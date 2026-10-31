@@ -473,6 +473,11 @@ SEAMS: dict[str, Seam] = {
         "(#283); no model",
         strips_identity=True,
     ),
+    "aisquare/core/load.py::_notifyutil": Seam(
+        EXCLUDED,
+        "`notifyutil -g com.apple.system.thermalpressurelevel` (macOS): the thermal pressure "
+        'level auto admission reads (`max_agents_per_project = "auto"`); a number, no model',
+    ),
     "aisquare/services/ngrok_tunnel.py::popen_tied": Seam(
         EXCLUDED,
         "the R panel's ngrok, run by a small Python parent (`-I`) that ends its process "

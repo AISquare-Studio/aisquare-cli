@@ -764,6 +764,17 @@ class FleetSettings(BaseModel):
     ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
     ``test_gate_wait_minutes`` how long the gate waits for it.
 
+    ``max_agents_per_project`` is a number, refused at as it always was, or ``"auto"``,
+    the default: a spawn is admitted unless the machine is busy, and while it is, a spawn
+    into a project that already runs ``busy_floor`` live agents is held (refused,
+    ``capacity_busy``) for ``busy_hold_minutes``, without probing again; a project below
+    the floor is always admitted. Busy is any one of: the 5-minute load average per logical
+    CPU at ``busy_load_per_cpu``, Linux's CPU pressure (``some avg60``) at ``busy_cpu_psi``
+    (``0`` turns either off), memory pressure at ``busy_memory``, macOS's thermal pressure
+    at ``busy_thermal`` (``"off"`` turns either off) — ``core.load``. ``min_free_mb``,
+    ``max_agents_total`` and a group's ``max_agents`` refuse in either mode, below the
+    floor too.
+
     Auto-stop (P2-W1b, #283): with ``auto_stop_finished`` a worker of a role in
     ``auto_stop_roles`` that has finished — its task closed (or a ``result`` posted),
     nothing claimed, nothing addressed to it unread, nothing queued for it, an empty input
@@ -800,7 +811,7 @@ class FleetSettings(BaseModel):
 
     tmux_socket: str = "asq"
     escape_key: str = "f12"
-    max_agents_per_project: int = 4
+    max_agents_per_project: int | Literal["auto"] = "auto"
     worktree_dir: str = ".aisquare-worktrees"
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
@@ -820,6 +831,12 @@ class FleetSettings(BaseModel):
     min_free_mb: int = 2048
     test_gate_mb: int = 0
     test_gate_wait_minutes: int = 15
+    busy_floor: int = Field(default=3, ge=0)
+    busy_load_per_cpu: float = Field(default=1.0, ge=0)
+    busy_cpu_psi: float = Field(default=40.0, ge=0)
+    busy_memory: Literal["warn", "critical", "off"] = "warn"
+    busy_thermal: Literal["moderate", "heavy", "trapping", "sleeping", "off"] = "heavy"
+    busy_hold_minutes: float = Field(default=5.0, ge=0)
     auto_stop_finished: bool = True
     auto_stop_idle_minutes: float = Field(default=5.0, ge=0)
     auto_stop_roles: list[str] = Field(

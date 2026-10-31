@@ -28,7 +28,7 @@ import typer
 from rich.console import Console
 from rich.text import Text
 
-from aisquare.cli.common import USAGE_ERROR, fail, refuse_conflicting_scope
+from aisquare.cli.common import USAGE_ERROR, fail, format_reset, refuse_conflicting_scope
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -88,7 +88,8 @@ def _fail_fleet(exc: Exception) -> NoReturn:
     Most specific first — every subclass is also a ``FleetError``, so the order
     here IS the mapping: ``fleet_unavailable`` (no usable tmux), ``not_found``
     (the project reference), ``no_such_agent`` (the label), a capacity refusal's
-    own code (``capacity_project``, ``capacity_fleet``, ``capacity_memory``), and
+    own code (``capacity_project``, ``capacity_fleet``, ``capacity_memory``,
+    ``capacity_group``, ``capacity_busy`` — whose ``hint`` is its earliest retry), and
     ``fleet_error`` for everything else the service refused with a reason.
     """
     if isinstance(exc, fleet_service.FleetUnavailable):
@@ -97,6 +98,9 @@ def _fail_fleet(exc: Exception) -> NoReturn:
         fail(str(exc), error="not_found", detail=str(exc))
     if isinstance(exc, fleet_service.NoSuchAgent):
         fail(str(exc), error="no_such_agent", detail=str(exc))
+    if isinstance(exc, fleet_service.CapacityRefused) and exc.retry_at is not None:
+        retry = f"retry_at {exc.retry_at.isoformat(timespec='seconds')}"
+        fail(str(exc), error=exc.code, detail=str(exc), hint=retry)
     if isinstance(exc, fleet_service.CapacityRefused | adopt_service.AdoptRefused):
         fail(str(exc), error=exc.code, detail=str(exc))
     fail(str(exc), error="fleet_error", detail=str(exc))
@@ -1646,7 +1650,7 @@ def _ago(delta: timedelta) -> str:
 
 @app.command("capacity")
 def capacity() -> None:
-    """Memory headroom and live agents against every admission limit (#283)."""
+    """Memory headroom, the machine's load and live agents against every admission limit."""
     report = fleet_service.capacity()
     if get_state().json_output:
         typer.echo(json.dumps(report.as_json()))
@@ -1665,8 +1669,36 @@ def capacity() -> None:
     budget = str(report.max_agents_total) if report.max_agents_total else "no budget"
     out.print(f"agents:   {report.live_total} live ({budget}; max_agents_total)", markup=False)
     for name, count in report.live.items():
-        out.print(f"  {name}: {count} of {report.max_agents_per_project}", markup=False)
-    mark = "✓" if report.admits else "✗"
+        if not report.auto:
+            out.print(f"  {name}: {count} of {report.max_agents_per_project}", markup=False)
+        else:
+            held = " — held" if report.held(name) else ""
+            out.print(f"  {name}: {count}{held}", markup=False)
+    if report.auto:
+        out.print(
+            f"load:     auto admission (max_agents_per_project): busy holds a project at "
+            f"{report.busy_floor} agents (busy_floor)",
+            markup=False,
+        )
+    else:
+        out.print(
+            f"load:     not consulted (max_agents_per_project = {report.max_agents_per_project})",
+            markup=False,
+        )
+    name_w = max((len(signal.name) for signal in report.signals), default=0)
+    value_w = max((len(signal.value) for signal in report.signals), default=0)
+    threshold_w = max((len(signal.threshold) for signal in report.signals), default=0)
+    for signal in report.signals:
+        out.print(
+            f"  {signal.name:<{name_w}}  {signal.value:<{value_w}}  "
+            f"{signal.threshold:<{threshold_w}}  {signal.verdict}",
+            markup=False,
+        )
+    for name, hold in report.holds:
+        retry = format_reset(hold.until, now=report.read_at)
+        out.print(f"held:     {name}, retry {retry} ({hold.signal})", markup=False)
+    holding = report.auto and (report.busy is not None or bool(report.holds))
+    mark = "✗" if not report.admits else "⚠" if holding else "✓"
     out.print(f"{mark} {report.reason}", markup=False)
 
 

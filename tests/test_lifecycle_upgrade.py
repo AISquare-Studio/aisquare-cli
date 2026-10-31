@@ -1975,14 +1975,19 @@ def test_a_move_back_to_a_release_that_reads_config_whole_names_what_it_reads_ot
     chosen = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
 
     assert back["config_defaults_lost"] == [
+        # Auto admission is the default since #12; 0.8.0 caps every project at 4.
+        "fleet.max_agents_per_project 4 (here auto)",
         "accounts.pick default (here headroom)",
         "accounts.on_limit wait (here switch)",
     ], back
     assert layered["config_defaults_lost"] == [], "0.8.1 lays the file over its defaults too"
     assert forward["config_defaults_lost"] == [], "control: a move forward reads it the same"
     assert "⚠ 0.8.0 reads config.toml without this release's defaults under it" in said, said
-    assert "`aisquare config set accounts.pick …`" in said.replace("\n", " "), said
-    assert chosen["config_defaults_lost"] == ["accounts.on_limit wait (here switch)"], chosen
+    assert "`aisquare config set fleet.max_agents_per_project …`" in said.replace("\n", " "), said
+    assert chosen["config_defaults_lost"] == [
+        "fleet.max_agents_per_project 4 (here auto)",
+        "accounts.on_limit wait (here switch)",
+    ], chosen
 
 
 def test_a_move_back_before_env_files_names_the_roles_whose_file_bindings_it_ignores(

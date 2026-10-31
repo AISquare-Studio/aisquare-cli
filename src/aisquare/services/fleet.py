@@ -61,6 +61,7 @@ from aisquare.core import (
     personas,
     selfcli,
 )
+from aisquare.core import load as load_core
 from aisquare.core import memory as memory_core
 from aisquare.core import names as names_core
 from aisquare.core import tmux as tmux_core
@@ -253,13 +254,17 @@ class CapacityRefused(FleetError):
     """A spawn the machine has no room for (#283): ``code`` says which limit.
 
     ``capacity_project`` (``max_agents_per_project``), ``capacity_fleet``
-    (``max_agents_total``, every project's live agents) or ``capacity_memory``
-    (``min_free_mb``, or the kernel's memory pressure at critical).
+    (``max_agents_total``, every project's live agents), ``capacity_memory``
+    (``min_free_mb``, or the kernel's memory pressure at critical), ``capacity_group`` (a
+    group's ``max_agents``) or ``capacity_busy`` (auto admission held the spawn: the
+    machine is busy and the project runs ``busy_floor`` agents; ``retry_at`` is the
+    earliest a retry probes again).
     """
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, retry_at: datetime | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.retry_at = retry_at
 
 
 class _LostToARelabel(FleetError):
@@ -3624,7 +3629,8 @@ def spawn(
     under ``hub`` when the caller names one, ``""`` for none.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
-    past ``max_agents_per_project``, a second manager, a worktree in a non-git
+    past ``max_agents_per_project`` (in auto mode, past ``busy_floor`` while the machine is
+    busy: :func:`_admit_by_load`), a second manager, a worktree in a non-git
     project, and an unknown role — each with the reason in the message.
 
     The window runs ``python -P -m aisquare launch <role> …`` (§3.4; ``-P`` is
@@ -3824,12 +3830,12 @@ def spawn(
                 f"the home already has a captain ({existing.id}) — one per home; "
                 "`aisquare captain` attaches to it"
             )
-    if len(live) >= config.max_agents_per_project:
+    cap = config.max_agents_per_project
+    if isinstance(cap, int) and len(live) >= cap:
         raise CapacityRefused(
             "capacity_project",
             f"{_name(project)} already runs {len(live)} agents "
-            f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
-            "or raise the limit in [fleet]",
+            f"(max_agents_per_project = {cap}) — stop one, or raise the limit in [fleet]",
         )
     _refuse_by_group(project, spawned_by, admit=admit)
     # The machine's own limits (#283), after the project's: the fleet-wide budget and
@@ -3837,8 +3843,12 @@ def spawn(
     # ``admit`` is False for a live 1:1 replacement (a restart of a running agent, a
     # switch: `_respawn(takes_over=True)`): its own seat and memory are freed as it
     # starts, and refused after the stop, the agent was lost (review of #323).
+    seats = _Seats(cap if isinstance(cap, int) else None)
     if admit and not experimental.captain_role(role):
         notes.extend(_admit_or_make_room(config))
+        # Auto admission, after the hard floors above: they refuse below its floor too.
+        if not isinstance(cap, int):
+            seats = _admit_by_load(project, len(live), config, notes)
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -4294,7 +4304,7 @@ def spawn(
                 srv,
                 wanted=label,
                 notes=notes,
-                cap=config.max_agents_per_project,
+                cap=seats,
                 total=0 if experimental.captain_role(role) else config.max_agents_total,
                 onboard=onboard,
                 codename=codename,
@@ -5079,7 +5089,7 @@ def _record(
     *,
     wanted: str | None,
     notes: list[str],
-    cap: int,
+    cap: _Seats,
     onboard: bool,
     codename: str,
     total: int = 0,
@@ -5157,7 +5167,7 @@ def _write_row(
     *,
     wanted: str | None,
     notes: list[str],
-    cap: int,
+    cap: _Seats,
     onboard: bool,
     codename: str,
     total: int = 0,
@@ -5262,8 +5272,19 @@ def _relabel(
     return agent.model_copy(update={"label": relabel})
 
 
-def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
-    """Back the row out if it is past ``max_agents_per_project``.
+@dataclass(frozen=True)
+class _Seats:
+    """The live rows a spawn's project may hold once its own is written (:func:`_verify_cap`):
+    ``max_agents_per_project``; in auto mode ``busy_floor`` while the machine reads busy
+    (``busy`` names the signal), else no count at all (``None``)."""
+
+    cap: int | None
+    busy: str | None = None
+
+
+def _verify_cap(store: ContextStore, stored: FleetAgent, seats: _Seats) -> None:
+    """Back the row out if it is past ``max_agents_per_project``, or past auto admission's
+    ``busy_floor`` while it read the machine busy (``capacity_busy``).
 
     ``spawn`` checks the cap before it starts anything, but that read and this
     write are different transactions with a worktree and a tmux window between
@@ -5274,10 +5295,20 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
     sides of a race. The row is ended rather than deleted (the store has no
     delete): its label is freed and no live listing shows it.
     """
+    cap = seats.cap
+    if cap is None:
+        return
     live = store.fleet_agents(stored.project_id, live_only=True)
     if len(live) <= cap or all(agent.id != stored.id for agent in live[cap:]):
         return
     store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
+    if seats.busy is not None:
+        raise CapacityRefused(
+            "capacity_busy",
+            f"that would be {len(live)} live agents while the machine is busy ({seats.busy}; "
+            f"busy_floor = {cap}) — another spawn took the last seat while this one was "
+            "starting; stop one, or retry once the machine is calmer",
+        )
     raise FleetError(
         f"that would be {len(live)} live agents (max_agents_per_project = {cap}) — another "
         "spawn took the last slot while this one was starting; stop one, or raise the "
@@ -5452,6 +5483,224 @@ def _admit_or_make_room(config: FleetSettings) -> list[str]:
     return [f"stopped finished workers to make room: {made}", *_admit(config)]
 
 
+# --- auto admission: how busy the machine is -----------------------------------------
+
+_BUSY_HOLD_META = "fleet:busy_hold:"
+"""``team_meta`` key prefix of a held project's :class:`Hold`, by project id."""
+
+
+def busy_thresholds(config: FleetSettings) -> load_core.Thresholds:
+    """``[fleet] busy_*``, as the probes take them."""
+    return load_core.Thresholds(
+        load_per_cpu=config.busy_load_per_cpu,
+        cpu_psi=config.busy_cpu_psi,
+        memory=config.busy_memory,
+        thermal=config.busy_thermal,
+    )
+
+
+@dataclass(frozen=True)
+class Hold:
+    """A project auto admission held (``capacity_busy``): the signal that read busy, and
+    until when a retry is held again without probing.
+
+    Kept past ``until`` for ``aisquare watch``, which wakes the project's manager once its
+    capacity frees up (:func:`freed_holds`) and then forgets it; a spawn into the project
+    admitted with the machine not busy forgets it too.
+    """
+
+    project_id: str
+    held_at: datetime
+    until: datetime
+    signal: str
+    """The busy signal in its own words (:meth:`core.load.Signal.said`)."""
+
+    def as_meta(self) -> str:
+        return json.dumps(
+            {
+                "held_at": self.held_at.isoformat(),
+                "until": self.until.isoformat(),
+                "signal": self.signal,
+            }
+        )
+
+    @classmethod
+    def from_meta(cls, project_id: str, text: str) -> Hold | None:
+        """The hold ``text`` records, or ``None`` for one that cannot be read (no hold)."""
+        try:
+            said = json.loads(text)
+            return cls(
+                project_id,
+                datetime.fromisoformat(said["held_at"]),
+                datetime.fromisoformat(said["until"]),
+                str(said["signal"]),
+            )
+        except (ValueError, KeyError, TypeError):
+            return None
+
+
+def holds() -> list[Hold]:
+    """Every hold auto admission keeps: in force, or past it and not yet woken for. A store
+    that cannot be read keeps none."""
+    try:
+        with store_session() as store:
+            found = store.list_meta(_BUSY_HOLD_META)
+    except Exception:
+        return []
+    read = (Hold.from_meta(key.removeprefix(_BUSY_HOLD_META), text) for key, text in found.items())
+    return [hold for hold in read if hold is not None]
+
+
+def _hold_of(project_id: str) -> Hold | None:
+    try:
+        with store_session() as store:
+            text = store.get_meta(_BUSY_HOLD_META + project_id)
+    except Exception:  # a hold that cannot be read is none: the probes answer
+        return None
+    return Hold.from_meta(project_id, text) if text else None
+
+
+def release_hold(project_id: str, held_at: datetime | None = None) -> None:
+    """Forget ``project_id``'s hold; given ``held_at``, only that one, so a hold a later spawn
+    wrote meanwhile stays. Never fails."""
+    key = _BUSY_HOLD_META + project_id
+    with contextlib.suppress(Exception), store_session() as store:
+        if held_at is not None:
+            text = store.get_meta(key)
+            hold = Hold.from_meta(project_id, text) if text else None
+            if hold is None or hold.held_at != held_at:
+                return
+        store.delete_meta(key)
+
+
+def _admit_by_load(
+    project: ProjectInfo, live: int, config: FleetSettings, notes: list[str]
+) -> _Seats:
+    """Auto admission (``max_agents_per_project = "auto"``) of one spawn into ``project``,
+    which runs ``live`` agents: the seats its row is settled against, or a hold.
+
+    The machine reads busy by the project's hold while one is in force, without a probe;
+    else by the probes (:func:`core.load.read`). Not busy: admitted, any hold forgotten.
+    Busy, with the project below ``busy_floor``: admitted, the row settled against the
+    floor. Busy at the floor: with ``auto_stop_finished``, the project's finished workers
+    are stopped and the count read again (P2-W1b); still at it, the project is held for
+    ``busy_hold_minutes`` and the spawn refused (``capacity_busy``) at once: a held spawn
+    never waits. Each new hold is a line in ``admission.jsonl``.
+    """
+    now = _now()
+    hold = _hold_of(project.id)
+    if hold is not None and now < hold.until:
+        busy: str | None = hold.signal
+    else:
+        signal = load_core.read(busy_thresholds(config)).busy
+        busy = signal.said() if signal is not None else None
+    if busy is None:
+        if hold is not None:
+            release_hold(project.id, hold.held_at)
+        return _Seats(None)
+    floor = config.busy_floor
+    if live >= floor and config.auto_stop_finished:
+        live = _after_stopping_finished(project, live, notes)
+    if live < floor:
+        notes.append(
+            f"the machine is busy ({busy}) — admitted: {_name(project)} runs {live} of the "
+            f"{floor} agents a project always gets (busy_floor)"
+        )
+        return _Seats(floor, busy=busy)
+    if hold is None or now >= hold.until:
+        hold = Hold(project.id, now, now + timedelta(minutes=config.busy_hold_minutes), busy)
+        with contextlib.suppress(Exception), store_session() as store:
+            store.set_meta(_BUSY_HOLD_META + project.id, hold.as_meta())
+        _log_admission(
+            "capacity_busy",
+            {"project": project.id, "live": live, "busy_floor": floor, "signal": busy},
+        )
+    raise CapacityRefused(
+        "capacity_busy", _held(project, live, floor, hold, now), retry_at=hold.until
+    )
+
+
+def _after_stopping_finished(project: ProjectInfo, live: int, notes: list[str]) -> int:
+    """``project``'s finished workers stopped (P2-W1b), and its live count after; ``live``
+    when none was."""
+    try:
+        stopped = [item.verdict for item in autostop.reap_finished([project]) if item.stopped]
+        if not stopped:
+            return live
+        with store_session() as store:
+            left = len(store.fleet_agents(project.id, live_only=True))
+    except Exception:  # a stop that fails holds the spawn, as none would
+        return live
+    made = ", ".join(f"{v.agent.label} ({v.reason})" for v in stopped)
+    notes.append(f"stopped finished workers to make room: {made}")
+    return left
+
+
+def _held(project: ProjectInfo, live: int, floor: int, hold: Hold, now: datetime) -> str:
+    """A hold's refusal: the signal, its value and threshold, and the earliest retry."""
+    left = max(int((hold.until - now).total_seconds()), 0)
+    ago = int((now - hold.held_at).total_seconds())
+    read = f", read {ago // 60}m {ago % 60:02d}s ago" if ago > 0 else ""
+    at = hold.until.astimezone().isoformat(timespec="seconds")
+    return (
+        f"{_name(project)} is held, nothing started: it runs {live} live agents "
+        f"(busy_floor = {floor}) and the machine is busy — {hold.signal}{read}; retry at "
+        f"{at} or later (in {left // 60}m {left % 60:02d}s). `aisquare watch` wakes the "
+        "manager when a seat frees up; a number for max_agents_per_project in [fleet] "
+        "turns auto admission off"
+    )
+
+
+@dataclass(frozen=True)
+class Freed:
+    """A held project that could take a spawn again (:func:`freed_holds`), and why."""
+
+    hold: Hold
+    project: ProjectInfo
+    why: str
+
+
+def freed_holds(now: datetime | None = None) -> list[Freed]:
+    """The holds whose project's capacity has freed up: what ``aisquare watch`` wakes a
+    manager for, so it retries without polling.
+
+    Freed: the project runs fewer than ``busy_floor`` live agents, or the hold is past its
+    ``until`` and the probes no longer read busy (asked once, and only then), or auto
+    admission is off. A hold whose project is gone is forgotten. Never raises.
+    """
+    found = holds()
+    if not found:
+        return []
+    now = now or _now()
+    config = settings()
+    cap = config.max_agents_per_project
+    reading: load_core.Reading | None = None
+    out: list[Freed] = []
+    for hold in found:
+        try:
+            with store_session() as store:
+                project = store.get_project(hold.project_id)
+                live = len(store.fleet_agents(hold.project_id, live_only=True))
+        except Exception:  # asked again next tick
+            continue
+        if project is None:
+            release_hold(hold.project_id, hold.held_at)
+            continue
+        if isinstance(cap, int):
+            why = f"max_agents_per_project = {cap}: auto admission holds nothing now"
+        elif live < config.busy_floor:
+            why = f"{live} live agents, below busy_floor = {config.busy_floor}"
+        elif now >= hold.until:
+            reading = reading or load_core.read(busy_thresholds(config))
+            if reading.busy is not None:
+                continue
+            why = "the machine is no longer busy"
+        else:
+            continue
+        out.append(Freed(hold, project, why))
+    return out
+
+
 def _said(head: memory_core.Headroom) -> str:
     available = f"{head.available_mb} MB available" if head.available_mb is not None else ""
     psi = f"PSI some avg10 {head.psi_some_avg10:g}" if head.psi_some_avg10 is not None else ""
@@ -5532,15 +5781,38 @@ class CapacityReport:
     min_free_mb: int
     """The floor a spawn needs now: ``min_free_mb``, or ``+512`` just after a refusal."""
     max_agents_total: int
-    max_agents_per_project: int
+    max_agents_per_project: int | Literal["auto"]
     live: dict[str, int]
     """Live agents per project (by the name lists use), the captain excluded."""
     admits: bool
     reason: str
+    signals: tuple[load_core.Signal, ...] = ()
+    """Every load signal against its threshold (:func:`core.load.read`), read in either mode;
+    only auto admission holds by them."""
+    busy_floor: int = 3
+    holds: tuple[tuple[str, Hold], ...] = ()
+    """The holds in force, by the name lists use: a spawn into one is held without a probe."""
+    read_at: datetime | None = None
+    """When the report was read: what a hold's retry is measured from."""
 
     @property
     def live_total(self) -> int:
         return sum(self.live.values())
+
+    @property
+    def auto(self) -> bool:
+        return self.max_agents_per_project == "auto"
+
+    @property
+    def busy(self) -> load_core.Signal | None:
+        """The first signal that reads busy, or ``None``."""
+        return next((signal for signal in self.signals if signal.busy), None)
+
+    def held(self, name: str) -> bool:
+        """Whether a spawn into the project lists name ``name`` would be held now."""
+        if not self.auto or self.live.get(name, 0) < self.busy_floor:
+            return False
+        return self.busy is not None or any(held == name for held, _ in self.holds)
 
     def as_json(self) -> dict[str, Any]:
         head = self.headroom
@@ -5557,6 +5829,18 @@ class CapacityReport:
             "live": self.live,
             "admits": self.admits,
             "reason": self.reason,
+            "busy_floor": self.busy_floor,
+            "busy": self.busy is not None,
+            "signals": [signal.as_json() for signal in self.signals],
+            "holds": [
+                {
+                    "project": name,
+                    "held_at": hold.held_at.isoformat(timespec="seconds"),
+                    "until": hold.until.isoformat(timespec="seconds"),
+                    "signal": hold.signal,
+                }
+                for name, hold in self.holds
+            ],
         }
 
 
@@ -5567,6 +5851,24 @@ def capacity() -> CapacityReport:
     head = memory_core.headroom()
     floor = _memory_floor(config.min_free_mb)
     total = sum(live.values())
+    signals = load_core.evaluate(
+        load_core.cpu_load(), head, load_core.thermal(), busy_thresholds(config)
+    ).signals
+    now = _now()
+    in_force = tuple((_held_name(hold.project_id), hold) for hold in holds() if now < hold.until)
+    report = CapacityReport(
+        headroom=head,
+        min_free_mb=floor,
+        max_agents_total=config.max_agents_total,
+        max_agents_per_project=config.max_agents_per_project,
+        live=live,
+        admits=True,
+        reason="",
+        signals=signals,
+        busy_floor=config.busy_floor,
+        holds=in_force if config.max_agents_per_project == "auto" else (),
+        read_at=now,
+    )
     admits, reason = True, "a spawn would be admitted"
     if config.max_agents_total > 0 and total >= config.max_agents_total:
         admits, reason = False, f"the fleet is at max_agents_total = {config.max_agents_total}"
@@ -5574,19 +5876,33 @@ def capacity() -> CapacityReport:
         admits, reason = False, "memory pressure is critical"
     elif config.min_free_mb > 0 and head.available_mb is not None and head.available_mb < floor:
         admits, reason = False, f"{head.available_mb} MB available, {floor} MB needed"
+    elif report.auto and (held := [name for name in live if report.held(name)]):
+        busy = report.busy
+        why = busy.said() if busy is not None else "a hold in force"
+        reason = (
+            f"the machine is busy ({why}) — a spawn would be admitted into a project running "
+            f"fewer than {config.busy_floor} agents, held in {', '.join(held)}"
+        )
+    elif report.auto and report.busy is not None:
+        reason = (
+            f"the machine is busy ({report.busy.said()}) — a spawn would be admitted: no "
+            f"project runs {config.busy_floor} agents"
+        )
     elif head.pressure == "warn":
         reason = "a spawn would be admitted, with a warning: memory pressure is warn"
     elif not head.known:
         reason = "a spawn would be admitted: this machine's memory cannot be read"
-    return CapacityReport(
-        headroom=head,
-        min_free_mb=floor,
-        max_agents_total=config.max_agents_total,
-        max_agents_per_project=config.max_agents_per_project,
-        live=live,
-        admits=admits,
-        reason=reason,
-    )
+    return replace(report, admits=admits, reason=reason)
+
+
+def _held_name(project_id: str) -> str:
+    """A held project as :func:`_live_per_project` names it, or its id when it cannot be read."""
+    try:
+        with store_session() as store:
+            row = store.get_project(project_id, include_forgotten=True)
+    except Exception:
+        row = None
+    return _name(row) if row is not None else project_id[:12]
 
 
 GATE_POLL_SECONDS = 5.0

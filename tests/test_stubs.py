@@ -81,6 +81,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "resume",
             "switch",
             "capacity",
+            "top",
             "gate",
             "adopt",
         )

@@ -87,6 +87,8 @@ narrowing their environment would be change without a reason:
     A listing, no model.
   * ``core/instance_scan.py::_environment`` — ``ps -E -p <pid>`` on macOS and the BSDs: one
     such asq's ``AISQUARE_HOME``/``HOME``, whether it runs on this home (#21). No model.
+  * ``core/process_table.py::ps_text`` — ``ps -A -o pid=,ppid=,pcpu=,rss=,etime=``: every
+    process at once, for ``fleet top`` and asq's Agent resources page. A listing, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
   * ``cli/ui/terminal.py::wsl_path`` — ``wslpath -u`` on a Windows path pasted into a
     pane under WSL (#288). A path converter, no model.
@@ -362,6 +364,11 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "`ps -E -p <pid>` on macOS and the BSDs: one asq's AISQUARE_HOME and HOME, whether it "
         "runs on this home (#21). No model",
+    ),
+    "aisquare/core/process_table.py::ps_text": Seam(
+        EXCLUDED,
+        "`ps -A -o pid=,ppid=,pcpu=,rss=,etime=`: every process at once, for `fleet top` and "
+        "asq's Agent resources page. A listing, no model",
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"

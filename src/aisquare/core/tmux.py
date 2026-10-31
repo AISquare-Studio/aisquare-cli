@@ -1732,6 +1732,27 @@ class TmuxServer:
             return None
         return _optional_int(pid)
 
+    def pane_pids(self) -> dict[str, int | None] | None:
+        """Every pane of the server and the pid tmux started in it, in ONE ``list-panes -a``:
+        ``None`` for a dead pane's (``remain-on-exit``: its process is gone). ``{}`` when no
+        server runs behind the socket, ``None`` when one did not answer — not the same: an
+        empty answer from a server that did not speak is no evidence that a pane is gone.
+
+        For ``fleet top``, which reads every agent's tree at once (:meth:`pane_pid` is one
+        question per pane). Raises what the runner raises (:class:`TmuxError`)."""
+        fmt = _SEP.join(("#{pane_id}", "#{pane_pid}", "#{pane_dead}"))
+        completed = self._runner(self.argv("list-panes", "-a", "-F", fmt), None)
+        if completed.returncode != 0:
+            return {} if _ABSENT.search(completed.stderr) else None
+        pids: dict[str, int | None] = {}
+        for line in completed.stdout.splitlines():
+            fields = line.split(_SEP)
+            if len(fields) != 3 or not fields[0]:
+                continue
+            pane, pid, dead = fields
+            pids[pane] = None if dead == "1" else _optional_int(pid)
+        return pids
+
     def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
         """:meth:`pane_facts`, except a server that could not be ASKED raises.
 

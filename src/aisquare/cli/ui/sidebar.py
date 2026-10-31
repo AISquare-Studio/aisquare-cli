@@ -208,6 +208,10 @@ class UsageStatsSelected(Message):
     """The Usage & stats page: what this machine's Claude Code sessions spent, by range."""
 
 
+class ResourcesSelected(Message):
+    """The Agent resources page: what each live agent consumes, read again while it shows."""
+
+
 class SettingsSelected(ViewSelected):
     """*⚙ Settings*: the Settings hub, with its links to App settings, Accounts and Doctor."""
 

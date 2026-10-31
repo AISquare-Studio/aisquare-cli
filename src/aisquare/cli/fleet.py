@@ -1670,6 +1670,59 @@ def capacity() -> None:
     out.print(f"{mark} {report.reason}", markup=False)
 
 
+TOP_WIDTH = 132
+"""The width ``fleet top`` lays its table out at when stdout is not a terminal (a pipe, a
+file, an agent's shell): rich's default 80 would cut every name to a few letters."""
+
+
+@app.command("top")
+def top(
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Only this project's agents: codename, name or id prefix (default: every "
+            "project's).",
+            metavar="PROJECT",
+        ),
+    ] = None,
+    sort: Annotated[
+        str,
+        typer.Option("--sort", help="Heaviest first by: cpu, mem or tokens.", metavar="KEY"),
+    ] = "cpu",
+) -> None:
+    """What each live agent consumes, read once: CPU, memory and processes of its pane's
+    process tree, uptime, and its session's tokens and cost so far — with a totals row.
+
+    One `ps` and one tmux listing for every agent at once; reads only, stops nothing. In asq:
+    ⚙ Settings ▸ Agent resources, which refreshes every few seconds while it is open.
+    """
+    from aisquare.cli import fleet_top_render as render  # lazy: only `top` draws the table
+    from aisquare.services import fleet_top
+
+    if sort not in fleet_top.SORT_KEYS:
+        raise typer.BadParameter(
+            f"{sort!r} is not one of {', '.join(fleet_top.SORT_KEYS)}", param_hint="--sort"
+        )
+    by = next(key for key in fleet_top.SORT_KEYS if key == sort)
+    scope = {_project(project).id} if project is not None else None
+    report = fleet_top.sample(scope)
+    if get_state().json_output:
+        typer.echo(json.dumps(report.as_json(by)))
+        return
+    out = stdout_console()
+    if not out.is_terminal:
+        out.width = max(out.width, TOP_WIDTH)
+    out.print(render.summary(report, by), markup=False, style="dim")
+    if not report.agents:
+        out.print("  (no live agents)", markup=False)
+        return
+    out.print(render.top_table(report, by))
+    for line in render.notes(report):
+        out.print(line, markup=False, style="dim")
+
+
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$")
 
 

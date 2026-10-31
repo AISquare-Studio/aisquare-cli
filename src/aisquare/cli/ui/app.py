@@ -281,11 +281,11 @@ PROJECT_FRESH_WORKER = "project-fresh"
 """The thread worker *Start fresh…* clears a project's board and fleet on (``project fresh``),
 one a project at a time (:func:`_fresh_group`)."""
 AGENT_RENAME_WORKER = "agent-relabel"
+"""The thread worker an agent row's name field renames its agent on (``fleet relabel``)."""
 STOPPING_TOAST_CAP = 600.0
 """Seconds a stop made with no dialog keeps its ``stopping …`` toast at most: it is taken
 down when the stop answers (``FleetApp._stopped_at_once``); this only bounds a toast whose
 answer never comes."""
-"""The thread worker an agent row's name field renames its agent on (``fleet relabel``)."""
 TOAST_PLACES = 3
 """The places a refusal's toast names before it counts the rest: at 80x24 a longer list
 pushed the toast's title and what to do off the screen."""

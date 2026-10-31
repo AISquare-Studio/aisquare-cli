@@ -195,7 +195,12 @@ def test_the_dialog_opens_on_stop_so_x_then_enter_stops_as_before(
         await open_view(pilot, app, CODER)
         app.sidebar.focus()
         await pilot.press("x")
-        await pilot.pause()
+        # The dialog up AND its own focus given, on the loop's clock: before the push the
+        # sidebar holds the focus, and after it nothing does until AUTO_FOCUS lands — one
+        # pause read that gap under load (1 run in 47, review of #477 round 2).
+        await watch_until(
+            lambda: isinstance(app.screen, StopAgentScreen) and app.focused is not None
+        )
         dialog = app.screen
         assert isinstance(dialog, StopAgentScreen), f"x opened {type(dialog).__name__}"
         focused = app.focused.id if app.focused is not None else None

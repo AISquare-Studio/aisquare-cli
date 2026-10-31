@@ -9,13 +9,13 @@ This guard covers every other one: a view switched to, a button that appears,
 a layout that moves a button, a dialog closing off it.
 
 :class:`GuardedButton` ignores a mouse press that reaches the app before the frame
-that shows its own changed place has reached the terminal, and the press does not
-take the focus either. Once that frame is out, the next press goes through at once:
-there is no time to wait out (user, 2026-10-30: the second it used to hold a button
-after it was drawn, and the toast saying so, were in the way of someone who knows
-where the button is). An ignored press says nothing. A key press (enter on the
-focused button) is a deliberate gesture, and so is :meth:`Button.press`; neither is
-guarded.
+that shows its own changed place has reached the terminal (a second at most, when
+the terminal cannot keep up), and the press does not take the focus either. Once
+that frame is out, the next press goes through at once: there is no time to wait
+out (user, 2026-10-30: the second it used to hold a button after it was drawn, and
+the toast saying so, were in the way of someone who knows where the button is). An
+ignored press says nothing. A key press (enter on the focused button) is a
+deliberate gesture, and so is :meth:`Button.press`; neither is guarded.
 """
 
 from __future__ import annotations
@@ -36,29 +36,47 @@ if sys.platform != "win32":
     import termios
 
 WRITTEN_POLL = 0.001
-"""Seconds between looks at whether a frame has reached the terminal (:func:`written`). Not a
+"""Seconds between looks at whether a frame has left for the terminal (:func:`written`). Not a
 wait: a frame is usually out within one."""
+
+WRITTEN_MAX = 1.0
+"""Seconds after the paint the guard waits at most for the terminal: a ceiling, not a floor.
+:func:`written` waits for every frame drawn so far to be read, and a terminal or link slower
+than asq's output may not read them all for as long as a pane streams: Stop was dead for 9.4 s
+with the terminal reading 64 KB/s (REVIEW 478 r3). The lag the UI tester saw was 270 ms."""
 
 
 def written(app: App[Any]) -> bool:
-    """Whether the terminal has read every frame ``app`` has drawn so far.
+    """Whether what reads asq's tty has read every frame ``app`` has drawn so far.
 
-    Textual hands a frame to its driver's writer thread, which writes it to the tty, where
-    the terminal reads it. Either can lag: in 2 of 74 switches the frame showing a view
-    reached the terminal 270 ms after asq had drawn it (UI tester on #8, PR #478 at
-    695e19bb). A driver with no writer thread writes as it is called, or not at all
-    (headless, as under ``Pilot``): nothing it was handed is still on its way.
+    Textual hands a frame to its driver's writer thread, which writes it to the tty, and the
+    terminal reads it from there. Either can lag: in 2 of 74 switches the frame showing a view
+    reached the terminal 270 ms after asq had drawn it (UI tester on #8, PR #478 at 695e19bb).
+    What reads the tty need not be the screen: under tmux it is the tmux server, over SSH it is
+    sshd, and the rest of the way is out of asq's sight.
+
+    Each doubt answers yes, as the guard did at the paint before this: a driver with no writer
+    thread writes as it is called, or not at all (headless, as under ``Pilot``); a tty that does
+    not say what it holds unread (a Linux pty, :func:`_unread`) counts as read once the writer
+    is done with it; and a writer this does not know answers yes. The writer thread and the
+    queue's waiters are Textual's and CPython's private parts, and a change in either raised in
+    the layout signal, where Textual logs it, and kept the guard up for the session (REVIEW 478
+    r3).
     """
-    writer = getattr(app._driver, "_writer_thread", None)
-    if writer is None or not writer.is_alive():
+    try:
+        writer = getattr(app._driver, "_writer_thread", None)
+        if writer is None or not writer.is_alive():
+            return True
+        queue = writer._queue
+        with queue.mutex:
+            # It flushes when its queue runs dry, then waits on it: waiting on an empty queue,
+            # it has written all it took. Its only waiter is itself (``put`` waits on not_full).
+            if queue.queue or not queue.not_empty._waiters:
+                return False
+        fd = writer.fileno()
+    except (AttributeError, TypeError, ValueError, OSError):
         return True
-    queue = writer._queue
-    with queue.mutex:
-        # It flushes when its queue runs dry, then waits on it: waiting on an empty queue,
-        # it has written all it took. (Its only waiter is itself; ``put`` waits on not_full.)
-        if queue.queue or not queue.not_empty._waiters:
-            return False
-    return _unread(writer.fileno()) == 0
+    return _unread(fd) == 0
 
 
 def _unread(fd: int) -> int:
@@ -85,9 +103,10 @@ class GuardedButton(Button):
     re-laid out around it all change that region, and each puts the guard up. So does its
     screen becoming the current one again (``App.screen_change_signal``), as when a
     dialog over it closes (:meth:`changed_under_pointer`). The guard comes down once a
-    layout pass has painted the change, the terminal has read that frame (:func:`written`)
-    and the app has judged every input it had queued by then (:meth:`_laid_out`), and not
-    a frame later.
+    layout pass has painted the change, the terminal has read that frame (:func:`written`,
+    :data:`WRITTEN_MAX` at most) and the app has judged every input it had queued by then
+    (:meth:`_laid_out`), and not a frame later. A hidden button is not waited for: nothing
+    can click it.
     An ignored press posts nothing, says nothing and leaves the focus where it was. The
     verdict is made once per press, at its mouse-down, and stands for the focus and the
     click alike.
@@ -139,15 +158,17 @@ class GuardedButton(Button):
         # refresh, behind every callback queued there, and on the Settings hub that was the
         # restyle of the focus moving to its first link, up to a second later (UI tester on
         # #8, PR #478 at 41569b99).
-        self._when_written(self._change)
+        self._when_written(self._change, asyncio.get_running_loop().time() + WRITTEN_MAX)
 
-    def _when_written(self, change: int) -> None:
+    def _when_written(self, change: int, deadline: float) -> None:
         if change != self._change or not self.is_attached:
             return  # a newer change waits for its own frame
-        if written(self.app):
+        loop = asyncio.get_running_loop()
+        # Hidden (the view switched away from), it cannot be clicked: no look at the terminal.
+        if self._placed_at == NULL_REGION or written(self.app) or loop.time() >= deadline:
             self.app.call_later(self._painted, change)
         else:
-            asyncio.get_running_loop().call_later(WRITTEN_POLL, self._when_written, change)
+            loop.call_later(WRITTEN_POLL, self._when_written, change, deadline)
 
     def _screen_changed(self, screen: Screen[Any]) -> None:
         if screen is self.screen:

@@ -32,6 +32,7 @@ from textual.drivers._writer_thread import WriterThread
 from textual.geometry import Offset
 from textual.screen import Screen
 
+from aisquare.cli.ui import click_guard
 from aisquare.cli.ui.click_guard import GuardedButton
 
 
@@ -148,13 +149,21 @@ class TerminalBehind:
         os.close(self._terminal)
 
 
-def terminal_behind(monkeypatch: pytest.MonkeyPatch, app: App[Any], unread: int) -> TerminalBehind:
+def terminal_behind(
+    monkeypatch: pytest.MonkeyPatch, app: App[Any], unread: int, *, ceiling: float = 60.0
+) -> TerminalBehind:
     """Send ``app``'s output the way Textual's terminal driver does, through its writer thread
     to a tty, and have the terminal at its other end read none of it until
     :meth:`TerminalBehind.catch_up`. ``unread`` bytes are on their way already: the frame,
     as far as the guard can know, that shows what the test changes next. More than the tty
     holds and the writer is still writing it; less (on macOS, whose pty holds 1 KB) and it
-    sits in the tty. ``Pilot``'s own frames go nowhere, as ever. Close it after."""
+    sits in the tty. ``Pilot``'s own frames go nowhere, as ever. Close it after.
+
+    The guard stops waiting for a terminal ``ceiling`` seconds after the paint
+    (:data:`~aisquare.cli.ui.click_guard.WRITTEN_MAX`): a minute by default, so that a test
+    about a press while the terminal is behind is not raced by a slow runner past the real
+    one second."""
+    monkeypatch.setattr(click_guard, "WRITTEN_MAX", ceiling)
     behind = TerminalBehind(unread)
     monkeypatch.setattr(app._driver, "_writer_thread", behind.writer, raising=False)
     return behind

@@ -11,8 +11,11 @@ own buttons are tested through the shell in ``tests/test_ui_shell.py``.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import threading
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from typing import TypeVar
 
 import pytest
@@ -24,6 +27,7 @@ from textual.pilot import Pilot
 from textual.screen import ModalScreen
 from textual.widgets import Button, ContentSwitcher, Static
 
+from aisquare.cli.ui import click_guard
 from aisquare.cli.ui.click_guard import GuardedButton
 from tests import guard_paint, toast_log
 from tests.guard_paint import PaintHold
@@ -188,11 +192,16 @@ def test_a_press_after_a_layout_pass_made_in_a_batch_is_ignored() -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a pty for the terminal")
 @pytest.mark.parametrize(
-    "unread",
+    ("unread", "tty_says"),
     [
-        pytest.param(1 << 20, id="the-writer-still-writing"),
+        pytest.param(1 << 20, True, id="the-writer-still-writing"),
+        # As on a Linux pty: only the writer, still writing, says the frame is not out.
+        # (On macOS the full tty says so as well, and hid a probe that missed the writer:
+        # REVIEW 478 r3.)
+        pytest.param(1 << 20, False, id="the-writer-still-writing-to-a-tty-that-does-not-say"),
         pytest.param(
             512,
+            True,
             id="in-the-tty",
             marks=pytest.mark.skipif(
                 sys.platform != "darwin", reason="only macOS says what a pty holds unread"
@@ -201,7 +210,7 @@ def test_a_press_after_a_layout_pass_made_in_a_batch_is_ignored() -> None:
     ],
 )
 def test_a_press_before_the_terminal_has_the_frame_is_ignored(
-    monkeypatch: pytest.MonkeyPatch, unread: int
+    monkeypatch: pytest.MonkeyPatch, unread: int, tty_says: bool
 ) -> None:
     """UI tester on #8 (re-pass 2, PR #478 at 695e19bb): in 2 of 74 switches the frame that
     showed agent-1's view reached the terminal some 270 ms after asq had drawn it, and a
@@ -209,6 +218,8 @@ def test_a_press_before_the_terminal_has_the_frame_is_ignored(
     terminal reads nothing until told. A press that reaches the app after the paint and
     before the terminal has the frame presses nothing and takes no focus; once the terminal
     has read it all, the next press goes through."""
+    if not tty_says:
+        monkeypatch.setattr(click_guard, "_unread", lambda fd: 0)
 
     async def go(
         pilot: Pilot[None], host: Host
@@ -240,6 +251,94 @@ def test_a_press_before_the_terminal_has_the_frame_is_ignored(
     assert down, "the guard stayed up after the terminal had read it all"
     assert pressed == ["restart"]
     assert told == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a pty for the terminal")
+def test_a_terminal_that_never_catches_up_holds_the_guard_up_no_longer_than_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVIEW 478 r3, major 2: the guard waits for the terminal to have read every frame, and
+    a terminal or link slower than asq's output may never get there while a pane streams
+    (Stop dead for 9.4 s at 64 KB/s). It waits ``WRITTEN_MAX`` after the paint at most: up
+    until then, down at it with the terminal still behind, and the next click presses."""
+    ceiling = 0.3
+    downs: list[float] = []
+    painted = GuardedButton._painted
+
+    def timed(button: GuardedButton, change: int) -> None:
+        painted(button, change)
+        if not button.guarding:
+            downs.append(asyncio.get_running_loop().time())
+
+    monkeypatch.setattr(GuardedButton, "_painted", timed)
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[float, list[str], list[str]]:
+        button, _ = await _shown_again(pilot, host)
+        terminal = guard_paint.terminal_behind(monkeypatch, host, 1 << 20, ceiling=ceiling)
+        try:
+            downs.clear()
+            switched = asyncio.get_running_loop().time()
+            host.query_one(ContentSwitcher).current = "two"
+            await watch_until(lambda: downs and not button.guarding, timeout=5)
+            await pilot.click(button)  # the terminal has not read a byte
+            await settle_page(host)
+        finally:
+            terminal.close()
+        return downs[0] - switched, host.pressed, host.notices()
+
+    down_after, pressed, told = drive(go)
+    assert down_after >= ceiling, f"the guard came down {down_after:.3f} s after the switch"
+    assert pressed == ["restart"]
+    assert told == []
+
+
+class _Stranger:
+    """A writer thread of a Textual this guard does not know: alive, and nothing else."""
+
+    def is_alive(self) -> bool:
+        return True
+
+
+class _QueueOfAnotherPython:
+    """A writer whose queue's condition keeps its waiters elsewhere."""
+
+    def __init__(self) -> None:
+        self._queue = SimpleNamespace(mutex=threading.Lock(), queue=[], not_empty=object())
+
+    def is_alive(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("writer", [_Stranger, _QueueOfAnotherPython])
+def test_a_writer_the_guard_does_not_know_lets_it_come_down_at_the_paint(
+    monkeypatch: pytest.MonkeyPatch, writer: type[object]
+) -> None:
+    """REVIEW 478 r3, major 1: whether the terminal has a frame is read off Textual's private
+    writer thread and CPython's queue internals. A change in either raised in the layout
+    signal, which Textual logs and goes on, and the guard never came down: Stop, Restart
+    and Confirm ignored the mouse for the session. A writer it does not know counts as
+    written, so the guard comes down at the paint, as before the terminal was asked."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[bool, list[str]]:
+        await _shown_again(pilot, host)
+        monkeypatch.setattr(host._driver, "_writer_thread", writer(), raising=False)
+        button = await _shown(pilot, host)
+        guarding = button.guarding
+        await pilot.click(button)
+        await settle_page(host)
+        return guarding, host.pressed
+
+    assert drive(go) == (False, ["restart"]), "the guard stayed up on a writer it did not know"
+
+
+def test_an_output_that_is_no_tty_holds_nothing_unread() -> None:
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, b"a frame nobody has read")
+        assert click_guard._unread(writer) == 0
+    finally:
+        os.close(reader)
+        os.close(writer)
 
 
 def test_a_button_its_bar_moves_is_guarded_again_and_one_left_in_place_is_not(

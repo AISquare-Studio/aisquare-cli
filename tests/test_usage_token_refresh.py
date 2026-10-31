@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -633,6 +634,68 @@ def test_a_pick_never_waits_on_a_slot_the_page_holds_but_does_not_refresh(
         reader.join(10)
     assert picked is not None and picked.slot == home.slot, notes
     assert claude.runs == [work.slot], "the page's refresh, and only it"
+
+
+@pytest.mark.parametrize(
+    ("force", "home_age", "picks_home"),
+    [(True, 30, True), (False, 310, False)],
+    ids=["the page's force refresh", "home's five-minute cache lapsed"],
+)
+def test_a_pick_never_waits_on_a_second_round_queued_behind_the_refresh(
+    force: bool,
+    home_age: int,
+    picks_home: bool,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVIEW-485 round 3's triggers: the sidebar's round refreshes work, holding its lock;
+    a second display round over [home, work] (the Accounts page's force refresh, or home's
+    cache lapsing past five minutes meanwhile) takes home's lock, home sorting first, and
+    queues on work's. A pick that needed home waited on that round, which waited on the
+    refresh. It waits on neither: home is picked by its reading of 30 s ago, or, read
+    310 s ago (past the five minutes), skipped like work, and the caller's next rung
+    decides. Nothing is fetched by the pick."""
+    endpoint = _Usage({"tok-home": _payload(20), "tok-renewed-1": _payload(55)})
+    home = _slot("home@example.com", "tok-home")  # its config dir sorts before work's
+    service.read_usage([home], now=NOW - timedelta(seconds=home_age), fetch=endpoint)
+    work = _expired()
+    _read_before_it_expired(work, endpoint, 40)
+    assert str(home.config_dir) < str(work.config_dir)
+    claude = FakeClaude(monkeypatch, True)
+    claude.before = threading.Event()
+    rounds = [
+        threading.Thread(target=lambda: service.cached_usage([work], now=NOW, fetch=endpoint)),
+        threading.Thread(
+            target=lambda: service.cached_usage([home, work], now=NOW, fetch=endpoint, force=force)
+        ),
+    ]
+    try:
+        rounds[0].start()  # the sidebar's: refreshes work, holding its lock
+        assert claude.started.wait(10)
+        rounds[1].start()  # the page's: takes home's lock, then queues on work's
+        deadline = time.monotonic() + 10
+        while not (
+            (lock := service._FETCH_LOCKS.get(str(home.config_dir))) is not None and lock.locked()
+        ):
+            assert time.monotonic() < deadline, "the second round never took home's lock"
+            time.sleep(0.01)
+        asked = len(endpoint.calls)
+        picked, notes = _promptly(
+            lambda: _pick(work, home, endpoint=endpoint, max_age=service.PICK_MAX_AGE_SECONDS)
+        )
+        assert all(r.is_alive() for r in rounds), "the pick returned while both rounds waited"
+        assert len(endpoint.calls) == asked, "the pick fetched nothing"
+    finally:
+        claude.before.set()
+        for r in rounds:
+            r.join(10)
+    assert any(core.label(work) in note and service.NOT_WAITED in note for note in notes), notes
+    if picks_home:
+        assert picked is not None and picked.slot == home.slot, notes
+    else:
+        assert picked is None, notes
+        assert any(core.label(home) in note and service.NOT_WAITED in note for note in notes)
+    assert claude.runs == [work.slot], "the sidebar's refresh, and only it"
 
 
 @pytest.mark.parametrize("on_record", [True, False], ids=["home on record", "nothing on record"])

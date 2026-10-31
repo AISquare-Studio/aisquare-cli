@@ -2630,9 +2630,14 @@ def _read_elsewhere(
     never a refresh."""
     since = moment - timedelta(seconds=USAGE_MAX_AGE_SECONDS)
     served = _served(accounts, logins, since=since, now=moment)
+    # Stamped now, as a failed try is: an older good reading is then shown KEPT behind it
+    # (:func:`_with_last_good`), which the pick takes only inside its own window. Unstamped,
+    # a reading of any age up to LAST_GOOD_LOOKBACK came back as a live one, and was picked.
     return {
         account.slot: served.get(account.slot)
-        or unreadable_usage(UsageCause.read_failed, NOT_WAITED, slot=account.slot)
+        or unreadable_usage(
+            UsageCause.read_failed, NOT_WAITED, slot=account.slot, fetched_at=moment
+        )
         for account in accounts
     }
 

@@ -85,6 +85,196 @@ def test_task_add_is_idempotent_on_key(work_dir: Path) -> None:
     assert again.id == first.id
 
 
+# --- a dropped or done task does not block re-adding its title (#2) -----------
+
+
+def test_re_adding_a_dropped_tasks_title_creates_a_new_task() -> None:
+    first, made_first = team_service.add_task("QA probe task")
+    assert first.number is not None
+    team_service.drop_task(first.id)
+
+    again, made_again = team_service.add_task("QA probe task")
+
+    assert made_first and made_again
+    assert again.id != first.id and again.number == first.number + 1
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None
+    assert supersedes.id == first.id and supersedes.status == "dropped"
+
+
+def test_re_adding_a_done_tasks_title_creates_a_new_task() -> None:
+    first, made_first = team_service.add_task("ship the release")
+    assert first.number is not None
+    team_service.finish_task(first.id)
+
+    again, made_again = team_service.add_task("ship the release")
+
+    assert made_first and made_again
+    assert again.id != first.id and again.number == first.number + 1
+    assert again.key != first.key, "the unique (project_id, key) row must not collide"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None
+    assert supersedes.id == first.id and supersedes.status == "done"
+
+
+@pytest.mark.parametrize("make_status", ["todo", "doing", "review", "blocked"])
+def test_re_adding_a_title_still_open_stays_idempotent(make_status: str) -> None:
+    first, made_first = team_service.add_task("recurring checklist item")
+    if make_status == "doing":
+        team_service.claim_task(first.id)
+    elif make_status == "review":
+        team_service.review_task(first.id)
+    elif make_status == "blocked":
+        team_service.block_task(first.id, reason="waiting on X")
+
+    again, made_again = team_service.add_task("recurring checklist item")
+
+    assert made_first and not made_again
+    assert again.id == first.id
+    assert team_service.last_supersedes() is None
+
+
+def test_a_superseding_add_is_reported_in_cli_json(runner: CliRunner) -> None:
+    runner.invoke(app, ["task", "add", "QA probe task"])
+    runner.invoke(app, ["task", "drop", "1"])
+
+    result = runner.invoke(app, ["--json", "task", "add", "QA probe task"])
+    payload = json.loads(result.stdout)
+    assert payload["supersedes"] == {
+        "number": 1,
+        "id": payload["supersedes"]["id"],
+        "status": "dropped",
+    }
+    assert payload["number"] == 2
+
+    # A plain idempotent duplicate still carries the field, null.
+    again = json.loads(runner.invoke(app, ["--json", "task", "add", "QA probe task"]).stdout)
+    assert again["supersedes"] is None
+
+
+def test_a_superseding_add_names_the_old_task_on_the_human_line(runner: CliRunner) -> None:
+    runner.invoke(app, ["task", "add", "QA probe task"])
+    runner.invoke(app, ["task", "drop", "1"])
+
+    added = runner.invoke(app, ["task", "add", "QA probe task"])
+    assert "#2" in _flat(added.output) and "supersedes dropped #1" in _flat(added.output)
+
+
+def test_a_title_ending_in_a_number_is_added_after_a_re_add_of_its_stem() -> None:
+    """Review of #469: the re-add's key was `release-checklist-2`, the key of the title
+    "Release checklist 2", whose add then answered "already tracked" with the re-add."""
+    first, _ = team_service.add_task("Release checklist")
+    team_service.finish_task(first.id)
+    again, made_again = team_service.add_task("Release checklist")
+
+    second, made_second = team_service.add_task("Release checklist 2")
+
+    assert made_again and made_second
+    assert second.id not in (first.id, again.id) and second.title == "Release checklist 2"
+    assert team_service.last_supersedes() is None
+
+
+def test_a_re_add_is_not_answered_by_an_open_title_ending_in_a_number() -> None:
+    """The reverse order: an open "Release checklist 2" held the key the re-add of "Release
+    checklist" tried, so the re-add was never made and the reply named the other task."""
+    numbered, _ = team_service.add_task("Release checklist 2")
+    first, _ = team_service.add_task("Release checklist")
+    team_service.finish_task(first.id)
+
+    again, made_again = team_service.add_task("Release checklist")
+
+    assert made_again and again.id not in (numbered.id, first.id)
+    assert again.title == "Release checklist"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None and supersedes.id == first.id
+
+
+def test_a_re_add_supersedes_its_own_title_not_one_ending_in_a_number() -> None:
+    """A done "Release checklist 2" held the re-add's second candidate key, so the re-add of
+    a dropped "Release checklist" said it superseded "Release checklist 2"."""
+    numbered, _ = team_service.add_task("Release checklist 2")
+    team_service.finish_task(numbered.id)
+    first, _ = team_service.add_task("Release checklist")
+    team_service.drop_task(first.id)
+
+    again, made_again = team_service.add_task("Release checklist")
+
+    assert made_again and again.title == "Release checklist"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None
+    assert (supersedes.id, supersedes.title, supersedes.status) == (
+        first.id,
+        "Release checklist",
+        "dropped",
+    )
+
+
+def test_a_re_add_is_not_answered_by_another_title_given_its_suffixed_key() -> None:
+    """Tester on #469: `--key ship--2` on another title held the re-add's second candidate,
+    so the re-add of a done "Ship" answered "already tracked" with "Unrelated"."""
+    unrelated, _ = team_service.add_task("Unrelated", key="ship--2")
+    first, _ = team_service.add_task("Ship")
+    team_service.finish_task(first.id)
+
+    again, made_again = team_service.add_task("Ship")
+
+    assert made_again and again.title == "Ship" and again.key == "ship--3"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None and supersedes.id == first.id
+    with store_session() as store:
+        kept = _stored_task(store, unrelated.id)
+    assert (kept.title, kept.status) == ("Unrelated", "todo")
+
+
+def test_an_explicit_key_stays_idempotent_after_a_re_add() -> None:
+    """Review of #469, r3: `--key` says "this task, whatever the title". The suffixed key's
+    holder was compared by title, so after one re-add every next `--key nightly` run made
+    another open task."""
+    d1, _ = team_service.add_task("Nightly run 10-01", key="nightly")
+    d2, made_d2 = team_service.add_task("Nightly run 10-02", key="nightly")
+    assert not made_d2 and d2.id == d1.id
+    team_service.finish_task(d1.id)
+    d3, made_d3 = team_service.add_task("Nightly run 10-03", key="nightly")
+    assert made_d3 and d3.key == "nightly--2"
+    supersedes = team_service.last_supersedes()
+    assert supersedes is not None and supersedes.id == d1.id, "the key's own, any title"
+
+    d4, made_d4 = team_service.add_task("Nightly run 10-04", key="nightly")
+
+    assert not made_d4 and d4.id == d3.id and d4.number == 2
+    assert team_service.last_supersedes() is None
+
+
+def test_titles_sharing_their_first_64_key_characters_are_two_re_adds() -> None:
+    """Their keys are one, clipped at 64: the second title's add met the first's re-add on
+    the suffixed key and answered "already tracked" with it, and once that was fixed, named
+    the first title's done task, holding the first key, as superseded (tester on #469)."""
+    stem = "x" * 64
+    alpha, _ = team_service.add_task(f"{stem} alpha")
+    team_service.finish_task(alpha.id)
+    alpha_again, _ = team_service.add_task(f"{stem} alpha")
+
+    beta, made_beta = team_service.add_task(f"{stem} beta")
+
+    assert made_beta and beta.title == f"{stem} beta"
+    assert beta.id not in (alpha.id, alpha_again.id)
+    # Nor does it supersede the done alpha, which held the first key: another title's.
+    assert team_service.last_supersedes() is None
+
+
+def test_a_case_variant_of_a_re_added_title_is_still_that_task() -> None:
+    """The suffixed key's holder is compared as keys compare titles: case and punctuation
+    folded, so "SHIP!" is the re-added "Ship", as it is the first one while that is open."""
+    first, _ = team_service.add_task("Ship")
+    team_service.finish_task(first.id)
+    again, _ = team_service.add_task("Ship")
+
+    variant, made_variant = team_service.add_task("SHIP!")
+
+    assert not made_variant and variant.id == again.id
+    assert team_service.last_supersedes() is None
+
+
 # --- task keys in any script (#270) --------------------------------------------
 
 

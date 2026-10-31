@@ -129,10 +129,12 @@ UNKNOWN_THERMAL = Thermal(None, "unknown")
 def cpu_load() -> CpuLoad:
     """This machine's CPU load now. Never raises; ``None`` for what cannot be read."""
     try:
-        try:
-            load5: float | None = os.getloadavg()[1]
-        except (AttributeError, OSError):  # Windows has no load average
-            load5 = None
+        load5: float | None = None
+        if sys.platform != "win32":  # Windows has no load average; also the guard mypy reads
+            try:
+                load5 = os.getloadavg()[1]
+            except (AttributeError, OSError):
+                load5 = None
         return CpuLoad(load5, os.cpu_count(), psi_some_avg60(PSI_CPU))
     except Exception:  # a probe is an answer or unknown, never a crash at spawn
         return UNKNOWN_LOAD

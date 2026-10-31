@@ -468,6 +468,14 @@ terminal beside the default sidebar.**
   ragged, with words like `worktree` and `(with` alone on a line. A dry run was refused from
   inside one of the project's own fleet agents, though it stops nothing; a manager can read
   the plan from its own pane now. The real run is still refused there.
+- **Turning usage sharing off while its first upload is out no longer loses the opt-out
+  notice.** `aisquare metrics share off` and *Turn sharing off* wrote the switch first and
+  only then looked for a shipment in flight. A first shipment whose reply landed in between
+  saw sharing off and recorded nothing, so *off* found nothing running and nothing ever
+  sent, and no notice went: the server kept the install as opted in. Nothing was posted
+  after *off*, and nothing was kept. *Off* now looks for a shipment in flight before it
+  writes the switch, and no shipment can start while it does; the one notice is sent, best
+  effort, as it is whenever anything was sent.
 
 ## [0.9.1] - 2026-10-27
 

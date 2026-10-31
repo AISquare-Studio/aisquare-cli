@@ -751,25 +751,30 @@ def enable(*, now: datetime | None = None) -> SharingStatus:
 def disable(*, now: datetime | None = None, transport: Transport | None = None) -> ShipReport:
     """Turn sharing off: at once, and for good until it is turned on again.
 
-    The switch goes first, so a shipment already under way re-reads it before its next POST and
-    stops. What was kept of the shipments is then purged under the shipper's lock, waited for up
-    to :data:`DISABLE_WAIT_S` (one POST is 5 s at most): the shipment in flight finishes before the
+    The shipper's lock is asked first, once and without waiting, so whether a shipment is in
+    flight is known before anything can read the switch as off: one whose reply landed between
+    the switch and a later look would go unseen, and with it the opt-out notice. A lock that was
+    free is kept while the switch goes off, so no shipment starts in between. The switch goes
+    next, so a shipment already under way re-reads it before its next POST and stops. What was
+    kept of the shipments is then purged under the shipper's lock, waited for up to
+    :data:`DISABLE_WAIT_S` (one POST is 5 s at most): the shipment in flight finishes before the
     purge, and nothing it records can land after it. If anything was ever sent, or a shipment was
     in flight, one ``opt_out`` ping says so, best effort; nothing is sent after it. Nothing is
     sent at all while something forces sharing off. An explicit *off* is also the answer to the
     one-time question: it is not asked afterwards."""
     moment = now or datetime.now(UTC)
-    settings_service.set_value("sharing.enabled", "false")
     in_flight = False
     with contextlib.ExitStack() as held:
         try:
             held.enter_context(locking.holding(sharing.lock_path(), wait_s=0))
         except TimeoutError:
             in_flight = True  # a shipment is running: wait for its POST, then purge
-            with contextlib.suppress(TimeoutError, OSError):
-                held.enter_context(locking.holding(sharing.lock_path(), wait_s=DISABLE_WAIT_S))
         except OSError:
             pass  # no lock file to take: nothing can be in flight
+        settings_service.set_value("sharing.enabled", "false")
+        if in_flight:
+            with contextlib.suppress(TimeoutError, OSError):
+                held.enter_context(locking.holding(sharing.lock_path(), wait_s=DISABLE_WAIT_S))
         state = sharing.read()
 
         def purge(old: SharingState) -> None:

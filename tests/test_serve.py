@@ -152,6 +152,26 @@ def test_remote_task_lifecycle_and_guards(work_dir: Path) -> None:
     assert "team.task_claimed" in kinds and "team.task_review" in kinds
 
 
+def test_a_remote_re_add_of_a_done_title_names_the_task_it_supersedes(work_dir: Path) -> None:
+    """REVIEW-RC092-MI, minor 1: task_add's description promised a re-add "returns the
+    original", and its result never named what a closed title's new task supersedes, as
+    ``task add`` and its ``--json`` do."""
+    team_service.activate()
+    assert mcp_server.task_add("ship the release").startswith("created: #1 ")
+    mcp_server.task_update("1", "done")
+
+    again = mcp_server.task_add("ship the release")
+    assert again.startswith("created: #2 ") and again.endswith(" (supersedes done #1)")
+    still = mcp_server.task_add("ship the release")
+    assert still.startswith("already existed (idempotent): #2 ") and "supersedes" not in still
+
+    tools = anyio.run(mcp_server.build_server().list_tools)
+    [described] = [" ".join((t.description or "").split()) for t in tools if t.name == "task_add"]
+    assert "returns the original" not in described
+    assert "a done or dropped task's title adds a new task" in described
+    assert "task_add (idempotent while the task is open)" in mcp_server.TEAM_INSTRUCTIONS
+
+
 def test_server_exposes_exactly_the_eight_tools() -> None:
     server = mcp_server.build_server()
 

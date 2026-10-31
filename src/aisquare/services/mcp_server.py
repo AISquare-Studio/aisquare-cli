@@ -275,7 +275,8 @@ def team_board() -> str:
 def task_add(
     title: str, role: str | None = None, detail: str | None = None, needs: str | None = None
 ) -> str:
-    """Add a shared task (idempotent: re-adding the same title returns the original).
+    """Add a shared task. Re-adding an open task's title returns it (idempotent); a done
+    or dropped task's title adds a new task, and the result names the one it supersedes.
 
     ``needs``: comma-separated tasks this task depends on — numbers (``12``, ``#12``)
     or ids — it stays unavailable to `task_next` until they are done.
@@ -288,7 +289,8 @@ def task_add(
             title, detail=detail, role=role, needs=needed or None, session_ref=me
         )
         state = "created" if created else "already existed (idempotent)"
-        return f"{state}: {team_service.task_label(task)} [{task.status}] {task.title}"
+        note = team_service.supersedes_note(team_service.last_supersedes())
+        return f"{state}: {team_service.task_label(task)} [{task.status}] {task.title}{note}"
 
     return _guard(run)
 
@@ -492,7 +494,7 @@ def serve_token() -> str:
 #: (:func:`_serves_a_team`), and to every HTTP client.
 TEAM_INSTRUCTIONS = (
     "The shared task board and working memory of a team of coding-agent "
-    "sessions. Check team_board first; add work with task_add (idempotent); "
+    "sessions. Check team_board first; add work with task_add (idempotent while the task is open); "
     "claim before working (task_next with claim=true); report outcomes with "
     "task_update and note_add. Every write's success names a seq receipt — "
     "verify(receipt) re-proves it landed; team_log(by_session='me') reads "

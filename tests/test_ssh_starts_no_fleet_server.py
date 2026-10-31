@@ -233,6 +233,24 @@ def test_a_restart_from_ssh_over_a_stale_socket_refuses_before_it_records_the_de
     assert f"cannot restart {agent.label!r}" in str(refused.value), "restart's own refusal"
 
 
+def test_a_resume_from_ssh_with_no_server_says_resume(
+    tmux: Any, claude_on_path: Path, project: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-RC092-MI, nit 2: ``fleet resume`` from SSH with no server refused each paused
+    agent as "cannot restart": the restart it runs on is not the command the owner gave."""
+    agent = fleet_service.spawn(project, "coder").agent
+    fleet_service.bulk("pause", projects=[project])
+    assert not tmux.running, "the pause closed the server's last window, and the server went"
+    monkeypatch.setattr(login_session, "remote_session", lambda: True)
+
+    report = fleet_service.bulk("resume", projects=[project])
+
+    [why] = [r.why for r in report.receipts if r.agent.id == agent.id and r.outcome == "failed"]
+    assert why is not None and why.startswith(f"cannot resume {agent.label!r}: not started: ")
+    assert fleet_service.SSH_START_REFUSAL in why and "cannot restart" not in why
+    assert fleet_service.is_paused(project), "still paused, as a refused resume leaves it"
+
+
 @pytest.mark.parametrize("answer", [None, "gone", "answers", "unasked"])  # listener()'s answers
 def test_the_start_and_restarts_early_check_keep_one_rule_for_no_server_listens(
     answer: str | None, monkeypatch: pytest.MonkeyPatch

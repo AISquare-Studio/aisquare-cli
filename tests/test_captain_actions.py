@@ -1932,6 +1932,24 @@ def test_task_verbs_move_the_card_as_the_captain(
     assert ok(actions.task("alpha", "done", card.id))["status"] == "done"
 
 
+def test_a_re_add_of_a_done_title_says_what_the_new_card_supersedes(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
+) -> None:
+    """REVIEW-RC092-MI, minor 1: a done card's title adds a new card (#447); the captain says
+    which one it supersedes, as ``task add`` does, and an open card's re-add stays as it was."""
+    first = ok(actions.task("alpha", "add", "ship the release"))
+    ok(actions.task("alpha", "done", first["id"]))
+
+    again = ok(actions.task("alpha", "add", "ship the release"))
+    assert again["created"] and again["supersedes"] == first["id"]
+    assert again["id"] != first["id"]
+    number = task_now(first["id"]).number
+    assert audit(alpha.id)[-1]["said"].endswith(f"ship the release (supersedes done #{number})")
+
+    still = ok(actions.task("alpha", "add", "ship the release"))
+    assert not still["created"] and still["supersedes"] is None and still["id"] == again["id"]
+
+
 def test_task_refuses_a_bad_verb_a_missing_reason_and_a_foreign_card(
     projects: dict[str, ProjectInfo], agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:

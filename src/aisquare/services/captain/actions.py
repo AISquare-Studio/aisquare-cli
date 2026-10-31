@@ -676,9 +676,15 @@ def _task(target: ProjectInfo, verb: str, ref: str, note: str | None) -> Outcome
     if verb == "add":
         card, created = team_service.add_task(ref, detail=note, session_ref=actor)
         state = "added" if created else "already there (idempotent)"
+        old = team_service.last_supersedes()
         return Outcome(
-            {"id": card.id, "status": card.status, "created": created},
-            said=f"{state}: {card.id} {card.title}",
+            {
+                "id": card.id,
+                "status": card.status,
+                "created": created,
+                "supersedes": old.id if old is not None else None,
+            },
+            said=f"{state}: {card.id} {card.title}{team_service.supersedes_note(old)}",
             receipt=_receipt(before),
         )
     if verb == "block" and not note:

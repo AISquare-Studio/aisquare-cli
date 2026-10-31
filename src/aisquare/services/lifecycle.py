@@ -2277,10 +2277,12 @@ def running_asqs() -> tuple[str, ...]:
 
 _ASQ_COST = {
     "upgrade": (
-        "the install would be replaced under {it}, and {it} would go on running the old "
+        "the install would be replaced under {it}, and {they} would go on running the old "
         "release over the new one's files: two releases on one home"
     ),
-    "uninstall": "it would remove the program {it} {runs}, with nothing left to quit {it} cleanly",
+    "uninstall": (
+        "it would remove the program {they} {runs}, with nothing left to quit {it} cleanly"
+    ),
 }
 """What each command would do to an asq left running (:func:`asqs_refusal`)."""
 
@@ -2294,8 +2296,9 @@ def asqs_refusal(command: str, asqs: Sequence[str], *, again: str | None = None)
         return None
     one = len(asqs) == 1
     it = "it" if one else "them"
-    cost = _ASQ_COST.get(command, "{it} would be left running").format(
-        it=it, runs="runs" if one else "run"
+    they = "it" if one else "they"
+    cost = _ASQ_COST.get(command, "{they} would be left running").format(
+        it=it, they=they, runs="runs" if one else "run"
     )
     running = "another asq runs" if one else f"{len(asqs)} other asqs run"
     each = "it" if one else "each"

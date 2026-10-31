@@ -666,10 +666,8 @@ def _emit_fresh(report: FreshReport) -> None:
             markup=False,
         )
     elif report.manager_error is not None:
-        spawn = project_service.fleet_command("spawn", project, "manager")
-        console.print(
-            f"  ✗ no manager started: {report.manager_error} — start one: {spawn}", markup=False
-        )
+        hint = fresh_service.manager_hint(report)
+        console.print(f"  ✗ no manager started: {report.manager_error} — {hint}", markup=False)
 
 
 # --- groups, pins and manual order (#140) ---------------------------------------------------

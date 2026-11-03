@@ -201,20 +201,30 @@ def test_the_first_busy_signal_is_the_one_a_hold_names() -> None:
 # --- review of #12: no probe raises -----------------------------------------------------------
 
 
+@pytest.mark.parametrize(("platform", "load5"), [("linux", 2.0), ("win32", None)])
 @pytest.mark.parametrize("avg60", ["1.2.3", ".", "4.5.6.7"])
 def test_a_malformed_cpu_pressure_is_no_reading_and_no_probe_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, avg60: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    avg60: str,
+    platform: str,
+    load5: float | None,
 ) -> None:
     """Review of #12 (2): ``float()`` on ``avg60=1.2.3`` raised ``ValueError`` through
     ``cpu_load`` and ``read``, and a Linux spawn in auto mode crashed. Not a number is no
-    reading; and whatever a probe does, ``read`` answers, every signal ``unknown``."""
+    reading; and whatever a probe does, ``read`` answers, every signal ``unknown``.
+
+    The platform is set, not this machine's: Windows has no load average, so the probe never
+    asks ``getloadavg`` there, the one this test plants (REVIEW-RC092-MI round 2, M2: it
+    expected 2.0, and failed on every Windows shard it ran in)."""
+    monkeypatch.setattr(sys, "platform", platform)
     psi = tmp_path / "cpu"
     psi.write_text(f"some avg10=0.00 avg60={avg60} avg300=0.00 total=0\n", encoding="ascii")
     assert load.psi_some_avg60(psi) is None
     monkeypatch.setattr(load, "PSI_CPU", psi)
     monkeypatch.setattr(os, "getloadavg", lambda: (1.0, 2.0, 3.0), raising=False)
     monkeypatch.setattr(os, "cpu_count", lambda: 8)
-    assert REAL_CPU_LOAD() == load.CpuLoad(2.0, 8, None)
+    assert REAL_CPU_LOAD() == load.CpuLoad(load5, 8, None)
 
     def broken() -> object:
         raise RuntimeError("probe exploded")

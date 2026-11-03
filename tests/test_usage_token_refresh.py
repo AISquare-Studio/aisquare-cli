@@ -76,8 +76,8 @@ class FakeClaude:
         self.runs: list[int] = []
         self.before: threading.Event | None = None  # set: each run waits for it
         self.started = threading.Event()
-        command = ["/opt/bin/claude", *service.TOKEN_REFRESH_ARGS]
-        monkeypatch.setattr(service, "_token_refresh_command", lambda: command)
+        command = ["/opt/bin/claude", *core.TOKEN_REFRESH_ARGS]
+        monkeypatch.setattr(service, "_token_refresh_command", lambda _agent: command)
         monkeypatch.setattr(service, "_run_token_refresh", self)
 
     def __call__(self, account: ClaudeAccount, command: Sequence[str]) -> bool:
@@ -404,7 +404,7 @@ def test_without_claude_code_an_expired_token_reads_as_it_always_did(
 ) -> None:
     work = _expired()
     monkeypatch.setattr(service, "_token_refresh_command", REAL_COMMAND)
-    monkeypatch.setattr(service, "install", lambda: ClaudeInstall(installed=False))
+    monkeypatch.setattr(service, "install", lambda _agent: ClaudeInstall(installed=False))
     ran: list[Any] = []
 
     def run(*args: Any) -> bool:
@@ -746,9 +746,9 @@ def test_the_refresh_runs_claude_code_headless_on_the_accounts_own_directory(
 
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(
-        service, "install", lambda: ClaudeInstall(installed=True, binary="/opt/bin/claude")
+        service, "install", lambda _agent: ClaudeInstall(installed=True, binary="/opt/bin/claude")
     )
-    command = REAL_COMMAND()
+    command = REAL_COMMAND(core.AGENT)
     assert command == ["/opt/bin/claude", "mcp", "get", "aisquare token refresh"]
 
     assert REAL_RUN(work, command) is True, "an exit status of 1 is no answer either way"

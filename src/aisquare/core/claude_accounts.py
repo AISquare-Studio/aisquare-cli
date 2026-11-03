@@ -739,10 +739,16 @@ def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
 
 
 def has_stored_login(account: ClaudeAccount) -> bool:
-    """Whether ``account``'s login is one :func:`stored_login` reads: Claude Code's, in the
-    Keychain or its credentials file. Another agent's slot keeps its own (its adapter's
-    accounts slot reads it), never a Keychain item, so no Keychain is ever locked for it."""
-    return _claude_codes(account)
+    """Whether ``account``'s login is kept in the login Keychain on macOS, as its agent's
+    accounts slot declares (``AgentAccounts.keychain_login``): Claude Code's, which
+    :func:`stored_login` reads there or in its credentials file. An agent whose login is a
+    file in its home (Codex's) keeps no Keychain item. No Keychain is ever locked for its
+    slot, and none of its rows says a login. ``False`` for an agent this install does not
+    know."""
+    try:
+        return kind(account.agent).keychain_login
+    except ValueError:
+        return False
 
 
 def _claude_codes(account: ClaudeAccount) -> bool:
@@ -1773,6 +1779,26 @@ class ClaudeFolderTrust:
         return claude_sharing.grant_trust(claude_json_path(account), *keys)
 
 
+# --- a stale token, refreshed quietly ----------------------------------------------------------
+#
+# Claude Code's, never ours: exchanging the refresh token here would rotate it under every
+# session running on the account. Measured on Claude Code 2.1.314 against a fake login and a
+# local endpoint that answered nothing real (the task's result has the run): `auth status`
+# never refreshes; every other subcommand's startup refreshes an expired token, but
+# `plugin list`, `auto-mode config` and `doctor` exit with the refresh still in flight,
+# where the server may already have rotated the refresh token. `mcp get` waits for the
+# answer — it reads the account's claude.ai connectors with the token — and so does
+# `mcp list`, which starts every MCP server to check it; `mcp get` of a name no server can
+# have (a space: `claude mcp add` refuses it) starts none. No request to the model API.
+# A 401 on a token Claude Code holds unexpired is not refreshed by it outside a session;
+# the read after it then catches a token another session has renewed meanwhile.
+
+TOKEN_REFRESH_ARGS = ("mcp", "get", "aisquare token refresh")
+"""Claude Code's ``refresh_args`` (``AgentAccounts``): ``claude mcp get`` of a server no one
+can have (see above), what runs on a slot whose token went stale. Its exit status says
+nothing; the login read again after it does."""
+
+
 class ClaudeCodeAccounts:
     """Claude Code's answers to the accounts slot: the functions above, as they were."""
 
@@ -1790,6 +1816,7 @@ class ClaudeCodeAccounts:
     relogin = "/login"
     sign_out = "inside Claude Code (/logout)"
     shares_settings = True
+    keychain_login = True  # on macOS: the login Keychain's item (`stored_login`)
 
     def __init__(
         self, share_parts: tuple[SharePart, ...] = (), memory: SharedMemory | None = None
@@ -1802,6 +1829,9 @@ class ClaudeCodeAccounts:
     def sign_in_args(self) -> tuple[str, ...]:
         # No non-interactive login: a first session in the slot runs Claude Code's own.
         return ()
+
+    def refresh_args(self) -> tuple[str, ...]:
+        return TOKEN_REFRESH_ARGS
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(CONFIG_DIR_VAR, "").strip()

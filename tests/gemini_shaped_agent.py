@@ -598,6 +598,7 @@ class GeminiShapedAccounts:
     relogin = "/auth"
     sign_out = "inside Gemini (/auth)"
     shares_settings = False
+    keychain_login = False  # a file in its home: SSH may start the fleet's server for it
     # Its config dir is a ``.gemini`` in each slot's home: a folder of skills and one context
     # file, linked the way every agent's are (``core.account_sharing``); no memory to merge.
     share_parts: tuple[SharePart, ...] = (
@@ -609,6 +610,9 @@ class GeminiShapedAccounts:
 
     def sign_in_args(self) -> tuple[str, ...]:
         return ()  # no login subcommand: its TUI signs in on its first run in the slot
+
+    def refresh_args(self) -> tuple[str, ...]:
+        return ()  # no quiet refresh: a stale token reads as it is
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(HOME_ENV, "").strip()

@@ -958,7 +958,7 @@ def no_token_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     too. ``tests/test_usage_token_refresh.py`` puts a fake Claude Code in their place."""
     from aisquare.services import claude_accounts as service
 
-    monkeypatch.setattr(service, "_token_refresh_command", lambda: None)
+    monkeypatch.setattr(service, "_token_refresh_command", lambda _agent: None)
     monkeypatch.setattr(service, "_run_token_refresh", lambda _account, _command: False)
 
 

@@ -505,6 +505,7 @@ class FakeAccounts:
     relogin = ""
     sign_out = "with `fakeagent logout`"
     shares_settings = False
+    keychain_login = False  # a file in its home: SSH may start the fleet's server for it
     # A folder linked like every agent's, and a part merged, which the fake takes by `--notes`.
     share_parts: tuple[SharePart, ...] = (
         SharePart("rules", "rules.d"),
@@ -515,6 +516,9 @@ class FakeAccounts:
 
     def sign_in_args(self) -> tuple[str, ...]:
         return ("auth",)
+
+    def refresh_args(self) -> tuple[str, ...]:
+        return ()  # no quiet refresh: a stale token reads as it is
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(self.home_env, "").strip()

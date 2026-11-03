@@ -39,13 +39,14 @@ request is ever made for it. Its sign-in is ``codex login`` in the slot's
 ``CODEX_HOME`` (a *Log in* over an ``auth.json`` still there waits for new tokens:
 :func:`login_fingerprint`), its folder trust is shared between Codex slots, and its
 arrangement lives in ``agent_account`` (store v29).
-**A stale token is Claude Code's to refresh, never this module's.** The access token
+**A stale token is its agent's to refresh, never this module's.** Claude Code's access token
 lasts hours and only Claude Code renews it, from the refresh token beside it; exchanged
 here, that would rotate under every session running on the account. So when a read finds
-the token expired or refused (a 401), :func:`read_usage` has Claude Code refresh it — its
-own headless startup, on the account's directory, with no window and no model request
-(:data:`TOKEN_REFRESH_ARGS`) — and reads again; once more a minute later; and only then
-does the row ask for a log-in. Meanwhile it shows the last good reading (:func:`_refresh_stale`).
+the token expired or refused (a 401), :func:`read_usage` has the agent refresh it — its
+own headless run, on the account's directory, with no window and no model request
+(``AgentAccounts.refresh_args``: Claude Code's ``core.TOKEN_REFRESH_ARGS``) — and reads
+again; once more a minute later; and only then does the row ask for a log-in. Meanwhile it
+shows the last good reading (:func:`_refresh_stale`).
 """
 
 from __future__ import annotations
@@ -2344,33 +2345,23 @@ def usage_backoffs(
 
 # --- a stale token, refreshed quietly ----------------------------------------------------------
 #
-# An access token lasts hours, and only Claude Code renews it: on the account's next session.
-# An account no agent ran on lately read as signed out, and its row offered Log in, though
-# nothing was wrong with it (the owner pressed Log in and landed in a session with nothing to
-# do). So a read that finds the token expired, or refused (a 401), has Claude Code refresh it
-# and reads again; failing that, once more after TOKEN_REFRESH_RETRY_SECONDS; and only then
-# answers as before, a log-in needed. In between the row shows the last good reading, aged
-# (`_with_last_good`), never "signed out".
+# An access token lasts hours, and only its agent renews it: Claude Code on the account's
+# next session. An account no agent ran on lately read as signed out, and its row offered
+# Log in, though nothing was wrong with it (the owner pressed Log in and landed in a session
+# with nothing to do). So a read that finds the token expired, or refused (a 401), has the
+# agent refresh it and reads again; failing that, once more after
+# TOKEN_REFRESH_RETRY_SECONDS; and only then answers as before, a log-in needed. In between
+# the row shows the last good reading, aged (`_with_last_good`), never "signed out".
 #
-# Claude Code's, never ours: exchanging the refresh token here would rotate it under every
-# session running on the account. Measured on Claude Code 2.1.314 against a fake login and a
-# local endpoint that answered nothing real (the task's result has the run): `auth status`
-# never refreshes; every other subcommand's startup refreshes an expired token, but
-# `plugin list`, `auto-mode config` and `doctor` exit with the refresh still in flight,
-# where the server may already have rotated the refresh token. `mcp get` waits for the
-# answer — it reads the account's claude.ai connectors with the token — and so does
-# `mcp list`, which starts every MCP server to check it; `mcp get` of a name no server can
-# have (a space: `claude mcp add` refuses it) starts none. No request to the model API.
-# A 401 on a token Claude Code holds unexpired is not refreshed by it outside a session;
-# the read after it then catches a token another session has renewed meanwhile.
+# The agent's, never ours: what it runs is its accounts slot's `refresh_args` (Claude Code's
+# `mcp get`, measured in `core.claude_accounts`), and an agent that declares none (Codex,
+# which renews its own `auth.json`) keeps its stale reading, as before this existed.
 #
 # At most one refresh runs per account, whichever process reads: a slot's row
 # (`_TOKEN_REFRESH_KEY`), claimed compare-and-set, says it runs, waits for its retry, or
-# gave up — for the token it is about, so the next token Claude Code writes starts afresh.
+# gave up — for the token it is about (the slot's `login_fingerprint`), so the next token
+# the agent writes starts afresh.
 
-TOKEN_REFRESH_ARGS = ("mcp", "get", "aisquare token refresh")
-"""What runs on a slot whose token went stale: ``claude mcp get`` of a server no one can have
-(see above). Its exit status says nothing; the login read again after it does."""
 TOKEN_REFRESH_TIMEOUT_SECONDS = 60.0
 """How long a refresh may run: Claude Code's own token request gives up at 30 s."""
 TOKEN_REFRESH_RETRY_SECONDS = 60.0
@@ -2443,15 +2434,20 @@ def _refresh_turn(held: TokenRefresh | None, token: str, now: datetime) -> int |
     return held.tries + 1
 
 
-def _refreshing_usage(stale: ClaudeUsage, slot: int, retry_at: datetime | None) -> ClaudeUsage:
+def _refreshing_usage(
+    stale: ClaudeUsage, account: ClaudeAccount, retry_at: datetime | None
+) -> ClaudeUsage:
     """What a read answers while a stale token is being refreshed: no live reading, and not a
-    log-in either (``needs_login`` False), so the row shows its last good reading, aged."""
+    log-in either (``needs_login`` False), so the row shows its last good reading, aged. The
+    agent that refreshes it is named (``Claude Code is refreshing it``)."""
     said = stale.reason or _EXPIRED
+    agent = core.agent_label(account.agent)
+    slot = account.slot
     if retry_at is None:
-        reason = f"{said} — Claude Code is refreshing it"
+        reason = f"{said} — {agent} is refreshing it"
     else:
         reason = (
-            f"{said} — Claude Code's refresh did not take, once more at "
+            f"{said} — {agent}'s refresh did not take, once more at "
             f"{retry_at.astimezone().strftime('%H:%M')}"
         )
     return unreadable_usage(
@@ -2459,17 +2455,23 @@ def _refreshing_usage(stale: ClaudeUsage, slot: int, retry_at: datetime | None) 
     )
 
 
-def _token_refresh_command() -> list[str] | None:
-    """What :func:`_run_token_refresh` runs (:data:`TOKEN_REFRESH_ARGS`), or ``None`` without
-    Claude Code: no refresh is tried then, and a stale token answers as it always did."""
-    found = install()
+def _token_refresh_command(agent: str) -> list[str] | None:
+    """What :func:`_run_token_refresh` runs on a slot of ``agent``: its binary and the
+    arguments its accounts slot declares (``AgentAccounts.refresh_args``, Claude Code's
+    ``core.TOKEN_REFRESH_ARGS``). ``None`` for an agent that declares none (Codex's) or is
+    not installed here: no refresh is tried then, and a stale token answers as it always
+    did. The slot is asked first, so an agent with no refresh looks for no binary."""
+    args = core.kind(agent).refresh_args()
+    if not args:
+        return None
+    found = install(agent)
     if not found.installed or found.binary is None:
         return None
-    return [found.binary, *TOKEN_REFRESH_ARGS]
+    return [found.binary, *args]
 
 
 def _run_token_refresh(account: ClaudeAccount, command: Sequence[str]) -> bool:
-    """Run Claude Code's own headless refresh, ``command`` (:func:`_token_refresh_command`), on
+    """Run the agent's own headless refresh, ``command`` (:func:`_token_refresh_command`), on
     ``account`` and wait for it: whether it ran. Whether it WORKED is the login's to say,
     read again after.
 
@@ -2508,35 +2510,47 @@ def _refresh_stale(
     fetch: Fetch | None,
     start: bool = True,
 ) -> RefreshRows:
-    """Have Claude Code refresh each of ``accounts``' stale token and read it again, in place in
+    """Have each of ``accounts``' agent refresh its stale token and read it again, in place in
     ``readings``: an answer is then recorded as any other, and the rows returned are written,
     in :func:`read_usage`'s one session after the round.
 
     Per slot, by its row (:class:`TokenRefresh`), claimed compare-and-set in one store
-    session: the first read of a stale token runs the refresh; a read while it runs, or
-    before its retry is due, starts none and answers :func:`_refreshing_usage`; the first
-    read at or after it runs the retry; after that, the stale reading as before. The
-    refreshes run at once, one thread each. No Claude Code to run, or no store to claim in:
-    the reading stands, as before this existed, and no store is opened for it.
+    session for the token its accounts slot fingerprints (``login_fingerprint``): the first
+    read of a stale token runs the refresh; a read while it runs, or before its retry is
+    due, starts none and answers :func:`_refreshing_usage`; the first read at or after it
+    runs the retry; after that, the stale reading as before. The refreshes run at once, one
+    thread each. A slot whose agent declares no refresh (``AgentAccounts.refresh_args``),
+    or is not installed here, keeps its reading, as before this existed; with none to run,
+    or no store to claim in, no store is opened for it.
 
     ``start=False``, for a reader that cannot wait (a headroom pick): none is started or
     waited for. A refresh running, or waiting for its retry, is answered as for any read
     meanwhile; a token none is about, or whose retry is due, keeps its stale reading, which
     the pick skips as it did before this existed, and the next reader that can wait starts it.
     """
-    command = _token_refresh_command() if start else None
-    if start and command is None:
+    refreshed = [account for account in accounts if core.kind(account.agent).refresh_args()]
+    commands: dict[str, list[str]] = {}
+    if start:
+        for agent in dict.fromkeys(account.agent for account in refreshed):
+            command = _token_refresh_command(agent)
+            if command is not None:
+                commands[agent] = command
+        refreshed = [account for account in refreshed if account.agent in commands]
+    if not refreshed:
         return {}
     moment = now or _now()
     tokens: dict[int, str] = {}
-    for account in accounts:
-        creds = core.credentials(account)
-        if creds is not None:
-            tokens[account.slot] = _login_digest(creds)
+    for account in refreshed:
+        try:
+            token = login_fingerprint(account)  # the stale login, as its accounts slot says
+        except LoginUnreadable:
+            continue  # the store would not say: no token to claim a refresh for
+        if token is not None:
+            tokens[account.slot] = token
     claimed: dict[int, tuple[TokenRefresh | None, TokenRefresh]] = {}
     try:
         with store_session() as store:
-            for account in accounts:
+            for account in refreshed:
                 token = tokens.get(account.slot)
                 if token is None:
                     continue
@@ -2561,17 +2575,15 @@ def _refresh_stale(
                 if held.until is None or held.until <= moment:
                     continue  # a claim that lapsed with no try left: as if given up
                 retry = held.until if held.phase == "waiting" else None
-                readings[account.slot] = _refreshing_usage(
-                    readings[account.slot], account.slot, retry
-                )
+                readings[account.slot] = _refreshing_usage(readings[account.slot], account, retry)
     except sqlite3.Error:
         return {}
-    running = [account for account in accounts if account.slot in claimed]
-    if not running or command is None:
+    running = [account for account in refreshed if account.slot in claimed]
+    if not running or not commands:
         return {}
 
     def _refresh(account: ClaudeAccount) -> ClaudeUsage | None:
-        if not _run_token_refresh(account, command):
+        if not _run_token_refresh(account, commands[account.agent]):
             return None
         return usage(account, now=now, fetch=fetch, fresh=True)
 
@@ -2599,7 +2611,7 @@ def _refresh_stale(
         if reading.cause in _STALE_TOKEN and claim.tries < TOKEN_REFRESH_TRIES:
             retry_at = after + timedelta(seconds=TOKEN_REFRESH_RETRY_SECONDS)
             rows[slot] = (claim.dump(), replace(claim, phase="waiting", until=retry_at).dump())
-            reading = _refreshing_usage(reading, slot, retry_at)
+            reading = _refreshing_usage(reading, account, retry_at)
         elif reading.cause in _STALE_TOKEN:
             rows[slot] = (claim.dump(), replace(claim, phase="failed", until=None).dump())
         else:  # it took (or the token is fine and the endpoint is not): nothing to wait for
@@ -4912,6 +4924,7 @@ def open_sign_in_window(
         command=command,
         env=env,
         config=config,
+        agent=account.agent,  # its login's home: whether SSH may start the server for it
     )
 
 

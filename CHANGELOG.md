@@ -191,7 +191,7 @@ adapter.**
   `fleet relabel`, the project rename that renames the codename and session, auto admission,
   `aisquare outcomes`, who started each turn, `aisquare fleet top`, the quiet refresh of a
   stale token, the sidebar's count, filter and highlight, asking in place, and the fixes), each
-  bullet of its entry with a Codex status (SCOPE #113 092: 35 rows, 15 PARITY, 2 GAP, 18 N-A).
+  bullet of its entry with a Codex status (SCOPE #113 092: 35 rows, 16 PARITY, 1 GAP, 18 N-A).
   **The store is v50**: main's v41-v43 (the codename aliases, `fleet_agent.paused_at`,
   `metric.origin`) and this line's seven steps behind them (v44-v50, renumbered once more); a
   store from 0.9.2 (v43) and one from this line before the merge (stamped 47) both reach v50.
@@ -200,8 +200,8 @@ adapter.**
   meet main's new behaviour they stand: a rename renames the sessions the launch records name,
   by tmux's id (one made by hand is left), a row that ran under the plain home comes back on
   its plain slot by name, and over SSH an old reading over the line is a floor to the pick.
-  On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask a
-  Claude Code slot's alone.
+  On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask
+  the item of a slot whose agent keeps its login in the Keychain (`keychain_login`) alone.
   - **Through the adapter**, tested on Codex: a pause exits a Codex agent through its own exit
     command and parks its claims on its thread, and a resume brings the thread back (`codex …
     resume <id>`) with the pause's carry-on line, or starts it fresh with its claims when no
@@ -220,21 +220,26 @@ adapter.**
     never a Codex manager; the Accounts table with Codex rows still fits 160 columns, the agent
     mark inside the name's 12 cells; the live count, Active only, the "1 account" line and the
     real repository names count every agent's rows. Main's hook launcher change (its pinned release) is in the Codex
-    plugin's copy too. `tests/test_no_agent_literals.py`'s BASELINE is 109, as before the
-    merge: its one new line, `CLAUDECODE` in `core/prompt_origin.py`, is Claude Code's
+    plugin's copy too. From an SSH login on macOS a Codex spawn starts the fleet's tmux server
+    and the agent in it: whether a server may be started there is the agent's accounts fact
+    `AgentAccounts.keychain_login` (Claude Code's login is in the Keychain, Codex's
+    `auth.json` is a file), and a server an SSH login started is marked, so no agent whose
+    login is in the Keychain is opened in it, from SSH or at the Mac (a restart and the
+    sign-in window included). `tests/test_no_agent_literals.py`'s BASELINE is 109, as before
+    the merge: its one new line, `CLAUDECODE` in `core/prompt_origin.py`, is Claude Code's
     `process_env` now.
-  - **Gaps for Codex**, each with its lane: a fleet tmux server is never started from an SSH
-    login on macOS, for Claude Code's Keychain, a Codex spawn included
-    (`AgentAccounts.keychain_login`); `aisquare outcomes` reads its transcript facts (prompts,
+  - **Gaps for Codex**, with its lane: `aisquare outcomes` reads its transcript facts (prompts,
     interrupts, denials, edits) in Claude Code's format alone (`AgentTranscript.facts`).
-  - **Not Codex's** (N-A): usage over SSH from what the Mac recorded and the quiet refresh of a
-    stale token are Claude Code's login, in the Keychain and refreshed by Claude Code (a Codex
-    slot's login is its own file, refreshed by Codex, its usage read off its rollouts); the
-    prompt log's filter of Claude Code's own blocks (Codex's hook hands the typed prompt
-    alone); usage sharing's opt-out (sharing is Claude Code's); and the asq-only items: the
-    instance registry and gate, the upgrade and uninstall refusal, the highlight and the fade,
-    buttons that work on appear and the questions asked in place, the codename lookups, the
-    Onboard ↻, the scroll of Usage & stats, `task add`, a leading `--json` and `project fresh`.
+  - **Not Codex's** (N-A): usage over SSH from what the Mac recorded is Claude Code's login in
+    the Keychain (a Codex slot's login is its own file, its usage read off its rollouts); the
+    quiet refresh of a stale token runs the agent's own command, its accounts slot's
+    `refresh_args()` (Claude Code's `mcp get`), and Codex declares none, as it renews its own
+    `auth.json` and its slot never reads stale; the prompt log's filter of Claude Code's own
+    blocks (Codex's hook hands the typed prompt alone); usage sharing's opt-out (sharing is
+    Claude Code's); and the asq-only items: the instance registry and gate, the upgrade and
+    uninstall refusal, the highlight and the fade, buttons that work on appear and the
+    questions asked in place, the codename lookups, the Onboard ↻, the scroll of Usage &
+    stats, `task add`, a leading `--json` and `project fresh`.
 - **No `docs/` pages for this line** (the owner, 2026-10-27, to match main's removal): the
   adapter contract (the protocol table and "Adding a terminal agent" with its file and fixture
   list) is the docstring of `aisquare.core.agent_adapters`, held to `types.py` by

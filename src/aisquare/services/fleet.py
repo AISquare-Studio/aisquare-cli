@@ -5161,7 +5161,7 @@ def spawn(
     # new server would answer for their rows. Asked here so the refusal comes before the
     # project is captured or a worktree made (#139), and again as the window opens
     # (`open_window`), as a server can exit while the worktree is checked out.
-    exited = _before_a_server_starts(srv, config)
+    exited = _before_a_server_starts(srv, config, selected.adapter.id).exited
     if exited:
         notes.append(_exited_note(srv, exited))
     from aisquare.core.agent_adapters.types import fleet_extra_args
@@ -5942,6 +5942,7 @@ def spawn(
                     width=width,
                     height=height,
                     notes=notes,
+                    agent=selected.adapter.id,
                 )
                 if joined is not None
                 else _new_session_window(
@@ -5955,6 +5956,7 @@ def spawn(
                     height=height,
                     config=config,
                     notes=notes,
+                    agent=selected.adapter.id,
                 )
             )
         except TmuxError as exc:
@@ -6862,21 +6864,109 @@ SSH_START_REFUSAL = (
 )
 """Why an SSH login on macOS starts no fleet tmux server (:func:`_refuse_a_server_from_ssh`)."""
 
+SSH_STARTED_OPTION = "@asq-started-over-ssh"
+"""The tmux user option (global) that marks a fleet server an SSH login on macOS started
+(:func:`_mark_a_server_started_over_ssh`). It lives and dies with that server, so the next
+server, started at the Mac, carries none."""
 
-def _refuse_a_server_from_ssh() -> None:
-    """Refuse to start the fleet's tmux server from an SSH login on macOS (#20).
+SSH_STARTED_REFUSAL = (
+    "the fleet's tmux server was started from an SSH login, and an agent it opens can't read "
+    "the Keychain"
+)
+"""Why an agent whose login is in the Keychain is opened in no server an SSH login started
+(:func:`_refuse_a_server_started_over_ssh`)."""
+
+
+def _keychain_login(agent: str | None) -> bool | None:
+    """Whether the agent ``agent`` (an adapter's id) keeps its login in the Keychain, as its
+    accounts slot declares (``AgentAccounts.keychain_login``): Claude Code's does, Codex's is
+    a file. ``None`` when nothing is declared: a window that runs no agent (``agent`` is
+    ``None``: the watcher, an editor), or an agent with no accounts slot or not registered
+    here."""
+    if agent is None:
+        return None
+    try:
+        accounts = get_adapter(agent).accounts
+    except ValueError:
+        return None
+    return accounts.keychain_login if accounts is not None else None
+
+
+def _file_login_agents() -> str:
+    """The agents here whose login is no Keychain item (``keychain_login`` False), named for a
+    refusal: what an SSH login may start the fleet's server with. ``""`` when none is."""
+    names = [
+        claude_accounts_core.agent_label(agent)
+        for agent in claude_accounts_core.account_agents()
+        if _keychain_login(agent) is False
+    ]
+    return " or ".join(f"a {name} agent" for name in names)
+
+
+def _refuse_a_server_from_ssh(agent: str | None = None) -> bool:
+    """Refuse to start the fleet's tmux server from an SSH login on macOS for ``agent`` unless
+    its login is no Keychain item (#20); whether this start is one from an SSH login, which
+    :func:`open_window` marks on the server it starts (:func:`_mark_a_server_started_over_ssh`).
 
     A tmux server runs in the security session of the process that started it, and so does
     every pane it opens (``core.login_session``): one started from an SSH login opens agents
-    that cannot read the Claude Code login in the Keychain, whoever attaches to it later. A server
-    the Mac started is joined from SSH as ever: only the start is refused. Asked once
-    :func:`_before_a_server_starts` read that no server listens, so a spawn into a running
-    server pays nothing for it.
+    that cannot read a login kept in the Keychain, whoever attaches to it later. So the start
+    is refused for an agent whose accounts slot keeps its login there
+    (``AgentAccounts.keychain_login``: Claude Code's), and for a window that declares
+    nothing (no agent, or an agent with no accounts slot), as every start was before. An
+    agent whose login is a file in its home (Codex's ``auth.json``) runs there as at the Mac:
+    its start is let through, and marked. A server the Mac started is joined from SSH as
+    ever. Asked once :func:`_before_a_server_starts` read that no server listens, so a spawn
+    into a running server pays nothing for it.
     """
-    if login_session.remote_session():
+    if not login_session.remote_session():
+        return False
+    if _keychain_login(agent) is not False:
+        others = _file_login_agents()
         raise FleetError(
             f"not started: {SSH_START_REFUSAL}. No fleet tmux server runs yet: start an agent "
             "in asq at the Mac, and agents start from SSH after that"
+            + (f"; {others} can start it from here" if others else "")
+        )
+    return True
+
+
+def _started_over_ssh(srv: TmuxServer) -> bool:
+    """Whether the server at ``srv`` carries :data:`SSH_STARTED_OPTION`: an SSH login on
+    macOS started it. A server that would not say is not refused on a guess."""
+    try:
+        return srv.run("show-options", "-gqv", SSH_STARTED_OPTION).strip() == "1"
+    except TmuxError:
+        return False
+
+
+def _mark_a_server_started_over_ssh(srv: TmuxServer) -> None:
+    """Mark the server ``srv``, which a window opened from an SSH login on macOS has just
+    started, as one an SSH login started (:data:`SSH_STARTED_OPTION`), so no agent whose login
+    is in the Keychain is opened in it later (:func:`_refuse_a_server_started_over_ssh`),
+    from SSH or at the Mac. Set right after the window that started it opened: in between,
+    another process's window joins it unmarked. Best effort: a server that would not take it
+    keeps the window it opened."""
+    with contextlib.suppress(TmuxError):
+        srv.run("set-option", "-g", SSH_STARTED_OPTION, "1")
+
+
+def _refuse_a_server_started_over_ssh(srv: TmuxServer, agent: str | None) -> None:
+    """Refuse to open ``agent`` in the running server at ``srv`` when an SSH login on macOS
+    started it (#20) and the agent's login is in the Keychain (``keychain_login``): every pane
+    of that server is in the SSH login's security session, wherever the spawn comes from,
+    so the agent could not read its login. Asked only of such an agent, and only where a
+    security session can be asked (macOS): elsewhere no server is ever marked. There it costs
+    such a window one read of the server's option (:func:`_started_over_ssh`)."""
+    if agent is None or _keychain_login(agent) is not True:
+        return
+    if login_session.remote_session() is None:
+        return
+    if _started_over_ssh(srv):
+        raise FleetError(
+            f"not started: {SSH_STARTED_REFUSAL}. `aisquare fleet shutdown --all` ends that "
+            f"server; then start asq on the Mac, and {claude_accounts_core.agent_label(agent)} "
+            "agents start from SSH after that"
         )
 
 
@@ -6890,26 +6980,43 @@ def _no_server_listens(answer: SocketAnswer | None) -> bool:
     return answer != "answers" and answer != "unasked"
 
 
-def _refuse_a_server_start_from_ssh(srv: TmuxServer) -> None:
-    """:func:`_refuse_a_server_from_ssh` where no server listens at ``srv``'s socket, for a
-    caller that must refuse before it stops or records anything: ``restart``, whose contract
-    is that every refusal not depending on the stop comes first. From SSH over a stale socket
-    it recorded the dead row, and only its replacement's spawn refused (review of #464).
-    Asked of the session first: at the machine, or off macOS, no socket is read."""
-    if not login_session.remote_session():
+def _refuse_a_server_start_from_ssh(srv: TmuxServer, agent: str | None = None) -> None:
+    """The SSH rules of #20 for a window opening ``agent`` at ``srv``, for a caller that must
+    refuse before it stops or records anything: ``restart``, whose contract is that every
+    refusal not depending on the stop comes first. From SSH over a stale socket it recorded
+    the dead row, and only its replacement's spawn refused (review of #464). Where no server
+    listens, :func:`_refuse_a_server_from_ssh`; where one does,
+    :func:`_refuse_a_server_started_over_ssh`. Asked of the session first: off macOS no
+    socket is read, nor at the machine for an agent whose login is no Keychain item."""
+    remote = login_session.remote_session()
+    if remote is None or (not remote and _keychain_login(agent) is not True):
         return
     try:
         answer = srv.listener(srv.socket_path())
     except TmuxUnavailable:
         return
     if _no_server_listens(answer):
-        _refuse_a_server_from_ssh()
+        _refuse_a_server_from_ssh(agent)
+    elif answer == "answers":
+        _refuse_a_server_started_over_ssh(srv, agent)
 
 
-def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
+@dataclass(frozen=True)
+class _ServerCheck:
+    """What :func:`_before_a_server_starts` found: the rows whose exited server's start it
+    forgot, and whether the window it was asked for starts the server from an SSH login
+    (:func:`_refuse_a_server_from_ssh`), which :func:`open_window` then marks."""
+
+    exited: list[FleetAgent] = field(default_factory=list)
+    over_ssh: bool = False
+
+
+def _before_a_server_starts(
+    srv: TmuxServer, config: FleetSettings, agent: str | None = None
+) -> _ServerCheck:
     """What must hold before anything starts a tmux server at the fleet's socket path, asked in
-    this one place; the rows whose exited server's start it forgot. ``srv`` is the fleet's
-    server for ``config`` (:func:`server`).
+    this one place, for a window that opens ``agent`` (an adapter's id; ``None`` for a window
+    that runs no agent). ``srv`` is the fleet's server for ``config`` (:func:`server`).
 
     ``new-session`` starts a server where none listens. Over a stale file, a server that
     exited, that is the next server, and the rows of the one that exited forget its start
@@ -6923,21 +7030,26 @@ def _before_a_server_starts(srv: TmuxServer, config: FleetSettings) -> list[Flee
     two connects, and a spawn checks twice (review of #259, round 5). A server listening
     there, the usual case, is one connect and nothing else.
 
-    Where none listens, an SSH login on macOS starts none (:func:`_refuse_a_server_from_ssh`,
-    #20), before anything is written.
+    Where none listens, an SSH login on macOS starts none for an agent whose login is in the
+    Keychain, and one for an agent whose login is a file (:func:`_refuse_a_server_from_ssh`,
+    #20), before anything is written. Where one listens that an SSH login started, an agent
+    whose login is in the Keychain is not opened in it (:func:`_refuse_a_server_started_over_ssh`).
     """
     try:
         answer = srv.listener(srv.socket_path())
     except TmuxUnavailable:
-        return []  # no POSIX uid: no tmux server can exist here
+        return _ServerCheck()  # no POSIX uid: no tmux server can exist here
+    over_ssh = False
     if _no_server_listens(answer):  # this one would start it
-        _refuse_a_server_from_ssh()
+        over_ssh = _refuse_a_server_from_ssh(agent)
+    elif answer == "answers":
+        _refuse_a_server_started_over_ssh(srv, agent)
     reads = tmux_core.SocketReads()  # that answer, for every row recorded at the path
     reads.heard_listener(srv, None, answer)
     if answer is None:
-        return _forget_an_exited_server(srv, config, reads)
+        return _ServerCheck(_forget_an_exited_server(srv, config, reads), over_ssh)
     _refuse_a_freed_socket(srv, config, answer, reads)
-    return []
+    return _ServerCheck(over_ssh=over_ssh)
 
 
 def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
@@ -6992,6 +7104,7 @@ def open_window(
     config: FleetSettings | None = None,
     notes: list[str] | None = None,
     create: bool = False,
+    agent: str | None = None,
 ) -> WindowInfo:
     """A window on the fleet's tmux server ``srv`` (:func:`server`), opened once what must hold
     before a server starts there does (:func:`_before_a_server_starts`): the one way anything
@@ -7003,11 +7116,14 @@ def open_window(
     when given, gets the rows whose exited server's start the check forgot, for the caller
     to say (:func:`_exited_note`). ``create`` opens it only in a session it creates
     (``TmuxServer.spawn_window``), as a spawn that joins no recorded session does
-    (:func:`_new_session_window`)."""
-    exited = _before_a_server_starts(srv, config or settings())
-    if exited and notes is not None:
-        notes.append(_exited_note(srv, exited))
-    return srv.spawn_window(
+    (:func:`_new_session_window`). ``agent`` is the agent the window runs (an adapter's id),
+    whose accounts slot says whether an SSH login may start the server for it
+    (``keychain_login``); ``None`` for a window that runs none. A server this window starts
+    from an SSH login is marked so (:func:`_mark_a_server_started_over_ssh`)."""
+    check = _before_a_server_starts(srv, config or settings(), agent)
+    if check.exited and notes is not None:
+        notes.append(_exited_note(srv, check.exited))
+    window = srv.spawn_window(
         session,
         name=name,
         cwd=cwd,
@@ -7017,6 +7133,9 @@ def open_window(
         height=height,
         create=create,
     )
+    if check.over_ssh:
+        _mark_a_server_started_over_ssh(srv)
+    return window
 
 
 def _refuse_occupied_worktree(
@@ -14839,9 +14958,10 @@ def restart(
         elif replays is None or replays.accounts is not None:
             choice = _replacement_account(account, slot, role=runs_as, project=project, whose=whose)
         # The replacement's spawn opens its window where no server may listen: from SSH on
-        # macOS it would refuse to start one there, so the restart refuses now, with the row
-        # and its last screen as they were (#20; review of #464).
-        _refuse_a_server_start_from_ssh(server())
+        # macOS it would refuse to start one there for an agent whose login is in the
+        # Keychain, or join one an SSH login started, so the restart refuses now, with the
+        # row and its last screen as they were (#20; review of #464).
+        _refuse_a_server_start_from_ssh(server(), onto if onto is not None else whose)
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot {verb} {label!r}: {exc}") from exc
     # The row's own slot is no new pin; a take-over's account is the human's choice.

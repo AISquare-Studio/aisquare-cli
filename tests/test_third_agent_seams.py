@@ -38,6 +38,7 @@ from aisquare.core.agent_adapters.types import AgentAdapter
 from aisquare.core.selfcli import CliResult
 from aisquare.models import ClaudeAccount, ClaudeUsage
 from aisquare.services import agents as agents_service
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import first_run, lifecycle
 from tests.fake_agent import FakeAgentAdapter
 from tests.gemini_shaped_agent import GeminiShapedAccounts, GeminiShapedAdapter
@@ -450,6 +451,171 @@ def test_a_network_reading_of_its_own_windows_is_cached_whole_and_has_a_doctor_r
         check = diagnostics._agent_account_headroom_check(adapter.id, live=True)
         assert check is not None and check.name == f"{adapter.id}-account-headroom"
         assert check.status.value == "ok" and "70%" in check.detail, check.detail
+    finally:
+        unregister(adapter.id)
+
+
+# --- 092 rows 6 and 35: an SSH start and a quiet refresh, by what its accounts declare ------
+
+
+class _InTheKeychain(GeminiShapedAccounts):
+    """Its accounts, as an agent whose login is kept in the macOS Keychain."""
+
+    keychain_login = True
+
+
+@pytest.mark.parametrize("keychain", [False, True], ids=["login-a-file", "login-in-keychain"])
+def test_from_ssh_it_starts_the_fleets_server_as_its_keychain_login_declares(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keychain: bool
+) -> None:
+    """SCOPE #113 092 row 6: an SSH login on macOS starts the fleet's tmux server for an agent
+    whose accounts slot declares its login no Keychain item (``keychain_login`` False, the
+    Gemini-shaped agent's ``oauth_creds.json``), and marks it. The agent then joins that
+    server too. The same agent declaring the Keychain is refused there, by that one fact."""
+    from aisquare.core import login_session
+    from aisquare.core.config import FleetRoleSettings, load_config, save_config
+    from aisquare.core.orchestrator import team_project
+    from aisquare.services import fleet as fleet_service
+    from tests import fakebin
+    from tests.test_fleet_service import FakeTmux
+
+    adapter = GeminiShapedAdapter()
+    if keychain:
+        adapter.accounts = _InTheKeychain()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        config = load_config()
+        config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+        save_config(config)
+        bin_dir = tmp_path / "bin"
+        fakebin.executable_fake(bin_dir, "gemini", windows="set /p line=", posix="read line")
+        fakebin.prepend_to_path(bin_dir, monkeypatch)
+        tmux = FakeTmux()
+        tmux.running = False  # no fleet server runs
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+        monkeypatch.setattr(login_session, "remote_session", lambda: True)  # an SSH login
+        project = team_project(tmp_path)
+
+        # And the same fact is the gate of its slots' Keychain rows (row 5).
+        assert accounts_core.has_stored_login(accounts_core.create_account(adapter.id)) is keychain
+        if keychain:
+            with pytest.raises(fleet_service.FleetError, match="start asq on the Mac first"):
+                fleet_service.spawn(project, "coder", agent=adapter.id)
+            assert not tmux.running and tmux.spawned == []
+            return
+        first = fleet_service.spawn(project, "coder", agent=adapter.id).agent
+        assert tmux.running and first.pane_id in tmux.facts
+        assert tmux.options == {fleet_service.SSH_STARTED_OPTION: "1"}
+        second = fleet_service.spawn(project, "coder", agent=adapter.id).agent
+        assert second.pane_id in tmux.facts, "it joins the server an SSH login started"
+    finally:
+        unregister(adapter.id)
+
+
+class _RefreshedQuietly(GeminiShapedAccounts):
+    """Its accounts, as an agent whose usage is read with a token that expires
+    (``oauth_creds.json``'s ``expiry_date``) and which renews it quietly with ``gemini auth
+    refresh`` (``refresh_args``)."""
+
+    def refresh_args(self) -> tuple[str, ...]:
+        return ("auth", "refresh")
+
+    def usage(
+        self, account: ClaudeAccount, *, now: Any, fetch: object, fresh: bool = False
+    ) -> ClaudeUsage:
+        from aisquare.models import UsageCause
+
+        expiry = (self._read(account, "oauth_creds.json") or {}).get("expiry_date", 0)
+        if expiry <= now.timestamp() * 1000:
+            return ClaudeUsage(
+                available=False,
+                reason="the stored token has expired",
+                cause=UsageCause.token_expired,
+            )
+        return super().usage(account, now=now, fetch=fetch, fresh=fresh)
+
+
+class _NoRefresh(_RefreshedQuietly):
+    """The same accounts, declaring no quiet refresh: what every agent's slot is by default."""
+
+    def refresh_args(self) -> tuple[str, ...]:
+        return ()
+
+
+_REAL_REFRESH_COMMAND = accounts_service._token_refresh_command
+"""The real one, before ``conftest.no_token_refresh`` stubs it per test."""
+
+
+@pytest.mark.parametrize("declared", [True, False], ids=["refresh-args", "none-declared"])
+def test_its_stale_token_is_refreshed_quietly_by_the_command_its_accounts_declare(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: bool
+) -> None:
+    """SCOPE #113 092 row 35: a slot whose token went stale is refreshed by its own agent's
+    command, its accounts slot's ``refresh_args`` run headless in the slot, and read again.
+    The first run does not take, and the row reads ``token_refreshing`` with its retry a
+    minute on, naming the agent. The retry takes, and the slot reads its windows. An agent
+    that declares no refresh runs nothing, and its stale token reads as it is."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.models import UsageCause
+    from tests import fakebin
+
+    adapter = GeminiShapedAdapter()
+    adapter.accounts = _RefreshedQuietly() if declared else _NoRefresh()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        binary = fakebin.executable_fake(tmp_path / "bin", "gemini", windows="", posix="")
+        fakebin.prepend_to_path(binary.parent, monkeypatch)
+        monkeypatch.setattr(accounts_service, "_token_refresh_command", _REAL_REFRESH_COMMAND)
+        slot = _signed_in_slot(adapter)
+        creds = slot.config_dir / ".gemini" / "oauth_creds.json"
+        now = datetime.now(UTC)
+        hour = int(timedelta(hours=1).total_seconds() * 1000)
+        tomorrow = (now + timedelta(days=1)).isoformat()
+        (slot.config_dir / ".gemini" / "quota.json").write_text(
+            json.dumps(
+                {
+                    "models": {
+                        model: {"used_percent": used, "resets_at": tomorrow}
+                        for model, used in {"gemini-2.5-flash": 10, "gemini-2.5-pro": 70}.items()
+                    },
+                    "recorded_at": now.isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        login = json.loads(creds.read_text("utf-8"))
+        creds.write_text(json.dumps({**login, "expiry_date": int(now.timestamp() * 1000) - hour}))
+        ran: list[tuple[int, list[str]]] = []
+
+        def refresh(account: ClaudeAccount, command: list[str]) -> bool:
+            ran.append((account.slot, list(command)))
+            if len(ran) > 1:  # the retry takes: a new token, hours from expiring
+                expiry = int(now.timestamp() * 1000) + 8 * hour
+                creds.write_text(
+                    json.dumps({**login, "refresh_token": "r-two", "expiry_date": expiry})
+                )
+            return True
+
+        monkeypatch.setattr(accounts_service, "_run_token_refresh", refresh)
+
+        first = accounts_service.read_usage([slot], now=now)[slot.slot]
+
+        if not declared:
+            assert ran == [] and first.cause is UsageCause.token_expired
+            return
+        assert ran == [(slot.slot, [str(binary), "auth", "refresh"])]
+        assert first.cause is UsageCause.token_refreshing and not first.needs_login
+        assert first.refresh_retry_at is not None
+        assert "Gemini-shaped's refresh did not take" in (first.reason or ""), first.reason
+
+        again = accounts_service.read_usage([slot], now=first.refresh_retry_at)[slot.slot]
+
+        assert len(ran) == 2, "the retry, once due"
+        assert again.available and again.limiting is not None
+        assert again.limiting.used_percent == 70.0
     finally:
         unregister(adapter.id)
 

@@ -2147,6 +2147,29 @@ class AgentAccounts(Protocol):
     memory: SharedMemory | None
     """How its ``merge`` part is shared (:class:`SharedMemory`), or ``None`` for an agent
     with no such part. Read for the launch, never by name."""
+    keychain_login: bool
+    """Its login is kept in the macOS login Keychain (Claude Code's), which no process in an
+    SSH login's security session can read. A fleet tmux server started from an SSH login on
+    macOS, and every pane it opens, is in that session (``core.login_session``). So an SSH
+    login starts no server for it, and it is never opened in a server an SSH login started
+    (``services.fleet._refuse_a_server_from_ssh``, #20). Its slots' Keychain rows are read and
+    said (``core.claude_accounts.has_stored_login``). ``False`` for an agent whose login is a
+    file in its home (Codex's ``auth.json``): it starts the server from SSH, and that server
+    is marked as one an SSH login started."""
+
+    def refresh_args(self) -> tuple[str, ...]:
+        """Arguments to the agent's binary that renew a slot's stale token quietly and wait for
+        the answer: no terminal, no turn, no request to a model. They run headless, in the
+        slot's session environment, when a usage read finds its token expired or refused
+        (``services.claude_accounts._refresh_stale``). The row reads ``token_refreshing`` while
+        they run, then the login is read again. One retry follows a minute later, and only
+        then is a log-in asked for. Claude Code's are ``mcp get`` of a server no one can
+        have.
+
+        ``()`` for an agent that declares none, and whose stale token then reads as it is.
+        Codex renews its own ``auth.json`` in its sessions and reads its usage offline, so
+        its slot never reads stale."""
+        ...
 
     def sign_in_args(self) -> tuple[str, ...]:
         """Arguments to the agent's binary that start its own sign-in in a slot's env.

@@ -245,6 +245,9 @@ class FakeTmux(TmuxServer):
         session on the next one."""
         self.renamed_windows: list[tuple[str, str]] = []
         """``(pane_id, name)`` for every window renamed, as ``fleet relabel`` renames them."""
+        self.options: dict[str, str] = {}
+        """The server's global user options (``set-option -g @…``), which go with it: the
+        mark of a server an SSH login started (``fleet_service.SSH_STARTED_OPTION``)."""
         self._counter = 0
         self._sessions_made = 0
 
@@ -278,8 +281,20 @@ class FakeTmux(TmuxServer):
         return Path("/fake/fleet-tmux.conf")
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
-        """The one raw command the service sends: last-output times for every pane."""
+        """The raw commands the service sends: last-output times for every pane, and the
+        server's global user options (an SSH login's mark: ``show-options -gqv``, set by
+        ``set-option -g``), as the real one answers them."""
         self.binary()
+        match list(args):
+            case ["show-options", "-gqv", option] if option.startswith("@"):
+                if not self.running:
+                    raise TmuxError(f"no server running on /fake/tmux-0/{self.socket}")
+                return f"{self.options[option]}\n" if option in self.options else ""
+            case ["set-option", "-g", option, value] if option.startswith("@"):
+                if not self.running:
+                    raise TmuxError(f"no server running on /fake/tmux-0/{self.socket}")
+                self.options[option] = value
+                return ""
         if list(args) != ["list-panes", "-a", "-F", fleet_service._ACTIVITY_FORMAT]:
             raise AssertionError(f"the fake tmux was asked to really run: {list(args)}")
         if not self.running:
@@ -379,6 +394,7 @@ class FakeTmux(TmuxServer):
         self.server_killed = True
         self.running = False
         self.sessions.clear()
+        self.options.clear()  # they were the server's
         self.session_ids.clear()
         self.facts.clear()
 
@@ -415,6 +431,7 @@ class FakeTmux(TmuxServer):
             self.started = datetime.now(tz=UTC)
             self._sessions_made = 0  # a new server numbers its sessions from $0 again
             self.session_ids.clear()
+            self.options.clear()  # and holds no option the last one was given
         self.running = True
         if named not in self.session_ids:
             self.session_ids[named] = f"${self._sessions_made}"
@@ -6480,8 +6497,10 @@ def test_a_check_before_a_server_starts_reads_the_socket_once_and_a_spawn_says_b
     checks = fleet_service._before_a_server_starts
     early = [True]
 
-    def then_the_server_exits(srv: TmuxServer, config: FleetSettings) -> list[FleetAgent]:
-        exited = checks(srv, config)
+    def then_the_server_exits(
+        srv: TmuxServer, config: FleetSettings, agent: str | None = None
+    ) -> fleet_service._ServerCheck:
+        exited = checks(srv, config, agent)
         if early:  # the spawn's own check, before its worktree
             early.clear()
             tmux.kill_server()  # the file stays, nothing listens

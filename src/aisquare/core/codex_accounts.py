@@ -619,6 +619,7 @@ class CodexAccounts:
     sign_out = "with `codex logout`"
     shares_settings = False
     memory: SharedMemory | None = None  # no Codex setting points its memory anywhere
+    keychain_login = False  # its login is auth.json in its home: SSH starts a server for it
 
     def __init__(self, share_parts: tuple[SharePart, ...] = ()) -> None:
         # What it shares is its adapter's to say (``agent_adapters.codex_shared``), handed in.
@@ -627,6 +628,11 @@ class CodexAccounts:
     def sign_in_args(self) -> tuple[str, ...]:
         # Codex's own browser (or device-code) sign-in; it writes auth.json and exits.
         return ("login",)
+
+    def refresh_args(self) -> tuple[str, ...]:
+        # None: Codex renews auth.json itself in its sessions, and its usage is read offline,
+        # so its slot reads ok or missing, never a stale token (`token_state`).
+        return ()
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(HOME_VAR, "").strip()

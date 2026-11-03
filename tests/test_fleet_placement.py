@@ -153,6 +153,15 @@ ACTS: dict[str, dict[str, str]] = {
             "today's socket, probed at its own path for a listener before a restart from an "
             "SSH login (0.9.2's #20); no pane or session named"
         ),
+        "_started_over_ssh": (
+            "`show-options -gqv @asq-started-over-ssh`: the server's own option, read at "
+            "today's socket before an agent whose login is in the Keychain joins it (#113 092 "
+            "row 6); no pane or session named"
+        ),
+        "_mark_a_server_started_over_ssh": (
+            "`set-option -g @asq-started-over-ssh`: the server's own option, set on the "
+            "server `open_window` has just started from an SSH login; no pane or session named"
+        ),
     },
     "services/diagnostics.py": {
         "_check_fleet": (

@@ -25,7 +25,15 @@ from aisquare.cli.app import app
 from aisquare.core import prompt_origin
 from aisquare.core.ids import new_trace_id
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TurnMetric
+from aisquare.models import (
+    BASELINE_REASONS,
+    ClientReason,
+    FleetAgent,
+    ProjectInfo,
+    TeamEvent,
+    TeamSession,
+    TurnMetric,
+)
 from aisquare.services import fleet as fleet_service
 from aisquare.services import github_prs, outcomes, transcript_facts, usage_stats
 from tests.rendered import plain
@@ -952,6 +960,48 @@ def test_a_stop_hook_that_keeps_the_turn_going_opens_a_continuation_turn(
     rows = _rows("ses-m")
     assert [row.origin for row in rows] == ["human:typed", "agent:continuation"]
     assert all(row.ended_at is not None for row in rows), "each closed by its own Stop"
+    assert [row.client_reason for row in rows] == [ClientReason.disabled] * 2, "both baseline"
+
+
+@pytest.mark.parametrize(
+    ("before", "tagged"),
+    [
+        (ClientReason.not_configured, ClientReason.not_configured),
+        (ClientReason.none, ClientReason.no_prompt),
+        (ClientReason.trigger_not_in_descriptor, ClientReason.no_prompt),
+        (ClientReason.transport_error, ClientReason.no_prompt),
+    ],
+)
+def test_a_continuation_is_tagged_in_its_turns_arm_never_baseline_after_a_consulted_one(
+    tmp_path: Path,
+    as_human: None,
+    monkeypatch: pytest.MonkeyPatch,
+    before: ClientReason,
+    tagged: ClientReason,
+) -> None:
+    """REVIEW-RC092-MI round 2, minor 2: with the CI experiment on, a consulted turn that
+    ``hook_stop`` kept going opened an ``agent:continuation`` row tagged ``disabled``, a
+    baseline reason, and ``summarize`` counted it as control data beside the consulted turn.
+    The continuation asks the CI nothing: ``no_prompt`` (by design) unless the experiment was
+    off for the turn before, whose baseline reason it keeps."""
+    from aisquare.services import hooks as hooks_service
+    from aisquare.services import metrics as metrics_service
+    from aisquare.services import team as team_service
+    from tests.projects import add_project
+
+    project = add_project(tmp_path)
+    turn = metrics_service.baseline_turn(project.id, session_id="ses-x", reason=before)
+    assert metrics_service.open_turn(turn) is not None
+    decision = team_service.StopDecision(reason="2 board updates", cursor=7)
+    monkeypatch.setattr(team_service, "hook_stop", lambda *a, **k: decision)
+    hooks_service.turn_stopped(tmp_path, session_id="ses-x")
+    rows = _rows("ses-x")
+    assert [(row.origin, row.client_reason) for row in rows][-1] == (
+        "agent:continuation",
+        tagged,
+    )
+    summary = metrics_service.summarize(rows)
+    assert summary.baseline == (2 if before in BASELINE_REASONS else 0), "the arms never mix"
 
 
 def test_a_repository_is_named_in_its_remotes_own_case(machine: Machine) -> None:

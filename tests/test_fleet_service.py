@@ -3898,7 +3898,9 @@ def test_a_refused_spawn_leaves_the_registration_as_it_found_it(
         elif refusal == "worktree":
             fleet_service.spawn(asked, "coder", worktree=True)
         else:
-            _settings(monkeypatch, max_agents_per_project=0)
+            # No file or `config set` takes 0 now (REVIEW-RC092-MI round 2, nit 1); set past
+            # validation, it is still the cap refusing a project with no live agent.
+            _settings(monkeypatch).max_agents_per_project = 0
             fleet_service.spawn(asked, "coder", worktree=False)
 
     assert len(tmux.spawned) == spawned_before, "nothing was started"

@@ -22,10 +22,10 @@ import tomllib
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -755,6 +755,24 @@ BUSY_LOAD_PER_CPU_MAX = 1000.0
 """The highest ``busy_load_per_cpu``: past any load a machine survives."""
 
 
+def _max_agents(value: object) -> object:
+    """``max_agents_per_project`` as a file, ``config set`` or a caller gives it: ``"auto"``
+    in any case and around any spaces, as App settings' field takes it; anything else is
+    left to the number it must be, of at least 1. A boolean is refused: a TOML ``true`` was
+    read as 1 (REVIEW-RC092-MI round 2, nit 1)."""
+    if isinstance(value, bool):
+        raise ValueError('max_agents_per_project is "auto" or a whole number of at least 1')
+    if isinstance(value, str):
+        text = value.strip()
+        return "auto" if text.lower() == "auto" else text
+    return value
+
+
+MaxAgents = Annotated[Annotated[int, Field(ge=1)] | Literal["auto"], BeforeValidator(_max_agents)]
+"""``[fleet] max_agents_per_project``: ``"auto"`` or a number of at least 1. Unbounded, a
+``config set`` of 0 saved, and every spawn was then refused "already runs 0 agents"."""
+
+
 class FleetSettings(BaseModel):
     """The fleet: one private tmux server, one session per project, agents as windows.
 
@@ -774,26 +792,26 @@ class FleetSettings(BaseModel):
     ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
     ``test_gate_wait_minutes`` how long the gate waits for it.
 
-    ``max_agents_per_project`` is a number, refused at as it always was, or ``"auto"``,
-    the default: a spawn is admitted unless the machine is busy, and while it is, a spawn
-    into a project that already runs ``busy_floor`` live agents is held (refused,
-    ``capacity_busy``) for ``busy_hold_minutes``, without probing again; a project below
-    the floor is always admitted. Auto has no fixed per-project number: on a calm machine
-    the only per-project bound is ``busy_burst``, the new agents a project above the floor
-    is admitted per ``busy_hold_minutes`` (default 2; ``0`` turns the guard off), since the
-    load average moves minutes after a burst of spawns does; one more is held as a busy one
-    is (``capacity_busy``), until the oldest of those admits is that old. Busy is any one
-    of: the 5-minute load average per logical CPU at ``busy_load_per_cpu``, Linux's CPU
-    pressure (``some avg60``) at ``busy_cpu_psi`` (``0`` turns either off), memory pressure
-    at ``busy_memory``, macOS's thermal pressure at ``busy_thermal`` (``"off"`` turns
-    either off) — ``core.load``. ``min_free_mb``,
-    ``max_agents_total`` and a group's ``max_agents`` refuse in either mode, below the
-    floor too. Each ``busy_*`` number is finite and bounded (no ``inf``, no ``nan``): the
-    hold lasts at most :data:`BUSY_HOLD_MAX_MINUTES`, a year, the floor is 1 to
-    :data:`BUSY_FLOOR_MAX` agents (a project below it is always admitted, so at 0 one with
-    no agent at all was held), CPU pressure is a percentage, and the load per CPU at most
-    :data:`BUSY_LOAD_PER_CPU_MAX`. Unbounded, ``busy_hold_minutes = inf`` saved, and
-    every held spawn then crashed computing its retry time instead of refusing.
+    ``max_agents_per_project`` is a number of at least 1, refused at as it always was, or
+    ``"auto"`` (in any case), the default: a spawn is admitted unless the machine is busy,
+    and while it is, a spawn into a project that already runs ``busy_floor`` live agents is
+    held (refused, ``capacity_busy``) for ``busy_hold_minutes``, without probing again; a
+    project below the floor is always admitted. Auto has no fixed per-project number: on a
+    calm machine the only per-project bound is ``busy_burst``, the new agents a project
+    above the floor is admitted per ``busy_hold_minutes`` (default 2; ``0`` turns the guard
+    off), since the load average moves minutes after a burst of spawns does; one more is
+    held as a busy one is (``capacity_busy``), until the oldest of those admits is that old.
+    Busy is any one of: the 5-minute load average per logical CPU at ``busy_load_per_cpu``,
+    Linux's CPU pressure (``some avg60``) at ``busy_cpu_psi`` (``0`` turns either off),
+    memory pressure at ``busy_memory``, macOS's thermal pressure at ``busy_thermal``
+    (``"off"`` turns either off) — ``core.load``. ``min_free_mb``, ``max_agents_total`` and
+    a group's ``max_agents`` refuse in either mode, below the floor too. Each ``busy_*``
+    number is finite and bounded (no ``inf``, no ``nan``): the hold lasts at most
+    :data:`BUSY_HOLD_MAX_MINUTES`, a year, the floor is 1 to :data:`BUSY_FLOOR_MAX` agents
+    (a project below it is always admitted, so at 0 one with no agent at all was held), CPU
+    pressure is a percentage, and the load per CPU at most :data:`BUSY_LOAD_PER_CPU_MAX`.
+    Unbounded, ``busy_hold_minutes = inf`` saved, and every held spawn then crashed
+    computing its retry time instead of refusing.
 
     Auto-stop (P2-W1b, #283): with ``auto_stop_finished`` a worker of a role in
     ``auto_stop_roles`` that has finished — its task closed (or a ``result`` posted),
@@ -831,7 +849,7 @@ class FleetSettings(BaseModel):
 
     tmux_socket: str = "asq"
     escape_key: str = "f12"
-    max_agents_per_project: int | Literal["auto"] = "auto"
+    max_agents_per_project: MaxAgents = "auto"
     worktree_dir: str = ".aisquare-worktrees"
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30

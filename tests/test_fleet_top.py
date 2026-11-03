@@ -580,6 +580,30 @@ def test_fleet_top_prints_a_table_sorted_by_cpu_with_a_totals_row(
     assert total.split()[1:6] == ["3", "agents", "(2", "read)", "101.0"]
 
 
+def test_fleet_top_counts_the_live_agents_as_the_sidebar_does_and_names_the_captain(
+    project: ProjectInfo, faked: ListedPanes
+) -> None:
+    """REVIEW-RC092-MI round 2, nit 2: ``fleet top`` counted the captain, the sidebar's
+    "Fleet · N live" (``fleet.live_ids``) leaves it out, and with a captain running they said
+    one apart with nothing to say why. The count is the sidebar's, the captain named apart;
+    its row and the totals keep it."""
+    from aisquare.services import fleet as fleet_service
+
+    _agent(project, "manager", "%2", role="manager")
+    _agent(project, "coder-1", "%1")
+    _agent(project, "captain", "%3", role="captain")
+    with store_session() as store:
+        sidebar = len(fleet_service.live_ids(store))
+
+    lines = runner.invoke(app, ["fleet", "top"]).output.splitlines()
+
+    assert sidebar == 2
+    assert lines[0].startswith("2 live agents + the captain · sampled in "), lines[0]
+    assert any(line.split()[1:2] == ["captain"] for line in lines[2:6]), "its row is kept"
+    total = next(line for line in lines if line.startswith("total"))
+    assert total.split()[1:3] == ["3", "agents"]
+
+
 def test_fleet_top_json_is_one_object_with_every_agent_and_the_totals(
     project: ProjectInfo, faked: ListedPanes
 ) -> None:

@@ -15,15 +15,15 @@ others, the one over SSH shows the usage the Mac recorded, and an asq of another
 starts nothing beside a running one until that one quits. Spawns follow the machine's
 load: `max_agents_per_project` now defaults to `auto`, which holds a spawn into a project
 running three agents while the machine is busy, and admits at most two more every five
-minutes while it is calm. `aisquare outcomes` says what your agents achieved this week and
-how much of it you steered, and `aisquare fleet top` (asq's Agent resources page) what
-each live agent consumes. An idle account whose token went stale is refreshed quietly
-instead of reading as logged out. Stats name each repository by its real name, and the
-sidebar's header counts the live agents. Rename a running agent from its sidebar row or
-`fleet relabel`. Renaming a project now renames its fleet codename and tmux session too,
-and the old codename keeps working. One sidebar highlight for a click and the arrow keys.
-Usage & stats scrolls to its end, and the Accounts table fits a 160-column terminal beside
-the default sidebar.**
+minutes while it is calm; it never holds a manager, nor a resume. `aisquare outcomes` says
+what your agents achieved this week and how much of it you steered, and `aisquare fleet
+top` (asq's Agent resources page) what each live agent consumes. An idle account whose
+token went stale is refreshed quietly instead of reading as logged out. Stats name each
+repository by its real name, and the sidebar's header counts the live agents. Rename a
+running agent from its sidebar row or `fleet relabel`. Renaming a project now renames its
+fleet codename and tmux session too, and the old codename keeps working. One sidebar
+highlight for a click and the arrow keys. Usage & stats scrolls to its end, and the
+Accounts table fits a 160-column terminal beside the default sidebar.**
 
 **Upgrading:**
 - From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.
@@ -72,16 +72,35 @@ the default sidebar.**
   `upgrade --version 0.9.1`. Quit the asqs first (`q` in each). Inside asq, its Update and
   Uninstall refuse only while another asq runs.
 - **`[fleet] max_agents_per_project` now defaults to `auto` (was `4`).** It is the one
-  change every upgrader gets without touching anything: auto has no fixed per-project
-  number, and admits by the machine's load and `busy_burst` (see *Changed*). A file that
-  sets a number keeps it, but a setting equal to its default is left out of the file, so a
-  `4` chosen before is not there to keep. To keep the old cap, set it again: `aisquare
-  config set fleet.max_agents_per_project 4`, or App settings ▸ *max agents per project*.
+  default that moves, so every upgrader gets it without touching anything: auto has no
+  fixed per-project number, and admits by the machine's load and `busy_burst` (see
+  *Changed*). A file that sets a number keeps it, but a setting equal to its default is
+  left out of the file, so a `4` chosen before is not there to keep. To keep the old cap,
+  set it again: `aisquare config set fleet.max_agents_per_project 4`, or App settings ▸
+  *max agents per project*. Moved back, 0.9.1 ignores the `busy_*` settings and its
+  default is 4 again, but it cannot load a `config.toml` that says
+  `max_agents_per_project = "auto"` (its setting takes only a number): take such a line,
+  typed by hand, out first. Neither `config set` nor App settings writes it there, since
+  `auto` is the default. A config save in 0.9.1 (a `config set`, or a setting changed in
+  its asq) drops a `max_agents_per_project = 4`, its own default, from the file, and keeps
+  the `busy_*` settings: moved forward again, the setting is `auto`, so set 4 again.
 - **Settings are added, none removed; no extra or dependency is.** `[fleet]` gains auto
   admission's `busy_floor`, `busy_burst`, `busy_load_per_cpu`, `busy_cpu_psi`,
   `busy_memory`, `busy_thermal` and `busy_hold_minutes`. Four new commands, `aisquare fleet
   relabel`, `aisquare instances`, `aisquare outcomes` and `aisquare fleet top`, and two new
   flags on `fleet pause` and `fleet resume`, `--all` and `--managers`.
+- **`auto` never holds a project's manager or the captain, nor a resume.** Their spawn and
+  restart are admitted however busy the machine reads, and take no seat of `busy_burst`
+  (they still count toward `busy_floor` for the agents after them). A `fleet resume`, and a
+  paused agent's `fleet restart`, bring back every agent the pause stopped: no new agent,
+  so neither the load nor the burst guard holds one. The hard floors still apply to the
+  manager and a resume, as in 0.9.1. A new coder or reviewer is held as before.
+- **`max_agents_per_project` takes `auto` or a number of at least 1.** 0.9.1 also took `0`
+  (which refused every spawn), a negative number and `true` (a cap of 1). 0.9.2 refuses
+  them: a `config.toml` that holds one is invalid (`aisquare doctor`: `config.toml is
+  invalid`), and `config set` cannot change it then. Before you upgrade, set a number of 1
+  or more (0.9.1 takes no `auto`); after, take the line out of `~/.aisquare/config.toml` by
+  hand, which leaves `auto`. `auto` is now taken in any case, as App settings takes it.
 - **`fleet pause` now exits the agents, not only the signal.** In 0.9.1 it set the
   project's `fleet-paused` signal and nothing else; now it also pauses every running agent
   of the project (or `--group`, `--all`), and `fleet resume` starts them again. A script
@@ -111,7 +130,14 @@ the default sidebar.**
   `upgrade --json` and `uninstall --json` plans add `asqs` (the asqs running, named), and
   their refusal while one runs is `"error": "asq_running"`. Under `accounts usage --json` a
   reading another process took carries `"recorded_elsewhere": true`, and a usage `cause`
-  may be `keychain_locked_ssh`.
+  may be `keychain_locked_ssh`, or `token_refreshing` while a stale token is refreshed,
+  with `refresh_retry_at` once its first try has failed. `fleet capacity --json` may give
+  `max_agents_per_project` as the string `"auto"`, and adds `busy`, `busy_floor`,
+  `busy_burst`, `busy_hold_minutes`, `signals`, `holds` and `bursts`; a spawn auto
+  admission holds fails with `"error": "capacity_busy"`, its `hint` the `retry_at`.
+  `metrics stats --json` gives a repository's real name, not its nickname, as
+  `repos.rows[].name` and `repos.top.name`. `aisquare outcomes --json` and
+  `aisquare fleet top --json` are new.
 
 ### Added
 
@@ -259,6 +285,23 @@ the default sidebar.**
     (`SessionGetInfo`), not `SSH_CONNECTION`: a pane of a server the Mac started is no SSH
     login, whoever attaches to it. Once the Mac has started the server, agents spawn into
     it from SSH as before.
+- **Active only, in the sidebar's header**: the ○ after the `+` (or `l` while the sidebar
+  has focus) lists only the projects with a live agent — working, waiting, asking for you,
+  limited or unknown; an exited, lost or paused one does not count. A project comes and goes
+  on the two-second refresh as its agents start and exit; a group header with no member
+  shown, and the 📌 Pinned label with no pinned entry shown, go with them. The Captain
+  section is never filtered, the open view stays open when its card is hidden, and
+  shift+↑/↓ step over the hidden rows. The choice is remembered across restarts
+  (`fleet.active_only`).
+- **↻ in the Onboard view reloads its directory tree.** The tree read the disk once, so a
+  repo cloned after the view opened could only be onboarded by typing its path. The ↻ at
+  the start of the hint line, or ctrl+r while the keyboard is anywhere in the view (the
+  path box too; an agent's pane keeps its own ctrl+r), lists what is on disk now: open
+  folders stay open, and the cursor stays on its row while that row is there. A typed path
+  whose folder did not exist yet is judged again, so it turns ✓ and Onboard can be pressed.
+  Opening the view again with `+` reloads it too. A reload during an onboard run leaves the
+  run, its log and its button as they were, and reloads asked for close together run one
+  after another, so a held ctrl+r keeps the open folders and the cursor where they were.
 
 - **The sidebar's header says how many agents are live: `Fleet · 19 live`.** Every live
   agent of every project, the captain excluded: the `live_total` of `aisquare fleet
@@ -320,7 +363,9 @@ the default sidebar.**
   long turn counts as it runs. Read-only: nothing on the page stops or restarts anything,
   and an agent whose pane is gone reads `gone` until `fleet ls` or `reap` records it — so
   does one left from before a reboot or a `kill-server`, whose pane id the next tmux server
-  gave to another agent: that agent's processes are counted once, for it.
+  gave to another agent: that agent's processes are counted once, for it. The line over
+  the table counts the live agents as the sidebar's header does, the captain named apart
+  (`3 live agents + the captain`); its row and the totals row keep it.
 
 ### Changed
 
@@ -402,6 +447,14 @@ the default sidebar.**
   nothing. In asq it is a toast, and the asq does not quit for nothing. Only asqs
   in the registry are counted: one from 0.9.1 writes no record, and the 0.9.2 asq started
   beside it refuses instead.
+- **`asq` fades the side that does not have the keyboard.** With focus in the sidebar
+  the content (an agent's pane, or a page such as Settings) is drawn slightly fainter;
+  with focus in the content, the sidebar is. The side your keys go to is drawn as
+  before, and the divider still lights while the sidebar has focus. Typing meant for an
+  agent used to land on the sidebar's one-key bindings with nothing but that one-column
+  divider to say so. In a faded pane, text and backgrounds in the 16 basic terminal
+  colours keep their strength (Textual's `opacity` blends those by number); everything
+  else fades.
 
 - **Usage & stats names a repository by its actual name, never a nickname or a codename.**
   The Stats page's *Top repositories*, `aisquare metrics stats` and its `--json` `name`
@@ -418,7 +471,10 @@ the default sidebar.**
 - **Fleet admission follows the machine's load: `[fleet] max_agents_per_project` takes
   `"auto"`, and `"auto"` is the default.** A spawn is admitted unless the machine is busy.
   While it is busy, a spawn into a project that already runs 3 live agents is held, and a
-  project with fewer is always admitted. Auto has no fixed per-project number: with the
+  project with fewer is always admitted. The manager and the captain are never held,
+  busy or calm, and count toward the 3 for the agents after them; a resume brings back
+  every agent the pause stopped (`fleet resume`, or a paused agent's `fleet restart`), held
+  by neither the load nor the burst guard. Auto has no fixed per-project number: with the
   machine calm, the only per-project bound is the burst guard below. Busy means any one of
   these: the 5-minute load average per logical CPU at 1.0; on Linux, `/proc/pressure/cpu`
   `some avg60` at 40; memory pressure at `warn`; on macOS, thermal pressure at `heavy`
@@ -439,9 +495,9 @@ the default sidebar.**
     parallel are settled once their rows are written, in the order they were written, from
     below the floor too: 10 started at once into an empty project leave 5 (the floor's 3,
     then the burst's 2), and the rest are refused as held, their windows closed. The
-    floor's agents are not counted, and a restart or switch of a running agent is not a
-    new agent. With `busy_burst = 0`, only `max_agents_total`, or a number here, bounds a
-    project while the machine reads calm.
+    floor's agents are not counted, and a restart or switch of a running agent, a resume
+    and the manager are not new agents. With `busy_burst = 0`, only `max_agents_total`, or
+    a number here, bounds a project while the machine reads calm.
   - **A held spawn never waits.** It is refused with the new code `capacity_busy`, and the
     message names the signal, its value, its threshold and the earliest retry (5 minutes
     on). A retry inside those 5 minutes is held again without probing, and one after them
@@ -458,13 +514,16 @@ the default sidebar.**
     A busy machine is reported there, not warned about: the doctor row stays ok, and still
     warns, as before, when a spawn would be refused or memory pressure is at `warn`.
   - **The hard floors still apply in auto mode, below 3 agents too:** `min_free_mb`,
-    critical memory pressure, `max_agents_total` and a group's `max_agents`. A replacement
-    of a running agent (`restart`, `switch`) is never held.
+    critical memory pressure, `max_agents_total` and a group's `max_agents`, for the
+    manager and a resume too. A replacement of a running agent (`restart`, `switch`), the
+    manager and a resume are never held by the load or the burst guard.
   - **A number keeps today's behaviour exactly.** A file that sets one (`8`, say) loads
     unchanged and never asks the load. A file 0.8.0 wrote, which holds every default
     including `4`, follows the new default like every other moved default. Set `4` again to
     keep it. App settings ▸ *max agents per project* takes `auto` or a number, and shows
-    `auto` as the default. No new dependency.
+    `auto` as the default. No new dependency. A number is at least 1 now: `0`, a negative
+    number and `true` (a cap of 1), which 0.9.1 took, make the file invalid (see
+    *Upgrading*); `auto` is taken in any case, by `config set` too.
 
 ### Fixed
 
@@ -490,7 +549,9 @@ the default sidebar.**
   added again. It gets a fresh key and number now, and says what it replaces:
   `✓ added: #9 … (supersedes dropped #4)`; `--json` carries `supersedes` (`number`, `id`,
   `status`), `null` when nothing was replaced. A title whose task is still open stays
-  idempotent, as before.
+  idempotent, as before. MCP `task_add` and the captain's add name the task they supersede
+  too, and `task add --help`, the MCP tool's description, the board's protocol and the
+  planner's cycle say a re-add is idempotent only while the task is open.
 - **The prompt log no longer records Claude Code's own blocks as your prompts.** A
   background task's `<task-notification>`, a slash command's `<command-name>`,
   `<command-message>`, `<command-args>` and `<local-command-caveat>`, and a hook's
@@ -528,16 +589,17 @@ the default sidebar.**
   that it tries once more after a minute, and only then says what it said before, with the
   same fix. In between, the row shows the last good reading with its age, and its tooltip
   says the token is being refreshed. One refresh at a time per account, across every asq
-  and `aisquare` process; the Accounts page, `accounts usage`, the status line and the
-  sidebar read through it. A launch's, a spawn's or a hand-over's account pick never
-  starts or waits for the refresh, nor for any other read of an account's usage under way
-  in the same asq: it skips an account whose token is stale (or decides by its kept
-  reading), and reads for itself an account another read is holding, without waiting for
-  it (one request more); the Accounts page, `accounts usage`, the status line or the
-  sidebar refresh a stale token. Disabled accounts, accounts never signed in and a
-  Keychain that will not say are as before. A 401 on a token Claude Code still holds as
-  valid is not refreshed by it outside a session: there the retry catches a token another
-  session renewed meanwhile, and otherwise *Log in* follows the minute.
+  and `aisquare` process; the Accounts page, `accounts usage`, `accounts list --usage`,
+  `doctor --live`, the status line, the sidebar and `[accounts] before_limit`'s read of an
+  agent's own account (`aisquare hook before-limit`) read through it. A launch's, a
+  spawn's or a hand-over's account pick never starts or waits for the refresh, nor for any
+  other read of an account's usage under way in the same asq: it skips an account whose
+  token is stale (or decides by its kept reading), and reads for itself an account
+  another read is holding, without waiting for it (one request more); the reads above
+  refresh a stale token. Disabled accounts, accounts never signed in and a Keychain that
+  will not say are as before. A 401 on a token Claude Code still holds as valid is not
+  refreshed by it outside a session: there the retry catches a token another session
+  renewed meanwhile, and otherwise *Log in* follows the minute.
 
 ## [0.9.1] - 2026-10-27
 

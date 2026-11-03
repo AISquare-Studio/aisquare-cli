@@ -141,6 +141,8 @@ def test_auto_is_the_default_and_parses_beside_old_ints(tmp_path: Path) -> None:
         # 0.8.0 wrote every setting, the default 4 too: a value it cannot tell from one
         # nobody chose follows today's default, as every other moved default does.
         ("[fleet]\nmax_agents_per_project = 4\n", "auto"),
+        ("config_version = 3\n[fleet]\nmax_agents_per_project = 1\n", 1),
+        ('config_version = 3\n[fleet]\nmax_agents_per_project = " Auto "\n', "auto"),
     ],
 )
 def test_an_existing_file_loads_its_int_unchanged(
@@ -167,6 +169,39 @@ def test_config_set_takes_auto_and_a_number_and_refuses_anything_else() -> None:
 )
 def test_the_settings_field_takes_auto_or_a_number(raw: str, parsed: object) -> None:
     assert parse_max_agents(raw) == parsed
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, "0", "-1"])
+def test_max_agents_per_project_is_at_least_1_or_auto(value: object) -> None:
+    """REVIEW-RC092-MI round 2, nit 1: unbounded, ``config set … 0`` stored 0 and every spawn
+    was refused "already runs 0 agents"; -1 was taken, and a TOML ``true`` read as 1."""
+    with pytest.raises(ValueError):
+        FleetSettings(max_agents_per_project=value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_config_set_refuses_a_max_agents_below_1_and_keeps_the_file(value: str) -> None:
+    settings_service.set_value("fleet.max_agents_per_project", "5")
+    with pytest.raises(ValueError):
+        settings_service.set_value("fleet.max_agents_per_project", value)
+    assert load_config().fleet.max_agents_per_project == 5
+    assert settings_service.set_value("fleet.max_agents_per_project", "1") == "1"
+
+
+@pytest.mark.parametrize("raw", ["AUTO", " Auto "])
+def test_config_set_takes_auto_in_any_case_as_the_settings_field_does(raw: str) -> None:
+    settings_service.set_value("fleet.max_agents_per_project", "5")
+    assert settings_service.set_value("fleet.max_agents_per_project", raw) == "auto"
+    assert load_config().fleet.max_agents_per_project == parse_max_agents(raw) == "auto"
+    assert "max_agents_per_project" not in settings_service.overrides().get("fleet", {})
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true"])
+def test_a_file_with_a_max_agents_below_1_is_refused_as_invalid(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"config_version = 3\n[fleet]\nmax_agents_per_project = {value}\n", "utf-8")
+    with pytest.raises(ValueError, match="max_agents_per_project"):
+        load_config(path)
 
 
 @pytest.mark.parametrize(("raw", "why"), [("0", "at least 1"), ("many", "auto or a whole")])
@@ -727,7 +762,8 @@ def test_a_spawn_that_races_past_the_floor_while_busy_backs_its_row_out(
     assert hold.until - hold.held_at == timedelta(minutes=5)
     assert hold.project_id == project.id and "cpu load 3.86 per CPU" in hold.signal
     assert hold.project_name == project_service.display_name(project)
-    assert "retry at " in str(raced.value) and "`aisquare watch` wakes" in str(raced.value)
+    assert "retry at " in str(raced.value)
+    assert "while `aisquare watch` runs, it wakes this project's manager" in str(raced.value)
     monkeypatch.setattr(tmux, "spawn_window", original)
     asked = machine.probes
     with pytest.raises(fleet_service.CapacityRefused) as again:
@@ -1387,3 +1423,149 @@ def test_a_saved_auto_config_reaches_spawn(
     with pytest.raises(fleet_service.CapacityRefused) as held:
         _coder(project)
     assert held.value.code == "capacity_busy"
+
+
+# --- never the manager, never a resume (REVIEW-RC092-MI round 2, M1) -------------------------
+
+
+def _team(project: ProjectInfo, coders: int, now: list[datetime]) -> None:
+    """A manager and ``coders`` coders, started on a calm machine a minute apart, each
+    burst's admits aged out before the next: the team a pause then stops."""
+    fleet_service.spawn(project, "manager")
+    for _ in range(coders):
+        now[0] += timedelta(minutes=6)
+        _coder(project)
+    assert len(_live(project)) == coders + 1
+
+
+def _resumed(project: ProjectInfo) -> dict[str, tuple[str, str | None]]:
+    report = fleet_service.bulk("resume", projects=[project])
+    return {r.agent.label: (r.outcome, r.why) for r in report.receipts}
+
+
+@pytest.mark.parametrize("coders", [3, 4])
+def test_a_resume_on_a_busy_machine_brings_back_every_agent_the_pause_stopped(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    coders: int,
+) -> None:
+    """(a): the manager came back last, at ``busy_floor`` live, and was held: "repo is held,
+    nothing started", left paused with its team running. A resume starts what the pause
+    stopped, so a fourth coder is never held either; nothing new is admitted."""
+    _team(project, coders, now)
+    fleet_service.bulk("pause", projects=[project])
+    assert _live(project) == []
+    machine.busy()
+    now[0] += timedelta(minutes=1)
+    outcomes = _resumed(project)
+    assert outcomes == {label: ("done", None) for label in outcomes}, outcomes
+    assert len(outcomes) == coders + 1 and "manager" in outcomes
+    assert sorted(_live(project)) == sorted(outcomes)
+    assert not fleet_service.is_paused(project)
+    assert fleet_service.holds() == []
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)  # a NEW coder is auto's, as before
+    assert held.value.code == "capacity_busy"
+
+
+def test_a_resume_on_a_calm_machine_is_never_held_by_the_burst_guard(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """(b): manager + 5 coders, resumed 2 h after the pause. The coders' resumes took the burst
+    (two above the floor) and the manager, last, was held by it. A resume records no admit:
+    the next new coder has the whole burst."""
+    _team(project, 5, now)
+    fleet_service.bulk("pause", projects=[project])
+    now[0] += timedelta(hours=2)
+    before = _ledger(project)
+    outcomes = _resumed(project)
+    assert outcomes == {label: ("done", None) for label in outcomes}, outcomes
+    assert len(outcomes) == 6 and "manager" in outcomes
+    assert len(_live(project)) == 6 and fleet_service.holds() == []
+    assert _ledger(project) == before, "a resume is no new agent: no admit recorded"
+    assert _coder(project).label == "coder-6"
+
+
+@pytest.mark.parametrize("how", ["spawn", "restart"])
+def test_a_lost_manager_is_spawned_and_restarted_on_a_busy_machine(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+    how: str,
+) -> None:
+    """(c): 3 coders live, the manager stopped, the machine busy: both its spawn and its
+    restart were refused ``capacity_busy``. The manager runs the others; held, the project
+    had nobody left to retry the spawns it held."""
+    if how == "spawn":
+        machine.busy()
+        _three(project)
+        receipt = fleet_service.spawn(project, "manager")
+        assert not any("busy" in note for note in receipt.notes), receipt.notes
+        started = receipt.agent
+    else:
+        _team(project, 3, now)
+        fleet_service.stop(project, "manager", force=True)
+        assert "manager" not in _live(project)
+        machine.busy()
+        started = fleet_service.restart(project, "manager").started
+    assert started.label == "manager" and started.ended_at is None
+    assert len(_live(project)) == 4 and fleet_service.holds() == []
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+    assert held.value.code == "capacity_busy", "a coder is still auto's"
+
+
+def test_a_manager_on_a_calm_machine_takes_no_seat_of_the_burst(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """Five coders fill the floor and the burst: the manager is still started, and records no
+    admit."""
+    for _ in range(5):
+        _coder(project)
+    before = _ledger(project)
+    assert len(before) == 2
+    assert fleet_service.spawn(project, "manager").agent.ended_at is None
+    assert _ledger(project) == before and fleet_service.holds() == []
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_a_number_still_counts_the_manager_as_0_9_1_did(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    busy: bool,
+) -> None:
+    """``max_agents_per_project = 4`` is every live agent, the manager one of them, refused
+    ``capacity_project`` past it, the manager too, whatever the load (unchanged from 0.9.1)."""
+    _settings(monkeypatch, max_agents_per_project=4)
+    if busy:
+        machine.busy()
+    fleet_service.spawn(project, "manager")
+    _three(project)
+    with pytest.raises(fleet_service.CapacityRefused) as coder:
+        _coder(project)
+    assert coder.value.code == "capacity_project"
+    assert "already runs 4 agents (max_agents_per_project = 4)" in str(coder.value)
+    fleet_service.stop(project, "manager", force=True)
+    _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused) as manager:
+        fleet_service.spawn(project, "manager")
+    assert manager.value.code == "capacity_project"
+    with pytest.raises(fleet_service.CapacityRefused):
+        fleet_service.restart(project, "manager")
+    assert machine.probes == 0 and fleet_service.holds() == []

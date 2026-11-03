@@ -97,11 +97,13 @@ Everything the UI does is also a plain command, and every one takes `--json`;
 
 ```sh
 aisquare fleet ls                         # this project's agents and their live state
+aisquare fleet top                        # what each live agent consumes: CPU, memory, tokens
 aisquare fleet relabel coder-1 login fix  # give an agent a name you chose: login-fix
 aisquare fleet pause --all                # every project's agents stop, kept for resume
 aisquare fleet resume --all               # ...and come back where they were
 aisquare fleet attach                     # the same session in raw tmux, full fidelity
 aisquare instances                        # the asqs open on this home: at the Mac, over SSH
+aisquare outcomes                         # what the agents got done this week, and who steered
 aisquare doctor                           # is everything wired? (and how to fix anything)
 ```
 

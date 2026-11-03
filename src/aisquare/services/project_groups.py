@@ -20,7 +20,7 @@ index, never by number.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Concatenate, ParamSpec, TypeVar
@@ -549,18 +549,28 @@ def remove_from_group(store: ContextStore, project_ids: Sequence[str]) -> UndoEn
     return entry
 
 
-def step(store: ContextStore, project_id: str, delta: int, *, all: bool = False) -> UndoEntry:
+def step(
+    store: ContextStore,
+    project_id: str,
+    delta: int,
+    *,
+    all: bool = False,
+    hidden: Collection[str] = (),
+) -> UndoEntry:
     """Move a project one place up (-1) or down (+1) inside its scope — the keyboard's move.
 
     One place is one place ON SCREEN: the project goes past the next row the
     list shows, stepping over the captured directories it hides (unless
-    ``all``). Swapped with a hidden row, a shift+↓ changed nothing anyone could
+    ``all``) and the projects in ``hidden`` (the sidebar's active-only filter).
+    Swapped with a hidden row, a shift+↓ changed nothing anyone could
     see and still took an undo (review of #171, round 1). With nowhere to go —
     an end of the scope, or a pinned project, which has no place in one — the
     entry is "nothing to move" and remembers no row.
     """
     project = store.update_project_layout(project_id)
-    ids = [p.id for p in _shown(_scope_members(store, project.group_id), all=all)]
+    ids = [
+        p.id for p in _shown(_scope_members(store, project.group_id), all=all) if p.id not in hidden
+    ]
     if project_id not in ids:
         return UndoEntry("nothing to move")
     index = ids.index(project_id)
@@ -572,13 +582,18 @@ def step(store: ContextStore, project_id: str, delta: int, *, all: bool = False)
     return move_project(store, project_id, after=ids[target])
 
 
-def step_group(store: ContextStore, group_id: str, delta: int) -> UndoEntry:
-    groups = [g for g in store.project_groups() if g.pinned_at is None]
-    ids = [g.id for g in groups]
-    if group_id not in ids:
+def step_group(
+    store: ContextStore, group_id: str, delta: int, *, hidden: Collection[str] = ()
+) -> UndoEntry:
+    """Move an unpinned group one place up or down: past the next header ON SCREEN, so over
+    the groups in ``hidden`` (the sidebar's active-only filter), as :func:`step` moves."""
+    shown = [g.id for g in store.project_groups() if g.pinned_at is None and g.id not in hidden]
+    if group_id not in shown:
         return UndoEntry("nothing to move")
-    index = ids.index(group_id)
-    target = max(0, min(len(ids) - 1, index + delta))
+    index = shown.index(group_id)
+    target = max(0, min(len(shown) - 1, index + delta))
     if target == index:
         return UndoEntry("nothing to move")
-    return move_group(store, group_id, position=target)
+    if target < index:
+        return move_group(store, group_id, before=shown[target])
+    return move_group(store, group_id, after=shown[target])

@@ -108,6 +108,8 @@ LOOKAHEAD = timedelta(days=1)
 """How far past a past week's end turns are read, to end its last turns that had no Stop."""
 
 GITHUB_COMMITTER = "noreply@github.com"
+GITHUB_HOST = "github.com"
+"""The host a normalised remote must have, exactly, for its pull requests to be asked of GitHub."""
 _SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _WEEK = re.compile(r"^(\d{4})-?W(\d{1,2})$", re.IGNORECASE)
 FIRST_YEAR = 1970
@@ -437,9 +439,21 @@ def _week_repos(
                 repo.roots.append(root)
         repo.remote = remote
         repo.name = usage_stats.real_name(remote, repo.roots[0] if repo.roots else None)
-        if remote and remote.startswith("github.com/"):
-            repo.github = remote.removeprefix("github.com/")
+        repo.github = _github_repo(remote)
     return repos
+
+
+def _github_repo(remote: str | None) -> str | None:
+    """The ``owner/name`` a normalised ``remote`` (``github.com/org/repo``,
+    :func:`~aisquare.core.repo_profile.normalise_remote`) names on GitHub, else ``None``. Its host
+    is compared whole, never by prefix or substring, so ``github.com.evil.com/x/y``,
+    ``evilgithub.com/x/y`` and ``x/github.com/y`` are not GitHub; and a path that is not one
+    ``owner/name`` (``github.com/``, ``github.com/org``) names no repository to search."""
+    host, _, path = (remote or "").partition("/")
+    owner, _, name = path.partition("/")
+    if host != GITHUB_HOST or not owner or not name or "/" in name:
+        return None
+    return path
 
 
 def _name_repo(repo: _Repo) -> None:

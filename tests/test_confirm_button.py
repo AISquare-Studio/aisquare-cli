@@ -138,6 +138,22 @@ def test_a_double_click_is_two_presses_and_acts() -> None:
     assert drive(go) == (["clear"], REST)
 
 
+def test_a_double_click_as_the_terminal_sends_it_arms_and_acts() -> None:
+    """The click guard ignores the second click of a double-click (``Click.chain`` 2) unless
+    its button took the first (REVIEW-RC092-MI round 3); this one did. The presses are queued
+    as the terminal's driver queues them, so Textual counts the run itself (``Pilot.click``
+    sets the count), and stamped as a double-click's are."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], str]:
+        where = host.button().region.offset + Offset(1, 0)
+        first = guard_paint.queue_press(host, where)
+        guard_paint.queue_press(host, where, at=first + Host.CLICK_CHAIN_TIME_THRESHOLD / 2)
+        await settle_page(host)
+        return host.pressed, label(host.button())
+
+    assert drive(go) == (["clear"], REST)
+
+
 def test_enter_arms_and_enter_again_confirms() -> None:
     async def go(pilot: Pilot[None], host: Host) -> list[object]:
         host.button().focus()

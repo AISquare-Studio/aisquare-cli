@@ -553,3 +553,76 @@ def test_a_key_or_a_press_from_code_is_not_guarded(hold: PaintHold) -> None:
     assert guarding is True
     assert pressed == ["restart", "restart"]
     assert told == []
+
+
+class Over(ModalScreen[None]):
+    """A dialog whose guarded button is drawn where the button that opened it is, as
+    ConfirmBulk's Confirm is over *Stop all…* with a small fleet; Cancel has the focus."""
+
+    DEFAULT_CSS = "Over { align: left top; }"
+
+    def compose(self) -> ComposeResult:
+        yield GuardedButton("Confirm", id="confirm")
+        yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel", Button).focus()
+
+
+class Opens(App[None]):
+    """A button that opens :class:`Over` over itself."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pressed: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        yield Button("Stop all…", id="opener")
+
+    @on(Button.Pressed)
+    def _pressed(self, event: Button.Pressed) -> None:
+        self.pressed.append(event.button.id or "")
+        if event.button.id == "opener":
+            self.push_screen(Over())
+
+
+def test_a_double_or_triple_click_on_what_opens_a_dialog_presses_nothing_in_it() -> None:
+    """REVIEW-RC092-MI round 3, MAJOR 1: Textual counts a run of clicks on one cell whatever
+    is under each (``Click.chain``). The first of a double-click opened the dialog, and the
+    second, once the dialog's button was drawn and its guard down, pressed it. A click goes
+    on a run only on the button that took the one before it: the second and the third press
+    nothing, and leave the focus on Cancel. The presses are stamped as a double-click's are
+    (``guard_paint.queue_press``): a slow runner cannot space them out."""
+    double = Opens.CLICK_CHAIN_TIME_THRESHOLD / 2
+
+    async def run() -> tuple[bool, list[object], list[object]]:
+        app = Opens()
+        async with app.run_test(size=(40, 8)) as pilot:
+            await settle_page(app)
+            where = app.query_one("#opener", Button).region.offset + Offset(2, 1)
+
+            def drawn() -> bool:
+                if not isinstance(app.screen, Over):
+                    return False
+                confirm = app.screen.query_one("#confirm", GuardedButton)
+                return not confirm.guarding and app.get_widget_at(*where)[0] is confirm
+
+            def seen() -> list[object]:
+                return [list(app.pressed), app.focused.id if app.focused else None]
+
+            first = guard_paint.queue_press(app, where)
+            await watch_until(drawn)
+            await settle_page(app)
+            over = drawn()
+            guard_paint.queue_press(app, where, at=first + double)
+            await settle_page(app)
+            second = seen()
+            guard_paint.queue_press(app, where, at=first + 2 * double)
+            await settle_page(app)
+            await pilot.pause()
+            return over, second, seen()
+
+    over, second, third = asyncio.run(run())
+    assert over, "the second click must reach the app with Confirm drawn under it"
+    assert second == [["opener"], "cancel"]
+    assert third == [["opener"], "cancel"]

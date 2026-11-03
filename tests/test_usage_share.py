@@ -130,6 +130,10 @@ def _on(days_back: int = 10) -> None:
     usage_share.enable(now=NOW - timedelta(days=days_back))
 
 
+PINNED_ID = "12345678-9abc-4def-8123-456789abcdef"
+"""A valid version-4 install id with no number a test looks for in its first 8 digits."""
+
+
 # --- off, and forced off ----------------------------------------------------------------------
 
 
@@ -925,6 +929,9 @@ def test_the_commands_say_nothing_of_a_failed_shipment(
     pin_clock(monkeypatch, usage_share, sharing)
     _history(machine)
     _on()
+    # `share status` prints the first 8 hex digits of the random install id, and "404" was
+    # in them about once in 700 runs ("installation 4041d478…", REVIEW-RC092-MI round 3).
+    sharing.update(lambda state: setattr(state, "install_id", PINNED_ID))
     monkeypatch.setattr(usage_share, "default_transport", Server(status(404), unreachable()))
     runner = CliRunner()
 
@@ -939,6 +946,7 @@ def test_the_commands_say_nothing_of_a_failed_shipment(
     for word in ("fail", "error", "retry", "404", "unreach", "could not", "refused"):
         assert word not in text, word
     assert "sharing is on" in text and "last sent      never" in text
+    assert f"installation   {PINNED_ID[:8]}…" in text  # the id the failure words are kept from
     assert debug["debug"]["failures"] == 2 and debug["debug"]["last_error"]
     assert {"enabled", "switch", "last_sent_at", "linked", "debug"} <= set(debug)
 

@@ -85,9 +85,9 @@ class NextFrame:
     """Steps to run once the current screen's next frame is out (:func:`next_frame`)."""
 
     def __init__(self) -> None:
-        self.steps: list[Callable[[], None]] = []
+        self.steps: list[Callable[[], object]] = []
 
-    def then(self, step: Callable[[], None]) -> None:
+    def then(self, step: Callable[[], object]) -> None:
         self.steps.append(step)
 
 
@@ -109,13 +109,23 @@ def next_frame(monkeypatch: pytest.MonkeyPatch) -> NextFrame:
     return frame
 
 
-def queue_press(app: App[Any], where: Offset) -> None:
+def queue_press(app: App[Any], where: Offset, *, at: float | None = None) -> float:
     """A press at ``where``, queued at ``app`` as the terminal's driver queues it: the down and
     the up, and the app makes the click of them when it reaches them (``Pilot.click`` hands
-    all three to the screen at once instead)."""
+    all three to the screen at once instead), counting it in a run of clicks on that cell as
+    Textual does (``Click.chain``). Returns the time the press is stamped with, on Textual's
+    clock: now, or ``at``. Stamped, a press is as far from the one before as the stamps say,
+    however late a loaded runner queues it: two presses on one cell stamped closer than
+    ``App.CLICK_CHAIN_TIME_THRESHOLD`` are a double-click."""
     x, y = where
+    stamp = 0.0
     for kind in (events.MouseDown, events.MouseUp):
-        app.post_message(kind(None, x, y, 0, 0, 1, False, False, False, screen_x=x, screen_y=y))
+        event = kind(None, x, y, 0, 0, 1, False, False, False, screen_x=x, screen_y=y)
+        if at is not None:
+            event.time = at
+        stamp = event.time
+        app.post_message(event)
+    return stamp
 
 
 class TerminalBehind:

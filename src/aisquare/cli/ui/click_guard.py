@@ -84,13 +84,13 @@ def _unread(fd: int) -> int:
     1 KB, so a frame that fits leaves the writer idle before the terminal has it. 0 where the
     OS does not say (a Linux pty hands bytes to the terminal's side as they are written) or
     ``fd`` is no tty."""
-    if sys.platform == "win32":
-        return 0
-    try:
-        (count,) = struct.unpack("i", fcntl.ioctl(fd, termios.TIOCOUTQ, b"\0" * 4))
-    except OSError:
-        return 0
-    return int(count)
+    if sys.platform != "win32":  # Windows has no TIOCOUTQ; also the guard mypy reads
+        try:
+            (count,) = struct.unpack("i", fcntl.ioctl(fd, termios.TIOCOUTQ, b"\0" * 4))
+        except OSError:
+            return 0
+        return int(count)
+    return 0
 
 
 class GuardedButton(Button):

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -118,9 +119,16 @@ def queue_press(app: App[Any], where: Offset) -> None:
 
 
 class TerminalBehind:
-    """A terminal that has not read what the app sent it (:func:`terminal_behind`)."""
+    """A terminal that has not read what the app sent it (:func:`terminal_behind`): a pty, so
+    not on Windows, where the tests that use it skip."""
+
+    writer: WriterThread
+    _terminal: int
+    _unread: int
 
     def __init__(self, unread: int) -> None:
+        if sys.platform == "win32":  # what mypy narrows; the tests that use it skip there
+            pytest.skip("a pty for the terminal")
         self._terminal, tty = os.openpty()
         self.writer = WriterThread(os.fdopen(tty, "w"))
         self.writer.start()
@@ -137,6 +145,8 @@ class TerminalBehind:
             count -= len(os.read(self._terminal, 1 << 16))
 
     def close(self) -> None:
+        if sys.platform == "win32":  # what mypy narrows; never made there (__init__)
+            return
         stop = threading.Thread(target=self.writer.stop)  # it ends once it has written all
         stop.start()
         os.set_blocking(self._terminal, False)

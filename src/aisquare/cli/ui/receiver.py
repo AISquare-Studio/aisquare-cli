@@ -14,7 +14,10 @@ The vocabulary — :data:`ACTIONS`, one small function of the app and the arg ea
   the one selected in the sidebar (a selected agent's project).
 - ``open_stop <agent>`` — the Stop dialog for that agent. The dialog asks the
   owner; the action stops nothing, and a row with nothing to stop is refused by
-  the rule the ``x`` key and the Stop button ask (``STOP_STATES``).
+  the rule the ``x`` key and the Stop button ask (``STOP_STATES``). It asks even
+  when the owner's *Don't ask again* has the Stop button and ``x`` stop at once
+  (``[ui] confirm_stop`` off): that choice is about the owner's own clicks, not
+  a stop the captain starts.
 - ``select_project <project>`` / ``select_agent <agent>`` — what a click on the
   row does.
 - ``copy_row <agent|project>`` — the row's text to the clipboard: an agent's
@@ -355,7 +358,8 @@ def _open_stop(app: FleetApp, arg: str | None) -> str:
         raise UiRefusal(
             f"{agent.label} is {row.state}: there is nothing to stop (a lost row is fleet reap's)"
         )
-    app.post_message(StopAgent(agent.project_id, agent.id))
+    # ``ask``: the owner's Don't ask again is for their own clicks, never the captain's.
+    app.post_message(StopAgent(agent.project_id, agent.id, ask=True))
     return f"stop dialog open for {agent.label} ({_where(snapshot, agent.project_id)})"
 
 

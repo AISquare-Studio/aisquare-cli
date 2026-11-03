@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Button, Checkbox, Input, Static
+from textual.widgets import Checkbox, Input, Static
 
 from aisquare.cli.ui.receiver import ui_receiver
 from aisquare.cli.ui.sidebar import (
@@ -138,9 +138,9 @@ def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
         toggle = await _settings(pilot)
         await _tick(pilot, toggle.query_one("#captain-toggle", Checkbox))
         ticked = seen()
-        await pilot.click("#reset-settings")
+        await pilot.click("#reset-settings")  # arms it in place
         await pilot.pause()
-        app.screen.query_one("#reset-confirm", Button).press()
+        await pilot.click("#reset-settings")  # the second click on it resets
         await settle_page(app)
         await refreshed(app)
         reset = seen()

@@ -19,13 +19,15 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from textual.geometry import Offset
 from textual.pilot import Pilot
 from textual.widgets import Button, Static, Switch
 
 from aisquare.cli.ui import sidebar
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.click_guard import GuardedButton
-from aisquare.cli.ui.sidebar import SettingsRow
+from aisquare.cli.ui.sidebar import SettingsRow, SettingsSelected
+from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, TITLE, ConfirmBulk
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.core import tmux as tmux_core
@@ -33,10 +35,10 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from tests import toast_log
+from tests import guard_paint, toast_log
 from tests.fleet_fakes import list_agents_as
-from tests.test_ui_shell import seed, settle, shown, status
-from tests.ui_workers import settle_page
+from tests.test_ui_shell import row_for, seed, settle, shown, status
+from tests.ui_workers import settle_page, settle_until, watch_until
 
 T = TypeVar("T")
 SIZE = (140, 44)
@@ -335,14 +337,50 @@ def test_escape_and_cancel_close_the_dialog_and_act_on_nobody(acted: Acted) -> N
     assert acted.calls == []
 
 
-def test_a_click_on_confirm_as_the_dialog_appears_leaves_cancel_the_focus(acted: Acted) -> None:
+def test_restart_all_takes_a_click_as_soon_as_the_hub_is_drawn(acted: Acted) -> None:
+    """UI tester on #8 (PR #478 at 41569b99): the hub's Fleet buttons dropped a click for 0.2 to
+    1.0 s after the hub was drawn, toast or no toast. Their guard waited on
+    ``call_after_refresh``, which runs after the screen's NEXT refresh, and the hub's next
+    one, the restyle of the focus moving to its first link, came that much later. The
+    tester's path: an agent's view, then ⚙ Settings. A press that reaches the app once
+    *Restart all…* is drawn opens its dialog."""
+
+    async def run() -> str:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [])
+        async with app.run_test(size=SIZE, notifications=True) as pilot:
+            await pilot.pause()
+            await settle(app)
+            await pilot.click(row_for(app, "agt_a_manager"))
+            await settle(app)
+            assert isinstance(app.current_view(), AgentView)
+            app.post_message(SettingsSelected())  # as the sidebar's row posts it
+
+            def drawn() -> Offset | None:
+                button = app.query_one("#fleet-restart-all", GuardedButton)
+                where = button.region.offset
+                return where if button.region and app.get_widget_at(*where)[0] is button else None
+
+            await watch_until(drawn)  # no pause: Pilot's would wait out what the hub does next
+            where = drawn()
+            assert where is not None, "the hub never drew Restart all…"
+            guard_paint.queue_press(app, where)
+            await settle_until(app, lambda: isinstance(app.screen, ConfirmBulk))
+            return type(app.screen).__name__
+
+    assert asyncio.run(run()) == "ConfirmBulk"
+    assert acted.calls == []
+
+
+def test_a_click_on_confirm_as_the_dialog_appears_leaves_cancel_the_focus(
+    acted: Acted, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Review of #266, round 2: the click the guard ignored still took the focus off
     Cancel on its mouse-down, and the Enter after it ran Stop all."""
+    guard_paint.install(monkeypatch)  # the dialog's paint is held back: it has just appeared
 
     async def go(pilot: Pilot[None]) -> tuple[str | None, bool]:
         app = _app(pilot)
         dialog = await _open(pilot, "stop")
-        dialog.query_one("#bulk-confirm", GuardedButton).changed_under_pointer()
         await pilot.click(_confirm(dialog))
         await settle(app)
         focused = app.focused.id if app.focused else None

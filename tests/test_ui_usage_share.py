@@ -33,7 +33,7 @@ from aisquare.cli.ui.views.usage_stats import UsageStatsView
 from aisquare.core import sharing as sharing_core
 from aisquare.models import SharingStatus, ShipReport
 from aisquare.services import usage_share
-from tests import guard_clock
+from tests import guard_paint
 from tests.projects import add_project
 from tests.test_ui_settings_hub import GOOD
 from tests.ui_workers import released, settle_page, settle_until
@@ -200,19 +200,14 @@ def test_the_switch_starts_off_and_says_nothing_leaves_the_machine() -> None:
     assert "every repo you run Claude Code in, including ones you haven't added" in about
 
 
-def test_one_click_turns_it_on_and_sends_the_first_shipment_and_one_click_turns_it_off(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = guard_clock.install(monkeypatch)
+def test_one_click_turns_it_on_and_sends_the_first_shipment_and_one_click_turns_it_off() -> None:
     fake = FakeSharing(signed_in=True)
 
     async def go(pilot: Pilot[None], box: SharingBox) -> list[tuple[str, str]]:
         seen: list[tuple[str, str]] = []
-        clock.step()
         await pilot.click("#usage-share-toggle")
         await settle_page(box.app)
         seen.append((_label(box), _line(box)))
-        clock.step()
         await released(pilot, box.query_one("#usage-share-toggle", Button))
         await pilot.click("#usage-share-toggle")
         await settle_page(box.app)
@@ -230,7 +225,7 @@ def test_one_click_turns_it_on_and_sends_the_first_shipment_and_one_click_turns_
 def test_a_click_that_lands_as_the_page_appears_is_not_how_someone_agrees_to_share(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    guard_clock.install(monkeypatch)  # the clock does not move: the page has just appeared
+    guard_paint.install(monkeypatch)  # the page's paint is held back: it has just appeared
     fake = FakeSharing()
 
     async def go(pilot: Pilot[None], box: SharingBox) -> str:
@@ -289,16 +284,12 @@ def test_the_line_says_whether_the_server_linked_the_shipments_to_the_account() 
     assert "fail" not in failed.lower() and "503" not in failed and "retry" not in failed.lower()
 
 
-def test_a_first_shipment_that_fails_is_not_said_and_the_switch_stays_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_first_shipment_that_fails_is_not_said_and_the_switch_stays_on() -> None:
     """Sharing fails silently, whatever the server's state (the owner's decision): the page
     shows the consent state and the last shipment that WENT, never "failed" or "retrying"."""
-    clock = guard_clock.install(monkeypatch)
     fake = FakeSharing(ship_report=ShipReport(error="HTTP 404 — Could not reach the server"))
 
     async def go(pilot: Pilot[None], box: SharingBox) -> tuple[str, str, list[str]]:
-        clock.step()
         await pilot.click("#usage-share-toggle")
         await settle_page(box.app)
         toasts = [n.message for n in box.app._notifications]
@@ -456,9 +447,8 @@ def test_the_question_is_asked_once_after_onboarding_and_no_thanks_is_remembered
 
 
 def test_share_anonymous_usage_turns_it_on_and_sends_the_first_shipment(
-    tmp_path: Path, sharing_allowed: None, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, sharing_allowed: None
 ) -> None:
-    clock = guard_clock.install(monkeypatch)
     add_project(tmp_path / "work")
     fake = FakeSharing(signed_in=True)
 
@@ -467,7 +457,6 @@ def test_share_anonymous_usage_turns_it_on_and_sends_the_first_shipment(
         async with app.run_test(size=(130, 50)) as pilot:
             await settle_page(app)
             await _open_settings(app, pilot)
-            clock.step()
             await pilot.click("#consent-share")
             await settle_page(app)
             await settle_until(app, lambda: "share" in fake.calls)

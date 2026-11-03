@@ -383,6 +383,26 @@ def test_config_get_and_set_cover_the_ui_preference(runner: CliRunner) -> None:
     assert load_config().ui.always_show_project_path is True, "a rejected value must not land"
 
 
+def test_config_get_and_set_cover_asking_before_a_stop(runner: CliRunner) -> None:
+    """``[ui] confirm_stop`` — the Stop dialog's *Don't ask again*, and *Ask before stopping
+    an agent* under User preferences — is on by default and kept out of the file while on;
+    ``config get`` and ``config set`` reach it as they reach ``always_show_project_path``."""
+    assert AppConfig().ui.confirm_stop is True
+    shown = runner.invoke(app, ["config", "get", "ui.confirm_stop"])
+    assert shown.stdout.strip() == "ui.confirm_stop = true"
+
+    result = runner.invoke(app, ["config", "set", "ui.confirm_stop", "false"])
+    assert result.exit_code == 0, result.output
+    assert load_config().ui.confirm_stop is False
+    assert tomllib.loads(config_path().read_text(encoding="utf-8"))["ui"] == {"confirm_stop": False}
+
+    back_on = runner.invoke(app, ["config", "set", "ui.confirm_stop", "true"])
+    assert back_on.exit_code == 0, back_on.output
+    assert "ui" not in tomllib.loads(config_path().read_text(encoding="utf-8")), (
+        "on is the default, which the file leaves out"
+    )
+
+
 def test_experiment_is_off_by_default() -> None:
     """The state every existing user is in. ``prompt_submit`` runs
     synchronously in front of a developer who has just hit enter, so off has to

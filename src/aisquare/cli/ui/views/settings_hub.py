@@ -14,7 +14,8 @@ Under them, *Fleet*: *Restart all…* and *Stop all…*, for every running agent
 project, and *Pause all…* and *Resume all…*, ``fleet pause --all`` and ``fleet resume --all``
 (``views.fleet_bulk``). Each asks first, in a dialog that lists who. The action then runs off
 the UI thread, with a toast per agent as it is done and one that sums it up. Every button is
-greyed while it runs.
+greyed while it runs. Each of the four is a ``GuardedButton`` (``click_guard``): a click
+that reaches it before the page is painted under the pointer opens nothing.
 
 Remote control and the Captain box were sections of this page (#33). They live in App
 settings' tabs now, in its format, where the owner placed them (#41).

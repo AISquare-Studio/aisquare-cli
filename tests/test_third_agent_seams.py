@@ -606,7 +606,11 @@ def test_its_stale_token_is_refreshed_quietly_by_the_command_its_accounts_declar
         if not declared:
             assert ran == [] and first.cause is UsageCause.token_expired
             return
-        assert ran == [(slot.slot, [str(binary), "auth", "refresh"])]
+        # Its binary as PATH found it (`install`): on Windows `shutil.which` spells the shim's
+        # extension as PATHEXT does (`gemini.CMD` for the `gemini.cmd` written), so by case.
+        [(refreshed, [found, *args])] = ran
+        assert (refreshed, args) == (slot.slot, ["auth", "refresh"])
+        assert os.path.normcase(found) == os.path.normcase(str(binary)), found
         assert first.cause is UsageCause.token_refreshing and not first.needs_login
         assert first.refresh_retry_at is not None
         assert "Gemini-shaped's refresh did not take" in (first.reason or ""), first.reason

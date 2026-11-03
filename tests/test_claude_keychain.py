@@ -370,10 +370,13 @@ def test_an_expired_keychain_token_is_expired_and_never_sent(keychain: FakeKeych
     _identity(two, "two@example.com")
     keychain.login(two, "sk-ant-oat01-old", expires_in=timedelta(hours=-1))
     status = service.describe(two)
-    assert status.signed_in and status.token_state == "expired" and needs_login(status, None)
+    assert status.signed_in and status.token_state == "expired"
     fetch = _Usage({})
     reading = service.usage(two, now=NOW, fetch=fetch)
     assert reading.needs_login and fetch.calls == []
+    # Owed, the row waits for the reading (Claude Code may refresh it, task #9); this one,
+    # with no refresh made, asks for a log-in.
+    assert not needs_login(status, None) and needs_login(status, reading)
 
 
 @POSIX_ONLY

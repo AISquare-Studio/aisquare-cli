@@ -14,11 +14,13 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import harness
 from aisquare.core.ids import new_task_id
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamSession, TeamTask
 from aisquare.services import team as team_service
+from tests.cycles import unscoped
 
 PLANNER = "aaaa1111-0000-0000-0000-000000000000"
 CODER = "bbbb2222-0000-0000-0000-000000000000"
@@ -158,6 +160,37 @@ def test_a_superseding_add_names_the_old_task_on_the_human_line(runner: CliRunne
 
     added = runner.invoke(app, ["task", "add", "QA probe task"])
     assert "#2" in _flat(added.output) and "supersedes dropped #1" in _flat(added.output)
+
+
+def test_what_agents_are_told_of_a_re_add_says_a_closed_title_adds_a_new_task(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-RC092-MI, minor 1: #447 made a done or dropped task's title add a new task, and
+    the planner's cycle ("Re-emitting is safe"), the board protocol ("safe to re-run") and
+    ``task add --help`` ("you get the original") still promised the original back. A planner
+    re-emitting its plan after #1 was done brought #1 back as a todo for a coder to redo."""
+    planner = " ".join(harness.role_cycle("planner", "abcd1234", fleet=unscoped))
+    assert "Re-emitting is safe." not in planner
+    assert (
+        "Re-emitting an open task is safe, but a done or dropped task's title adds a new "
+        "one: re-emit only what is open." in planner
+    )
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    protocol = _flat(_start(runner, CODER, work_dir).stdout)
+    assert "safe to re-run" not in protocol and "Tasks are shared and idempotent" not in protocol
+    assert (
+        'Tasks are shared; re-adding an open one is idempotent (`aisquare task add "wire auth '
+        "flow\"`), but a done or dropped one's title adds a new task, so re-add only what is "
+        "still open." in protocol
+    )
+
+    helped = _flat(runner.invoke(app, ["task", "add", "--help"]).output)
+    assert "you get the original" not in helped
+    assert "re-adding a done or dropped task's title adds a new task" in helped
+    assert "add is idempotent while a task is open" in _flat(
+        runner.invoke(app, ["task", "--help"]).output
+    )
 
 
 def test_a_title_ending_in_a_number_is_added_after_a_re_add_of_its_stem() -> None:

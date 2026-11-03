@@ -27,7 +27,9 @@ Three triggers, no daemon:
   (W2) calls each tick; ``--dry-run`` lists the candidates and stops none.
 - **(c) A refused spawn.** With ``auto_stop_finished`` on, a spawn that ``max_agents_total``
   or the memory floor refuses stops the finished workers first and asks once more
-  (``services.fleet.spawn``).
+  (``services.fleet.spawn``); one auto admission would hold (``capacity_busy``: the machine
+  busy, the project at ``busy_floor``) stops that project's finished workers and counts
+  again before it holds.
 """
 
 from __future__ import annotations

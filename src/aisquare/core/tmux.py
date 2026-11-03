@@ -726,7 +726,9 @@ class SizeOwner(NamedTuple):
     """How that asq's terminal reached the machine: ``ssh``, ``mac`` (the Mac's own
     terminal), or ``local`` — what the other asq's hint names (``cli.ui.terminal``)."""
     stamp: int
-    """When it took the size (``time.time_ns``): each claim's value is its own."""
+    """When it took the size (``time.time_ns``), the clock the registry's reads are stamped
+    with (``cli.ui.terminal.size_owner_runs``). Another asq's claim differs by its pid; two of
+    one process may share a stamp on a coarse clock."""
 
     def value(self) -> str:
         return f"{self.pid}@{self.host}/{self.where}/{self.stamp}"
@@ -820,6 +822,19 @@ class WindowInfo:
     :meth:`TmuxServer.started_at` says it, ``None`` when tmux does not say: asked in the same
     ``list-panes``, as :attr:`PaneFacts.server_started` is, so a listing says which server's
     lifetime its pane ids belong to without a second process (review of #259, round 3)."""
+
+
+@dataclass(frozen=True)
+class PanePids:
+    """:meth:`TmuxServer.pane_pids`'s answer: every pane of the server and its pid."""
+
+    pids: dict[str, int | None]
+    """Pane id → the pid tmux started in it; ``None`` for a dead pane (``remain-on-exit``)."""
+    server_started: datetime | None = None
+    """When the server that listed them started (``#{start_time}``), asked in the same
+    ``list-panes``: a pane id names a pane of one server's lifetime only, so a row written
+    before this server started holds none of these panes (``services.fleet._outlived``).
+    ``None`` when tmux did not say, and when no server runs (no panes to judge)."""
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -1731,6 +1746,29 @@ class TmuxServer:
         if not answered or (pane_id.startswith("%") and answered != pane_id):
             return None
         return _optional_int(pid)
+
+    def pane_pids(self) -> PanePids | None:
+        """Every pane of the server and the pid tmux started in it, and when the server
+        started, in ONE ``list-panes -a`` (:class:`PanePids`). An empty listing when no server
+        runs behind the socket, ``None`` when one did not answer — not the same: an empty
+        answer from a server that did not speak is no evidence that a pane is gone.
+
+        For ``fleet top``, which reads every agent's tree at once (:meth:`pane_pid` is one
+        question per pane). Raises what the runner raises (:class:`TmuxError`)."""
+        fmt = _SEP.join(("#{pane_id}", "#{pane_pid}", "#{pane_dead}", "#{start_time}"))
+        completed = self._runner(self.argv("list-panes", "-a", "-F", fmt), None)
+        if completed.returncode != 0:
+            return PanePids({}) if _ABSENT.search(completed.stderr) else None
+        pids: dict[str, int | None] = {}
+        started: datetime | None = None
+        for line in completed.stdout.splitlines():
+            fields = line.split(_SEP)
+            if len(fields) != 4 or not fields[0]:
+                continue
+            pane, pid, dead, start = fields
+            pids[pane] = None if dead == "1" else _optional_int(pid)
+            started = started or _epoch(start)
+        return PanePids(pids, started)
 
     def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
         """:meth:`pane_facts`, except a server that could not be ASKED raises.

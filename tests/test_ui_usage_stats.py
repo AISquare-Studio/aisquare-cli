@@ -36,7 +36,9 @@ from aisquare.cli.ui.views.usage_stats import (
 )
 from aisquare.core.store import store_session
 from aisquare.models import USAGE_RANGES, UsageDay, UsageRange, UsageStats, UsageTokens
+from aisquare.services import project as project_service
 from aisquare.services import usage_stats
+from tests.projects import add_project
 from tests.test_ui_settings_hub import GOOD
 from tests.ui_workers import settle_page, settle_until
 from tests.usage_stats_support import IST, NOW, Machine, pin_clock, prompt, request
@@ -633,6 +635,29 @@ def test_the_page_fits_a_small_terminal(machine: Machine) -> None:
     widest, width = _drive_page(real_loader(), go, size=(80, 24))
 
     assert widest <= width
+
+
+def test_top_repositories_names_a_nicknamed_repository_by_its_remote(machine: Machine) -> None:
+    """tsk_01m67vf4mpsgdcvt6kq6znsrwc: the owner could not tell which repository a nickname
+    meant. The remote's name is shown — not the nickname, the codename or the folder (``ws7``)."""
+    repo = machine.repo("ws7", remote="git@github.com:AISquare-Studio/aisquare-cli.git")
+    project = project_service.set_nickname(add_project(repo), "the big one")
+    with store_session() as store:
+        store.set_codename(project.id, "earnest-hawk")
+    machine.session(
+        1, repo, "s1", prompt(_day(0, 9), cwd=repo), request(_day(0, 9, 1), "m1", cwd=repo)
+    )
+    usage_stats.sweep(tz=IST)
+
+    async def go(pilot: Pilot[None], view: UsageStatsView) -> str:
+        await settle_until(view.app, lambda: view.stats is not None)
+        return _page(view)["repos"]
+
+    repos = _drive_page(real_loader(), go)
+
+    assert "aisquare-cli" in repos
+    for other in ("the big one", "earnest-hawk", "ws7"):
+        assert other not in repos
 
 
 # --- the chart and the figures' formats ------------------------------------------------

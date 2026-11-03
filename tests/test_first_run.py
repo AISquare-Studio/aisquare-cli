@@ -1067,9 +1067,12 @@ def test_through_the_real_listing_the_coders_come_back_after_a_reboot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A reboot (or kill-server), then the manager's Restart from its pane: both coders read
-    ``lost``, and each still holds a place under the default cap of 4. Started beside them,
-    coder-3 took the last place and coder-4 was refused on every press (review of #257)."""
+    ``lost``, and each still holds a place under a cap of 4 (the default before auto
+    admission). Started beside them, coder-3 took the last place and coder-4 was refused on
+    every press (review of #257)."""
     tmux, project = _real_fleet(tmp_path, monkeypatch)
+    capped = FleetSettings(tmux_socket="asq-test", max_agents_per_project=4)
+    monkeypatch.setattr(fleet_service, "settings", lambda: capped)
     first_run.start_fleet(project)
     tmux.kill_server()
     fleet_service.restart(project, "manager")  # Welcome's Open, then the Restart there

@@ -1277,6 +1277,31 @@ def test_a_fleet_error_keeps_the_dialog_open_with_the_message_and_spawn_re_enabl
     assert len(spawns.calls) == 2 and results == []
 
 
+def test_a_held_spawn_shows_the_hold_reason_and_spawn_re_enables(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """Auto admission's hold (``capacity_busy``) is the service's answer like any refusal: its
+    reason — the signal, its value and threshold, the earliest retry — in the status line."""
+    reason = (
+        "alpha is held, nothing started: it runs 3 live agents (busy_floor = 3) and the "
+        "machine is busy — cpu load 3.86 per CPU (load5 54.0 / 14), busy at >= 1 per CPU; "
+        "retry at 22:05:00 or later (in 5m 00s)"
+    )
+
+    def hold(project: ProjectInfo, role: str) -> fleet_service.SpawnReceipt:
+        raise fleet_service.CapacityRefused("capacity_busy", reason)
+
+    spawns.answer = hold
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return [isinstance(host.screen, SpawnDialog), note(dialog, "#spawn-status")]
+
+    open_, status = drive(git_project, scenario)
+    assert open_ is True and status == reason
+
+
 def test_a_fleet_error_that_lands_while_the_test_waits_keeps_the_dialog_open(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:

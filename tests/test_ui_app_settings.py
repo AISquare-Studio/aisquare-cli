@@ -137,6 +137,30 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
     assert load_config().fleet.roles["coder"].permission_mode == "plan"
 
 
+def test_the_agent_cap_shows_auto_as_the_default_and_takes_it_back_from_a_number() -> None:
+    """``auto`` is the default, shown in the field and as its placeholder; a number saves as
+    before, and ``auto`` typed over it saves ``auto`` (the default: out of the file)."""
+    config = load_config()
+    config.fleet.max_agents_per_project = 6
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[str, str, list[str]]:
+        await settle(pilot)
+        field = host.query_one("#max-agents", Input)
+        shown, placeholder = field.value, field.placeholder
+        field.value = "auto"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        errors = [m for m, severity in host.notices if severity == "error"]
+        return shown, placeholder, errors
+
+    shown, placeholder, errors = drive(scenario)
+    assert (shown, errors) == ("6", [])
+    assert placeholder.startswith("auto (default)")
+    assert load_config().fleet.max_agents_per_project == "auto"
+    assert "max_agents_per_project" not in overrides(load_config()).get("fleet", {})
+
+
 def test_settings_rejects_a_bad_agent_cap_and_writes_nothing() -> None:
     """And shows the field: Save pressed from *User preferences* brings *Agent settings* to the
     front with its *Advanced* open, where the agent cap is folded (#41)."""

@@ -169,8 +169,10 @@ def test_a_crashed_asqs_record_is_gone_after_the_next_start(tmp_path: Path) -> N
         asq_running(host="mini-elsewhere", pid=dead_pid) as beating,
         asq_running() as live,
     ):
+        # Then by id: two records can share a started_at (seen on Windows, run 41660934779),
+        # and the roll reads its folder in name order before its stable sort.
         assert instances.live_instances() == sorted(
-            [beating, live], key=lambda instance: instance.started_at
+            [beating, live], key=lambda instance: (instance.started_at, instance.id)
         ), "another host's fresh heartbeat is live whatever its pid is here"
         for stale in (dead, recycled, silent):
             assert f"{stale.id}.json" not in _files(), "pruned"

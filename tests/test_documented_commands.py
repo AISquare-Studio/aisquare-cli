@@ -777,8 +777,9 @@ CENSUS = {
     # Re-measured 2026-10-07 when the README became a front page (roadmap 9.5):
     # the two quickstarts and the plain-command block, with the `uv tool install`
     # line and the installer URL as the two classified mentions. 2026-10-28: the
-    # plain-command block gained `fleet relabel`.
-    "README.md": (6, 2),
+    # plain-command block gained `fleet relabel`. Re-measured 2026-11-03 at 14, when it
+    # gained `fleet top` and `outcomes` (#485) beside `instances` (#474).
+    "README.md": (14, 2),
     # 2026-10-30 (#20): `aisquare instances` and its `--json`, in one block.
     "docs/multi-instance.md": (2, 0),
 }

@@ -18,18 +18,18 @@ back where they were from one dialog. Spawns follow the machine's load:
 running three agents while the machine is busy, and admits at most two more every five
 minutes while it is calm; it never holds a manager, nor a resume. asq asks less, and in
 place: the Stop dialog has *Don't ask again*, five yes/no questions are asked on the
-button itself, and a button works as soon as it is on screen. `aisquare outcomes` says
-what your agents achieved this week and how much of it you steered, and
-`aisquare fleet top` (asq's Agent resources page) what each live agent consumes. An idle
-account whose token went stale is refreshed quietly instead of reading as logged out.
-Stats name each repository by its real name. The sidebar's header counts the live agents
-and can list only the projects that have one, a click and the arrow keys move one
-highlight, and the side without the keyboard fades. Rename a running agent from its
-sidebar row or `fleet relabel`; renaming a project renames its fleet codename and tmux
-session too, and the old codename keeps working. The Onboard view's ↻ reads its folders
-again, Usage & stats scrolls to its end, and the Accounts table fits a 160-column
-terminal beside the default sidebar. CI and `uv.lock` take Dependabot's bumps of certifi,
-truststore, ruff and setup-uv.**
+button itself, a button works as soon as it is on screen, and a double-click never
+confirms the dialog it opens. `aisquare outcomes` says what your agents achieved this
+week and how much of it you steered, and `aisquare fleet top` (asq's Agent resources
+page) what each live agent consumes. An idle account whose token went stale is refreshed
+quietly instead of reading as logged out. Stats name each repository by its real name.
+The sidebar's header counts the live agents and can list only the projects that have one,
+a click and the arrow keys move one highlight, and the side without the keyboard fades.
+Rename a running agent from its sidebar row or `fleet relabel`; renaming a project
+renames its fleet codename and tmux session too, and the old codename keeps working. The
+Onboard view's ↻ reads its folders again, Usage & stats scrolls to its end, and the
+Accounts table fits a 160-column terminal beside the default sidebar. CI and `uv.lock`
+take Dependabot's bumps of certifi, truststore, ruff and setup-uv.**
 
 **Upgrading:**
 - From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.

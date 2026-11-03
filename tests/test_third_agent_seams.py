@@ -1283,6 +1283,117 @@ def test_its_sessions_are_counted_by_the_token_ledger_through_its_own_reader(
     assert row.baseline == 100 and row.tool_calls == {"run_shell_command": 1}
 
 
+def test_its_steering_reaches_outcomes_through_its_own_reader(tmp_path: Path) -> None:
+    """``aisquare outcomes`` asks the transcript reader of each session's agent for who steered it
+    (``AgentTranscript.facts``, #113's 092 row 10): this agent's records say a prompt, an edit
+    (its ``write_file``), a call its dialog refused (a ``$patch`` saying ``cancelled``) and the
+    human stopping it (an ``info`` record), and the week counts each, with no line of shared code
+    naming it. One session is known by its board row, the other by its usage row alone: each
+    names its agent, and that decides, the logs lying where Claude Code keeps its own (under a
+    ``projects`` folder, which by its path alone would be read as Claude Code's)."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core.ids import new_trace_id
+    from aisquare.core.store import store_session
+    from aisquare.models import ProjectInfo, SessionUsage, TeamSession, TurnMetric
+    from aisquare.services import outcomes
+
+    adapter = GeminiShapedAdapter()
+    now = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
+    start = datetime(2026, 10, 27, 9, 0, tzinfo=UTC)
+
+    def log(name: str, edited: str) -> Path:
+        at = [(start + timedelta(minutes=n)).strftime("%Y-%m-%dT%H:%M:%S.000Z") for n in range(4)]
+        call = {"id": "c1", "name": "write_file", "args": {"file_path": edited}}
+        records = [
+            {"type": "user", "timestamp": at[0], "content": "write it, then run the tests"},
+            {"type": "gemini", "timestamp": at[1], "id": "g1", "toolCalls": [call]},
+            {"$patch": {"toolCalls": [{"id": "c2", "status": "cancelled"}]}, "timestamp": at[2]},
+            {"type": "info", "timestamp": at[3], "content": "Request cancelled."},
+        ]
+        path = tmp_path / "home" / "projects" / "-work" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        return path
+
+    register(adapter)
+    try:
+        with store_session() as store:
+            store.ensure_project(ProjectInfo(id="prj_gem", root=tmp_path))
+            store.upsert_session(
+                TeamSession(
+                    id="s-board",
+                    project_id="prj_gem",
+                    role="coder",
+                    started_at=start,
+                    last_seen_at=start,
+                    transcript_path=str(log("board.jsonl", "/w/a.py")),
+                    agent=adapter.id,
+                )
+            )
+            store.record_usage(
+                SessionUsage(
+                    session_id="s-usage",
+                    project_id="prj_gem",
+                    transcript_path=str(log("usage.jsonl", "/w/b.py")),
+                    started_at=start,
+                    updated_at=start,
+                    agent=adapter.id,
+                ),
+                None,
+                previous_state=None,
+            )
+            for session_id in ("s-board", "s-usage"):
+                store.open_turn(
+                    TurnMetric(
+                        trace_id=new_trace_id(),
+                        project_id="prj_gem",
+                        session_id=session_id,
+                        started_at=start,
+                        trigger="prompt_submit",
+                        origin="human:typed",
+                    )
+                )
+        result = outcomes.week_report("2026-W44", now=now, tz=UTC, use_gh=False)
+    finally:
+        unregister(adapter.id)
+
+    assert result.effort.files_edited == 2
+    assert (result.direction.interrupts, result.direction.denied_permissions) == (2, 2)
+
+
+def test_its_facts_read_by_a_pool_that_does_not_know_it_are_read_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large first read goes through a pool of spawned processes, which know the agents
+    registered at import: this one, registered at run time, is read in this process instead,
+    and its facts are all there (``services.transcript_facts``)."""
+    from datetime import UTC, datetime
+
+    from aisquare.services import transcript_facts
+
+    adapter = GeminiShapedAdapter()
+    paths = []
+    for n in range(2):
+        path = tmp_path / f"chat-{n}.jsonl"
+        record = {"type": "info", "timestamp": "2026-10-27T09:00:00.000Z"}
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        paths.append(path)
+    monkeypatch.setattr(transcript_facts, "PARALLEL_BYTES", 0)
+    monkeypatch.setattr("aisquare.services.transcript_facts.os.cpu_count", lambda: 2)
+    register(adapter)
+    try:
+        found = transcript_facts.read_facts(
+            paths,
+            since=datetime(2026, 10, 19, tzinfo=UTC),
+            agents=dict.fromkeys(paths, adapter.id),
+        )
+    finally:
+        unregister(adapter.id)
+
+    assert [[fact.kind for fact in found[path]] for path in paths] == [["i"], ["i"]]
+
+
 def test_an_agent_that_declares_no_compact_command_is_never_compacted_from_here(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

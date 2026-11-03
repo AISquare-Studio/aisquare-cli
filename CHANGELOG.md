@@ -453,9 +453,9 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   arrow passes over. Rows that act rather than show (`+`, *Spawn agent*, *Start captain*,
   the update row, a group header) are only highlighted by the arrows, with no dialog popped;
   Enter acts on them. Enter, F2, `x` and the other sidebar keys act on the highlighted row,
-  so `x` asks to stop the agent the arrows just reached. *Spawn agent* reached by the
-  arrows opens on the project whose view is on screen, else the first listed. A held arrow
-  does not open every view it passes.
+  so `x` stops the agent the arrows just reached (asking first, unless *Don't ask again*
+  is ticked). *Spawn agent* reached by the arrows opens on the project whose view is on
+  screen, else the first listed. A held arrow does not open every view it passes.
 - **A click on a button that has just appeared works as soon as the button is on screen.**
   Stop and Restart in an agent's view, the Confirm of *Restart all…*, *Stop all…*, *Pause
   all…* and *Resume all…*, *Start fresh* and *Discard and start fresh*, the Settings hub's

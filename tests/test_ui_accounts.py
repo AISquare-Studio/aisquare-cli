@@ -352,6 +352,37 @@ def test_usage_bar_fills_five_cells_and_colours_by_pressure() -> None:
     assert styles[12] == "green" and styles[60] == "yellow" and styles[95] == "bold red"
 
 
+def test_every_reset_a_window_can_show_fits_its_column_whole() -> None:
+    """Review of PR 454: a week ``in 15h 30m`` away is 10 cells and a kept reading's
+    ``reset 45m ago`` 13, so 9-cell columns cut them. Every minute a week can be from its
+    reset, and every minute of a five-hour session window, fits its column; a kept reading
+    whose window has reset reads ``reset``, with its age on hover."""
+    widths = {column.key: column.width for column in COLUMNS}
+    status = _status(2, "two@example.com")
+    longest = {"session-resets": "", "week-resets": ""}
+    for minutes in range(0, 7 * 24 * 60 + 1):
+        usage = ClaudeUsage(
+            available=True,
+            session_percent=10,
+            session_resets_at=NOW + timedelta(minutes=min(minutes, 5 * 60), seconds=30),
+            week_percent=10,
+            week_resets_at=NOW + timedelta(minutes=minutes, seconds=30),
+        )
+        cells = account_cells(status, usage, now=NOW)
+        for key, text in longest.items():
+            shown = cells[key].plain
+            assert len(shown) <= widths[key], (minutes, key, shown)
+            longest[key] = max(text, shown, key=len)
+    assert longest == {"session-resets": "in 1h 01m", "week-resets": "in 10h 01m"}  # the widest
+
+    kept = ClaudeUsage(
+        available=True, session_resets_at=NOW - timedelta(minutes=45), week_percent=10
+    )
+    cells = account_cells(status, kept, now=NOW)
+    assert cells["session-resets"].plain == "reset"
+    assert accounts_view.reset_tooltip(kept, "session", now=NOW) == "reset 45m ago"
+
+
 def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> None:
     usage = ClaudeUsage(
         available=True,
@@ -365,8 +396,8 @@ def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> Non
     assert signed["slot"] == "2" and signed["name"] == "account 2"
     assert signed["email"] == "two@example.com" and signed["plan"] == "max 5x"
     assert signed["session"] == "▮▯▯▯▯ 12%" and signed["week"] == "▮▮▯▯▯ 40%"  # USED
-    assert signed["session-resets"].startswith("in 3h 10m")
-    assert signed["week-resets"].startswith("in 6d 12h (")
+    assert signed["session-resets"] == "in 3h 10m"  # the distance; the clock is the tooltip
+    assert signed["week-resets"] == "in 6d 12h"
     assert list(signed) == [column.key for column in COLUMNS]
     # Rank 1 is the default (#8 on the board): no ★ column, and no status column either.
     assert "default" not in signed and "status" not in signed
@@ -398,8 +429,14 @@ def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> Non
         return (accounts_view.problem_tooltip(status, reading) or "").partition("\n")[0]
 
     expired = _status(1, "me@example.com", token_state="expired")
-    assert reason_of(expired, None) == ("!", "")
-    assert said(expired, None) == "the stored token has expired"
+    # Owed, an expired token is the reading's to say: Claude Code may yet refresh it (task
+    # #9). Only the reading that gave up on it is a '!', with the reason it always had.
+    assert reason_of(expired, None) == ("…", "…") and said(expired, None) == ""
+    gave_up = accounts_service.unreadable_usage(
+        UsageCause.token_expired, "the stored token has expired", slot=1, needs_login=True
+    )
+    assert reason_of(expired, gave_up) == ("!", "")
+    assert said(expired, gave_up) == "the stored token has expired"
     logged_out = _status(2, "two@example.com", signed_in=False)
     assert reason_of(logged_out, usage) == ("!", "") and "not signed in" in said(logged_out, usage)
     cut_out = account_cells(logged_out, usage).values()
@@ -426,8 +463,17 @@ def test_log_in_is_offered_for_no_login_a_missing_an_expired_or_a_rejected_token
     locked = ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED)
     assert needs_login(_status(3, None), None)  # never signed in
     assert needs_login(_status(2, "two@example.com", signed_in=False), fine)  # token missing
-    assert needs_login(_status(2, "two@example.com", token_state="expired"), None)
+    expired = _status(2, "two@example.com", token_state="expired")
+    assert needs_login(expired, rejected), "expired, and the refresh gave up on it"
+    off = _arranged(expired, disabled=True)
+    assert needs_login(off, None), "never refreshed: a disabled account asks at once"
     assert needs_login(_status(2, "two@example.com"), rejected)  # 401
+    # An enabled account's expired token, owed or being refreshed (task #9): not yet.
+    refreshing = accounts_service.unreadable_usage(
+        UsageCause.token_refreshing, "the stored token has expired — Claude Code is refreshing it"
+    )
+    for reading in (None, refreshing, fine):
+        assert not needs_login(expired, reading), reading
     # Negatives: a working login, one whose reading is owed, an endpoint that is down, and
     # a login in a locked macOS Keychain: none is a log-in to do.
     for reading in (fine, None, offline, locked):
@@ -1008,9 +1054,16 @@ def test_rows_in_a_rate_limit_wait_hold_no_timer_thread(no_network: dict[str, An
 
 
 def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
+    # Slot 5's token expired and Claude Code could not refresh it (task #9): what the read
+    # answers once the quiet refresh has given up — no Claude Code runs in the suite.
+    gave_up = accounts_service.unreadable_usage(
+        UsageCause.token_expired, "the stored token has expired", slot=5, needs_login=True
+    )
     no_network["usage"] = lambda account: (
         ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
         if account.slot == 4
+        else gave_up
+        if account.slot == 5
         else ClaudeUsage(available=True, session_percent=10, week_percent=10)
     )
     overview = _overview(
@@ -3483,7 +3536,7 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     assert out["header"][:4] == ["↑", "↓", "#", title]
     assert out["marks"] == [agents == "both"] * 4  # a closed rename gives it back, or not
     assert out["header"][5:8] == ["session used", "week used", ""]  # USED; Log in
-    assert out["header"][8:] == ["session resets", "week resets", "plan"]  # the plan last
+    assert out["header"][8:] == ["5h resets", "wk resets", "plan"]  # the plan last
     assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
     assert out["open"] == closed  # the open field moved no column on any row…
     field_region, name_box = out["field"]
@@ -3597,7 +3650,7 @@ def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
     assert out["marked"] == [True] * 4  # rows mounted into a table of both agents carry the mark
 
 
-def test_a_machines_names_keep_their_16_cells_until_a_second_agent_marks_the_rows(
+def test_a_machines_names_keep_their_cells_until_a_second_agent_marks_the_rows(
     no_network: dict[str, Any],
 ) -> None:
     """The ui-tester on 874aeff6 (r23 of #113): a Claude-only machine's names fell from 16 cells
@@ -3606,10 +3659,12 @@ def test_a_machines_names_keep_their_16_cells_until_a_second_agent_marks_the_row
     one agent's accounts there is no mark and no "agent" in the header: the names have their
     16 cells. With both the mark is back and the name has 13, a longer one ends in ``…`` and
     is whole in its tooltip, and the CHANGELOG says so (the cells it names are measured here,
-    not copied). At 200x50 either way nothing scrolls and the last button ends on screen."""
+    not copied). At 200x50 either way nothing scrolls and the last button ends on screen.
+    Since the 0.9.2 merge the name column is main's 12 cells (the table fits 160 columns), so
+    one agent's names have 12 and both agents' 9."""
     no_network["usage"] = _table_usage
-    sixteen, fourteen, thirteen = "abcdefghijklmnop", "abcdefghijklmn", "abcdefghijklm"
-    aliases = {1: sixteen, 2: fourteen, 3: thirteen}
+    twelve, ten, nine = "abcdefghijkl", "abcdefghij", "abcdefghi"
+    aliases = {1: twelve, 2: ten, 3: nine}
     one = _overview(
         *(
             _arranged(_status(slot, f"{slot}@example.com"), alias=alias, position=slot)
@@ -3666,19 +3721,19 @@ def test_a_machines_names_keep_their_16_cells_until_a_second_agent_marks_the_row
         for slot, alias in aliases.items():
             assert table["tips"][slot].startswith(f"{alias} — "), table["tips"][slot]
             assert "double-click" in table["tips"][slot]
-    # One agent's accounts: 0.9.0's table, the name whole in its 16 cells.
-    assert alone["header"] == "name" and alone["cells"] == name_column.width == 16
+    # One agent's accounts: 0.9.2's table, the name whole in its 12 cells.
+    assert alone["header"] == "name" and alone["cells"] == name_column.width == 12
     assert {shown_ for shown_, _ in alone["marks"].values()} == {False}
     assert alone["drawn"] == aliases
-    # Both: the mark, its space and 13 cells of name; the longer ones cut, the tooltip whole.
+    # Both: the mark, its space and 9 cells of name; the longer ones cut, the tooltip whole.
     assert marked["header"] == "agent name"
     assert marked["marks"] == {1: (True, "Cl"), 2: (True, "Cl"), 3: (True, "Co")}
-    assert marked["cells"] == 13 == name_column.width - len("Cl") - 1
-    assert marked["drawn"] == {1: sixteen[:12] + "…", 2: fourteen[:12] + "…", 3: thirteen}
+    assert marked["cells"] == 9 == name_column.width - len("Cl") - 1
+    assert marked["drawn"] == {1: twelve[:8] + "…", 2: ten[:8] + "…", 3: nine}
     changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
     flat = " ".join(changelog.split("\n## [0.9.0]", 1)[0].replace("**", "").split())
     assert f"With both agents the name has {marked['cells']} cells, not {alone['cells']}" in flat
-    assert "there is no mark and the names keep the 16 cells 0.9.0's had" in flat
+    assert "there is no mark and the names keep the 12 cells 0.9.2's have" in flat
 
 
 def test_a_frame_while_a_name_is_renamed_leaves_the_mark_under_the_open_field(
@@ -3829,8 +3884,9 @@ def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
     no_network: dict[str, Any],
 ) -> None:
     """The tester on #408: with the status column still there *Log in again* read
-    'Log in ag' at 160 columns. Without it (#406), the 14-wide login column shows the
-    whole label on a healthy row, on screen, with nothing scrolled."""
+    'Log in ag' at 160 columns. Without it (#406), the login column, as wide as the label
+    (12 cells, a compact button), shows it whole on a healthy row, on screen, with nothing
+    scrolled."""
     no_network["usage"] = _table_usage
 
     async def run() -> dict[str, Any]:
@@ -3854,6 +3910,91 @@ def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
     assert out["scroll"] == 0 and out["label"] == "Log in again"
     assert "Log in again" in out["line"] and "…" not in out["line"], out["line"]
     assert out["seen"] and out["on_screen"]
+
+
+@pytest.mark.parametrize("codex", [False, True], ids=["claude-only", "with-a-codex-slot"])
+def test_the_whole_table_fits_160_by_48_with_no_sideways_scroll(
+    no_network: dict[str, Any], codex: bool
+) -> None:
+    """The screenshot capture (seq 4391): at 160 columns a row was 167 cells on a 123-cell
+    page, so the week-resets column was cut and a horizontal scrollbar showed. Now the
+    header and the four rows are no wider than the table, nothing scrolls, and every label
+    is drawn whole on screen, the arranging buttons' too (a Button pads its label by a cell
+    each side unless told not to); a resets cell shows the distance alone and its tooltip
+    the whole reset, clock and all. With a Codex slot listed (SCOPE #113 092), each row's
+    agent mark takes its two letters and a space from the name's 12 cells, never a column of
+    its own: the line is as wide."""
+    week_resets = datetime.now(tz=UTC) + timedelta(hours=15, minutes=30, seconds=30)
+
+    def usage(account: ClaudeAccount) -> ClaudeUsage:
+        # The page reads the wall clock: the widest a week's reset reads, ``in 15h 30m``,
+        # half a minute clear of a minute's edge. Built whole: a reading's resets are its
+        # windows' (#113), which a copy's ``week_resets_at`` would not reach.
+        base = _table_usage(account)
+        if not base.available:
+            return base
+        return ClaudeUsage(
+            available=True,
+            session_percent=base.session_percent,
+            session_resets_at=base.session_resets_at,
+            week_percent=base.week_percent,
+            week_resets_at=week_resets,
+        )
+
+    no_network["usage"] = usage
+
+    def frame() -> AccountsOverview:
+        listed = _table_frame()
+        if not codex:
+            return listed
+        three = listed.accounts[2]
+        listed.accounts[2] = three.model_copy(
+            update={"account": three.account.model_copy(update={"agent": "codex"})}
+        )
+        return listed
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=frame)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 3, 4))
+            await settle_page(app, group=_NO_WORKER)
+            table = view.query_one("#accounts-table")
+            header = view.query_one("#accounts-header")
+            screen = _painted(app)
+            week = row(view, 1).cell("week-resets")
+            return {
+                "rows": len(view.rows()),
+                "table": table.scrollable_content_region.width,
+                "widths": [line.outer_size.width for line in (header, *view.rows())],
+                "max_scroll_x": table.max_scroll_x,
+                "scrollbar": table.show_horizontal_scrollbar,
+                "header": screen[header.region.y],
+                "lines": {r.slot: screen[r.region.y] for r in view.rows()},
+                "week": (shown(week), week.tooltip),
+            }
+
+    out = asyncio.run(run())
+    assert out["rows"] == 4
+    assert max(out["widths"]) <= out["table"] == 123, out["widths"]
+    assert out["max_scroll_x"] == 0 and not out["scrollbar"], out
+    for title in ("signed in as", "session used", "week used", "5h resets", "wk resets", "plan"):
+        assert title in out["header"], (title, out["header"])
+    lines = out["lines"]
+    assert "Log in again" in lines[1] and "Disable" in lines[1], lines[1]  # slot 1: no Remove
+    for slot in (2, 3):
+        assert "Log in " in lines[slot] and "Disable" in lines[slot], lines[slot]
+        assert "Remove" in lines[slot], lines[slot]
+    assert "Enable" in lines[4] and "Remove" in lines[4], lines[4]  # slot 4 is disabled
+    text, tip = out["week"]
+    assert text == "in 15h 30m", text  # the distance alone, whole in the 10-cell column
+    assert tip is not None and tip.startswith("in 15h 30m (") and tip.endswith(")"), tip
+    marked = accounts_view.MARKED_NAME_TITLE in out["header"]
+    assert marked is codex, out["header"]
+    if codex:
+        marks = accounts_view.agent_marks()
+        assert f"{marks['codex']} " in lines[3] and f"{marks['claude-code']} " in lines[1]
 
 
 @pytest.mark.parametrize("size", [(160, 50), (100, 40)], ids=["160x50", "100x40"])

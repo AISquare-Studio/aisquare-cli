@@ -570,7 +570,10 @@ def test_the_front_page_offers_the_codex_plugin() -> None:
 
     assert "plugins/codex/README.md" in readme
     assert README.is_file()
-    assert "blob/main/docs/" not in readme.replace("blob/main/docs/usage-telemetry.md", "")
+    mains_own = ("blob/main/docs/usage-telemetry.md", "blob/main/docs/multi-instance.md")
+    for page in mains_own:  # main's pages: docs/ holds them alone, none of this line's
+        readme = readme.replace(page, "")
+    assert "blob/main/docs/" not in readme
 
 
 @posix_only

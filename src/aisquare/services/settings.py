@@ -50,6 +50,20 @@ def ui_settings() -> UiSettings:
         return UiSettings()
 
 
+def stop_without_asking() -> UiSettings:
+    """Save ``[ui] confirm_stop = false`` — the Stop dialog's *Don't ask again* — and return
+    ``[ui]`` as the file now holds it.
+
+    Raises what ``load_config`` raises on an unreadable file, having written nothing: a
+    default config saved over a broken one would lose every setting it held for one
+    preference.
+    """
+    config = load_config()
+    config.ui.confirm_stop = False
+    save_config(config)
+    return config.ui
+
+
 def anything_to_reset() -> bool:
     """Whether the user's file holds a setting a reset would undo.
 

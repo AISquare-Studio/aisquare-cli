@@ -738,6 +738,13 @@ def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
     return StoredLogin(credentials_in(_read_json(credentials_path(account))))
 
 
+def has_stored_login(account: ClaudeAccount) -> bool:
+    """Whether ``account``'s login is one :func:`stored_login` reads: Claude Code's, in the
+    Keychain or its credentials file. Another agent's slot keeps its own (its adapter's
+    accounts slot reads it), never a Keychain item, so no Keychain is ever locked for it."""
+    return _claude_codes(account)
+
+
 def _claude_codes(account: ClaudeAccount) -> bool:
     """Whether ``account``'s agent keeps its slots as Claude Code does (its accounts slot is
     :class:`ClaudeCodeAccounts`); ``False`` for any other, one this install does not know
@@ -771,6 +778,13 @@ def plaintext_credentials_path(
 def keychain_platform() -> bool:
     """Whether this platform keeps Claude Code's credentials in the Keychain (macOS)."""
     return sys.platform == "darwin"
+
+
+def over_ssh(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether this process runs in an SSH login (:data:`SSH_MARKERS`): a locked Keychain is
+    then the rule, and the Mac's own asq is what reads it (``services.claude_accounts``)."""
+    source = os.environ if environ is None else environ
+    return any(source.get(marker) for marker in SSH_MARKERS)
 
 
 # --- the macOS Keychain -------------------------------------------------------------------
@@ -807,6 +821,11 @@ SECURE_STORAGE_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 KEYCHAIN_ACCOUNT_FALLBACK = "claude-code-user"
 KEYCHAIN_LOCKED_REASON = "the login Keychain is locked"
 KEYCHAIN_LOCKED = f"{KEYCHAIN_LOCKED_REASON} — unlock it (or log in to the Mac) and refresh"
+KEYCHAIN_LOCKED_SSH_REASON = "the login Keychain is locked in this SSH session"
+"""Said for a locked read in an SSH login (:func:`over_ssh`): the Mac's own login unlocks the
+Keychain for its own session, not for one that came in over SSH, which is why it says locked."""
+SSH_MARKERS = ("SSH_CONNECTION", "SSH_TTY")
+"""Set in an SSH login's environment (``core.clipboard``'s attach markers)."""
 KEYCHAIN_REFUSED_REASON = "macOS refused aisquare access to the Claude Code item"
 KEYCHAIN_REFUSED = f"{KEYCHAIN_REFUSED_REASON} — allow it in Keychain Access"
 """Said for errSecAuthFailed (51): the Deny button on the item's access prompt."""
@@ -1623,6 +1642,14 @@ KEYCHAIN_CAUSES: dict[KeychainProblem, tuple[UsageCause, str | None]] = {
 :func:`stored_login` carry a fix of their own (``None``: its words stand)."""
 
 
+def keychain_cause(problem: KeychainProblem) -> tuple[UsageCause, str | None]:
+    """:data:`KEYCHAIN_CAUSES`' answer, a locked Keychain in an SSH login said as one: its fix
+    is the Mac's own asq, not an unlock this session cannot see (:func:`over_ssh`)."""
+    if problem == "locked" and over_ssh():
+        return UsageCause.keychain_locked_ssh, KEYCHAIN_LOCKED_SSH_REASON
+    return KEYCHAIN_CAUSES[problem]
+
+
 def no_login_reason() -> str:
     """Why an account with no stored login has no reading."""
     if keychain_platform():
@@ -1637,18 +1664,21 @@ def _unread(cause: UsageCause, reason: str, **fields: Any) -> ClaudeUsage:
 
 
 def endpoint_usage(
-    account: ClaudeAccount, *, now: datetime | None, fetch: UsageFetch
+    account: ClaudeAccount, *, now: datetime | None, fetch: UsageFetch, fresh: bool = False
 ) -> ClaudeUsage:
     """The account's five-hour and seven-day windows, or why they cannot be read.
 
     Reads the token where Claude Code keeps it (:func:`stored_login`: the
     credentials file, or on macOS the login Keychain) and sends it to
     :data:`USAGE_URL` only, through ``fetch`` (the service's HTTP GET: core opens
-    no socket); a token that has already expired is not sent at all, because
-    Claude Code refreshes it on the account's next session and this module never
-    does. A Keychain that would not show the token says why (locked, refused),
-    and asks for no log-in. No reason ever carries the token. ``fetched_at`` is
-    left for the caller to stamp.
+    no socket); a token that has already expired is not sent at all: only Claude
+    Code refreshes it, on the account's next session or when the service's
+    ``read_usage`` has it do so. A Keychain that would not show the token says why
+    (locked, refused; locked in an SSH login, :func:`keychain_cause`), and asks for
+    no log-in. No reason ever carries the token. ``fresh`` reads the login again
+    rather than take a Keychain read from the last :data:`KEYCHAIN_MEMO_SECONDS`:
+    after a refresh, the token it left. ``fetched_at`` is left for the caller to
+    stamp.
 
     Every window the endpoint sends is read (#277): the per-family weeks
     (``seven_day_opus``, ``seven_day_sonnet``: :attr:`ClaudeUsage.family_week_percent`),
@@ -1656,12 +1686,12 @@ def endpoint_usage(
     and a ``locked_reason``, which reads that window 100 % used. Keys it does not know
     are ignored.
     """
-    login = stored_login(account)
+    login = stored_login(account, fresh=fresh)
     creds = login.credentials
     if creds is None:
         if login.unreadable is None:
             return _unread(UsageCause.token_missing, no_login_reason())
-        cause, said = KEYCHAIN_CAUSES[login.problem or "failed"]
+        cause, said = keychain_cause(login.problem or "failed")
         return _unread(cause, said or login.unreadable)
     if creds.expired(now):
         return _unread(UsageCause.token_expired, TOKEN_EXPIRED_REASON, needs_login=True)
@@ -1812,9 +1842,14 @@ class ClaudeCodeAccounts:
         return "unreadable" if login.unreadable is not None else token_state(login.credentials)
 
     def usage(
-        self, account: ClaudeAccount, *, now: datetime | None, fetch: UsageFetch
+        self,
+        account: ClaudeAccount,
+        *,
+        now: datetime | None,
+        fetch: UsageFetch,
+        fresh: bool = False,
     ) -> ClaudeUsage:
-        return endpoint_usage(account, now=now, fetch=fetch)
+        return endpoint_usage(account, now=now, fetch=fetch, fresh=fresh)
 
     def limit_from_transcript(
         self, path: Path, *, now: datetime | None = None

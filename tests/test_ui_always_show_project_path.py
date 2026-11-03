@@ -92,9 +92,10 @@ def test_off_by_default_only_twins_show_their_directory(tmp_path: Path) -> None:
 
     always, lines = drive(go)
     assert always is False
+    # Each twin's codename after its directory: neither is the one its name gives (`api`).
     assert lines == {
-        "prj_w": _directory(tmp_path, "work/api"),
-        "prj_o": _directory(tmp_path, "oss/api"),
+        "prj_w": _directory(tmp_path, "work/api") + " · amber-otter",
+        "prj_o": _directory(tmp_path, "oss/api") + " · ruby-fox",
         "prj_u": None,
     }
 
@@ -139,7 +140,7 @@ def test_it_is_read_at_the_start_and_reset_all_turns_it_off(tmp_path: Path) -> N
         await _open_app_settings(app)
         app.query_one("#reset-settings", Button).press()
         await settle(app)
-        app.screen.query_one("#reset-confirm", Button).press()
+        app.query_one("#reset-settings", Button).press()
         await settle(app)
         return at_start, _subtitles(app)["prj_u"]
 

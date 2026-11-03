@@ -62,12 +62,19 @@ async def quiet(pilot: Pilot[None]) -> None:
 
 
 def agent_opened(pilot: Pilot[None], agent_id: str) -> Callable[[], bool]:
-    """The last effect of selecting an agent: its row selected, its pane focused (#147)."""
+    """The last effect of selecting an agent: its row selected, ITS pane focused (#147).
+
+    Its own pane, not any: a row takes the sidebar's highlight as it is clicked, before its
+    view is built, so with another agent's pane still focused "selected and a pane focused"
+    held at once, and the wait ended before the view it waits for was there."""
     app = fleet_app(pilot)
 
     def done() -> bool:
-        return app.sidebar.selected_key == f"agent:{agent_id}" and isinstance(
-            app.focused, TerminalPane
+        focused = app.focused
+        return (
+            app.sidebar.selected_key == f"agent:{agent_id}"
+            and isinstance(focused, TerminalPane)
+            and any(node.id == f"agent-{agent_id}" for node in focused.ancestors)
         )
 
     return done
@@ -200,7 +207,11 @@ def test_with_the_captured_directories_shown_the_home_is_still_no_card(
         for _ in range(12):  # more presses than there are rows: the walk ends at the last one
             await pilot.press("down")
             await pilot.pause()
-            walk.extend(row.selection_key for row in app.query(".cursor").results(Activatable))
+            walk.extend(
+                row.selection_key
+                for row in app.sidebar.query(Activatable)
+                if row.has_class("selected")
+            )
         return cards, copies, walk
 
     cards, copies, walk = drive(body)
@@ -331,8 +342,8 @@ def test_restarting_the_captain_selects_its_new_row_and_keeps_the_doctor_global(
         await until(pilot, agent_opened(pilot, exited.agent.id), what="the exited captain selected")
         view = app.current_view()
         assert isinstance(view, AgentView)
-        # Pressed, as Enter on it would: the click guard (0.8.2) drops a mouse press this
-        # soon after the view came up, and the guard is not what is tested here.
+        # Pressed, as Enter on it would: the click guard drops a mouse press that reaches the
+        # app before the view is painted, and the guard is not what is tested here.
         view.query_one("#agent-restart", Button).press()
         await ui_suite.settle(app)
         await until(pilot, agent_opened(pilot, "agt_captain_new"), what="the new row selected")

@@ -319,11 +319,14 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
         "Captain",
         "Accounts",
         "Usage & stats",
+        "Agent resources",
         "Doctor",
         "Restart all…",
         "Stop all…",
+        "Pause all…",
+        "Resume all…",
     ]
-    assert len(about) == 7 and all(about)  # the Fleet section's two share one line
+    assert len(about) == 8 and all(about)  # the Fleet section's four share one line
 
 
 def test_the_usage_link_names_no_agent() -> None:

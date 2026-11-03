@@ -48,6 +48,7 @@ from aisquare.services import install_route, lifecycle
 from aisquare.services import settings as settings_service
 from aisquare.services.install_route import Captured, Facts, LatestRelease
 from tests import installer_seams
+from tests.asq_elsewhere import asq_running
 from tests.fsperms import can_deny_reads
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.remote_elsewhere import remote_on_elsewhere
@@ -1984,14 +1985,19 @@ def test_a_move_back_to_a_release_that_reads_config_whole_names_what_it_reads_ot
     chosen = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.0"]).stdout)
 
     assert back["config_defaults_lost"] == [
+        # Auto admission is the default since #12; 0.8.0 caps every project at 4.
+        "fleet.max_agents_per_project 4 (here auto)",
         "accounts.pick default (here headroom)",
         "accounts.on_limit wait (here switch)",
     ], back
     assert layered["config_defaults_lost"] == [], "0.8.1 lays the file over its defaults too"
     assert forward["config_defaults_lost"] == [], "control: a move forward reads it the same"
     assert "⚠ 0.8.0 reads config.toml without this release's defaults under it" in said, said
-    assert "`aisquare config set accounts.pick …`" in said.replace("\n", " "), said
-    assert chosen["config_defaults_lost"] == ["accounts.on_limit wait (here switch)"], chosen
+    assert "`aisquare config set fleet.max_agents_per_project …`" in said.replace("\n", " "), said
+    assert chosen["config_defaults_lost"] == [
+        "fleet.max_agents_per_project 4 (here auto)",
+        "accounts.on_limit wait (here switch)",
+    ], chosen
 
 
 def test_a_move_back_before_env_files_names_the_roles_whose_file_bindings_it_ignores(
@@ -2154,6 +2160,44 @@ def test_a_remote_on_in_another_process_is_named_before_the_install_is_replaced_
         agreed.stdout
     )
     assert "Remote is on" not in quiet.stdout, "control: no Remote, no warning"
+
+
+def test_another_asq_on_this_home_refuses_the_upgrade_and_is_named(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#17: left running, an asq goes on with the old release over the new one's files, two
+    releases on one home, which a new asq's gate refuses. Refused, not warned of as a Remote
+    is: named in the plan, refused under --yes and --one-click, and asq's Update (`--reopen`)
+    is asked nothing and comes back."""
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    asked: list[str] = []
+    reopened: list[list[str]] = []
+
+    def confirm(text: str, **_: object) -> bool:
+        asked.append(text)
+        return True
+
+    monkeypatch.setattr("aisquare.cli.install.typer.confirm", confirm)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: reopened.append(list(args)))
+    with asq_running(kind="ssh") as other:
+        plan = _one_object(runner.invoke(app, ["--json", "upgrade"]).stdout)
+        reopen = runner.invoke(app, ["upgrade", "--reopen"])
+        refused = runner.invoke(app, ["--json", "upgrade", "--yes"])
+        one_click = runner.invoke(app, ["upgrade", "--one-click"])
+
+    named = f"asq {other.version} (ssh on {other.host}, pid {other.pid})"
+    assert plan["asqs"] == [named], plan
+    said = " ".join(reopen.stdout.split())
+    assert reopen.exit_code == 1, reopen.output
+    assert f"✗ it will not run: another asq runs on this home ({named})" in said
+    assert asked == [], "no question whose yes is refused"
+    assert refused.exit_code == 1 and _one_object(refused.stdout)["error"] == "asq_running"
+    assert one_click.exit_code == 1 and named in " ".join(one_click.stderr.split())
+    assert machine.installs == [], "nothing installed"
+    assert reopened[0] == ["ui"], "asq's Update comes back"
+    agreed = runner.invoke(app, ["upgrade", "--yes"])
+    assert agreed.exit_code == 0 and len(machine.installs) == 1, "control: alone, it upgrades"
 
 
 def test_yes_runs_the_restated_command_checks_the_version_and_refreshes_the_hooks(

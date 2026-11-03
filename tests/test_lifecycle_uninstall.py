@@ -24,7 +24,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import paths
+from aisquare.core import instances, paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import claude_installs, get_adapter
 from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
@@ -40,6 +40,7 @@ from aisquare.core.tmux import (
 from aisquare.models import FleetAgent
 from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Facts
+from tests.asq_elsewhere import asq_running
 from tests.fsperms import can_deny_reads, can_symlink
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.remote_elsewhere import remote_lock, remote_on_elsewhere
@@ -103,8 +104,9 @@ def _record(*directories: Path) -> None:
 def _snapshot(root: Path, *, held: Path | None = None) -> dict[str, bytes]:
     """Every file, directory and link under ``root``, by path — what "unchanged" means.
 
-    ``held`` is a file another descriptor holds locked (a Remote's ``remote-serve.lock``),
-    whose bytes Windows will not read meanwhile: recorded as there, not read."""
+    ``held`` is a file another descriptor holds locked (a Remote's ``remote-serve.lock``, a
+    running asq's ``instances/<id>.lock``), whose bytes Windows will not read meanwhile:
+    recorded as there, not read."""
     found: dict[str, bytes] = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
@@ -725,6 +727,39 @@ def test_it_refuses_while_a_remote_is_on_in_another_process_and_names_it(
     assert "press Ctrl-C where `aisquare remote serve` runs" in said
     assert after == before and world.events == [], "nothing touched"
     assert off["remote"] is None and off["refusal"] is None, "control: once it is off"
+
+
+def test_it_refuses_while_another_asq_runs_on_this_home_and_names_it(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """#17: an asq at the Mac, or one over SSH, outlived the uninstall, its program gone from
+    under it. Refused as a Remote on elsewhere is, naming it (kind, host, pid); nothing is
+    touched."""
+    _initialised(runner, tmp_path)
+    _hooked(isolated_agent_home / ".claude", tool.script)
+    with asq_running(kind="ssh") as other, asq_running(pid=2**22 + 12345, hold_lock=False):
+        # And a stale record beside it: the plans read the registry without pruning it, as a
+        # plan writes nothing to the home (review of #462).
+        held = instances.registry_dir() / f"{other.id}.lock"
+        before = _snapshot(tmp_path, held=held)
+        refused = runner.invoke(app, ["--json", "uninstall", "--yes"])
+        plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+        human = runner.invoke(app, ["uninstall", "--yes"])
+        after = _snapshot(tmp_path, held=held)
+    alone = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+
+    named = f"asq {other.version} (ssh on {other.host}, pid {other.pid})"
+    said = " ".join(human.stderr.split())
+    assert refused.exit_code == 1 and _one_object(refused.stdout)["error"] == "asq_running"
+    assert plan["asqs"] == [named] and plan["refusal"]["error"] == "asq_running", plan
+    assert f"another asq runs on this home ({named})" in said
+    assert "Quit it first (q in it), then run `aisquare uninstall` again." in said
+    assert after == before and world.events == [], "nothing touched"
+    assert alone["asqs"] == [] and alone["refusal"] is None, "control: once it has quit"
 
 
 @pytest.mark.parametrize(

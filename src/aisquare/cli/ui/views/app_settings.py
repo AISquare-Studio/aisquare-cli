@@ -6,17 +6,19 @@ permission, worktree, persona and account per role, the fleet's escape key, agen
 worktree root and native-teams switch, how launches pick an account, what a usage limit
 does, what the accounts share and each role's binding (``team bind``). *User preferences*
 is ``[ui]``, how ``asq`` shows things to the person at it: today *Always show project
-directory* (``ui.always_show_project_path``); and below it ``[updates]``, *Check for a new
-release daily* (``updates.check``). *Remote* is Remote control
-(``views.settings_remote``). Save, Reload and Reset all sit under the tabs and act on the
-first two; they hide on *Remote*, whose every control acts at once.
+directory* (``ui.always_show_project_path``); below it ``[updates]``, *Check for a new
+release daily* (``updates.check``); and in its *Advanced*, *Ask before stopping an agent*
+(``ui.confirm_stop``, which the Stop dialog's *Don't ask again* turns off). *Remote* is
+Remote control (``views.settings_remote``). Save, Reload and Reset all sit under the tabs
+and act on the first two; they hide on *Remote*, whose every control acts at once.
 
 **What shows, and what is folded** (#41, the owner's D8: the bare minimum that works in
 view, the rest a click away). *Agent settings* shows the *Captain (experimental)* box on
 top (``views.settings_captain``: it saves at once, as it did on the hub) and how launches
 pick an account and what a usage limit does; its *Advanced* holds the user's coding
 agent, the roles, the fleet, the rest of the accounts' rules and the role bindings. *User
-preferences* shows its two switches, and folds the note on setting one from a shell.
+preferences* shows its two switches, and folds *Ask before stopping an agent* (a third
+switch in view pushed the fold off an 80x24 tab) and the note on setting one from a shell.
 *Remote* shows Turn on/off, the token field when one is needed and the link, QR and password
 while on; its own
 *Advanced* holds the rest. A Save refused for a folded field opens that *Advanced*, so
@@ -28,9 +30,10 @@ after every save so the form shows what the file holds. Precedence: a per-spawn
 flag beats this file beats the system default; no value here is read from the
 environment.
 
-Reset all settings to default asks first, then moves the file aside
-(``services.settings.reset_settings``) and names the backup it kept; moving it
-back undoes the reset.
+Reset all settings to default asks first, in place (``ui.confirm_button``): its first
+press arms it and puts the backup it will keep in the note line under the buttons; a
+second press moves the file aside (``services.settings.reset_settings``) and names the
+backup it kept; moving it back undoes the reset.
 
 Model and effort per role are NOT here on purpose: they live in ``team harness`` and
 ``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>``, one home per concept, the rule
@@ -40,7 +43,8 @@ the owner decides, is that they stay out. The binary is a binding's, and binding
 ``team bind`` bound, with its binary, its environment (its agent's home variable and
 its temp-files variable called out with their values, any other variable by name only,
 since a value may be a token) and its args. *Edit* opens the bind form on it, *Unset
-key…* and *Clear* are ``team bind --unset`` and ``--clear``; each writes at once through
+key…* and *Clear* are ``team bind --unset`` and ``--clear`` (*Clear* asks in place, and
+the note line under the buttons says the whole binding goes); each writes at once through
 ``services.settings``, the writers ``team bind`` uses, apart from the form's Save. The
 ``[team]`` values here are the AGENT and the ACCOUNT per role (#145): the selects beside each role
 write ``team.profiles.<role>.agent`` and ``.account`` — exactly what ``aisquare
@@ -73,7 +77,9 @@ meanwhile included.
 
 Every re-read of the file (Save, Reload, Reset all) posts :class:`UiSettingsChanged`, so
 the app, which holds ``[ui]`` for the sidebar rather than reading the file every tick,
-follows at once.
+follows at once. The Stop dialog posts it too when it saves *Don't ask again*, and the app
+hands it back here (:meth:`AppSettingsView.follow_ui`): the page is kept alive once opened,
+and its switch would otherwise read on over a file that says off.
 
 Reached from *⚙ Settings ▸ App settings*: the Settings hub opens
 ``AppSettingsView(id="app-settings")``.
@@ -84,7 +90,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections.abc import Iterable
-from typing import ClassVar, NamedTuple, get_args
+from typing import ClassVar, Literal, NamedTuple, get_args
 
 from rich.text import Text
 from textual import on
@@ -107,6 +113,8 @@ from textual.widgets import (
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import NewBindScreen
+from aisquare.cli.ui.click_guard import GuardedButton
+from aisquare.cli.ui.confirm_button import ConfirmButton
 from aisquare.cli.ui.sidebar import short_path
 from aisquare.cli.ui.views.settings_captain import CaptainToggle
 from aisquare.cli.ui.views.settings_remote import RemoteSection
@@ -158,6 +166,7 @@ INTENT_OPTIONS: tuple[tuple[str, str], ...] = (
 
 DEFAULT_ESCAPE_KEY = FleetSettings().escape_key
 DEFAULT_WORKTREE_DIR = FleetSettings().worktree_dir
+DEFAULT_MAX_AGENTS = str(FleetSettings().max_agents_per_project)
 PICK_MODES: tuple[tuple[str, str], ...] = (
     ("the default account", "default"),
     ("the account with headroom", "headroom"),
@@ -235,7 +244,10 @@ own agent's accounts are all full (``services.handoff``), and what the accounts 
 (``core.claude_sharing``)."""
 UPDATES_CHECK = "updates-check"
 """``[updates] check``'s switch: asq's daily release check (``services.updates``)."""
-_UI_SWITCHES = {"ui-always-show-path": "always_show_project_path"}
+_UI_SWITCHES = {
+    "ui-always-show-path": "always_show_project_path",
+    "ui-confirm-stop": "confirm_stop",
+}
 """*User preferences*' switches, by id → ``[ui]`` field."""
 AGENT_TAB = "tab-agent-settings"
 """The *Agent settings* tab's pane id: roles, the fleet, accounts. Shown first."""
@@ -246,7 +258,8 @@ REMOTE_TAB = "tab-remote"
 AGENT_ADVANCED = "agent-settings-advanced"
 """*Agent settings*' fold: the roles, the fleet and the rest of the accounts' rules."""
 PREFERENCES_ADVANCED = "user-preferences-advanced"
-"""*User preferences*' fold: the note on setting a preference from a shell."""
+"""*User preferences*' fold: *Ask before stopping an agent* (``[ui] confirm_stop``), and the
+note on setting a preference from a shell."""
 
 
 BINDING_ID_PREFIX = "binding-"
@@ -320,7 +333,10 @@ class UnsetKeyScreen(ModalScreen[str | None]):
                 id="unset-key",
             )
             with Horizontal():
-                yield Button("Unset", id="unset-confirm", variant="warning")
+                # Guarded: with three bindings or more, the page can be scrolled so that the
+                # first role's *Unset key…* sits under this button, and a double-click on it
+                # unset the variable selected first (REVIEW-RC092-MI round 3, MAJOR 1).
+                yield GuardedButton("Unset", id="unset-confirm", variant="warning")
                 yield Button("Cancel", id="unset-cancel")
 
     @on(Button.Pressed, "#unset-confirm")
@@ -332,45 +348,22 @@ class UnsetKeyScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class ConfirmClearBinding(ModalScreen[bool]):
-    """``team bind <role> --clear`` asks first: the whole binding goes."""
-
-    DEFAULT_CSS = """
-    ConfirmClearBinding { align: center middle; }
-    ConfirmClearBinding > Vertical { width: 64; height: auto; border: round $error; padding: 1 2; }
-    ConfirmClearBinding Horizontal { height: auto; margin-top: 1; }
-    ConfirmClearBinding Button { margin-right: 1; }
-    """
-    BINDINGS: ClassVar = [("escape", "cancel", "cancel")]
-
-    def __init__(self, role: str) -> None:
-        super().__init__()
-        self.role = role
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            question = Text("Clear the binding of ", style="bold")
-            question.append(self.role, style="bold")
-            question.append("?", style="bold")
-            yield Static(question)
-            yield Static(
-                Text(
-                    "Its binary, environment, args and account go, as `aisquare team bind "
-                    "<role> --clear` takes them; the role then launches as an unbound one."
-                ),
-                id="clear-explained",
-            )
-            with Horizontal():
-                yield Button("Clear", id="clear-confirm", variant="error")
-                yield Button("Cancel", id="clear-cancel")
-
-    @on(Button.Pressed, "#clear-confirm")
-    def _confirm(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#clear-cancel")
-    def action_cancel(self) -> None:
-        self.dismiss(False)
+def parse_max_agents(raw: str) -> int | Literal["auto"]:
+    """The max-agents field as ``[fleet] max_agents_per_project`` takes it: ``auto``, the
+    default (an empty field too), or a whole number of at least 1. ``ValueError`` says why
+    anything else is not."""
+    text = raw.strip().lower()
+    if text in ("", "auto"):
+        return "auto"
+    try:
+        number = int(text)
+    except ValueError:
+        raise ValueError(
+            f"max agents per project must be auto or a whole number, not {raw.strip()!r}"
+        ) from None
+    if number < 1:
+        raise ValueError("max agents per project must be auto or at least 1")
+    return number
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -580,50 +573,31 @@ class UiSettingsChanged(Message):
         self.updates = updates
 
 
+def clear_note(role: str) -> Text:
+    """What a role binding's *Clear* does, in the note line under the buttons while it is
+    armed: the whole binding goes first, where the line's ellipsis cannot cut it."""
+    text = Text("The whole binding of ", style="bold")
+    text.append(role, style="bold")
+    text.append(
+        " goes: its binary, environment, args and account, as `aisquare team bind <role> "
+        "--clear` takes them; the role then launches as an unbound one."
+    )
+    return text
+
+
+def reset_note() -> Text:
+    """What *Reset all* keeps, in the note line under the buttons while it is armed."""
+    config = paths.config_path()
+    return Text(
+        f"Yours are kept as {config.name}.bak-<UTC date and time> beside {short_path(config)}; "
+        "every setting goes back to its default, and moving that file back undoes it.",
+        style="bold",
+    )
+
+
 def section_title(title: str, about: str) -> Text:
     """A section's header: its name in bold, then what it holds, dim."""
     return Text.assemble((title, "bold"), ("  " + about, "dim"))
-
-
-class ConfirmReset(ModalScreen[bool]):
-    """ "Reset every setting to its default?" — Reset or Cancel; Esc cancels."""
-
-    CSS = """
-    ConfirmReset { align: center middle; }
-    #resetbox { width: 64; height: auto; border: heavy $error; background: $surface;
-                padding: 1 2; }
-    #resetbox Static { height: auto; margin-bottom: 1; }
-    #resetbuttons { height: auto; }
-    #resetbuttons Button { margin-right: 1; }
-    """
-    BINDINGS: ClassVar = [("escape", "cancel", "cancel")]
-
-    def compose(self) -> ComposeResult:
-        config = paths.config_path()
-        with Vertical(id="resetbox"):
-            yield Static(Text("Reset all settings to default?", style="bold"))
-            yield Static(
-                Text(
-                    f"{config} moves aside to {config.name}.bak-<UTC date and time> beside "
-                    "it, and every setting goes back to its default. Moving that file back "
-                    "undoes the reset."
-                ),
-                id="reset-explained",
-            )
-            with Horizontal(id="resetbuttons"):
-                yield Button("Reset all", id="reset-confirm", variant="error")
-                yield Button("Cancel", id="reset-cancel")
-
-    def on_mount(self) -> None:
-        self.query_one("#reset-cancel", Button).focus()
-
-    @on(Button.Pressed, "#reset-confirm")
-    def _confirm(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#reset-cancel")
-    def action_cancel(self) -> None:
-        self.dismiss(False)
 
 
 class AppSettingsView(Vertical):
@@ -699,6 +673,10 @@ class AppSettingsView(Vertical):
     ALWAYS_SHOW_PATH_ABOUT: ClassVar[str] = (
         "Show each project's path under its name in the sidebar. "
         "Off: shown only when two projects share a name."
+    )
+    STOPPING_SECTION: ClassVar[tuple[str, str]] = ("Agents", "what Stop and x do")
+    CONFIRM_STOP_ABOUT: ClassVar[str] = (
+        "Off: they stop it at once, gracefully (no Force), the manager too."
     )
     UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether asq looks for a new release")
     # One line: at 80x24, beside the sidebar, three pushed the tab's Advanced one scroll down.
@@ -884,8 +862,11 @@ class AppSettingsView(Vertical):
         with Horizontal(id="settings-buttons"):
             yield Button("Save", id="save-settings", variant="primary", compact=True)
             yield Button("Reload", id="reload-settings", compact=True)
-            yield Button(
+            yield ConfirmButton(
                 "Reset all settings to default",
+                armed_label="Reset all? click again",
+                note=reset_note(),
+                note_in="#settings-note",
                 id="reset-settings",
                 variant="error",
                 compact=True,
@@ -1013,7 +994,9 @@ class AppSettingsView(Vertical):
         with Horizontal(classes="row"):
             yield Label("max agents per project")
             yield Input(
-                value=str(self.fleet.max_agents_per_project), type="integer", id="max-agents"
+                value=str(self.fleet.max_agents_per_project),
+                placeholder=f"{DEFAULT_MAX_AGENTS} (default) or a number",
+                id="max-agents",
             )
         with Horizontal(classes="row"):
             yield Label("worktree root")
@@ -1116,7 +1099,16 @@ class AppSettingsView(Vertical):
                         id=binding_widget_id("unset", role),
                         disabled=not (profile.env or profile.env_files),
                     ),
-                    Button("Clear", id=binding_widget_id("clear", role), variant="error"),
+                    # Its note in the line under Save and Reset all, as Reset all's: always in
+                    # sight, where a line under the row could be scrolled out of it.
+                    ConfirmButton(
+                        "Clear",
+                        armed_label="Clear? click again",
+                        note=clear_note(role),
+                        note_in="#settings-note",
+                        id=binding_widget_id("clear", role),
+                        variant="error",
+                    ),
                 ),
                 id=binding_widget_id("row", role),
                 classes="binding",
@@ -1163,6 +1155,14 @@ class AppSettingsView(Vertical):
         with Collapsible(
             title="Advanced", collapsed=True, id=PREFERENCES_ADVANCED, classes="advanced"
         ):
+            # Folded, not beside the two above: at 80x24 a third switch pushed this fold's
+            # title off the tab as it opens (the gate in test_app_settings_fits_an_80x24).
+            # The Stop dialog's toast names the way here when Don't ask again is saved.
+            yield Static(section_title(*self.STOPPING_SECTION), classes="section")
+            with Horizontal(classes="row preference"):
+                yield Label("Ask before stopping an agent", classes="preference-label")
+                yield Switch(self.ui.confirm_stop, id="ui-confirm-stop")
+            yield Static(Text(self.CONFIRM_STOP_ABOUT), id="ui-confirm-stop-about", classes="about")
             yield Static(
                 Text.assemble(
                     before, ("aisquare config set ui.always_show_project_path true", "bold"), after
@@ -1375,6 +1375,22 @@ class AppSettingsView(Vertical):
         self.call_later(self.reload_bindings)
         self.post_message(UiSettingsChanged(self.ui, self.updates))
 
+    def follow_ui(self, ui: UiSettings) -> None:
+        """``[ui]`` as a save made elsewhere left it — the Stop dialog's *Don't ask again*:
+        each switch the file changed under the form shows the file now, as if just read.
+
+        A switch the file did not change is left as the operator set it, so an edit not yet
+        saved survives; and a re-read of this form's own posts back what it shows, which
+        changes nothing.
+        """
+        for wid, key in _UI_SWITCHES.items():
+            value = getattr(ui, key)
+            if value == self._shown.get(wid, value):
+                continue
+            self.query_one(f"#{wid}", Switch).value = value
+            self._shown[wid] = value
+        self.ui = ui
+
     # --- writing -----------------------------------------------------------------------
 
     def _form_fleet(self, current: FleetSettings, changed: set[str]) -> FleetSettings | str:
@@ -1383,12 +1399,9 @@ class AppSettingsView(Vertical):
         if "max-agents" in changed:
             raw = self.query_one("#max-agents", Input).value.strip()
             try:
-                max_agents = int(raw)
-            except ValueError:
-                return f"max agents per project must be a whole number, not {raw!r}"
-            if max_agents < 1:
-                return "max agents per project must be at least 1"
-            update["max_agents_per_project"] = max_agents
+                update["max_agents_per_project"] = parse_max_agents(raw)
+            except ValueError as exc:
+                return str(exc)
         roles = dict(current.roles)
         for role in self._roles:
             row = self._role_row(role)
@@ -1624,9 +1637,7 @@ class AppSettingsView(Vertical):
                 UnsetKeyScreen(role, keys), lambda key, role=role: self._unset(role, key)
             )
         elif (role := self._binding_role(button, "clear")) is not None:
-            self.app.push_screen(
-                ConfirmClearBinding(role), lambda yes, role=role: self._clear(role, yes)
-            )
+            self._clear(role)  # its Clear asked in place: this is the press that confirmed
 
     def _binding_saved(self, seat: str | None) -> None:
         if seat is not None:
@@ -1644,9 +1655,7 @@ class AppSettingsView(Vertical):
         self.notify(f"{role}: {key} unset (aisquare team bind {role} --unset {key})", markup=False)
         self.call_later(self.reload_bindings)
 
-    def _clear(self, role: str, confirmed: bool | None) -> None:
-        if not confirmed:
-            return
+    def _clear(self, role: str) -> None:
         try:
             settings_service.clear_role_binding(role)
         except Exception as exc:
@@ -1658,13 +1667,9 @@ class AppSettingsView(Vertical):
     # --- reset -------------------------------------------------------------------------
 
     @on(Button.Pressed, "#reset-settings")
-    def _ask_to_reset(self) -> None:
-        """Every setting back to its default — once the operator says so in the dialog."""
-        self.app.push_screen(ConfirmReset(), self._reset_answered)
-
-    def _reset_answered(self, confirmed: bool | None) -> None:
-        if not confirmed:
-            return
+    def _reset(self) -> None:
+        """Every setting back to its default — on the second press of *Reset all*, which the
+        first armed in place with what it keeps (:func:`reset_note`)."""
         try:
             backup = settings_service.reset_settings()
         except OSError as exc:  # the operator's filesystem saying no: nothing moved

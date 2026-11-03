@@ -54,14 +54,14 @@ def test_the_file_is_parsed_again_only_when_its_bytes_change(
 
     monkeypatch.setattr(config_core, "_parse_toml", counted)
     path = tmp_path / "config.toml"
-    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+    path.write_text("[fleet]\nmax_agents_per_project = 6\n", encoding="utf-8")
 
-    assert [load_config(path).fleet.max_agents_per_project for _ in range(3)] == [4, 4, 4]
+    assert [load_config(path).fleet.max_agents_per_project for _ in range(3)] == [6, 6, 6]
     assert len(parses) == 1, "parsed once"
 
     seen = path.stat()
     with path.open("r+b") as handle:  # in place: the same inode
-        handle.write(b"[fleet]\nmax_agents_per_project = 5\n")
+        handle.write(b"[fleet]\nmax_agents_per_project = 7\n")
     os.utime(path, ns=(seen.st_atime_ns, seen.st_mtime_ns))
     again = path.stat()
     assert (again.st_ino, again.st_size, again.st_mtime_ns) == (
@@ -69,7 +69,7 @@ def test_the_file_is_parsed_again_only_when_its_bytes_change(
         seen.st_size,
         seen.st_mtime_ns,
     )
-    assert load_config(path).fleet.max_agents_per_project == 5
+    assert load_config(path).fleet.max_agents_per_project == 7
     assert len(parses) == 2, "and again once its bytes changed"
 
 
@@ -77,13 +77,13 @@ def test_each_load_hands_out_its_own_config(tmp_path: Path) -> None:
     """The kept parse is never handed out: a caller changes what it loaded and saves it, and a
     change it did not save is not what the next load reads."""
     path = tmp_path / "config.toml"
-    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+    path.write_text("[fleet]\nmax_agents_per_project = 6\n", encoding="utf-8")
 
     first = load_config(path)
     first.fleet.max_agents_per_project = 9  # a nested model: a shallow copy would share it
 
     second = load_config(path)
-    assert second.fleet.max_agents_per_project == 4
+    assert second.fleet.max_agents_per_project == 6
     assert second is not first and second.fleet is not first.fleet
 
 
@@ -125,15 +125,15 @@ def test_a_read_only_load_in_one_load_never_shares_the_kept_parse(tmp_path: Path
     from aisquare.core.config import one_load
 
     path = tmp_path / "config.toml"
-    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
+    path.write_text("[fleet]\nmax_agents_per_project = 6\n", encoding="utf-8")
 
     with one_load():
         load_config(path, copy=False)
         mine = load_config(path)
         mine.fleet.max_agents_per_project = 9  # a change it never saves
 
-    assert load_config(path, copy=False).fleet.max_agents_per_project == 4
-    assert load_config(path).fleet.max_agents_per_project == 4
+    assert load_config(path, copy=False).fleet.max_agents_per_project == 6
+    assert load_config(path).fleet.max_agents_per_project == 6
 
 
 def test_a_file_that_will_not_parse_is_read_again_each_load(tmp_path: Path) -> None:
@@ -143,8 +143,8 @@ def test_a_file_that_will_not_parse_is_read_again_each_load(tmp_path: Path) -> N
     path.write_text("[fleet\n", encoding="utf-8")
     with pytest.raises(tomllib.TOMLDecodeError):
         load_config(path)
-    path.write_text("[fleet]\nmax_agents_per_project = 4\n", encoding="utf-8")
-    assert load_config(path).fleet.max_agents_per_project == 4
+    path.write_text("[fleet]\nmax_agents_per_project = 6\n", encoding="utf-8")
+    assert load_config(path).fleet.max_agents_per_project == 6
     path.write_text("[fleet\n", encoding="utf-8")
     with pytest.raises(tomllib.TOMLDecodeError):
         load_config(path)
@@ -381,6 +381,26 @@ def test_config_get_and_set_cover_the_ui_preference(runner: CliRunner) -> None:
     rejected = runner.invoke(app, ["config", "set", "ui.always_show_project_path", "maybe"])
     assert rejected.exit_code != 0
     assert load_config().ui.always_show_project_path is True, "a rejected value must not land"
+
+
+def test_config_get_and_set_cover_asking_before_a_stop(runner: CliRunner) -> None:
+    """``[ui] confirm_stop`` — the Stop dialog's *Don't ask again*, and *Ask before stopping
+    an agent* under User preferences — is on by default and kept out of the file while on;
+    ``config get`` and ``config set`` reach it as they reach ``always_show_project_path``."""
+    assert AppConfig().ui.confirm_stop is True
+    shown = runner.invoke(app, ["config", "get", "ui.confirm_stop"])
+    assert shown.stdout.strip() == "ui.confirm_stop = true"
+
+    result = runner.invoke(app, ["config", "set", "ui.confirm_stop", "false"])
+    assert result.exit_code == 0, result.output
+    assert load_config().ui.confirm_stop is False
+    assert tomllib.loads(config_path().read_text(encoding="utf-8"))["ui"] == {"confirm_stop": False}
+
+    back_on = runner.invoke(app, ["config", "set", "ui.confirm_stop", "true"])
+    assert back_on.exit_code == 0, back_on.output
+    assert "ui" not in tomllib.loads(config_path().read_text(encoding="utf-8")), (
+        "on is the default, which the file leaves out"
+    )
 
 
 def test_experiment_is_off_by_default() -> None:

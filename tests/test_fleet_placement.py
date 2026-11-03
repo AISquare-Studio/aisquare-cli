@@ -67,6 +67,11 @@ MADE: dict[str, dict[str, str]] = {
             "today's socket, asked as the replay's refusal asks it, before a hand-off onto "
             "another agent stops its agent (task #15); nothing named"
         ),
+        "restart": (
+            "today's socket, asked whether a server listens there before a restart from an "
+            "SSH login stops its agent (0.9.2's #20, `_refuse_a_server_start_from_ssh`); "
+            "nothing named"
+        ),
     },
     "services/diagnostics.py": {
         "_check_tmux": "the default socket: is tmux installed, which version",
@@ -144,6 +149,10 @@ ACTS: dict[str, dict[str, str]] = {
             "today's socket, a freed path probed before a hand-off onto another agent "
             "stops its agent"
         ),
+        "_refuse_a_server_start_from_ssh": (
+            "today's socket, probed at its own path for a listener before a restart from an "
+            "SSH login (0.9.2's #20); no pane or session named"
+        ),
     },
     "services/diagnostics.py": {
         "_check_fleet": (
@@ -192,6 +201,9 @@ MINTS: dict[tuple[str, str], str | None] = {
     ("_session_to_join", "_Address"): "config.tmux_socket",
     ("_shutdown_sockets", "_Address"): "config.tmux_socket",
     ("_live_rows_here", "_Address"): "config.tmux_socket",
+    # Today's socket beside the servers the rows' records place, whose session NAMES a rename
+    # reads to keep clear of (0.9.2's `follow_name`); no session is joined or acted on by it.
+    ("_standing_codenames", "_Address"): "config.tmux_socket",
 }
 
 #: ``callee`` → the sites that may call it in ``services/fleet.py``.

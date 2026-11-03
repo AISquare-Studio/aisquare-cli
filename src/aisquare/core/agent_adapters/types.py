@@ -2196,8 +2196,18 @@ class AgentAccounts(Protocol):
         ...
 
     def usage(
-        self, account: ClaudeAccount, *, now: datetime | None, fetch: UsageFetch
-    ) -> ClaudeUsage: ...
+        self,
+        account: ClaudeAccount,
+        *,
+        now: datetime | None,
+        fetch: UsageFetch,
+        fresh: bool = False,
+    ) -> ClaudeUsage:
+        """The slot's usage windows, or why they cannot be read; ``fresh`` reads its login
+        again, as :meth:`signed_in`'s does (after Claude Code's quiet refresh of a stale
+        token, the token it left)."""
+        ...
+
     def limit_from_transcript(
         self, path: Path, *, now: datetime | None = None
     ) -> LimitNotice | None:

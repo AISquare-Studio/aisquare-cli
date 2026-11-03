@@ -102,8 +102,12 @@ def test_each_board_numbers_its_tasks_from_one_and_a_re_add_takes_no_number(
 
 
 def test_adds_racing_on_two_boards_never_share_or_skip_a_number(
-    work_dir: Path, other_dir: Path
+    work_dir: Path, other_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # What races is the numbering, not the runner: twelve durable commits in a row outlast the
+    # 5 s busy default on a loaded Windows runner, and the last add is refused "database is
+    # locked" (``store_locked``: retry shortly, nothing written), as it should be there.
+    monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "60000")
     here, there = _board(work_dir), _board(other_dir)
     barrier = threading.Barrier(12)
     errors: list[BaseException] = []

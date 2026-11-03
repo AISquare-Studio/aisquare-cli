@@ -29,7 +29,7 @@ from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
 from aisquare.core import paths
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.store import store_session
+from aisquare.core.store import SCHEMA_VERSION, store_session
 from aisquare.models import SessionUsage, UsageStats
 from aisquare.services import usage_share, usage_stats
 from aisquare.services.agent_events import session_key
@@ -383,12 +383,12 @@ def test_the_shared_batch_holds_the_claude_code_session_alone_and_the_stats_both
 
 
 def _as_before_v47() -> None:
-    """The store as a build of this branch left it before v47: its usage rows, Codex's among
-    them, and no ``usage_session.agent``."""
+    """The store as a build of this branch left it before v47 (v50 since the 0.9.2 merge): its
+    usage rows, Codex's among them, and no ``usage_session.agent``."""
     raw = sqlite3.connect(str(paths.db_path()))
     try:
         raw.execute("ALTER TABLE usage_session DROP COLUMN agent")
-        raw.execute("PRAGMA user_version = 46")
+        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
         raw.commit()
     finally:
         raw.close()
@@ -438,7 +438,7 @@ def _agents_unset(*sessions: str) -> None:
         where = f" WHERE session_id IN ({', '.join('?' * len(sessions))})" if sessions else ""
         raw.execute(f"UPDATE usage_session SET agent = NULL{where}", sessions)
         raw.commit()
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 47
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         raw.close()
 

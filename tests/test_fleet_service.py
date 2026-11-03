@@ -243,6 +243,8 @@ class FakeTmux(TmuxServer):
         """Session name → tmux's own id for it (``$N``), numbered from ``$0`` again by each
         server, as tmux numbers them: an id recorded on an earlier server names another
         session on the next one."""
+        self.renamed_windows: list[tuple[str, str]] = []
+        """``(pane_id, name)`` for every window renamed, as ``fleet relabel`` renames them."""
         self._counter = 0
         self._sessions_made = 0
 
@@ -615,6 +617,23 @@ class FakeTmux(TmuxServer):
         self.sessions[new] = self.sessions.pop(named)
         self.session_ids[new] = self.session_ids.pop(named)
         self.renamed.append((named, new))
+
+    def rename_window(self, pane_id: str, name: str) -> None:
+        self.binary()
+        self._require_server()
+        for windows in self.sessions.values():
+            for index, window in enumerate(windows):
+                if window.pane_id == pane_id:
+                    windows[index] = replace(window, name=name)
+                    self.renamed_windows.append((pane_id, name))
+                    return
+        raise TmuxError(f"can't find pane: {pane_id}")
+
+    def window_name(self, pane_id: str) -> str | None:
+        """The name of the window ``pane_id`` is in, as ``#{window_name}`` reads it."""
+        return next(
+            (w.name for ws in self.sessions.values() for w in ws if w.pane_id == pane_id), None
+        )
 
     def _require_server(self) -> None:
         """What every WRITE hits when no server is listening: a non-zero exit.
@@ -1759,11 +1778,13 @@ def test_spawn_retries_the_label_when_the_live_index_trips(
         task_id: str | None = None,
         store: object = None,
         held: Collection[str] = (),
+        trees: Path | None = None,
+        replaces: str | None = None,
     ) -> str:
         calls.append(wanted)
         if len(calls) == 1:
             return "coder-auth"  # looked free a moment ago
-        return real(project_, role, wanted=wanted, task_id=task_id, store=store)  # type: ignore[arg-type]
+        return real(project_, role, wanted=wanted, task_id=task_id, store=store, trees=trees)  # type: ignore[arg-type]
 
     monkeypatch.setattr(fleet_service, "next_label", racing)
     receipt = fleet_service.spawn(project, "coder", worktree=False, label="coder-auth")
@@ -1818,11 +1839,13 @@ def test_spawn_never_puts_a_second_live_agent_in_one_worktree(
         task_id: str | None = None,
         store: object = None,
         held: Collection[str] = (),
+        trees: Path | None = None,
+        replaces: str | None = None,
     ) -> str:
         if racing["on"]:
             racing["on"] = False
             return "coder-auth"  # looked free a moment ago
-        return real(project_, role, wanted=wanted, task_id=task_id, store=store)  # type: ignore[arg-type]
+        return real(project_, role, wanted=wanted, task_id=task_id, store=store, trees=trees)  # type: ignore[arg-type]
 
     monkeypatch.setattr(fleet_service, "next_label", once)
 
@@ -4257,7 +4280,9 @@ def test_a_refused_spawn_leaves_the_registration_as_it_found_it(
         elif refusal == "worktree":
             fleet_service.spawn(asked, "coder", worktree=True)
         else:
-            _settings(monkeypatch, max_agents_per_project=0)
+            # No file or `config set` takes 0 now (REVIEW-RC092-MI round 2, nit 1); set past
+            # validation, it is still the cap refusing a project with no live agent.
+            _settings(monkeypatch).max_agents_per_project = 0
             fleet_service.spawn(asked, "coder", worktree=False)
 
     assert len(tmux.spawned) == spawned_before, "nothing was started"
@@ -13578,6 +13603,15 @@ class _RefusedOn:
         return getattr(self._conn, name)
 
 
+def _as_the_owner(w: _Hubbed, verb: str) -> None:
+    """A resume run from the owner's shell, not the coder's pane ``hubbed`` became: since the
+    fold of #457 only the owner's ``fleet resume`` writes the signal (round 2, m1), and the
+    store errors below are the write's. An agent's is refused before any write, as
+    ``test_an_agents_resume_clears_no_signal_only_pause`` says. A pause writes from either."""
+    if verb == "resume":
+        w.monkeypatch.delenv(FLEET_AGENT_ENV_VAR, raising=False)
+
+
 @pytest.mark.parametrize("verb", ["pause", "resume"])
 def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
     hubbed: _Hubbed, runner: CliRunner, verb: str
@@ -13609,6 +13643,7 @@ def test_a_pause_or_resume_the_store_refuses_on_a_later_board_writes_none(
 
     w.monkeypatch.setattr(SqliteStore, "add_signal_events", locked_on_last)
     signals = {board.id: _events(board, "signal") for board in (w.hub, w.fleet)}
+    _as_the_owner(w, verb)
 
     with pytest.raises(FleetError) as refused:
         getattr(fleet_service, verb)(w.fleet)
@@ -13664,6 +13699,7 @@ def test_a_pause_or_resume_a_full_or_readonly_store_refuses_is_said_with_no_trac
             store._conn = conn
 
     w.monkeypatch.setattr(SqliteStore, "add_signal_events", refused_on_last)
+    _as_the_owner(w, verb)
 
     with pytest.raises(FleetError) as refused:
         getattr(fleet_service, verb)(w.fleet)
@@ -15887,7 +15923,10 @@ def test_a_scoped_shutdown_never_kills_the_session_that_took_a_renamed_projects_
     fleet_service.shutdown(project)
     old = _codename(project)
     fleet_service.rename(project, "spare-heron")
-    fleet_service.rename(other, old)
+    # Taken by the store, as 0.9.1 let `fleet rename` take it: 0.9.2's rename refuses a
+    # codename another project gave up, which keeps naming that one (an alias).
+    with store_session() as store:
+        store.set_codename(other.id, old)
     theirs = _coder(other)
     assert f"asq-{old}" in tmux.sessions, "the other project's session took the old name"
 
@@ -16460,7 +16499,10 @@ def test_a_row_ended_in_the_store_while_it_runs_keeps_its_label_and_its_tree(
         assert spawned.label != agent.label and spawned.cwd != agent.cwd
     with pytest.raises(FleetError, match="still runs"):
         fleet_service._refuse_occupied_worktree(
-            project, fleet_service.settings().worktree_dir, "coder-1", [agent.cwd]
+            project,
+            project.root / fleet_service.settings().worktree_dir / "coder-1",
+            "coder-1",
+            [agent.cwd],
         )
 
 
@@ -16761,10 +16803,10 @@ def test_rename_says_what_a_swallowed_tmux_rename_cost(
     assert fleet_service.rename(project, "ruby-fox").codename == "ruby-fox"
 
 
-@pytest.mark.parametrize("bad", ["Amber-Otter", "amber_otter", "amber-otter-x"])
+@pytest.mark.parametrize("bad", ["Amber-Otter", "amber_otter", "amber.otter", "x" * 25])
 def test_rename_rejects_a_bad_shape(tmux: FakeTmux, project: ProjectInfo, bad: str) -> None:
     before = fleet_service.ensure_codename(project).codename
-    with pytest.raises(FleetError, match="adjective-animal"):
+    with pytest.raises(FleetError, match="lowercase letters and digits"):
         fleet_service.rename(project, bad)
     assert _codename(project) == before and tmux.renamed == []
 
@@ -20440,11 +20482,13 @@ def test_the_auto_mode_evidence_is_read_before_the_window_starts(
         task_id: str | None = None,
         store: object = None,
         held: Collection[str] = (),
+        trees: Path | None = None,
+        replaces: str | None = None,
     ) -> str:
         calls.append(wanted)
         if len(calls) == 1:
             return "coder-auth"  # looked free a moment ago
-        return real(project_, role, wanted=wanted, task_id=task_id, store=store)  # type: ignore[arg-type]
+        return real(project_, role, wanted=wanted, task_id=task_id, store=store, trees=trees)  # type: ignore[arg-type]
 
     monkeypatch.setattr(fleet_service, "next_label", racing)
 

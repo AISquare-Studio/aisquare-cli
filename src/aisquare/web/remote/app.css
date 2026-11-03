@@ -127,7 +127,7 @@ body.kb .bottom { display: none; }
 .k-info { background: var(--raise); color: var(--fg); }
 .s-working { color: var(--ok); }
 .s-waiting { color: var(--accent); }
-.s-exited, .s-unknown { color: var(--muted); }
+.s-exited, .s-paused, .s-unknown { color: var(--muted); }
 
 /* the needs feed and its cards */
 .notice-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 8px 12px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 12px; font-size: 14px; }

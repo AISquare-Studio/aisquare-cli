@@ -198,7 +198,7 @@ def test_the_header_has_no_star_and_nothing_is_headed_captain(
         return [child.id for child in header.children], statics
 
     header, statics = drive(body)
-    assert header == ["fleet-title", "add-project"]
+    assert header == ["fleet-title", "add-project", "active-only"]  # the + and its filter
     assert "Captain" not in statics and not any("★" in text for text in statics)
 
 
@@ -494,7 +494,7 @@ def test_the_cursor_target_of_an_action_row_is_no_project(tmp_path: Path, script
         for key in ("down", "down", "down"):  # add → start-captain → spawn-agent
             await pilot.press(key)
             await settle(app)
-            seen.append((app.sidebar._cursor_key, app.sidebar._cursor_target()))
+            seen.append((app.sidebar.selected_key, app.sidebar._cursor_target()))
         return seen
 
     assert drive(body) == [("add", None), ("start-captain", None), ("spawn-agent", None)]

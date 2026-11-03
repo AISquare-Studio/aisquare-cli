@@ -554,7 +554,9 @@ class FakeAccounts:
     def token_state(self, account: ClaudeAccount) -> str:
         return "ok" if self.signed_in(account) else "missing"
 
-    def usage(self, account: ClaudeAccount, *, now: datetime | None, fetch: object) -> ClaudeUsage:
+    def usage(
+        self, account: ClaudeAccount, *, now: datetime | None, fetch: object, fresh: bool = False
+    ) -> ClaudeUsage:
         return ClaudeUsage(available=False, reason="Fake Agent keeps no usage")
 
     def limit_from_transcript(

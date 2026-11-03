@@ -20,12 +20,14 @@ from pathlib import Path
 import pytest
 from rich.cells import cell_len
 from textual import events
+from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, OptionList, Static
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
-from aisquare.cli.ui.project_menu import MENU_WIDTH, ConfirmRemove, ProjectMenu
+from aisquare.cli.ui.confirm_button import ConfirmButton
+from aisquare.cli.ui.project_menu import MENU_WIDTH, ProjectMenu
 from aisquare.cli.ui.sidebar import (
     SETTINGS_ICON,
     CardChips,
@@ -41,6 +43,7 @@ from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectForgetReport, ProjectInfo
 from aisquare.services import install_route
 from aisquare.services import project as project_service
+from tests.fleet_fakes import SessionsOnly, tmux_sessions_as
 from tests.test_ui_shell import (
     PRIVATE_SOCKET,
     Script,
@@ -51,6 +54,7 @@ from tests.test_ui_shell import (
     composited,
     drive,
     fleet_app,
+    refreshed,
     row_for,
     seed,
     settle,
@@ -63,6 +67,13 @@ from tests.test_ui_shell import script as _script
 #: Re-exported so pytest collects them here (the guard is autouse there, and here).
 no_real_tmux = _no_real_tmux
 script = _script
+
+
+@pytest.fixture(autouse=True)
+def fleet_sessions(monkeypatch: pytest.MonkeyPatch) -> SessionsOnly:
+    """A rename's codename half asks the fleet's tmux server for the project's session
+    (task #6): here a server that holds none and runs no tmux. A test that has one says so."""
+    return tmux_sessions_as(monkeypatch)
 
 
 @pytest.fixture
@@ -143,6 +154,20 @@ async def _menu(pilot: Pilot[None], choice: str) -> None:
     await settle(app)
 
 
+async def _remove(pilot: Pilot[None], *, by_keys: bool = False) -> None:
+    """Remove from fleet in the menu on screen, which asks in place: a double click on it, or
+    ↓ from the last option onto it and Enter twice."""
+    app = fleet_app(pilot)
+    assert isinstance(app.screen, ProjectMenu)
+    if by_keys:
+        options = app.screen.query_one(OptionList)
+        options.highlighted = options.option_count - 1
+        await pilot.press("down", "enter", "enter")
+    else:
+        await pilot.double_click("#project-menu-remove")
+    await settle(app)
+
+
 # --- the name on the card --------------------------------------------------------------------
 
 
@@ -194,9 +219,14 @@ def test_an_emoji_nickname_shows_whole_and_keeps_the_cards_columns(
 
 @pytest.mark.usefixtures("wide_click_chain")
 def test_a_double_click_renames_in_place_and_enter_saves_at_once(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, fleet_sessions: SessionsOnly
 ) -> None:
+    """The name is saved at once, on the UI thread; the codename follows it in a worker
+    (task #6) — the tmux session renamed, and a toast that names the new codename and the
+    old one that still works."""
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", None))
+    fleet_sessions.sessions.add("asq-amber-otter")
+    sessions = fleet_sessions
 
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)
@@ -215,6 +245,8 @@ def test_a_double_click_renames_in_place_and_enter_saves_at_once(
         await settle(app)  # no refresh tick runs in these tests (refresh_seconds=3600)
         return {
             **opened,
+            "toasts": await _toasts(app),
+            "subtitle": card_for(app, "prj_a").subtitle,
             "title": _title(app, "prj_a"),
             "closed": not field.display and title.display,
             "sidebar_focused": app.focused is app.sidebar,
@@ -223,15 +255,61 @@ def test_a_double_click_renames_in_place_and_enter_saves_at_once(
             "view": _view_id(app),
         }
 
-    seen = drive(go)
+    seen = drive(go, notifications=True)
     assert seen["open"] and seen["focused"]
     assert seen["value"] == seen["selected"] == "alpha", "prefilled with the name, all selected"
     assert seen["title"] == "🗂 Payments v2" and seen["closed"] and seen["sidebar_focused"]
     stored = _stored("prj_a")
     assert stored is not None and stored.nickname == "Payments v2"
-    assert stored.codename == "amber-otter", "the codename is not touched"
+    assert stored.codename == "payments-v2", "the codename follows the name"
+    # The session made by hand above is one no launch record names: #113 renames the
+    # project's sessions by the tmux id its records hold, never one found by a name built
+    # from its codename (review r7, finding 2), so this one is left as it is.
+    assert sessions.renamed == []
+    assert (
+        "✓ Payments v2 · fleet codename payments-v2 (tmux asq-payments-v2) — was amber-otter, "
+        "and --project amber-otter still works"
+    ) in str(seen["toasts"])
+    assert seen["subtitle"] is None, "the codename is the name's: the card need not say it"
     assert seen["undo"] == 0 and seen["order"], "a double-click is no drag: nothing moved"
     assert seen["view"] == "project-prj_a", "the first click of the two opened it"
+
+
+def test_a_card_says_a_codename_its_name_does_not_give_and_its_tooltip_always_does(
+    tmp_path: Path, script: Script
+) -> None:
+    """Task #6, acceptance 5: what a manager calls the project is on its card. A generated
+    codename (``earnest-hawk``), never renamed, is said dim under the name; one the name
+    gives (``beta``) is not; the name's tooltip says the codename either way. A ``fleet
+    rename`` reaches the card at the next frame."""
+    seed(tmp_path, ("prj_a", "alpha", "earnest-hawk"), ("prj_b", "beta", "beta"))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        a, b = card_for(app, "prj_a"), card_for(app, "prj_b")
+        line = a.query_one(".card-subtitle", Static)
+        seen: dict[str, object] = {
+            "a": shown(line) if line.display else None,
+            "b": b.query_one(".card-subtitle", Static).display,
+            "a tip": str(a.query_one(ProjectTitle).tooltip),
+            "b tip": str(b.query_one(ProjectTitle).tooltip),
+        }
+        with store_session() as store:
+            store.set_codename("prj_a", "quiet-lynx")
+        await refreshed(app)
+        seen["a after"] = shown(line)
+        seen["a tip after"] = str(a.query_one(ProjectTitle).tooltip)
+        return seen
+
+    seen = drive(go)
+    assert seen["a"] == "· earnest-hawk"
+    assert seen["b"] is False, "beta's codename is its name's: no line"
+    assert str(seen["a tip"]).startswith(
+        "fleet codename earnest-hawk (tmux asq-earnest-hawk, --project earnest-hawk) · "
+        "double-click or F2 to rename"
+    )
+    assert str(seen["b tip"]).startswith("fleet codename beta (tmux asq-beta, --project beta)")
+    assert seen["a after"] == "· quiet-lynx" and "quiet-lynx" in str(seen["a tip after"])
 
 
 @pytest.mark.usefixtures("wide_click_chain")
@@ -465,6 +543,7 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
             labels = [
                 str(options.get_option_at_index(i).prompt) for i in range(options.option_count)
             ]
+            labels.append(str(screen.query_one("#project-menu-remove", Button).label))
             width = screen.query_one("#project-menu").outer_size.width
         await pilot.press("escape")
         app.sidebar.focus()
@@ -498,11 +577,15 @@ def test_the_menu_opens_from_its_button_the_dot_key_and_a_right_click(
         "✎ Rename",
         "📌 Pin",
         f"{SETTINGS_ICON} Open settings",  # the sidebar's monotone gear, not the emoji
+        "⏸ Pause agents…",
+        "▶ Resume agents…",
         "↺ Start fresh…",
-        "✗ Remove from fleet…",
+        "✗ Remove from fleet",  # a row of its own that asks in place, not a dialog: no …
     ]
     assert seen["width"] == MENU_WIDTH
-    assert seen["view"] == "project-prj_a", "a right-click opens the menu, not the project"
+    # ↓ opened beta, as the arrows open the row they land on; a right-click on alpha
+    # opens its menu and leaves beta's view where it is.
+    assert seen["view"] == "project-prj_b", "a right-click opens the menu, not the project"
 
 
 def test_the_menu_renames_pins_and_opens_the_settings_tab(tmp_path: Path, script: Script) -> None:
@@ -537,9 +620,12 @@ def test_the_menu_renames_pins_and_opens_the_settings_tab(tmp_path: Path, script
     assert (seen["view"], seen["tab"]) == ("project-prj_b", "tab-settings")
 
 
-def test_remove_asks_first_then_forgets_the_project_and_its_views_go_with_it(
+def test_remove_asks_in_place_then_forgets_the_project_and_its_views_go_with_it(
     tmp_path: Path, script: Script
 ) -> None:
+    """Remove asks in place (user, 2026-10-30): its first click arms it, removes nothing and
+    says under it what leaves the fleet; Esc disarms it and keeps the menu open, a second
+    Esc closes it; a double click on it removes."""
     seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None), ("prj_c", "gamma", None))
     script["prj_b"] = [status("prj_b", "manager", "manager", "exited", exit_status=0)]
 
@@ -549,21 +635,36 @@ def test_remove_asks_first_then_forgets_the_project_and_its_views_go_with_it(
         await _click(pilot, row_for(app, "agt_b_manager"))  # its agent's pane is open
         app.sidebar.open_menu("prj_b")
         await settle(app)
-        await _menu(pilot, "remove")
-        asked = isinstance(app.screen, ConfirmRemove)
-        question = shown(app.screen.query_one("#confirm-remove-text", Static)) if asked else ""
-        await pilot.press("enter")  # Cancel has the focus: an Enter too fast removes nothing
+        menu = app.screen
+        remove = menu.query_one("#project-menu-remove", ConfirmButton)
+        at_rest = remove.region
+        await pilot.click(remove)
         await settle(app)
+        screen = Region(0, 0, *app.size)
+        armed = {
+            "menu": app.screen is menu,
+            "label": str(remove.label),
+            "note": shown(menu.query_one("#project-menu-note", Static)),
+            "note on screen": screen.contains_region(menu.query_one("#project-menu-note").region),
+            "stayed": remove.region == at_rest,
+        }
         kept = _stored("prj_b") is not None
+        await pilot.press("escape")
+        await settle(app)
+        disarmed = (app.screen is menu, str(remove.label))
+        await pilot.press("escape")
+        await settle(app)
+        closed = not isinstance(app.screen, ProjectMenu)
         app.sidebar.open_menu("prj_b")
         await settle(app)
-        await _menu(pilot, "remove")
-        await pilot.click("#confirm-remove-yes")
+        await _remove(pilot)
         toasts = await _toasts(app)
         views = [child.id for child in app.content.children]
         return {
-            "question": question,
+            "armed": armed,
             "kept": kept,
+            "disarmed": disarmed,
+            "closed": closed,
             "toasts": toasts,
             "cards": [card.project.id for card in app.sidebar.query(ProjectCard)],
             "views": views,
@@ -573,9 +674,15 @@ def test_remove_asks_first_then_forgets_the_project_and_its_views_go_with_it(
         }
 
     seen = drive(go, notifications=True)
-    assert "Remove beta from the fleet?" in str(seen["question"])
-    assert "Its folder and history are kept" in str(seen["question"])
-    assert seen["kept"], "Cancel removed nothing"
+    armed = seen["armed"]
+    assert isinstance(armed, dict) and armed["menu"] is True
+    assert armed["label"] == "✗ Remove? click again"
+    assert "beta leaves the fleet" in armed["note"], armed
+    assert "its folder and history are kept" in armed["note"], armed
+    assert armed["note on screen"] is True, "room for the note was kept as the menu was placed"
+    assert armed["stayed"] is True, "the second click lands where the first did"
+    assert seen["kept"], "one click removed nothing"
+    assert seen["disarmed"] == (True, "✗ Remove from fleet") and seen["closed"] is True
     assert _stored("prj_b") is None, "forgotten — the registration hidden, history kept"
     with store_session() as store:
         tombstoned = store.list_projects(include_forgotten=True)
@@ -587,6 +694,60 @@ def test_remove_asks_first_then_forgets_the_project_and_its_views_go_with_it(
     assert (seen["current"], seen["selected"]) == ("project-prj_c", "project:prj_c"), (
         "what was open on it moves to the next project in the list"
     )
+
+
+def test_a_menu_opened_at_the_screen_s_foot_keeps_room_for_remove_s_note(
+    tmp_path: Path, script: Script
+) -> None:
+    """The menu is placed with the rows the armed Remove's note takes: opened under the last
+    row of the screen, arming Remove shows its whole note and moves Remove nowhere."""
+    (project,) = seed(tmp_path, ("prj_a", "a project with a rather long name", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, int]:
+        app = fleet_app(pilot)
+        app.push_screen(ProjectMenu(project, Region(0, app.size.height - 1, 20, 1)))
+        await settle(app)
+        menu = app.screen
+        remove = menu.query_one("#project-menu-remove", ConfirmButton)
+        at_rest = remove.region
+        await pilot.click(remove)
+        await settle(app)
+        note = menu.query_one("#project-menu-note", Static).region
+        screen = Region(0, 0, *app.size)
+        return remove.armed, remove.region == at_rest, screen.contains_region(note), note.height
+
+    armed, stayed, on_screen, rows = drive(go)
+    assert (armed, stayed, on_screen) == (True, True, True)
+    assert rows >= 2, "a long name wraps the note over more than one row"
+
+
+def test_the_menu_s_arrows_reach_remove_as_one_more_option(tmp_path: Path, script: Script) -> None:
+    """↓ from the last option and ↑ from the first land on Remove; ↑ and ↓ on it go back."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> list[str | None]:
+        app = fleet_app(pilot)
+        app.sidebar.open_menu("prj_a")
+        await settle(app)
+        options = app.screen.query_one(OptionList)
+        seen: list[str | None] = []
+        for start, key in (
+            (options.option_count - 1, "down"),
+            (None, "up"),
+            (0, "up"),
+            (None, "down"),
+        ):
+            if start is not None:
+                options.highlighted = start
+            await pilot.press(key)
+            await settle(app)
+            focused = app.focused
+            seen.append(
+                focused.id if isinstance(focused, Button) else f"option {options.highlighted}"
+            )
+        return seen
+
+    assert drive(go) == ["project-menu-remove", "option 5", "project-menu-remove", "option 0"]
 
 
 def test_removing_a_project_moves_to_a_neighbour_the_next_frame_still_lists(
@@ -614,9 +775,7 @@ def test_removing_a_project_moves_to_a_neighbour_the_next_frame_still_lists(
         await _click(pilot, card_for(app, "prj_b").query_one(ProjectTitle))
         app.sidebar.open_menu("prj_b")
         await settle(app)
-        await _menu(pilot, "remove")
-        await pilot.click("#confirm-remove-yes")
-        await settle(app)
+        await _remove(pilot, by_keys=True)
         return _view_id(app), app.sidebar.selected_key
 
     assert drive(go) == ("project-prj_a", "project:prj_a")
@@ -625,21 +784,20 @@ def test_removing_a_project_moves_to_a_neighbour_the_next_frame_still_lists(
 def test_remove_names_the_command_that_brings_it_back_quoted(
     tmp_path: Path, script: Script
 ) -> None:
-    """The way back is a command to copy: a root with a space is one argument in it, as in
-    the toast after the removal (``install_route.command_line``: this shell's quotes)."""
+    """The way back is a command to copy, in the toast after the removal: a root with a space
+    is one argument in it (``install_route.command_line``: this shell's quotes)."""
     (project,) = seed(tmp_path, ("prj_a", "my app", None))
 
     async def go(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         app.sidebar.open_menu("prj_a")
         await settle(app)
-        await _menu(pilot, "remove")
-        assert isinstance(app.screen, ConfirmRemove)
-        return shown(app.screen.query_one("#confirm-remove-text", Static))
+        await _remove(pilot)
+        return await _toasts(app)
 
-    question = drive(go)
+    toasts = drive(go, notifications=True)
     onboard = install_route.command_line(["aisquare", "project", "onboard", str(project.root)])
-    assert f"{onboard} brings it back" in question
+    assert f"{onboard} brings it back" in toasts
     assert install_route.split_line(onboard)[-1] == str(project.root), (
         "quoted: the space is inside the argument"
     )
@@ -653,9 +811,7 @@ def test_removing_the_last_project_shows_welcome(tmp_path: Path, script: Script)
         await _click(pilot, card_for(app, "prj_a").query_one(ProjectTitle))
         app.sidebar.open_menu("prj_a")
         await settle(app)
-        await _menu(pilot, "remove")
-        await pilot.click("#confirm-remove-yes")
-        await settle(app)
+        await _remove(pilot)
         view = app.current_view()
         return (view.id if view is not None else None), app.sidebar.selected_key
 
@@ -684,9 +840,7 @@ def test_remove_is_refused_while_the_project_has_live_agents(
         app = fleet_app(pilot)
         app.sidebar.open_menu("prj_a")
         await settle(app)
-        await _menu(pilot, "remove")
-        assert isinstance(app.screen, ConfirmRemove)
-        app.screen.query_one("#confirm-remove-yes", Button).press()
+        await _remove(pilot)
         toasts = await _toasts(app)
         return toasts, [card.project.id for card in app.sidebar.query(ProjectCard)]
 

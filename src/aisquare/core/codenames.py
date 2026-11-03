@@ -8,6 +8,11 @@ project id — itself a hash of the resolved root — so the same checkout gets 
 same name on every machine and after a ``context.db`` loss; the user cannot
 predict it, which keeps the fun, and can rename it (``fleet rename``).
 
+A project RENAMED takes a slug of its new name as its codename
+(:func:`codename_from_text`: ``AISquare CLI`` → ``aisquare-cli``), so the name a manager
+quotes is one the owner can find on its card. A chosen codename has that wider shape
+(:data:`USER_CODENAME`); a generated one is still ``adjective-animal`` (:data:`CODENAME`).
+
 Both word lists are hand-curated: lowercase ASCII, three to seven letters,
 family-friendly, nothing that reads badly beside an animal. ``tests`` pin the
 charset, ordering and uniqueness of the lists. See docs/plans/fleet-tui.md §5.7.
@@ -19,8 +24,21 @@ import hashlib
 import re
 from collections.abc import Collection
 
+from aisquare.core import names
+from aisquare.core.ids import PROJECT_PREFIX
+
 CODENAME = re.compile(r"^[a-z]{3,7}-[a-z]{3,7}$")
-"""The shape every codename — generated or user-chosen — must have."""
+"""The shape of a GENERATED codename (:func:`codename_for`): two curated words."""
+
+CODENAME_MAX = 24
+"""The longest codename, in characters: ``asq-<codename>`` and ``fleet/<codename>/…`` stay
+short enough to read in a tmux status line and a branch list."""
+
+USER_CODENAME = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+"""The shape a codename a person chose may have (``fleet rename``, or a project renamed):
+lowercase ASCII words of letters and digits joined by single ``-``, starting with a letter.
+Never a ``.``, ``:`` (tmux target separators), ``..``, space or ``/`` (a git ref component),
+and at most :data:`CODENAME_MAX` characters (:func:`is_codename`)."""
 
 WORD = re.compile(r"^[a-z]{3,7}$")
 
@@ -59,8 +77,60 @@ ANIMALS: tuple[str, ...] = (
 
 
 def is_codename(text: str) -> bool:
-    """Whether ``text`` has the codename shape (any words, not just ours)."""
-    return CODENAME.match(text) is not None
+    """Whether ``text`` may be a codename: :data:`USER_CODENAME`'s shape, at most
+    :data:`CODENAME_MAX` characters, and not a prefix of every project id (``p``, ``pr``,
+    ``prj``: ``--project prj`` names every project by its id, ``prj_…``, so a codename
+    spelled so could never name its own). Every generated codename is one."""
+    return (
+        len(text) <= CODENAME_MAX
+        and USER_CODENAME.match(text) is not None
+        and not PROJECT_PREFIX.startswith(text)
+    )
+
+
+def codename_from_text(text: str) -> str | None:
+    """The codename a project named ``text`` takes, or ``None`` when ``text`` gives none.
+
+    :func:`aisquare.core.names.slug` of it, the one rule a fleet agent's label is made by
+    too (``services.fleet.label_from_text``), so one typed name makes the same of either:
+    case folded, accents folded (``Café ✨ Board`` → ``cafe-board``, ``Straße`` →
+    ``strasse``), each run of anything else outside ``[a-z0-9]`` one ``-`` (a letter with no
+    ASCII base too: ``Søren board`` → ``s-ren-board``), cut to :data:`CODENAME_MAX` with no
+    ``-`` at either end. Then trimmed to start with a letter: ``2024 Roadmap`` →
+    ``roadmap``. ``!!!``, ``42`` and ``日本語`` give nothing (``None``), and neither do
+    ``p``, ``pr`` or ``prj`` (:func:`is_codename`). Pure: whether it is free is
+    :func:`first_free`'s to say.
+    """
+    slug = re.sub(r"^[^a-z]+", "", names.slug(text, max_len=CODENAME_MAX))
+    return slug if slug and is_codename(slug) else None
+
+
+def why_no_codename(text: str) -> str:
+    """Why :func:`codename_from_text` gives ``text`` no codename, in a note's words: it leaves
+    no letter, or it leaves ``p``, ``pr`` or ``prj``, how every project id begins."""
+    slug = re.sub(r"^[^a-z]+", "", names.slug(text, max_len=CODENAME_MAX))
+    if slug and PROJECT_PREFIX.startswith(slug):
+        return (
+            f"{slug!r} is how every project id begins ({PROJECT_PREFIX}…), so "
+            f"--project {slug} would name them all"
+        )
+    return "it needs a letter a-z once accents are dropped"
+
+
+def first_free(base: str, taken: Collection[str]) -> str:
+    """``base`` when nobody holds it, else the first of ``base-2``, ``base-3``, … that is
+    free — ``base`` cut short enough (no ``-`` left at its end) that the suffix keeps the
+    whole within :data:`CODENAME_MAX`. ``base`` is a codename (:func:`is_codename`)."""
+    unavailable = set(taken)
+    if base not in unavailable:
+        return base
+    number = 2
+    while True:
+        suffix = f"-{number}"
+        candidate = base[: CODENAME_MAX - len(suffix)].rstrip("-") + suffix
+        if candidate not in unavailable:
+            return candidate
+        number += 1
 
 
 def _pair(index: int) -> str:

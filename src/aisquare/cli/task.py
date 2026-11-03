@@ -1,4 +1,4 @@
-"""``aisquare task`` — the shared, idempotent team task list."""
+"""``aisquare task`` — the shared team task list: add is idempotent while a task is open."""
 
 from __future__ import annotations
 
@@ -31,7 +31,8 @@ _STATUSES: tuple[str, ...] = get_args(TaskStatus)
 _STATUS_HELP = ", ".join(_STATUSES)
 
 app = typer.Typer(
-    help="Shared team tasks: add is idempotent, claim is atomic.", no_args_is_help=True
+    help="Shared team tasks: add is idempotent while a task is open, claim is atomic.",
+    no_args_is_help=True,
 )
 
 TaskRef = Annotated[
@@ -139,7 +140,8 @@ def add(
     ] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Add a shared task. Re-adding the same task is safe — you get the original.
+    """Add a shared task. Re-adding an open task is safe — you get it back; re-adding a
+    done or dropped task's title adds a new task, which names the one it supersedes.
 
     The contract is checked for ``\\[team] brief_blocks`` (objective:, acceptance:,
     boundaries:): a missing block warns, or refuses under ``\\[team] brief_strict``."""
@@ -187,15 +189,26 @@ def add(
         _fail_team(exc, as_session)
     delivery = team_service.last_delivery()
     emit_write_warning(delivery)
+    supersedes = team_service.last_supersedes()
     if get_state().json_output:
         payload = {"created": created, **task.model_dump(mode="json")}
         payload.update(delivery_fields(delivery))
         payload["missing_blocks"] = missing
+        # Always present, null when the add did not bump a closed task off its key —
+        # a script should be able to read it without probing (cf. `task show`'s
+        # `stopped_because`).
+        payload["supersedes"] = (
+            {"number": supersedes.number, "id": supersedes.id, "status": supersedes.status}
+            if supersedes is not None
+            else None
+        )
         typer.echo(json.dumps(payload))
     else:
         verb = "added" if created else "already tracked (idempotent)"
+        note = team_service.supersedes_note(supersedes)
         stdout_console().print(
-            f"✓ {verb}: {team_service.task_label(task)} {task.title}{receipt_suffix(delivery)}"
+            f"✓ {verb}: {team_service.task_label(task)} {task.title}"
+            f"{note}{receipt_suffix(delivery)}"
         )
 
 

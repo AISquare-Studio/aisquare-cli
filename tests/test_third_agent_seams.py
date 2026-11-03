@@ -386,9 +386,11 @@ class _AskedOverTheNetwork(GeminiShapedAccounts):
     def __init__(self) -> None:
         self.asked: list[int] = []
 
-    def usage(self, account: ClaudeAccount, *, now: Any, fetch: object) -> ClaudeUsage:
+    def usage(
+        self, account: ClaudeAccount, *, now: Any, fetch: object, fresh: bool = False
+    ) -> ClaudeUsage:
         self.asked.append(account.slot)
-        reading = super().usage(account, now=now, fetch=fetch)
+        reading = super().usage(account, now=now, fetch=fetch, fresh=fresh)
         return reading.model_copy(update={"fetched_at": None})  # taken now, as a request is
 
 

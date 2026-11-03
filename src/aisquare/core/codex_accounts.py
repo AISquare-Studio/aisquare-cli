@@ -661,9 +661,14 @@ class CodexAccounts:
         return "ok" if signed_in(account) else "missing"
 
     def usage(
-        self, account: ClaudeAccount, *, now: datetime | None, fetch: object = None
+        self,
+        account: ClaudeAccount,
+        *,
+        now: datetime | None,
+        fetch: object = None,
+        fresh: bool = False,
     ) -> ClaudeUsage:
-        return usage(account, now=now)
+        return usage(account, now=now)  # read off its rollouts on every call: always fresh
 
     def limit_from_transcript(
         self, path: Path, *, now: datetime | None = None

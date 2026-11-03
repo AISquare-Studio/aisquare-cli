@@ -157,8 +157,13 @@ def test_rename_names_the_active_project(runner: CliRunner, work_dir: Path) -> N
     project = _added(work_dir)
     result = runner.invoke(app, ["project", "rename", "Login [wip] — día 2"])
     assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == "✓ work is now called Login [wip] — día 2"
+    # The codename follows the name (task #6): it had none, so there is no old one to say.
+    assert result.stdout.splitlines() == [
+        "✓ work is now called Login [wip] — día 2",
+        "  fleet codename: login-wip-dia-2 (tmux asq-login-wip-dia-2)",
+    ]
     assert _stored(project).nickname == "Login [wip] — día 2"
+    assert _stored(project).codename == "login-wip-dia-2"
 
     listed = runner.invoke(app, ["project", "list"])
     assert "Login [wip] — día 2" in listed.stdout
@@ -182,8 +187,11 @@ def test_rename_clear_shows_the_folder_again(
     project_service.set_nickname(project, "Q3 launch")
     result = runner.invoke(app, ["project", "rename", "--clear"])
     assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == "✓ Q3 launch is now called work"
-    assert _stored(project).nickname is None
+    assert result.stdout.splitlines() == [
+        "✓ Q3 launch is now called work",
+        "  fleet codename: work (tmux asq-work)",
+    ]
+    assert _stored(project).nickname is None and _stored(project).codename == "work"
 
 
 def test_rename_takes_another_project_by_any_of_its_names(

@@ -197,6 +197,9 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
             # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
             _check_fleet_capacity(),
             _check_watcher(),
+            # Warns when two asqs, or an asq and this aisquare, run different releases (#20), so
+            # it waits with the late rows.
+            _check_instances(),
             # Only while the experimental captain is off: one ok row saying how to turn it
             # on. On, doctor is as it was before the switch.
             *_optional(_captain_check()),
@@ -2203,13 +2206,14 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     """
     if not paths.db_path().exists():
         return None
-    accounts = [
+    listed = [
         account
         for account in claude_accounts_service.list_accounts()
         if claude_accounts_core.kind(account.agent).legacy_slots
-        and not account.disabled
-        and claude_accounts_core.signed_in(account)
     ]
+    # Signed in as every surface weighs it: over SSH, a slot the Mac saw logged out is out.
+    signed = claude_accounts_service.signed_in_slots(listed)
+    accounts = [account for account in listed if not account.disabled and account.slot in signed]
     if not accounts:
         return None
     settings = claude_accounts_service.accounts_settings()
@@ -2861,9 +2865,12 @@ def _check_fleet_capacity() -> DoctorCheck:
     """``fleet capacity``: memory headroom and live agents against admission's limits (#283).
 
     What the next ``fleet spawn`` would meet, read as ``aisquare fleet capacity`` reads it:
-    ok with the numbers; warn when a spawn would be refused (below ``min_free_mb``,
-    critical pressure, the fleet at ``max_agents_total``) or memory pressure is at warn.
-    Read-only, and it does not bring a home into being.
+    ok with the numbers and each load signal (value, threshold, verdict); warn when a spawn
+    would be refused (below ``min_free_mb``, critical pressure, the fleet at
+    ``max_agents_total``) or memory pressure is at warn. A busy CPU or a warm machine is
+    said, not warned of: it comes and goes, holds only a project at ``busy_floor``, and
+    ``install`` would list it as something to look at on every busy box. Read-only, and it
+    does not bring a home into being.
     """
     name = "fleet capacity"
     try:
@@ -2877,16 +2884,27 @@ def _check_fleet_capacity() -> DoctorCheck:
         f"{head.available_mb} MB available" if head.available_mb is not None else "memory unread"
     )
     budget = f" of {report.max_agents_total}" if report.max_agents_total else ""
+    burst = (
+        f"busy_burst {report.busy_burst} per {report.busy_hold_minutes:g} min"
+        if report.busy_burst
+        else "busy_burst off"
+    )
+    mode = f"auto, {burst}" if report.auto else f"max {report.max_agents_per_project} per project"
+    signals = "; ".join(
+        f"{signal.name} {signal.value} ({signal.threshold}: {signal.verdict})"
+        for signal in report.signals
+    )
     detail = (
         f"{memory}, pressure {head.pressure}, floor {report.min_free_mb or 'off'}; "
-        f"{report.live_total}{budget} agents live — {report.reason}"
+        f"{report.live_total}{budget} agents live — {report.reason}; admission {mode}: "
+        f"{signals}"
     )
     if not report.admits or head.pressure == "warn":
         return _warn(
             name,
             detail,
-            "aisquare fleet capacity lists the live agents — stop one, free memory, or "
-            "change max_agents_total / min_free_mb in [fleet]",
+            "aisquare fleet capacity lists the live agents and the load — stop one, free "
+            "memory, or change max_agents_total / min_free_mb / busy_* in [fleet]",
         )
     return _ok(name, detail)
 
@@ -2917,6 +2935,37 @@ def _check_watcher() -> DoctorCheck:
             "aisquare watch --stop, then aisquare watch --detach",
         )
     return _ok(name, f"running (pid {found.pid}), {looked}")
+
+
+def _check_instances() -> DoctorCheck:
+    """``asq instances``: the asq UIs live on this home (``core.instances``, #20), and whether
+    each runs this aisquare's release and store schema. Two releases on one home race on the
+    store's migrations, so a mismatch warns; anything else is said at ok. A look: no record is
+    pruned and no folder made, as ``aisquare instances`` does."""
+    name = "asq instances"
+    try:
+        from aisquare.core import instances
+
+        live = instances.live_instances(prune=False)
+        me = instances.this_instance() or instances.describe_this_process()
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    if not live:
+        return _ok(name, "no asq is running on this home")
+    others = [i for i in live if i.differs_from(me)]
+    if others:
+        named = "; ".join(f"{i.label}: schema {i.schema}" for i in others)
+        return _warn(
+            name,
+            f"{len(live)} running, {len(others)} on another release than this aisquare "
+            f"{me.version} (schema {me.schema}): {named}",
+            "Quit "
+            + ("it" if len(others) == 1 else "each of them")
+            + " (q in that asq), then start asq again, so one release uses this home",
+        )
+    one = len(live) == 1
+    where = "; ".join(i.label + (" (this one)" if i.id == me.id else "") for i in live)
+    return _ok(name, f"{len(live)} running{'' if one else ', all on ' + me.version}: {where}")
 
 
 def _check_anthropic_routing(server: explainability_ops.FleetServer | None = None) -> DoctorCheck:

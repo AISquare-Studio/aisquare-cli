@@ -24,10 +24,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -772,6 +772,34 @@ def _versioned(dumped: dict[str, Any]) -> dict[str, Any]:
     return {_VERSION_KEY: kept if newer else CONFIG_VERSION, **dumped}
 
 
+BUSY_HOLD_DEFAULT_MINUTES = 5.0
+"""How long auto admission holds a project, by default (``busy_hold_minutes``)."""
+BUSY_HOLD_MAX_MINUTES = 365 * 24 * 60
+"""The longest hold ``busy_hold_minutes`` takes: a year of minutes."""
+BUSY_FLOOR_MAX = 1000
+"""The highest ``busy_floor`` and ``busy_burst``: past any fleet a machine runs."""
+BUSY_LOAD_PER_CPU_MAX = 1000.0
+"""The highest ``busy_load_per_cpu``: past any load a machine survives."""
+
+
+def _max_agents(value: object) -> object:
+    """``max_agents_per_project`` as a file, ``config set`` or a caller gives it: ``"auto"``
+    in any case and around any spaces, as App settings' field takes it; anything else is
+    left to the number it must be, of at least 1. A boolean is refused: a TOML ``true`` was
+    read as 1 (REVIEW-RC092-MI round 2, nit 1)."""
+    if isinstance(value, bool):
+        raise ValueError('max_agents_per_project is "auto" or a whole number of at least 1')
+    if isinstance(value, str):
+        text = value.strip()
+        return "auto" if text.lower() == "auto" else text
+    return value
+
+
+MaxAgents = Annotated[Annotated[int, Field(ge=1)] | Literal["auto"], BeforeValidator(_max_agents)]
+"""``[fleet] max_agents_per_project``: ``"auto"`` or a number of at least 1. Unbounded, a
+``config set`` of 0 saved, and every spawn was then refused "already runs 0 agents"."""
+
+
 class FleetSettings(BaseModel):
     """The fleet: one private tmux server, one session per project, agents as windows.
 
@@ -790,6 +818,27 @@ class FleetSettings(BaseModel):
     much available memory, or at critical memory pressure (``0``: off);
     ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
     ``test_gate_wait_minutes`` how long the gate waits for it.
+
+    ``max_agents_per_project`` is a number of at least 1, refused at as it always was, or
+    ``"auto"`` (in any case), the default: a spawn is admitted unless the machine is busy,
+    and while it is, a spawn into a project that already runs ``busy_floor`` live agents is
+    held (refused, ``capacity_busy``) for ``busy_hold_minutes``, without probing again; a
+    project below the floor is always admitted. Auto has no fixed per-project number: on a
+    calm machine the only per-project bound is ``busy_burst``, the new agents a project
+    above the floor is admitted per ``busy_hold_minutes`` (default 2; ``0`` turns the guard
+    off), since the load average moves minutes after a burst of spawns does; one more is
+    held as a busy one is (``capacity_busy``), until the oldest of those admits is that old.
+    Busy is any one of: the 5-minute load average per logical CPU at ``busy_load_per_cpu``,
+    Linux's CPU pressure (``some avg60``) at ``busy_cpu_psi`` (``0`` turns either off),
+    memory pressure at ``busy_memory``, macOS's thermal pressure at ``busy_thermal``
+    (``"off"`` turns either off) — ``core.load``. ``min_free_mb``, ``max_agents_total`` and
+    a group's ``max_agents`` refuse in either mode, below the floor too. Each ``busy_*``
+    number is finite and bounded (no ``inf``, no ``nan``): the hold lasts at most
+    :data:`BUSY_HOLD_MAX_MINUTES`, a year, the floor is 1 to :data:`BUSY_FLOOR_MAX` agents
+    (a project below it is always admitted, so at 0 one with no agent at all was held), CPU
+    pressure is a percentage, and the load per CPU at most :data:`BUSY_LOAD_PER_CPU_MAX`.
+    Unbounded, ``busy_hold_minutes = inf`` saved, and every held spawn then crashed
+    computing its retry time instead of refusing.
 
     Auto-stop (P2-W1b, #283): with ``auto_stop_finished`` a worker of a role in
     ``auto_stop_roles`` that has finished — its task closed (or a ``result`` posted),
@@ -827,7 +876,7 @@ class FleetSettings(BaseModel):
 
     tmux_socket: str = "asq"
     escape_key: str = "f12"
-    max_agents_per_project: int = 4
+    max_agents_per_project: MaxAgents = "auto"
     worktree_dir: str = ".aisquare-worktrees"
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
@@ -847,6 +896,17 @@ class FleetSettings(BaseModel):
     min_free_mb: int = 2048
     test_gate_mb: int = 0
     test_gate_wait_minutes: int = 15
+    busy_floor: int = Field(default=3, ge=1, le=BUSY_FLOOR_MAX)
+    busy_burst: int = Field(default=2, ge=0, le=BUSY_FLOOR_MAX)
+    busy_load_per_cpu: float = Field(
+        default=1.0, ge=0, le=BUSY_LOAD_PER_CPU_MAX, allow_inf_nan=False
+    )
+    busy_cpu_psi: float = Field(default=40.0, ge=0, le=100, allow_inf_nan=False)
+    busy_memory: Literal["warn", "critical", "off"] = "warn"
+    busy_thermal: Literal["moderate", "heavy", "trapping", "sleeping", "off"] = "heavy"
+    busy_hold_minutes: float = Field(
+        default=BUSY_HOLD_DEFAULT_MINUTES, ge=0, le=BUSY_HOLD_MAX_MINUTES, allow_inf_nan=False
+    )
     auto_stop_finished: bool = True
     auto_stop_idle_minutes: float = Field(default=5.0, ge=0)
     auto_stop_roles: list[str] = Field(
@@ -1066,12 +1126,20 @@ class UiSettings(BaseModel):
     name in the sidebar. Off, the default, the directory is shown only when two projects
     share a name, to tell them apart.
 
+    ``confirm_stop`` on, the default: the agent view's Stop and the sidebar's ``x`` ask
+    first (the Stop dialog). Off, they stop the agent at once, gracefully (``/exit``, no
+    Force), every agent alike, the manager and the captain included. The dialog's *Don't
+    ask again* turns it off; *Ask before stopping an agent* under User preferences turns it
+    back on. The captain's ``open_stop`` ui action asks whatever this says: it opens the
+    dialog and stops nothing.
+
     Read from the config file alone, like ``[fleet]``: there is no ``AISQUARE_UI_*``
     variable. ``asq`` reads it once at start and again when App settings saves, reloads
-    or resets — not on every refresh tick.
+    or resets, or the Stop dialog saves *Don't ask again* — not on every refresh tick.
     """
 
     always_show_project_path: bool = False
+    confirm_stop: bool = True
 
 
 class SharingSettings(BaseModel):

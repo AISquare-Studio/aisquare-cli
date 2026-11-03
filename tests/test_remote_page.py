@@ -1379,6 +1379,25 @@ def test_the_python_reading_of_the_tables_is_what_the_script_holds(
     assert {"ansiToRuns", "renderRuns", "renderNeedsCard"} <= set(node_report["exports"])
 
 
+def test_every_agent_state_has_its_own_badge_and_sentence(node_report: dict[str, Any]) -> None:
+    """Review of the #457 fold, m3: a state the fleet derives that the page's tables lack is
+    drawn as ``unknown``, "in a state tmux does not say" — a paused manager was, on the phone.
+    Each of ``FleetAgentState`` has a badge with a class of its own and a sentence; a paused
+    one says paused, as the sidebar's ``⏯ paused`` does."""
+    from typing import get_args
+
+    from aisquare.models import FleetAgentState
+
+    badges, sentences = node_report["states"]["badges"], node_report["states"]["sentences"]
+    states = set(get_args(FleetAgentState))
+    assert states <= set(badges), states - set(badges)
+    assert states <= set(sentences), states - set(sentences)
+    assert len({cls for _, cls in badges.values()}) == len(badges), "one class a state"
+    assert badges["paused"] == ["paused ⏯", "s-paused"]
+    assert sentences["paused"].startswith("paused") and "fleet resume" in sentences["paused"]
+    assert ".s-paused" in _text("app.css")
+
+
 # --- the page booted in a fake browser (node) ----------------------------------------------
 
 

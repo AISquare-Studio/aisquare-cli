@@ -45,11 +45,13 @@ from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
 from aisquare.services import project_groups as groups_service
+from aisquare.services import settings as settings_service
 from aisquare.services.captain import actions
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
 from tests.test_captain_sidebar import until
 from tests.test_ui_shell import Script, drive, fleet_app, seed, status
+from tests.ui_workers import settle_page
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -174,8 +176,14 @@ def receiver_of(app: FleetApp) -> receiver.UiReceiver:
     return found
 
 
-def cursor_keys(app: FleetApp) -> list[str]:
-    return [row.selection_key for row in app.query(".cursor").results(Activatable)]
+def cursor_keys(app: FleetApp, *, shown: bool = False) -> list[str]:
+    """The sidebar's highlighted rows (``shown``: only the ones on screen)."""
+    sidebar = app.sidebar
+    return [
+        row.selection_key
+        for row in sidebar.query(Activatable)
+        if row.has_class("selected") and (not shown or sidebar._on_screen(row))
+    ]
 
 
 # --- the six actions: each has its effect, and says so --------------------------------------
@@ -277,6 +285,31 @@ def test_open_stop_opens_the_stop_dialog_for_that_agent_and_stops_nothing(
     reply, project_id, agent_id = drive(body)
     assert reply == {"ok": True, "said": "stop dialog open for coder-1 (alpha)"}
     assert (project_id, agent_id) == ("prj_aaa", "agt_aaa_coder-1")
+    assert recorder.calls == [], "the dialog asks the owner; the action itself stops nothing"
+
+
+@UNIX_SOCKETS
+@pytest.mark.needs_captain
+def test_open_stop_asks_even_when_the_owner_said_dont_ask_again(
+    tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[ui] confirm_stop`` off makes the owner's own Stop and ``x`` stop at once. The
+    captain's ``open_stop`` is not the owner's click: it still opens the dialog, and the
+    action itself still stops nothing."""
+    fleet(tmp_path, script)
+    settings_service.set_value("ui.confirm_stop", "false")
+    recorder = ui_suite.stopper(monkeypatch, status("prj_aaa", "coder-1", "coder", "working").agent)
+
+    async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], bool, str]:
+        app = fleet_app(pilot)
+        reply = await send(pilot, ui_path, "open_stop", "alpha/coder-1")
+        await settle_page(app)
+        return reply, app.confirm_stop, type(app.screen).__name__
+
+    reply, asks, screen = drive(body)
+    assert asks is False, "the premise: the owner's clicks stop at once"
+    assert reply == {"ok": True, "said": "stop dialog open for coder-1 (alpha)"}
+    assert screen == "StopAgentScreen"
     assert recorder.calls == [], "the dialog asks the owner; the action itself stops nothing"
 
 
@@ -478,7 +511,7 @@ def test_focus_project_selects_it_and_hands_the_keyboard_to_its_card(
         app = fleet_app(pilot)
         app.sidebar.focus()
         await pilot.pause()
-        for _ in range(2):  # the arrows leave the cursor on a row of their own: the captain's
+        for _ in range(2):  # the arrows leave the highlight on a row of their own: the captain's
             await pilot.press("down")
         app.set_focus(None)
         await pilot.pause()
@@ -492,13 +525,13 @@ def test_focus_project_selects_it_and_hands_the_keyboard_to_its_card(
             app.sidebar.selected_key,
             view.project.id if isinstance(view, ProjectView) else None,
         ]
-        await pilot.press("down")  # the cursor itself moved, not just its highlight
+        await pilot.press("down")  # the arrows go on from beta's card, not the captain's row
         await pilot.pause()
         return [before, *after, cursor_keys(app)]
 
     before, reply, focused, cursor, selected, shown, next_row = drive(body)
     assert before == (None, [f"agent:{home.id.replace('prj_', 'agt_')}_captain"]), (
-        "the premise: the keyboard was elsewhere, and the cursor on another row"
+        "the premise: the keyboard was elsewhere, and the highlight on another row"
     )
     assert reply == {"ok": True, "said": "focused beta in the sidebar"}
     assert focused
@@ -509,28 +542,66 @@ def test_focus_project_selects_it_and_hands_the_keyboard_to_its_card(
 
 @UNIX_SOCKETS
 @pytest.mark.needs_captain
-def test_focus_project_on_a_card_in_a_folded_group_selects_it_and_says_the_cursor_stayed(
+def test_focus_project_on_a_card_in_a_folded_group_selects_it_and_says_where_it_shows(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
-    """The arrows never land on a row that is not on screen; neither does the action."""
+    """The arrows never land on a row that is not on screen; neither does the action. The
+    project is still selected — its view opens and its folded title holds the highlight,
+    so no row on screen shows one — and the reply says when it will."""
     fleet(tmp_path, script)
     with store_session() as store:
         group, _ = groups_service.create_group(store, "later", ["prj_bbb"])
         groups_service.set_collapsed(store, group.id, True)
 
-    async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], list[str], str | None]:
+    async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], list[str], list[str], str | None]:
         app = fleet_app(pilot)
         reply = await send(pilot, ui_path, "focus_project", "beta")
-        return reply, cursor_keys(app), app.sidebar.selected_key
+        return reply, cursor_keys(app, shown=True), cursor_keys(app), app.sidebar.selected_key
 
-    reply, cursor, selected = drive(body)
+    reply, shown, held, selected = drive(body)
     assert reply == {
         "ok": True,
-        "said": "selected beta; its card is in a folded group, so the sidebar cursor stayed "
-        "where it was",
+        "said": "selected beta; its card is in a folded group, so the sidebar shows its "
+        "highlight once the group is unfolded",
     }
-    assert cursor == [], "no cursor on a row nobody can see"
+    assert shown == [], "no highlight on a row nobody can see"
+    assert held == ["project:prj_bbb"], "one highlight, on the folded card's title"
     assert selected == "project:prj_bbb"
+
+
+@UNIX_SOCKETS
+@pytest.mark.needs_captain
+def test_focus_project_on_a_card_the_active_only_filter_hides_says_so(
+    tmp_path: Path, script: Script, ui_path: Path
+) -> None:
+    """Hidden by the filter, not folded: the reply names the filter, not a group, and says
+    when the highlight shows — the filter off, as a folded card's shows with its group open."""
+    fleet(tmp_path, script)
+    script["prj_bbb"] = [status("prj_bbb", "old", "coder", "lost", minute=1)]  # none live
+
+    async def body(
+        pilot: Pilot[None],
+    ) -> tuple[dict[str, Any], list[str], list[str], str | None, list[str]]:
+        app = fleet_app(pilot)
+        app.sidebar.set_active_only(True)
+        await pilot.pause()
+        reply = await send(pilot, ui_path, "focus_project", "beta")
+        shown, held = cursor_keys(app, shown=True), cursor_keys(app)
+        selected = app.sidebar.selected_key
+        app.sidebar.set_active_only(False)
+        await pilot.pause()
+        return reply, shown, held, selected, cursor_keys(app, shown=True)
+
+    reply, shown, held, selected, unfiltered = drive(body)
+    assert reply == {
+        "ok": True,
+        "said": "selected beta; the active-only filter hides its card (it has no live agent), "
+        "so the sidebar shows its highlight once the filter is off",
+    }
+    assert shown == [], "no highlight on a row nobody can see"
+    assert held == ["project:prj_bbb"], "one highlight, on the hidden card's title"
+    assert selected == "project:prj_bbb", "selected all the same: its view opens"
+    assert unfiltered == ["project:prj_bbb"], "the filter off, the highlight is on screen"
 
 
 # --- T1's real client, end to end ----------------------------------------------------------

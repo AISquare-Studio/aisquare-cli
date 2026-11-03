@@ -48,6 +48,8 @@ from aisquare.models import (
     EndedBy,
     FleetAgent,
     LaunchSpec,
+    OutcomeSessionRow,
+    OutcomeTurnRow,
     PendingRevocation,
     Pool,
     ProjectExplainability,
@@ -57,6 +59,7 @@ from aisquare.models import (
     RepoProfile,
     RepoTraits,
     SessionUsage,
+    TaskEventRow,
     TaskStatus,
     TeamEvent,
     TeamSession,
@@ -541,7 +544,7 @@ def _has_table(connection: sqlite3.Connection, table: str) -> bool:
     return connection.execute(query, (table,)).fetchone() is not None
 
 
-#: The two triggers v42 makes (#113), each ``IF NOT EXISTS``.
+#: The two triggers v45 makes (#113), each ``IF NOT EXISTS``.
 _TEAM_META_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS team_meta_insert_time AFTER INSERT ON team_meta BEGIN
  UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
@@ -553,7 +556,7 @@ END;
 
 
 def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
-    """v41 → v42 (#113): the triggers that date every insert and change of a ``team_meta``
+    """v44 → v45 (#113): the triggers that date every insert and change of a ``team_meta``
     row. A trigger cannot be made on a table that is not there, and a store that lacks
     ``team_meta`` still opens, for the doctor to name what it lacks."""
     if _has_table(connection, "team_meta"):
@@ -562,7 +565,7 @@ def _date_team_meta_writes(connection: sqlite3.Connection) -> None:
 
 
 def _redate_team_meta(connection: sqlite3.Connection) -> None:
-    """v42 → v43 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
+    """v45 → v46 (#113): the rows #113's dogfooded v16 left dated 0, dated now."""
     if _has_table(connection, "team_meta"):
         connection.execute(
             "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
@@ -575,8 +578,8 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _converge_v11_fork,
     25: _index_board_stamps,
     29: _index_task_numbers,
-    41: _date_team_meta_writes,
-    42: _redate_team_meta,
+    44: _date_team_meta_writes,
+    45: _redate_team_meta,
 }
 
 
@@ -807,7 +810,7 @@ def _board_existing_agents(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
-    """v40 → v41's backfill (#113): the sessions and fleet agents Claude Code made say so.
+    """v43 → v44's backfill (#113): the sessions and fleet agents Claude Code made say so.
 
     Runs right after ``team_session.native_session_id`` is added (``agent`` is added just
     before it), in the same transaction, and only then (:data:`_BACKFILLS`). A session
@@ -821,11 +824,11 @@ def _adopt_claude_code_identity(connection: sqlite3.Connection) -> None:
 
 
 def _adopt_claude_code_fleet_agents(connection: sqlite3.Connection) -> None:
-    """v40 → v41's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
+    """v43 → v44's backfill (#113): a fleet agent started as ``claude`` is Claude Code's."""
     connection.execute("UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude'")
 
 
-#: The agent a usage row from before v47 is given when nothing says whose it was, in a store
+#: The agent a usage row from before v50 is given when nothing says whose it was, in a store
 #: that recorded an agent whose usage is not shared: one no install knows, so the row is
 #: counted locally and never shared (``services.usage_stats.shared_usage``). A sweep that
 #: reads the session on writes its agent over it (``record_usage``).
@@ -843,7 +846,7 @@ def _column_values(connection: sqlite3.Connection, table: str, column: str) -> s
 
 
 def _attribute_usage_sessions(connection: sqlite3.Connection) -> None:
-    """v46 → v47's backfill (#113, review r28 m1): the agent of each usage row from before
+    """v49 → v50's backfill (#113, review r28 m1): the agent of each usage row from before
     the column. Its session's (``team_session.agent``: a Stop records a row under the board's
     id for its session), else the agent whose transcript roots hold its transcript
     (``claude_accounts.transcript_home``, by the path alone: the file may be gone).
@@ -855,7 +858,7 @@ def _attribute_usage_sessions(connection: sqlite3.Connection) -> None:
 
     Runs right after ``usage_session.agent`` is added, in the same transaction, and only then
     (:data:`_BACKFILLS`); and again on the rows still NULL whenever the sharing path builds a
-    batch (:meth:`SqliteStore.attribute_usage_agents`), since a store can be stamped v47 with
+    batch (:meth:`SqliteStore.attribute_usage_agents`), since a store can be stamped v50 with
     none of this run, or be given a NULL row by an older build after it ran.
     """
     # Lazy: the adapters, and the account modules they read, are no import of the store's.
@@ -893,7 +896,7 @@ def _attribute_usage_sessions(connection: sqlite3.Connection) -> None:
 
 
 def _date_team_meta(connection: sqlite3.Connection) -> None:
-    """v41 → v42's backfill (#113): the ``team_meta`` rows from before the column are
+    """v44 → v45's backfill (#113): the ``team_meta`` rows from before the column are
     dated now, so the launch-metadata cleanup gives them a full retention period."""
     connection.execute("UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)")
 
@@ -1385,45 +1388,81 @@ CREATE TABLE IF NOT EXISTS feature_use (
 CREATE INDEX IF NOT EXISTS usage_turn_recorded ON usage_turn (recorded_at);
 """
 
-# v41-v46 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
+# v41: the codenames a project has given up. Renaming a project now renames its codename
+# (``services.fleet.follow_name``), and live agents were handed the old one in their start
+# packs and prompts (``--project earnest-hawk``), so it still names the project: one row a
+# retired codename, the project that last held it (:meth:`SqliteStore.set_codename` writes
+# it, :meth:`SqliteStore.find_projects` reads it after the current codenames). Additive: a
+# table and its index, both ``IF NOT EXISTS`` and in :data:`_PRODUCTS`; the foreign key
+# puts it among the tables a purge finds by the schema.
+_SCHEMA_V41 = """
+CREATE TABLE IF NOT EXISTS project_codename_alias (
+    codename   TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES project (id),
+    retired_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS project_codename_alias_project
+    ON project_codename_alias (project_id);
+"""
+
+# v42 (task #9, fleet pause/resume): ``fleet_agent.paused_at``, when ``fleet pause`` ended the
+# row, whose ``ended_by`` is then ``stopped``. The pause is this column and never a value of
+# ``ended_by`` of its own: 0.9.1 validates ``ended_by`` against ``stopped`` and ``died``, and
+# one row it could not read ended every fleet command there. 0.9.1 reads a store at or past its
+# own version as current, and never this column: it sees a paused agent as a stopped 💤 row.
+# Nullable and in :data:`_PRODUCTS`, so the step is the column alone.
+_SCHEMA_V42 = ""
+
+# v43 (task #11, the weekly outcomes report): ``metric.origin``, who started the turn, recorded at
+# its ``UserPromptSubmit`` (``core.prompt_origin``): ``human:typed``, ``agent:tell``,
+# ``agent:spawn``, ``agent:continuation``… A row from before it reads NULL, and the report infers
+# those, labelled as inferred. Nullable and in :data:`_PRODUCTS`, so the step is the column alone.
+_SCHEMA_V43 = ""
+
+# v44-v50 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
 # flight (the note above _SCHEMA_V15), then 26-29 once it took main's v25, then 33-36
 # once it took 0.8.1's 26-32, then 34-38 once it took 0.8.2's v33 (the persona columns),
 # then 36-41 once it took #274's v34 (``fleet_agent.ended_by``) and v35 (the usage
 # tables), then 37-42 once it took #295's v36 (the first-message columns), then 38-43
-# once it took #296's v37 (``team_event.actor`` and ``meta``); 0.9.0's v38 (P2-W6's parent
-# manager columns) and v39 (work briefs) took the numbers under these, and 0.9.1's v40
-# (Usage & stats) the next, so they come after them, renumbered once more.
+# once it took #296's v37 (``team_event.actor`` and ``meta``), then 40-45 once 0.9.0's v38
+# (P2-W6's parent manager columns) and v39 (work briefs) took the numbers under these,
+# then 41-47 once 0.9.1's v40 (Usage & stats) took the next; 0.9.2's v41-v43 (the
+# codename aliases, ``fleet_agent.paused_at``, ``metric.origin``) take the three after
+# that, so they come after them, renumbered once more.
 # Idempotent like every step from v15 on: the columns are in :data:`_PRODUCTS`, their
 # backfills in :data:`_BACKFILLS`, the triggers are ``IF NOT EXISTS`` and the tables and
 # their indexes too. A store #113's line stamped 26-29 ran
 # none of 0.8.1's v26-v29 under those numbers, one it stamped 33-36 has no persona
 # columns, one it stamped 34-38 has neither ``ended_by`` nor the usage tables, one it
 # stamped 36-41 has no first-message columns, one it stamped 37-42 has no event actor,
-# one it stamped 38-43 has neither P2-W6's columns nor ``brief``, and one it stamped
-# 40-45 (a store of this line from before 0.9.1) has neither of 0.9.1's tables
-# (``repo_profile``, ``feature_use``) nor the four usage columns: the presence pass
+# one it stamped 38-43 has neither P2-W6's columns nor ``brief``, one it stamped 40-45
+# (a store of this line from before 0.9.1) has neither of 0.9.1's tables
+# (``repo_profile``, ``feature_use``) nor the four usage columns, and one it stamped 41-47
+# (a store of this line from before 0.9.2) has none of 0.9.2's products (the
+# ``project_codename_alias`` table and its index, ``fleet_agent.paused_at``,
+# ``metric.origin``): the presence pass
 # (:func:`_converge_by_presence`) finds those columns, tables and indexes absent and
 # applies them, with their backfills (task numbers among them), before the ladder goes on
 # from its stamp; and these steps, whose products it holds already, add nothing to it but
-# the v43 repair of rows dated 0, which converges.
+# the v46 repair of rows dated 0, which converges.
 #
-# v41: native coding-agent identity, independent of runtime session IDs.
+# v44: native coding-agent identity, independent of runtime session IDs.
 # ``team_session.agent`` and ``native_session_id`` and ``fleet_agent.agent`` are the
 # whole step, so the script is empty; their backfill
 # (:func:`_adopt_claude_code_identity`) marks the rows Claude Code made.
-_SCHEMA_V41 = ""
-# v42: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
+_SCHEMA_V44 = ""
+# v45: when each ``team_meta`` row was last written, for the launch-metadata cleanup.
 # The column, ``team_meta.updated_at``, is in :data:`_PRODUCTS`, and its backfill
 # (:func:`_date_team_meta`) dates the rows that predate it; the triggers, made in
 # Python where the table is (:func:`_date_team_meta_writes`, in :data:`_PREPARE`), date
 # every later insert and change of value.
-_SCHEMA_V42 = ""
-# v43: #113 stamped 17 for this repair while the native-agent branch was being
+_SCHEMA_V45 = ""
+# v46: #113 stamped 17 for this repair while the native-agent branch was being
 # dogfooded: its v16 stores made before that step's backfill was added hold rows
 # dated 0. An UPDATE of those rows only, where the table is (:func:`_redate_team_meta`):
 # a store that meets it twice converges.
-_SCHEMA_V43 = ""
-# v44: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
+_SCHEMA_V46 = ""
+# v47: the arrangement of OTHER agents' account slots (Codex's, t3). The slots are
 # directories like Claude Code's (``core.claude_accounts``: one ladder numbers every
 # agent's, so ``slot`` alone is the key), and this table is ``claude_account`` for
 # them, plus the agent: an alias, a rank among that agent's slots, a default PER
@@ -1434,10 +1473,10 @@ _SCHEMA_V43 = ""
 # prune every Codex row it met, on any machine where two builds share the store.
 # Aliases are unique across the two tables by the service (``set_alias`` checks the
 # other agent's before writing); within this one, by the index. The default flag is
-# retired the way ``claude_account``'s is (0.9.0, #406): rank 1 of the one order (v46) is
+# retired the way ``claude_account``'s is (0.9.0, #406): rank 1 of the one order (v49) is
 # the machine default, so a flag a store still carries is folded into the order on the
 # next read (:meth:`SqliteStore.promote_retired_agent_account_default`) and cleared.
-_SCHEMA_V44 = """
+_SCHEMA_V47 = """
 CREATE TABLE IF NOT EXISTS agent_account (
     slot        INTEGER PRIMARY KEY,
     agent       TEXT NOT NULL,
@@ -1453,14 +1492,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_account_alias ON agent_account (alias)
 CREATE UNIQUE INDEX IF NOT EXISTS agent_account_default ON agent_account (agent)
     WHERE is_default = 1;
 """
-# v45: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
+# v48: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
 # JSON), so the five-minute cache serves an agent whose windows are not Claude Code's five
 # hours and week (a daily quota per model) what it read. The column is the whole step, so
 # the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
 # reads as its session and week columns say, as every row did.
-_SCHEMA_V45 = ""
-# v46: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
-# whatever agent the slot is (``slot`` alone is the key, as v44 says). The per-agent
+_SCHEMA_V48 = ""
+# v49: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
+# whatever agent the slot is (``slot`` alone is the key, as v47 says). The per-agent
 # ``position`` columns stay, and are kept in step with it, for the builds before this step
 # that share the store. A table of its own, not a column on the two registries: an older
 # build reconciles those and would never write a rank for the slots it adds, while a slot
@@ -1468,20 +1507,20 @@ _SCHEMA_V45 = ""
 # first read (``services.claude_accounts._ranked``: the default agent's accounts first,
 # so nothing changes on upgrade) since the default agent is the user's config, not the
 # store's.
-_SCHEMA_V46 = """
+_SCHEMA_V49 = """
 CREATE TABLE IF NOT EXISTS account_rank (
     slot  INTEGER PRIMARY KEY,
     rank  INTEGER NOT NULL
 );
 """
-# v47: the agent whose session a usage row is (``usage_session.agent``, its adapter's id), so
+# v50: the agent whose session a usage row is (``usage_session.agent``, its adapter's id), so
 # the opt-in usage share keeps the agents its consent names (``AgentCapabilities.usage_shared``)
 # and leaves the rest out, while the local stats count every one. The column is the whole
 # step, so the script is empty: it is in :data:`_PRODUCTS`. A row from before it is given its
 # session's agent, else its transcript's (:func:`_attribute_usage_sessions`): this branch
 # recorded Codex rows before the column (review r28 of #113, m1). One neither names keeps
 # NULL, which reads as the default agent's, only where the store never recorded another.
-_SCHEMA_V47 = ""
+_SCHEMA_V50 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1531,6 +1570,9 @@ _MIGRATIONS = (
     _SCHEMA_V45,
     _SCHEMA_V46,
     _SCHEMA_V47,
+    _SCHEMA_V48,
+    _SCHEMA_V49,
+    _SCHEMA_V50,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1617,21 +1659,24 @@ _PRODUCTS: dict[int, _Products] = {
             ("usage_turn", "source", "TEXT"),
         ),
     ),
-    40: _Products(
+    40: _Products(("project_codename_alias", "project_codename_alias_project")),
+    41: _Products(columns=(("fleet_agent", "paused_at", "TEXT"),)),
+    42: _Products(columns=(("metric", "origin", "TEXT"),)),
+    43: _Products(
         columns=(
             ("team_session", "agent", "TEXT"),
             ("team_session", "native_session_id", "TEXT"),
             ("fleet_agent", "agent", "TEXT"),
         )
     ),
-    41: _Products(
+    44: _Products(
         ("team_meta_insert_time", "team_meta_update_time"),
         (("team_meta", "updated_at", "INTEGER NOT NULL DEFAULT 0"),),
     ),
-    43: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
-    44: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
-    45: _Products(("account_rank",)),
-    46: _Products(columns=(("usage_session", "agent", "TEXT"),)),
+    46: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
+    47: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
+    48: _Products(("account_rank",)),
+    49: _Products(columns=(("usage_session", "agent", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1684,6 +1729,7 @@ _METRIC_FIELDS = (
     "tokens_out",
     "tool_calls",
     "delivery_source",
+    "origin",
 )
 _METRIC_COLUMNS = ", ".join(_METRIC_FIELDS)
 
@@ -1716,7 +1762,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "agent", "persona", "ended_by", "first_prompt", "first_prompt_at",
+    "board", "agent", "persona", "ended_by", "first_prompt", "first_prompt_at", "paused_at",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1904,6 +1950,11 @@ class ContextStore(Protocol):
         self, since: datetime, until: datetime
     ) -> tuple[list[tuple[datetime, str, str | None]], list[tuple[datetime, str | None]]]: ...
     def usage_turn_count(self) -> int: ...
+    def outcome_turns(self, since: datetime, until: datetime) -> list[OutcomeTurnRow]: ...
+    def outcome_sessions(self, session_ids: Collection[str]) -> dict[str, OutcomeSessionRow]: ...
+    def task_events(
+        self, since: datetime, until: datetime, kinds: Collection[str]
+    ) -> list[TaskEventRow]: ...
     def unattributed_usage(self, limit: int = 5_000) -> list[SessionUsage]: ...
     def attribute_usage(
         self,
@@ -2003,6 +2054,11 @@ class ContextStore(Protocol):
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def swap_codename(self, project_id: str, codename: str) -> tuple[str | None, ProjectInfo]: ...
+    def folder_names_in_use(self, project_id: str) -> set[str]: ...
+    def aliases_in_use(self, project_id: str | None = None) -> set[str]: ...
+    def codename_aliases(self, project_id: str) -> list[str]: ...
+    def codename_alias_owners(self) -> dict[str, str]: ...
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
@@ -2019,6 +2075,7 @@ class ContextStore(Protocol):
     def first_prompt_rows(self, since: datetime) -> list[FleetAgent]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def live_fleet_agent_ids_written(self, project_id: str) -> list[str]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_label_heads(self, project_id: str | None = None) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
@@ -2101,10 +2158,17 @@ class ContextStore(Protocol):
         self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent: ...
     def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
+    def relabel_fleet_agent(self, agent_id: str, old: str, new: str) -> FleetAgent | None: ...
     def end_fleet_agent_if_live(
-        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
+        self,
+        agent_id: str,
+        *,
+        exit_status: int | None = None,
+        ended_by: EndedBy,
+        paused: bool = False,
     ) -> FleetAgent | None: ...
     def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent: ...
+    def mark_fleet_agent_paused(self, agent_id: str) -> FleetAgent | None: ...
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool: ...
     def record_fleet_agent_branch(self, agent_id: str, branch: str | None) -> None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
@@ -2115,7 +2179,7 @@ class ContextStore(Protocol):
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
-    # Other agents' account registry (v44): the same arrangement, per agent.
+    # Other agents' account registry (v47): the same arrangement, per agent.
     def agent_accounts(self, agent: str) -> list[ClaudeAccountRecord]: ...
     def upsert_agent_account(
         self, agent: str, slot: int, config_dir: Path
@@ -2124,7 +2188,7 @@ class ContextStore(Protocol):
     def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None: ...
     def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None: ...
     def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None: ...
-    # One priority order over every agent's slots (v46).
+    # One priority order over every agent's slots (v49).
     def account_ranks(self) -> dict[int, int]: ...
     def rank_accounts(self, slots: Sequence[int]) -> None: ...
     def promote_retired_claude_account_default(self) -> int | None: ...
@@ -2218,6 +2282,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         ended_by=row["ended_by"],
         first_prompt=row["first_prompt"],
         first_prompt_at=_maybe_dt(row["first_prompt_at"]),
+        paused_at=_maybe_dt(row["paused_at"]),
     )
 
 
@@ -2418,6 +2483,7 @@ def _row_to_metric(row: sqlite3.Row) -> TurnMetric:
         tokens_out=row["tokens_out"],
         tool_calls=row["tool_calls"],
         delivery_source=row["delivery_source"],
+        origin=row["origin"],
     )
 
 
@@ -2459,7 +2525,7 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
 
 
 def _usage_windows(raw: str | None) -> tuple[UsageWindow, ...] | None:
-    """A sample's windows as v45 keeps them; ``None`` for a row from before (or one this
+    """A sample's windows as v48 keeps them; ``None`` for a row from before (or one this
     build cannot read), which its session and week columns describe."""
     if raw is None:
         return None
@@ -3000,19 +3066,37 @@ class SqliteStore:
         return found
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
-        """The live projects ``term`` names: an id prefix, a directory name or a codename,
-        and only when none of those match, a nickname (exactly, case and all).
+        """The live projects ``term`` names: the one whose codename it is; else every one it
+        names as an id prefix, a directory name or a codename given up at a rename
+        (``project_codename_alias``); and only when none of those match, a nickname (exactly,
+        case and all).
 
-        The nickname comes last so that one a person types never takes a reference
-        that already worked: a nickname spelled like another project's codename or
-        folder leaves that one found, rather than both refused as ambiguous.
+        The codename first: it is unique, and it is what every printed ``--project`` says
+        (``services.project.fleet_command``); a project that holds a codename NOW is the one
+        it names. A codename given up stands with the folders and the id prefixes: its
+        project's live agents were given ``--project earnest-hawk``, and a checkout added
+        since in ``…/earnest-hawk`` makes it name two, refused as ambiguous with both named
+        — never moved to either without a word (task #6, reopened). Asked after the folders,
+        it went to the checkout, and an agent's ``fleet stop --project earnest-hawk``
+        stopped another project's agent. A rename never takes another project's folder name
+        or old codename as its own (``services.fleet.follow_name``), so a reference that
+        worked before a rename keeps naming what it named. The nickname comes last so that
+        one a person types never takes a reference that already worked: a nickname spelled
+        like another project's codename or folder leaves that one found, rather than both
+        refused as ambiguous.
         """
         rows = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project "
-            "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR codename = ?) "
-            "ORDER BY name",
-            (_glob_prefix(term), term, term),
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL AND codename = ?",
+            (term,),
         ).fetchall()
+        if not rows:
+            rows = self._conn.execute(
+                f"SELECT {_PROJECT_COLUMNS} FROM project "
+                "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR id IN "
+                "(SELECT project_id FROM project_codename_alias WHERE codename = ?)) "
+                "ORDER BY name",
+                (_glob_prefix(term), term, term),
+            ).fetchall()
         if not rows:
             rows = self._conn.execute(
                 f"SELECT {_PROJECT_COLUMNS} FROM project "
@@ -4254,6 +4338,7 @@ class SqliteStore:
             metric.tokens_out,
             metric.tool_calls,
             metric.delivery_source,
+            metric.origin,
         )
         placeholders = ", ".join("?" for _ in _METRIC_FIELDS)
         self._conn.execute(
@@ -4539,6 +4624,89 @@ class SqliteStore:
         """How many turn rows are recorded, of any date."""
         return int(self._conn.execute("SELECT COUNT(*) FROM usage_turn").fetchone()[0])
 
+    def outcome_turns(self, since: datetime, until: datetime) -> list[OutcomeTurnRow]:
+        """The turn rows (``metric`` rows a ``UserPromptSubmit`` or a Stop hook's continuation
+        opened, never a ``session_start`` or ``agent_request`` call) started in
+        ``[since, until)``, oldest first."""
+        rows = self._conn.execute(
+            "SELECT session_id, project_id, started_at, ended_at, origin FROM metric "
+            "WHERE trigger = 'prompt_submit' AND started_at >= ? AND started_at < ? "
+            "ORDER BY started_at, trace_id",
+            (since.astimezone(UTC).isoformat(), until.astimezone(UTC).isoformat()),
+        ).fetchall()
+        return [
+            OutcomeTurnRow(
+                session_id=row["session_id"],
+                project_id=row["project_id"],
+                started_at=datetime.fromisoformat(row["started_at"]),
+                ended_at=_maybe_dt(row["ended_at"]),
+                origin=row["origin"],
+            )
+            for row in rows
+        ]
+
+    def outcome_sessions(self, session_ids: Collection[str]) -> dict[str, OutcomeSessionRow]:
+        """For each of ``session_ids`` the store knows: its board role, whether a fleet row ran
+        it (and gave it a first message), and its transcript, by the usage row or the board's."""
+        found: dict[str, OutcomeSessionRow] = {}
+        ids = sorted(set(session_ids))
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            marks = ", ".join("?" for _ in chunk)
+            for row in self._conn.execute(
+                "SELECT session_id, transcript_path FROM usage_session "
+                f"WHERE session_id IN ({marks})",
+                chunk,
+            ).fetchall():
+                found[row["session_id"]] = OutcomeSessionRow(
+                    session_id=row["session_id"], transcript_path=row["transcript_path"]
+                )
+            for row in self._conn.execute(
+                f"SELECT id, role, transcript_path FROM team_session WHERE id IN ({marks})", chunk
+            ).fetchall():
+                session = found.setdefault(row["id"], OutcomeSessionRow(session_id=row["id"]))
+                session.role = row["role"]
+                session.transcript_path = session.transcript_path or row["transcript_path"]
+            for row in self._conn.execute(
+                f"SELECT session_id, role, first_prompt, spawned_by FROM fleet_agent "
+                f"WHERE session_id IN ({marks})",
+                chunk,
+            ).fetchall():
+                session = found.setdefault(
+                    row["session_id"], OutcomeSessionRow(session_id=row["session_id"])
+                )
+                session.fleet = True
+                session.role = (
+                    session.role if session.role not in (None, "unassigned") else row["role"]
+                )
+                session.first_prompt = session.first_prompt or row["first_prompt"] is not None
+                session.spawned_by = session.spawned_by or row["spawned_by"]
+        return found
+
+    def task_events(
+        self, since: datetime, until: datetime, kinds: Collection[str]
+    ) -> list[TaskEventRow]:
+        """The board events of ``kinds`` (``task_done``, ``task_reopened``…) written in
+        ``[since, until)`` on every board, oldest first."""
+        wanted = sorted(set(kinds))
+        if not wanted:
+            return []
+        marks = ", ".join("?" for _ in wanted)
+        rows = self._conn.execute(
+            f"SELECT created_at, kind, project_id, task_id FROM team_event "
+            f"WHERE kind IN ({marks}) AND created_at >= ? AND created_at < ? ORDER BY seq",
+            (*wanted, since.astimezone(UTC).isoformat(), until.astimezone(UTC).isoformat()),
+        ).fetchall()
+        return [
+            TaskEventRow(
+                created_at=datetime.fromisoformat(row["created_at"]),
+                kind=row["kind"],
+                project_id=row["project_id"],
+                task_id=row["task_id"],
+            )
+            for row in rows
+        ]
+
     def usage_transcripts(self) -> dict[str, str]:
         """Every transcript path a session row recorded → that session's id: what the sweep
         asks before it reads a file, so that a file already counted is never counted again."""
@@ -4578,11 +4746,11 @@ class SqliteStore:
         self._conn.commit()
 
     def attribute_usage_agents(self) -> None:
-        """Give each usage row that names no agent the one v47's backfill would, and write
+        """Give each usage row that names no agent the one v50's backfill would, and write
         it back (:func:`_attribute_usage_sessions`): what the sharing path asks before it
         builds a batch, so a row is shared by the same rule whether that backfill ran or not.
-        A store a v47 build migrated before the backfill existed never ran it, and a build
-        from before v47 that shares the store still writes NULL (tester-42 on #42, (c) and
+        A store a v50 build migrated before the backfill existed never ran it, and a build
+        from before v50 that shares the store still writes NULL (tester-42 on #42, (c) and
         (d)). In one transaction; one that fails is rolled back and raises, and no batch is
         built from rows it did not attribute."""
         try:
@@ -5279,13 +5447,87 @@ class SqliteStore:
     # --- fleet -----------------------------------------------------------------
 
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
-        """Give a project its fleet codename (unique: the index raises on a clash)."""
-        self._conn.execute("UPDATE project SET codename = ? WHERE id = ?", (codename, project_id))
-        self._commit()
+        """Give a project its fleet codename (unique: the index raises on a clash), keeping the
+        one it replaced as an alias (:meth:`swap_codename`)."""
+        return self.swap_codename(project_id, codename)[1]
+
+    def swap_codename(self, project_id: str, codename: str) -> tuple[str | None, ProjectInfo]:
+        """Give a project its fleet codename, and say which one it REPLACED: read in the same
+        ``BEGIN IMMEDIATE`` transaction as the write, so two renames of one project at once
+        each learn the codename they really took over, not the one they read before.
+
+        The one it held before, if any, is kept as its alias (``project_codename_alias``,
+        :meth:`find_projects`), in the same transaction: the last project to give a codename
+        up is the one it names; one taken back is its project's current codename again, and
+        no longer an alias. A clash with another project's codename raises
+        ``sqlite3.IntegrityError`` and writes nothing.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT codename FROM project WHERE id = ?", (project_id,)
+            ).fetchone()
+            old = row["codename"] if row is not None else None
+            self._conn.execute(
+                "UPDATE project SET codename = ? WHERE id = ?", (codename, project_id)
+            )
+            if old is not None and old != codename:
+                self._conn.execute(
+                    "INSERT INTO project_codename_alias (codename, project_id, retired_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT (codename) DO UPDATE SET "
+                    "project_id = excluded.project_id, retired_at = excluded.retired_at",
+                    (old, project_id, datetime.now(UTC).isoformat()),
+                )
+            self._conn.execute(
+                "DELETE FROM project_codename_alias WHERE codename = ? AND project_id = ?",
+                (codename, project_id),
+            )
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
-        return project
+        return (str(old) if old is not None else None), project
+
+    def folder_names_in_use(self, project_id: str) -> set[str]:
+        """The directory names of every live project but ``project_id``: what
+        :meth:`find_projects` matches ``--project <name>`` against, so a codename that is one
+        of them would take that reference from the project it named."""
+        rows = self._conn.execute(
+            "SELECT name FROM project WHERE forgotten_at IS NULL AND id != ?", (project_id,)
+        ).fetchall()
+        return {str(row["name"]) for row in rows}
+
+    def aliases_in_use(self, project_id: str | None = None) -> set[str]:
+        """The codenames every live project but ``project_id`` (with ``None``, every live
+        project) gave up at a rename: what :meth:`find_projects` still finds those projects
+        by, so a codename that is one of them would make that reference name two projects.
+        A forgotten project's are free again: nothing finds it by them."""
+        rows = self._conn.execute(
+            "SELECT a.codename FROM project_codename_alias a JOIN project p "
+            "ON p.id = a.project_id WHERE p.forgotten_at IS NULL AND a.project_id != ?",
+            (project_id if project_id is not None else "",),
+        ).fetchall()
+        return {str(row["codename"]) for row in rows}
+
+    def codename_aliases(self, project_id: str) -> list[str]:
+        """The codenames ``project_id`` gave up that no project holds now, newest first: its
+        agents' ``fleet/<codename>/…`` branches and lingering ``asq-<codename>`` sessions from
+        before a rename are under them. One another project has taken since is that
+        project's, its session and branches included, and is left out."""
+        rows = self._conn.execute(
+            "SELECT codename FROM project_codename_alias WHERE project_id = ? AND codename "
+            "NOT IN (SELECT codename FROM project WHERE codename IS NOT NULL) "
+            "ORDER BY retired_at DESC, codename",
+            (project_id,),
+        ).fetchall()
+        return [str(row["codename"]) for row in rows]
+
+    def codename_alias_owners(self) -> dict[str, str]:
+        """Every codename given up → the project that last held it, for a reader that matches
+        many references at once (the watcher's sources) as :meth:`find_projects` would."""
+        rows = self._conn.execute(
+            "SELECT codename, project_id FROM project_codename_alias"
+        ).fetchall()
+        return {str(row["codename"]): str(row["project_id"]) for row in rows}
 
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo:
         """Name a project as a person sees it, or clear that name with ``None``.
@@ -5344,14 +5586,16 @@ class SqliteStore:
         """:meth:`upsert_fleet_agent` for the row that brings ``replaces`` back: nothing is
         written, and ``None`` returned, when that row is recorded stopped by then. One
         statement, so an owner's ``fleet stop`` that lands at any point before the new row
-        exists wins (last delta review of #274, m3)."""
+        exists wins (last delta review of #274, m3). A paused row (``paused_at``) is stopped
+        and still the resume's to bring back; the stop that ends its pause clears the mark."""
         return self._upsert_fleet_agent(agent, replaces)
 
     def _upsert_fleet_agent(
         self, agent: FleetAgent, unless_stopped: str | None
     ) -> FleetAgent | None:
         guard = (
-            "WHERE NOT EXISTS (SELECT 1 FROM fleet_agent WHERE id = ? AND ended_by = 'stopped') "
+            "WHERE NOT EXISTS (SELECT 1 FROM fleet_agent "
+            "WHERE id = ? AND ended_by = 'stopped' AND paused_at IS NULL) "
             if unless_stopped is not None
             else "WHERE true "  # INSERT … SELECT … ON CONFLICT needs a WHERE to parse
         )
@@ -5362,7 +5606,7 @@ class SqliteStore:
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
             "SELECT ?, ?, ?, ?, ?, ?, ?, "
             "COALESCE(?, (SELECT value FROM team_meta WHERE key = 'fleet-session:' || ?)), "
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+            f"{', '.join('?' * (len(_FLEET_AGENT_FIELDS) - 8))} "
             f"{guard}"
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
@@ -5400,6 +5644,7 @@ class SqliteStore:
                 agent.ended_by,
                 agent.first_prompt,
                 agent.first_prompt_at.isoformat() if agent.first_prompt_at else None,
+                agent.paused_at.isoformat() if agent.paused_at else None,
                 *((unless_stopped,) if unless_stopped is not None else ()),
             ),
         )
@@ -6111,6 +6356,19 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_bound_fleet_agent(row) for row in rows]
 
+    def live_fleet_agent_ids_written(self, project_id: str) -> list[str]:
+        """The ids of ``project_id``'s live fleet rows in the order they were written: by
+        ``rowid``, which an insert takes and an upsert's update keeps (``fleet_agent`` is a
+        plain table). ``created_at`` is stamped before the write, so two spawns can stamp in
+        one order and write in the other; a read just after a row's own insert sees exactly
+        the rows written before it, so every racer agrees on its place (auto admission's
+        burst, :func:`aisquare.services.fleet._verify_burst`)."""
+        rows = self._conn.execute(
+            "SELECT id FROM fleet_agent WHERE project_id = ? AND ended_at IS NULL ORDER BY rowid",
+            (project_id,),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def live_fleet_agents(self) -> list[FleetAgent]:
         """Every live fleet row, in every project, forgotten ones' included, oldest first.
 
@@ -6141,15 +6399,19 @@ class SqliteStore:
         query gave both of, give the one of the greater id.
 
         ``project_id`` keeps it to one project's rows, in the query: a restart's plan asks
-        for one project, once per project and again per row (final delta review, n5)."""
+        for one project, once per project and again per row (final delta review, n5).
+
+        A row a relabel retired (:data:`RETIRED_LABEL`) heads nothing: its label is another
+        agent's now, and no restart by label can name it."""
         scope, args = ("WHERE project_id = ?", (project_id,)) if project_id else ("", ())
         rows = self._conn.execute(
             f"SELECT {self._fleet_agent_read}, {_FLEET_AGENT_BINDING} FROM fleet_agent "
-            "WHERE id IN (SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
+            "WHERE id IN (SELECT id FROM (SELECT id, label, ended_at, ROW_NUMBER() OVER ("
             "PARTITION BY project_id, label ORDER BY created_at DESC, id DESC) AS newest "
-            f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR newest = 1) "
+            f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR (newest = 1 "
+            "AND substr(label, 1, 1) != ?)) "
             "ORDER BY created_at, id",
-            args,
+            (*args, RETIRED_LABEL),
         ).fetchall()
         return [_row_to_bound_fleet_agent(row) for row in rows]
 
@@ -6423,6 +6685,86 @@ class SqliteStore:
             raise KeyError(agent_id)
         return agent
 
+    def relabel_fleet_agent(self, agent_id: str, old: str, new: str) -> FleetAgent | None:
+        """Call the LIVE row ``agent_id`` ``new`` while it is still ``old``; ``None`` when it is
+        not (ended, or relabelled meanwhile), and nothing is written.
+
+        One transaction for everything a label names (``services.fleet.relabel``): the row;
+        the ENDED rows of ``old`` in its project, the agent's own earlier runs, which a restart
+        by label and Restart all read as its history (``fleet_label_heads``) and would
+        otherwise take for a dead agent of that name; the ENDED rows that already carried
+        ``new`` — another agent's history — retired to ``~<new>`` (:data:`RETIRED_LABEL`),
+        so that every lookup of ``new`` by its newest row (:meth:`fleet_agent_by_label`), now
+        and once this agent ends too, is this agent's and never that one's, however much
+        later than this agent's own row it was started; the ``ui_state`` rows kept per label
+        (:data:`_FLEET_LABEL_MOVES`), any ``new`` had dropped first; and the record that
+        ``old`` was renamed (:data:`FLEET_RENAMED`: the row's id and when), which a lookup by
+        ``old`` names in its refusal. Another LIVE row holding ``new`` trips the partial
+        ``fleet_agent_live_label`` index: ``sqlite3.IntegrityError`` is raised, and the
+        service picks the next suffix, as a spawn does. So does a PAUSED agent's (its row the
+        newest of ``new``, ``paused_at`` set, v42), with nothing written: retired, its pause
+        was lost, and ``fleet resume`` found no agent under its label.
+        """
+        try:
+            cursor = self._conn.execute(
+                "UPDATE fleet_agent SET label = ? WHERE id = ? AND label = ? AND ended_at IS NULL",
+                (new, agent_id, old),
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                return None
+            row = self._conn.execute(
+                "SELECT project_id FROM fleet_agent WHERE id = ?", (agent_id,)
+            ).fetchone()
+            project_id = str(row["project_id"])
+            head = self._conn.execute(
+                "SELECT ended_at, paused_at FROM fleet_agent "
+                "WHERE project_id = ? AND label = ? AND id != ? "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (project_id, new, agent_id),
+            ).fetchone()
+            if head is not None and head["ended_at"] is not None and head["paused_at"]:
+                raise sqlite3.IntegrityError(f"label {new!r} is a paused agent's")
+            # `new`'s own history first — another agent's, ended — out of the way, before
+            # this agent's moves in.
+            self._conn.execute(
+                "UPDATE fleet_agent SET label = ? "
+                "WHERE project_id = ? AND label = ? AND ended_at IS NOT NULL",
+                (RETIRED_LABEL + new, project_id, new),
+            )
+            self._conn.execute(
+                "UPDATE fleet_agent SET label = ? "
+                "WHERE project_id = ? AND label = ? AND ended_at IS NOT NULL",
+                (new, project_id, old),
+            )
+            for prefix in _FLEET_LABEL_MOVES:
+                self._conn.execute(
+                    "DELETE FROM ui_state WHERE key = ?", (f"{prefix}{project_id}:{new}",)
+                )
+                self._conn.execute(
+                    "UPDATE ui_state SET key = ?, updated_at = ? WHERE key = ?",
+                    (f"{prefix}{project_id}:{new}", _now_iso(), f"{prefix}{project_id}:{old}"),
+                )
+            now = _now_iso()
+            self._conn.execute(
+                "DELETE FROM ui_state WHERE key = ?", (f"{FLEET_RENAMED}{project_id}:{new}",)
+            )
+            self._conn.execute(
+                "INSERT INTO ui_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (
+                    f"{FLEET_RENAMED}{project_id}:{old}",
+                    json.dumps({"agent": agent_id, "at": now}),
+                    now,
+                ),
+            )
+        except Exception:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+        return self.get_fleet_agent(agent_id)
+
     def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
         """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
         session = self.get_session(session_id)
@@ -6437,11 +6779,18 @@ class SqliteStore:
         return updated
 
     def end_fleet_agent_if_live(
-        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
+        self,
+        agent_id: str,
+        *,
+        exit_status: int | None = None,
+        ended_by: EndedBy,
+        paused: bool = False,
     ) -> FleetAgent | None:
         """End a LIVE agent's row and return it; ``None`` when it was already ended.
 
         ``ended_by`` is how (v34, #38): ``stopped`` on aisquare's word, ``died`` otherwise.
+        ``paused`` is ``fleet pause``'s, with ``stopped``: ``paused_at`` is stamped in the same
+        statement (v42), so no reader finds the row ended and not yet paused.
 
         The UPDATE is a compare-and-set on ``ended_at IS NULL``, for a caller that
         announces the end: every fleet read records a dead pane (#138), so two
@@ -6449,10 +6798,11 @@ class SqliteStore:
         row may post ``agent_exited``. A re-read before the write left a statement
         for the other to land in (review of #138).
         """
+        now = _now_iso()
         cursor = self._conn.execute(
-            "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = ? "
+            "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = ?, paused_at = ? "
             "WHERE id = ? AND ended_at IS NULL",
-            (_now_iso(), exit_status, ended_by, agent_id),
+            (now, exit_status, ended_by, now if paused else None, agent_id),
         )
         self._commit()
         if cursor.rowcount == 0:
@@ -6462,9 +6812,11 @@ class SqliteStore:
     def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent:
         """Record an ENDED row as stopped on aisquare's word (#38): a 💤 row whose window
         ``fleet stop`` removed, which Restart all must then leave. A live row is untouched:
-        its end is written with how it ended."""
+        its end is written with how it ended. A paused row's pause ends with it
+        (``paused_at`` cleared): stopped for good, or resumed and history."""
         self._conn.execute(
-            "UPDATE fleet_agent SET ended_by = 'stopped' WHERE id = ? AND ended_at IS NOT NULL",
+            "UPDATE fleet_agent SET ended_by = 'stopped', paused_at = NULL "
+            "WHERE id = ? AND ended_at IS NOT NULL",
             (agent_id,),
         )
         self._conn.commit()
@@ -6472,6 +6824,19 @@ class SqliteStore:
         if agent is None:
             raise KeyError(agent_id)
         return agent
+
+    def mark_fleet_agent_paused(self, agent_id: str) -> FleetAgent | None:
+        """Record an ENDED row as paused (``services.fleet.pause_agent``): one a listing
+        recorded as died while the pause's ``/exit`` took it down. ``stopped`` with
+        ``paused_at``, as a pause writes it (v42). Never over a stop, which is the owner's
+        word, nor on a live row; ``None`` when nothing was written."""
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET ended_by = 'stopped', paused_at = ? "
+            "WHERE id = ? AND ended_at IS NOT NULL AND (ended_by IS NULL OR ended_by = 'died')",
+            (_now_iso(), agent_id),
+        )
+        self._conn.commit()
+        return self.get_fleet_agent(agent_id) if cursor.rowcount == 1 else None
 
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool:
         """Clear a LIVE row's recorded server start while it is still ``started``; whether it did.
@@ -6598,7 +6963,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- other agents' account registry (v44) ---------------------------------------------------
+    # --- other agents' account registry (v47) ---------------------------------------------------
     #
     # ``claude_account``'s methods above, for the rows of one other agent: the same
     # one-statement writes, the default and the alias refused by the indexes.
@@ -6675,7 +7040,7 @@ class SqliteStore:
             )
         self._commit()
 
-    # --- one priority order over every agent's slots (v46) ----------------------------------
+    # --- one priority order over every agent's slots (v49) ----------------------------------
 
     def account_ranks(self) -> dict[int, int]:
         """Each ranked slot's place in the one order, 1 first."""
@@ -6738,7 +7103,7 @@ class SqliteStore:
 
     def promote_retired_agent_account_default(self, agent: str) -> int | None:
         """:meth:`promote_retired_claude_account_default` for ``agent``'s slots: the flag
-        ``agent_account.is_default`` (store v44, one per agent) a build before the one order
+        ``agent_account.is_default`` (store v47, one per agent) a build before the one order
         across agents set, folded into ``agent``'s own order as its first, and cleared.
 
         Rank 1 of the one order is the machine default whatever its agent, so no agent has a
@@ -6951,11 +7316,29 @@ debounce, the solo session's not-yet-briefed mark (#346), and the quiet compacti
 its newest refusal and its latest arm (P1 WS-4)."""
 
 
-_FLEET_LABEL_STATE: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")
+_FLEET_LABEL_MOVES: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")
 """The ``ui_state`` keys kept per fleet label as ``<prefix><project id>:<label>``: the turn
 end that last started a before-limit move, the crossing a ``warn`` has named
-(``services.hooks``), and the row's model record (``services.model_memory``, #16). A reset
-clears a project's (:meth:`SqliteStore.reset_project`)."""
+(``services.hooks``), and the row's model record (``services.model_memory``, #16). They are
+the agent's, so a relabel moves them to its new label
+(:meth:`SqliteStore.relabel_fleet_agent`)."""
+
+RETIRED_LABEL = "~"
+"""Before a label, an ENDED row whose label a relabel gave another agent
+(:meth:`SqliteStore.relabel_fleet_agent`): ``~login-fix``. Never a label (``LABEL`` starts
+with a letter), so nothing typed resolves it; never a label's head
+(:meth:`SqliteStore.fleet_label_heads`), so no restart by label, Restart all or dead-team
+line takes it for the agent the label names now. The row keeps its id, its window, its
+history: a stop or a view pinned to it still finds it by its id."""
+
+FLEET_RENAMED = "fleet-renamed:"
+"""The ``ui_state`` key ``fleet-renamed:<project id>:<old label>``: the row a relabel took
+that label from and when, as JSON (``{"agent": …, "at": …}``), for a lookup by the old
+label to name the new one (``services.fleet.relabel``)."""
+
+_FLEET_LABEL_STATE: tuple[str, ...] = (*_FLEET_LABEL_MOVES, FLEET_RENAMED)
+"""Every ``ui_state`` key kept per fleet label. A reset clears a project's
+(:meth:`SqliteStore.reset_project`)."""
 
 
 _SESSION_BINDINGS: tuple[str, ...] = ("launch-session:", "fleet-session:", "session-alias:")

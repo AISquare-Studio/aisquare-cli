@@ -2,10 +2,12 @@
 
 docs/plans/fleet-tui.md §4.1. One ``ProjectCard`` per registered project, each
 with a disclosure, its name (the nickname, else the basename — renamed in place),
-chips (agents alive · 🔔 count), a ⋯ menu, and — when two projects share a name —
-the path as a dim subtitle; under it one ``AgentRow`` per fleet agent (role icon,
-label, state chip, exit status). Above the projects, one *actions* block under the Fleet
-header — *▶ Start captain* (the captain's own row while one is live) and *Spawn agent*, whose
+chips (agents alive · 🔔 count), a ⋯ menu, and a dim subtitle — the path when two projects
+share a name, and the fleet codename when it is not the one the name gives
+(:func:`project_subtitle`); under it one ``AgentRow`` per fleet agent (role icon,
+label, state chip, exit status). The Fleet header counts the agents live across the fleet
+(:func:`fleet_title`); above the projects, one *actions* block under it
+— *▶ Start captain* (the captain's own row while one is live) and *Spawn agent*, whose
 dialog asks which project — and under the separator, one
 row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), under it the
 ⬆ row while a newer aisquare is out (:func:`update_row_text`), and under that
@@ -17,14 +19,14 @@ Two rules shape the code more than the layout does:
 
 - **Rebuilds update in place.** The app re-reads the store every two seconds
   and calls ``show_projects`` with the whole frame. Cards and rows are keyed by
-  project and agent id and mutated, not re-created, so the highlight, the
-  keyboard cursor, a collapsed card and the scroll position survive every
-  tick, and nothing flickers. Only a project or agent that appeared or vanished
-  mounts or unmounts a widget.
+  project and agent id and mutated, not re-created, so the one highlight (the
+  mouse's and the keyboard's), a collapsed card and the scroll position survive
+  every tick, and nothing flickers. Only a project or agent that appeared or
+  vanished mounts or unmounts a widget.
 - **Rows post messages; the app decides.** ``AddProject``, ``ProjectSelected``,
   ``AgentSelected``, ``SpawnAgent``, ``SettingsSelected``, ``AccountsSelected``,
-  ``UpdateSelected``, ``RenameProject`` and ``OpenProjectMenu`` are the whole contract between this
-  pane and the shell (the Settings hub posts ``AppSettingsSelected``,
+  ``UpdateSelected``, ``RenameProject``, ``RenameAgent`` and ``OpenProjectMenu`` are the whole
+  contract between this pane and the shell (the Settings hub posts ``AppSettingsSelected``,
   ``AccountsSelected`` and ``DoctorSelected``). Nothing here opens a view or
   writes the store.
 
@@ -36,7 +38,7 @@ markup in data).
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
@@ -62,9 +64,17 @@ from aisquare.cli.ui.groups import (
     TogglePin,
     UndoLayout,
 )
+from aisquare.cli.ui.instances_chip import InstancesChip
 from aisquare.cli.ui.terminal import InPlaceField
+from aisquare.core import codenames
 from aisquare.core.agent_adapters import default_binary
-from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
+from aisquare.models import (
+    FleetAgent,
+    FleetAgentStatus,
+    HeadroomSummary,
+    ProjectGroup,
+    ProjectInfo,
+)
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
@@ -72,6 +82,7 @@ from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
 if TYPE_CHECKING:
     from aisquare.cli.ui.attach import ReturnTo
+    from aisquare.core.instances import Instance
 
 ROLE_ICON: dict[str, str] = {
     "manager": "🧭",
@@ -91,6 +102,7 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
     "limited": ("⏳", "magenta"),
     "exited": ("💤", "dim"),
     "lost": ("✗", "red"),
+    "paused": ("⏯", "cyan"),
     "unknown": ("·", "dim"),
 }
 CUSTOM_ROLE_ICON = "🤖"
@@ -101,16 +113,23 @@ ALIVE_STATES: frozenset[str] = fleet_service.PROCESS_STATES
 alive and parked (#146), not gone. The fleet's own set, which Stop and ``--all`` act on:
 a third copy of it could count as alive what they leave, or the reverse (review of #266,
 round 3)."""
-STOP_STATES: frozenset[str] = ALIVE_STATES | {"exited"}
+STOP_STATES: frozenset[str] = ALIVE_STATES | {"exited", "paused"}
 """Where **Stop** is offered — the agent view's button and the sidebar's ``x`` ask
 this one constant, never a copy of it: a process to stop (``ALIVE_STATES``), or an
 exited agent's dead window — `remain-on-exit` keeps it for the last screen, and Stop
 on the 💤 row removes it, which takes the row off the listing (``fleet stop`` on an
-ended row, #138). A ✗ lost row has neither: it is ``fleet reap``'s business."""
+ended row, #138). A ✗ lost row has neither: it is ``fleet reap``'s business. A ⏯ paused
+agent's Stop ends its pause for good: its kept claims go back to the board, and
+``fleet resume`` leaves it (``fleet stop`` of a paused agent)."""
 
 
 class AddProject(Message):
     """The + beside Fleet."""
+
+
+class ToggleActiveOnly(Message):
+    """The ○/● after the +, or ``l`` in the sidebar: list only the projects with a live agent,
+    or every project again. The app flips it and remembers it."""
 
 
 class CaptainRequested(Message):
@@ -118,13 +137,32 @@ class CaptainRequested(Message):
     (T4)."""
 
 
-class ProjectSelected(Message):
+class ViewSelected(Message):
+    """A view asked for by its row: a project's, an agent's, or the Settings hub.
+
+    Posted by the row itself (a click, Enter, an arrow landing on it) or by the shell on the
+    row's behalf (a restored selection, the ui receiver, the captain's insignia).
+    """
+
+    from_row = False
+    """The row posted it, and the sidebar put its one highlight on that row as it did. The
+    shell leaves the highlight alone then — and opens nothing once the highlight has moved
+    on to another row, whose own message is queued behind this one: an answer landing late
+    pulled the highlight back, and each row the arrows passed built its view, an agent's
+    pane attach included."""
+
+    browsing = False
+    """An arrow landed on the row: its view opens as a click opens it, but the keyboard
+    stays in the sidebar, so the next arrow moves on rather than typing into a pane."""
+
+
+class ProjectSelected(ViewSelected):
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id
         super().__init__()
 
 
-class AgentSelected(Message):
+class AgentSelected(ViewSelected):
     def __init__(self, project_id: str, agent_id: str) -> None:
         self.project_id = project_id
         self.agent_id = agent_id
@@ -135,7 +173,8 @@ class SpawnAgent(Message):
     """*Spawn agent*, or the receiver's ``open_spawn``: the Spawn dialog.
 
     ``project_id`` is the project the dialog opens on — the sidebar's selection, which the
-    dialog's Project field can change — or ``None`` for the first project listed.
+    dialog's Project field can change — or ``None``: the open view's project, else the first
+    listed (the shell's to say: the sidebar does not know the view).
     """
 
     def __init__(self, project_id: str | None = None) -> None:
@@ -149,11 +188,16 @@ class StopAgent(Message):
     Both controls ask the SHELL rather than calling the service, because the
     shell is what holds the :class:`ProjectInfo` a stop needs (``on_spawn_agent``
     resolves a project the same way) and what owns the dialog.
+
+    With ``[ui] confirm_stop`` off the shell stops at once, with no dialog — unless
+    ``ask``: the captain's ``open_stop`` ui action sets it, since that action opens a
+    question for the owner and stops nothing itself (``receiver.py``).
     """
 
-    def __init__(self, project_id: str, agent_id: str) -> None:
+    def __init__(self, project_id: str, agent_id: str, *, ask: bool = False) -> None:
         self.project_id = project_id
         self.agent_id = agent_id
+        self.ask = ask
         super().__init__()
 
 
@@ -181,7 +225,11 @@ class UsageStatsSelected(Message):
     """The Usage & stats page: what this machine's Claude Code sessions spent, by range."""
 
 
-class SettingsSelected(Message):
+class ResourcesSelected(Message):
+    """The Agent resources page: what each live agent consumes, read again while it shows."""
+
+
+class SettingsSelected(ViewSelected):
     """*⚙ Settings*: the Settings hub, with its links to App settings, Accounts and Doctor."""
 
 
@@ -203,6 +251,18 @@ class RenameProject(Message):
 
     def __init__(self, project_id: str, typed: str) -> None:
         self.project_id = project_id
+        self.typed = typed
+        super().__init__()
+
+
+class RenameAgent(Message):
+    """An agent row's name field was saved: rename ``agent_id``, labelled ``label``, to the label
+    ``typed`` becomes (``fleet relabel``)."""
+
+    def __init__(self, project_id: str, agent_id: str, label: str, typed: str) -> None:
+        self.project_id = project_id
+        self.agent_id = agent_id
+        self.label = label
         self.typed = typed
         super().__init__()
 
@@ -265,12 +325,44 @@ def short_path(path: Path, home: Path | None = None) -> str:
         return str(path)
 
 
+def codename_aside(project: ProjectInfo) -> str | None:
+    """The project's fleet codename when it is not the one its name gives
+    (:func:`codenames.codename_from_text` of :func:`project_name`), else ``None``.
+
+    A manager or a captain names a project by its codename (``--project earnest-hawk``), and
+    one never renamed has a generated one (``earnest-hawk``) its card does not otherwise
+    say; so does one set with ``fleet rename``, or one suffixed because another project
+    held the name's (``aisquare-cli-2``). One its name gives is said by the name itself."""
+    codename = project.codename
+    if codename is None or codename == codenames.codename_from_text(project_name(project)):
+        return None
+    return codename
+
+
 def project_subtitle(project: ProjectInfo, names: Counter[str], *, always: bool) -> str | None:
     """The dim line under a card's name: the project's directory (:func:`short_path`) when
     ``always`` — ``[ui] always_show_project_path`` — or when another listed project shares
-    its name (``names`` counts the listed projects by :func:`project_name`); ``None``, no
-    line, otherwise."""
-    return short_path(project.root) if always or names[project_name(project)] > 1 else None
+    its name (``names`` counts the listed projects by :func:`project_name`); then
+    `` · <codename>`` when its codename is not the one its name gives
+    (:func:`codename_aside`); ``None``, no line, when neither is said."""
+    path = short_path(project.root) if always or names[project_name(project)] > 1 else None
+    aside = codename_aside(project)
+    if aside is None:
+        return path
+    return f"{path} · {aside}" if path else f"· {aside}"
+
+
+def project_title_tooltip(project: ProjectInfo) -> str:
+    """The card name's tooltip: its fleet codename, whether the card says it or not, with the
+    tmux session it names, then the gestures."""
+    gestures = "double-click or F2 to rename · right-click or . for the menu"
+    codename = project.codename
+    if codename is None:
+        return f"no fleet codename yet (the first agent gives it one) · {gestures}"
+    return (
+        f"fleet codename {codename} (tmux {fleet_service.session_name(codename)}, "
+        f"--project {codename}) · {gestures}"
+    )
 
 
 def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatus]:
@@ -333,6 +425,9 @@ def agent_row_text(
         tail.append(" exited", style="dim")
         if agent.exit_status is not None:
             tail.append(f"({agent.exit_status})", style="dim")
+    elif status.state == "paused":
+        # Not exited: `fleet pause` stopped it, and `fleet resume` brings it back.
+        tail.append(" paused", style="dim")
     elif agent.account_slot is not None:
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:
@@ -362,12 +457,39 @@ def agent_row_text(
     return text
 
 
+LABEL_FIELD_MAX = 80
+"""What an agent row's name field holds: free text, which the label it becomes cuts to 24
+(``fleet_service.label_from_text``)."""
+
+
+def relabel_preview(typed: str, agent: FleetAgent, taken: Collection[str] = ()) -> Text:
+    """``→ login-fix``: the label an agent row's field makes of ``typed``, shown under it while
+    it is typed — what ``fleet relabel`` will call the agent. ``taken`` is the labels of the
+    other live agents the card shows: one of them is suffixed, as the rename suffixes it
+    (``login-fix-2``). Text that makes no label, or a reserved one, says why instead."""
+    try:
+        wanted = fleet_service.label_from_text(typed, agent.role)
+    except fleet_service.FleetError:
+        return Text("✗ needs 2 letters or digits", style="red")
+    if wanted in (fleet_service.MANAGER_LABEL, fleet_service.CAPTAIN_LABEL):
+        return Text(f"✗ {wanted} is reserved", style="red")
+    if wanted == agent.label:
+        return Text(f"→ {wanted} (as it is)", style="dim")
+    picked = fleet_service.free_label(wanted, taken)
+    text = Text("→ ", style="dim")
+    text.append(picked, style="bold")
+    if picked != wanted:
+        text.append(f" ({wanted} is taken)", style="dim")
+    return text
+
+
 def project_title_text(project: ProjectInfo) -> Text:
     """``🗂 Auth rewrite`` — the name a person gave it (else the folder's), and nothing else.
 
-    The codename is not shown: it names the tmux session and the branches, and a
-    nickname says what the project is. The chips are their own widget
-    (:func:`project_chips_text`), so a long name is cut before them, not them.
+    The codename is not on this line: a rename gives the project the codename its name
+    gives, and one that is not is said under it (:func:`project_subtitle`) and in the
+    title's tooltip. The chips are their own widget (:func:`project_chips_text`), so a long
+    name is cut before them, not them.
     """
     return Text(f"🗂 {project_name(project)}", no_wrap=True, overflow="ellipsis")
 
@@ -398,8 +520,8 @@ SETTINGS_ICON = "\u2699\ufe0e"
 """⚙ in its text presentation (VS15): a monotone gear, never the coloured emoji."""
 
 UPDATE_KEY = "update"
-"""The ⬆ row's key: reachable from the keyboard, never the highlighted selection (it opens
-a dialog, not a page)."""
+"""The ⬆ row's key: the arrows highlight it and open nothing — it opens a dialog, not a
+page, on Enter or a click, which leaves the highlight where it was."""
 
 UPDATE_ICON = "\u2b06\ufe0e"
 """⬆ in its text presentation (VS15), as :data:`SETTINGS_ICON` is."""
@@ -559,6 +681,13 @@ class Activatable(Static):
     ``selection_key`` names what it stands for (``project:<id>``,
     ``agent:<id>``, ``settings``) so the sidebar can re-apply the highlight
     after a rebuild without holding widget references.
+
+    The sidebar has ONE highlight (``.selected``), and the mouse and the keyboard move the
+    same one. A row that stands for a view (its message a :class:`ViewSelected`) takes it
+    when clicked or entered, and the arrows open it as they land on it. The others act —
+    ``+`` onboards, *Spawn agent*, *Start captain* and ⬆ open a dialog, a group header
+    folds: the arrows only highlight them, and Enter (or a click) acts. Passing over one
+    never pops a dialog.
     """
 
     # ``text-wrap`` / ``text-overflow`` live HERE, not on the Rich ``Text`` the rows
@@ -574,7 +703,6 @@ class Activatable(Static):
     DEFAULT_CSS = """
     Activatable { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     Activatable.selected { text-style: bold; background: $primary 35%; }
-    Activatable.cursor { background: $accent 30%; }
     """
 
     selection_key: str = ""
@@ -593,8 +721,35 @@ class Activatable(Static):
         click on a containing section. Left implicit, the sender would be
         whichever of those was handling its own event, and a message posted by a
         section onto its title would never reach the app.
+
+        A row that opens a view takes the sidebar's highlight here, before the shell has
+        read its message (:attr:`ViewSelected.from_row`): an arrow pressed in between goes
+        on from this row, not from the one highlighted before the click.
         """
-        self.post_message(self.message().set_sender(self))
+        self._post(self.message(), browsing=False)
+
+    @property
+    def opens_view(self) -> bool:
+        """Whether the row stands for a view (its message a :class:`ViewSelected`): the arrows
+        open it as they land on it, and its message follows whenever it takes the highlight."""
+        return isinstance(self.message(), ViewSelected)
+
+    def arrive(self) -> None:
+        """An arrow landed here: open the row's view, as a click would, the keyboard staying
+        in the sidebar. A row that acts rather than shows does nothing more than take the
+        highlight the sidebar has put on it."""
+        message = self.message()
+        if isinstance(message, ViewSelected):
+            self._post(message, browsing=True)
+
+    def _post(self, message: Message, *, browsing: bool) -> None:
+        if isinstance(message, ViewSelected):
+            sidebar = self._sidebar()
+            if sidebar is not None:
+                sidebar.select(self.selection_key)
+                message.from_row = True
+            message.browsing = browsing
+        self.post_message(message.set_sender(self))
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
@@ -621,10 +776,45 @@ class AddButton(Activatable):
 
     def __init__(self) -> None:
         super().__init__(Text(" + "), id="add-project")
-        self.selection_key = "add"  # reachable from the keyboard; never highlighted as selected
+        # The arrows highlight it like any row; once onboarding opens, no row is.
+        self.selection_key = "add"
 
     def message(self) -> Message:
         return AddProject()
+
+
+ACTIVE_ONLY_EMPTY = "No active projects — press l to show all."
+"""The projects' empty line while the active-only filter hides every project there is."""
+
+NO_PROJECTS = "No projects yet — press + to onboard one."
+"""The projects' empty line with nothing onboarded."""
+
+
+class ActiveOnlyButton(Activatable):
+    """The ○ after the ``+``: on (●, the accent), the sidebar lists only the projects with a
+    live agent (:meth:`Sidebar.show_projects`). ``l`` from the sidebar does the same."""
+
+    DEFAULT_CSS = """
+    ActiveOnlyButton { width: 3; color: $text-muted; }
+    ActiveOnlyButton.-on { color: $accent; text-style: bold; }
+    """
+
+    def __init__(self) -> None:
+        # No selection key: ↑/↓ walk the rows, not this glyph; the keyboard has ``l``.
+        super().__init__(id="active-only")
+        self.show(on=False)
+
+    def show(self, *, on: bool) -> None:
+        self.set_class(on, "-on")
+        self.update(Text(" ● " if on else " ○ "))
+        self.tooltip = (
+            "Active only: on — only the projects with a live agent are listed (l shows all)"
+            if on
+            else "Active only: off — every project is listed (l lists only those with a live agent)"
+        )
+
+    def message(self) -> Message:
+        return ToggleActiveOnly()
 
 
 class Disclosure(Static):
@@ -773,7 +963,7 @@ class ProjectTitle(DragHandle):
         super().__init__(project_title_text(project))
         self.project_id = project.id
         self.selection_key = f"project:{project.id}"
-        self.tooltip = "double-click or F2 to rename · right-click or . for the menu"
+        self.tooltip = project_title_tooltip(project)
 
     def message(self) -> Message:
         return ProjectSelected(self.project_id)
@@ -886,7 +1076,7 @@ class CardChips(Static):
 
 
 class CardMenuButton(Static):
-    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Start fresh…, Remove from fleet…"""
+    """⋯ — the card's menu: Rename, Pin / Unpin, Open settings, Start fresh…, Remove from fleet"""
 
     DEFAULT_CSS = """
     CardMenuButton { width: 2; height: 1; content-align: right middle; color: $text-muted; }
@@ -905,11 +1095,47 @@ class CardMenuButton(Static):
             sidebar.open_menu(card.project.id)
 
 
+class AgentLabelInput(InPlaceField, Input):
+    """An agent row's name as a field: Enter submits, Esc posts ``Cancelled``, and leaving it —
+    a press anywhere outside it too (:class:`InPlaceField`) — posts ``Left``: focus-out saves,
+    as Enter does."""
+
+    BINDINGS: ClassVar = [Binding("escape", "cancel_rename", "cancel", show=False)]
+
+    class Cancelled(Message):
+        """Esc in the field: close it and write nothing."""
+
+    class Left(Message):
+        """The field lost the focus while open."""
+
+    def action_cancel_rename(self) -> None:
+        self.post_message(self.Cancelled())
+
+    def on_blur(self) -> None:
+        self.post_message(self.Left())
+
+
+RENAME_TIP = "double-click or F2 to rename"
+
+
 class AgentRow(Activatable):
-    """One fleet agent under its project. Click → Agent view."""
+    """One fleet agent under its project. Click → Agent view; a second click → rename it.
+
+    The agent is renamed in place (``fleet relabel``): click its row twice, or press F2 on it,
+    and a field opens over the row, prefilled with the label, all selected, with the label
+    it will become under it (:func:`relabel_preview`). Enter or leaving the field saves
+    (``RenameAgent``), Esc closes it untouched, and a frame repaints the row beneath, never
+    the field. The manager's and the captain's rows, and an ended agent's, offer none
+    (``fleet_service.relabel_refusal``).
+    """
 
     DEFAULT_CSS = """
     AgentRow { padding-left: 3; }
+    AgentRow.-renaming { height: 2; }
+    AgentRow AgentLabelInput { width: 1fr; height: 1; }
+    AgentRow .agent-label-preview {
+        width: 1fr; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     """
 
     def __init__(self, status: FleetAgentStatus) -> None:
@@ -917,10 +1143,165 @@ class AgentRow(Activatable):
         self.status = status
         self.selection_key = f"agent:{status.agent.id}"
         self._painted: tuple[FleetAgentStatus, float | None, int] | None = None
+        self.prefill = ""
+        """What the name field said when it opened: leaving it so is no change."""
+        self._field: AgentLabelInput | None = None
+        self._preview: Static | None = None
+        self._tipped: FleetAgent | None = None
+        """The row the tooltip was last decided for: a frame that changed nothing of it asks
+        nothing again."""
+        self._tip()
 
     def show(self, status: FleetAgentStatus) -> None:
         self.status = status
+        self._tip()
         self.paint()
+        if self._field is not None:
+            # The frame may have changed what is taken (a spawn, another rename): the label
+            # it will become is said again, the field itself untouched.
+            self._paint_preview(self._field.value)
+
+    def _tip(self) -> None:
+        """The rename gesture, on a row that offers one: not the manager's, not the captain's,
+        not an ended agent's. ``relabel_refusal``, the one rule a second click and F2 ask too,
+        so the tooltip never offers what they refuse — asked again only when the row changed."""
+        agent = self.status.agent
+        if agent == self._tipped:
+            return
+        self._tipped = agent
+        tip = RENAME_TIP if fleet_service.relabel_refusal(agent) is None else None
+        if self.tooltip != tip:
+            self.tooltip = tip
+
+    # --- the label, renamed in place ---------------------------------------------------
+
+    @property
+    def renaming(self) -> bool:
+        """Whether the label's field is open on this row."""
+        return self._field is not None
+
+    @property
+    def field(self) -> AgentLabelInput | None:
+        return self._field
+
+    def open_rename(self, typed: str | None = None) -> None:
+        """Open the field over the label, prefilled with it (or ``typed``), all selected.
+
+        Already open, it only takes the focus back: what was typed is kept."""
+        if self._field is None:
+            self.prefill = self.status.agent.label
+            value = self.prefill if typed is None else typed
+            field = AgentLabelInput(
+                value=value,
+                max_length=LABEL_FIELD_MAX,
+                compact=True,
+                id=f"agent-label-{self.status.agent.id}",
+            )
+            field.tooltip = "any text · Enter saves, Esc cancels"
+            preview = Static(classes="agent-label-preview")
+            self._field, self._preview = field, preview
+            self._paint_preview(value)
+            self.add_class("-renaming")
+            self.mount(field, preview)
+        self.call_after_refresh(self._focus_field)
+
+    def _focus_field(self) -> None:
+        if self._field is not None and self._field.is_mounted:
+            self._field.focus()
+            self._field.select_all()
+
+    def close_rename(self, *, refocus: bool) -> None:
+        """Close the field and show the row; ``refocus`` hands the keys back to the sidebar
+        (Enter, Esc) — not when the field closed because a click took the focus elsewhere."""
+        field, preview = self._field, self._preview
+        if field is None:
+            return
+        self._field = self._preview = None
+        self.remove_class("-renaming")
+        field.remove()
+        if preview is not None:
+            preview.remove()
+        sidebar = self._sidebar()
+        if refocus and sidebar is not None:
+            sidebar.focus()
+
+    def _taken(self) -> set[str]:
+        """The labels of the other live agents its card shows."""
+        card = next((node for node in self.ancestors if isinstance(node, ProjectCard)), None)
+        statuses = card.statuses if card is not None else []
+        return {
+            status.agent.label
+            for status in statuses
+            if status.agent.id != self.status.agent.id and status.agent.ended_at is None
+        }
+
+    def _paint_preview(self, typed: str) -> None:
+        if self._preview is not None:
+            self._preview.update(relabel_preview(typed, self.status.agent, self._taken()))
+
+    def _save_typed(self, typed: str, *, refocus: bool) -> None:
+        """Save what the field says — or, when it makes the label it already has, just close it.
+
+        The shell writes it (``RenameAgent``) and says what the agent is called now."""
+        self.close_rename(refocus=refocus)
+        agent = self.status.agent
+        if typed.strip() == self.prefill.strip():
+            return
+        try:
+            if fleet_service.label_from_text(typed, agent.role) == agent.label:
+                return
+        except fleet_service.FleetError:
+            pass  # the shell's rename refuses it, says the rule and reopens the field
+        self.post_message(RenameAgent(agent.project_id, agent.id, agent.label, typed))
+
+    @on(Input.Changed, "AgentLabelInput")
+    def _typed(self, event: Input.Changed) -> None:
+        event.stop()
+        self._paint_preview(event.value)
+
+    @on(Input.Submitted, "AgentLabelInput")
+    def _submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._save_typed(event.value, refocus=True)
+
+    @on(AgentLabelInput.Left)
+    def _left(self, event: AgentLabelInput.Left) -> None:
+        """Focus-out saves, as Enter does — while the field is still open, and not when the
+        terminal itself lost the focus (Textual blurs the focused widget then)."""
+        event.stop()
+        if self._field is not None and self.app.app_focus:
+            self._save_typed(self._field.value, refocus=False)
+
+    @on(AgentLabelInput.Cancelled)
+    def _cancelled(self, event: AgentLabelInput.Cancelled) -> None:
+        event.stop()
+        self.close_rename(refocus=True)
+
+    _opened = False
+    """Whether the click before this one was a plain click that opened this row: only then is
+    a second one at the same place a rename (``ProjectTitle._opened``'s rule)."""
+
+    def on_click(self, event: events.Click) -> None:
+        opened, self._opened = self._opened, False
+        if self.renaming:
+            # A click in its field (or on the line under it) is the field's: no open.
+            event.stop()
+            event.prevent_default()
+            return
+        sidebar = self._sidebar()
+        if (
+            sidebar is not None
+            and event.button == 1
+            and event.chain >= 2
+            and opened
+            and fleet_service.relabel_refusal(self.status.agent) is None
+        ):
+            # The first click of the two opened the agent; the second renames it.
+            event.stop()
+            event.prevent_default()
+            sidebar.open_agent_rename(self.status.agent.id)
+        elif event.button == 1:
+            self._opened = True  # and ``Activatable.on_click`` opens it
 
     def paint(self) -> None:
         """Draw the row for its status, its account's session use and its width.
@@ -988,6 +1369,19 @@ def group_header_text(
     return text
 
 
+def has_live_agent(
+    project_id: str,
+    agents: Mapping[str, list[FleetAgentStatus]],
+    live: Mapping[str, int] | None = None,
+) -> bool:
+    """Whether a project has an agent in ``ALIVE_STATES`` — the card's "alive" chip, not an
+    exited or lost row. A project folded away is not read on the tick (#83): its live rows
+    are counted from ``live`` instead, as :func:`group_header_text` counts them."""
+    if project_id in agents:
+        return any(s.state in ALIVE_STATES for s in agents[project_id])
+    return (live or {}).get(project_id, 0) > 0
+
+
 class GroupHeader(DragHandle):
     """A group's line: Enter or a click folds and unfolds it; drag it to reorder groups (#140)."""
 
@@ -1030,7 +1424,7 @@ class GroupHeader(DragHandle):
 
 
 class SectionLabel(Static):
-    """``📌 Pinned`` — a heading that is not a row (the cursor skips it)."""
+    """``📌 Pinned`` — a heading that is not a row (the arrows skip it)."""
 
     DEFAULT_CSS = """
     SectionLabel { height: 1; padding: 0 1; color: $text-muted; text-style: italic; }
@@ -1137,7 +1531,9 @@ class ProjectCard(Vertical):
         if painting == self._painted:
             return
         try:
-            self.query_one(ProjectTitle).update(project_title_text(project))
+            title = self.query_one(ProjectTitle)
+            title.update(project_title_text(project))
+            title.tooltip = project_title_tooltip(project)
             self.query_one(CardChips).update(project_chips_text(project, statuses))
             holder = self.query_one("#agents", Vertical)
         except NoMatches:  # composing right now — compose reads the fields
@@ -1205,7 +1601,7 @@ class ProjectCard(Vertical):
         if refocus and sidebar is not None:
             sidebar.focus()
 
-    def _commit(self, typed: str, *, refocus: bool) -> None:
+    def _save_typed(self, typed: str, *, refocus: bool) -> None:
         """Save what the field says — or, when it is the name it opened with, just close it.
 
         The card says the new name at once; the shell writes it (``RenameProject``).
@@ -1220,7 +1616,7 @@ class ProjectCard(Vertical):
     @on(Input.Submitted, "NicknameInput")
     def _submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        self._commit(event.value, refocus=True)
+        self._save_typed(event.value, refocus=True)
 
     @on(NicknameInput.Left)
     def _left(self, event: NicknameInput.Left) -> None:
@@ -1228,7 +1624,7 @@ class ProjectCard(Vertical):
         terminal itself lost the focus (Textual blurs the focused widget then)."""
         event.stop()
         if self.renaming and self.app.app_focus:
-            self._commit(self.name_field.value, refocus=False)
+            self._save_typed(self.name_field.value, refocus=False)
 
     @on(NicknameInput.Cancelled)
     def _cancelled(self, event: NicknameInput.Cancelled) -> None:
@@ -1286,7 +1682,7 @@ def doctor_badge(failing: int, warning: int) -> str:
 
 class UpdateRow(Activatable):
     """The ⬆ row under *⚙ Settings* (:func:`update_row_text`), shown while a newer aisquare is
-    out. Click or Enter → the update dialog; never the highlighted selection."""
+    out. Click or Enter → the update dialog; the arrows only highlight it."""
 
     DEFAULT_CSS = """
     UpdateRow { display: none; }
@@ -1316,8 +1712,8 @@ of the fleet that asked for it answers: until then nothing says there is no capt
 
 START_CAPTAIN_KEY = "start-captain"
 SPAWN_AGENT_KEY = "spawn-agent"
-"""The two actions' keys: reachable from the keyboard, never the highlighted selection (each
-opens a dialog or a view that has its own row)."""
+"""The two actions' keys: the arrows highlight them and open nothing (each opens a dialog,
+or a view that has its own row); Enter or a click acts, a click leaving the highlight be."""
 
 
 ACTION_ICON_CELLS = 2
@@ -1461,8 +1857,8 @@ class ActionsSection(Vertical):
 class StatusLine(Static):
     """The dim line under *⚙ Settings* (:func:`status_line_text`). A click opens Accounts.
 
-    Not a row: it is never focused, never under the keyboard cursor and never the
-    highlighted selection — the Accounts page it opens is one of Settings' pages, so
+    Not a row: it is never focused, never reached by the arrows and never the
+    highlighted row — the Accounts page it opens is one of Settings' pages, so
     *⚙ Settings* stays the highlighted row (the human: "clicking on that should
     directly take me to accounts page but still that line wont be highlighted").
     """
@@ -1518,7 +1914,7 @@ class StatusLine(Static):
 
 class OthersSection(Vertical):
     """Everything that is not a project, under the separator: *⚙ Settings*, the ⬆ row while a
-    release is offered, and the status line."""
+    release is offered, the status line, and the chip while more than one asq runs (#20)."""
 
     DEFAULT_CSS = """
     OthersSection { height: auto; border-top: solid $primary; padding: 0 1; }
@@ -1528,9 +1924,28 @@ class OthersSection(Vertical):
         yield SettingsRow()
         yield UpdateRow()
         yield StatusLine(id="status-line")
+        yield InstancesChip(id="instances-chip")
 
 
 # --- the pane ---------------------------------------------------------------------
+
+
+def fleet_title(live_total: int) -> Text:
+    """The header: ``Fleet``, then ``· N live`` while any agent is live across the fleet —
+    every project's, the captain excluded: ``aisquare fleet capacity``'s ``live_total``."""
+    title = Text("Fleet")
+    if live_total > 0:
+        title.append(f" · {live_total} live", style="not bold")
+    return title
+
+
+def fleet_title_tooltip(live_total: int) -> str | None:
+    if live_total <= 0:
+        return None
+    return (
+        f"{live_total} agent{'' if live_total == 1 else 's'} live across every project, "
+        "the captain excluded — aisquare fleet capacity"
+    )
 
 
 MOVE_KEYS = Binding.Group("move", compact=True)
@@ -1541,8 +1956,9 @@ class Sidebar(Vertical):
     """Header and the scrolling project list; under the separator, *⚙ Settings* and its status.
 
     Focusable, because §4.3 puts focus either here or in a terminal pane:
-    ↑/↓ move a cursor over the rows, Enter activates the row under it, and the
-    escape hatch from a pane lands here.
+    ↑/↓ move the one highlight over the rows and open the view of the row they
+    land on, Enter activates the highlighted row, and the escape hatch from a
+    pane lands here.
     """
 
     DEFAULT_CSS = """
@@ -1586,9 +2002,11 @@ class Sidebar(Vertical):
         Binding("space", "toggle_collapse", "fold", show=False),
         Binding("u", "undo_layout", "undo", show=False),
         Binding("escape", "clear_marks", "clear marks", show=False),
-        # The card under the cursor: its name in place, and its menu (⋯).
+        # The highlighted card: its name in place, and its menu (⋯).
         Binding("f2", "rename", "rename", show=False),
         Binding("full_stop", "project_menu", "menu", show=False, key_display="."),
+        # The header's ○/●: only the projects with a live agent, or all of them again.
+        Binding("l", "toggle_active_only", "active only", show=False),
     ]
 
     can_focus = True
@@ -1598,8 +2016,11 @@ class Sidebar(Vertical):
         self.captain = captain
         """Whether the experimental captain is on: off, the actions block has no captain slot."""
         self.selected_key: str | None = None
-        """What is highlighted: ``project:<id>``, ``agent:<id>``, or ``settings`` while the hub
-        or a page it opens (App settings, Accounts, Doctor) shows."""
+        """The one highlighted row: ``project:<id>``, ``agent:<id>``, or ``settings`` while the
+        hub or a page it opens (App settings, Accounts, Doctor) shows — or, put there by the
+        arrows, a row that acts (``add``, ``group:<id>``, *Spawn agent*, *Start captain*, ⬆).
+        A click, the arrows and the shell all move this one key; there is no second,
+        keyboard-only highlight."""
         self.aisquare: bool | None = None
         """The AISquare sign-in the status line shows: signed in, out, or unknown."""
         self.headroom: HeadroomSummary | None = None
@@ -1614,8 +2035,12 @@ class Sidebar(Vertical):
         """Slot → its window that limits, percent USED, from the last headroom read: the
         ``#N·NN%`` on the agent rows (``HeadroomSummary.limit_by_slot``)."""
         self._prev_states: dict[str, str] = {}
-        self._cursor_key: str | None = None
+        self._anchor_key: str | None = None
+        """The last row highlighted: where the arrows go on from while none is. Clearing the
+        highlight (the Welcome page, onboarding) leaves the place it was."""
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
+        self.live_total = 0
+        """The header's "Fleet · N live", from the last frame read (:func:`fleet_title`)."""
         self.arrangement: Arrangement | None = None
         """The order the last frame was painted in (groups, pins, loose) — #140."""
         self._marked: list[str] = []
@@ -1623,24 +2048,37 @@ class Sidebar(Vertical):
         self._drag: DragState | None = None
         self._drag_source: DragHandle | None = None
         self._drop_target: Widget | None = None
+        self.active_only = False
+        """Whether only the projects with a live agent are listed (the header's ○/●, ``l``).
+        The app holds the remembered choice and sets it (:meth:`set_active_only`)."""
+        self.hidden_projects: frozenset[str] = frozenset()
+        """The listed projects the active-only filter hides in the frame on screen."""
+        self.hidden_groups: frozenset[str] = frozenset()
+        """The groups whose header it hides: none of their members passes it."""
+        self._frame_rest: tuple[
+            Mapping[str, str], list[ProjectGroup] | None, Mapping[str, int] | None
+        ] = ({}, None, None)
+        """The last frame's ``notices``, ``groups`` and ``live``: with :attr:`last_frame`, what
+        a flip of the filter repaints from."""
+        self._always_show_paths = False
+        self._empty_said = NO_PROJECTS
+        """What the projects' empty line says (:meth:`_show_empty`)."""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
-            yield Static(Text("Fleet"), id="fleet-title")
+            yield Static(fleet_title(self.live_total), id="fleet-title")
             yield AddButton()
+            yield ActiveOnlyButton()
         yield ActionsSection(captain=self.captain, id="actions")
         yield Static("", id="projects-notice")
         # can_focus=False: the rows are Statics, so a mouse-down on one focuses
         # the nearest focusable ancestor. Left focusable, this scroll would take
         # that focus and — once the list overflows — its own up/down bindings
         # would eat the arrows, so ↑/↓ scrolled the list instead of moving the
-        # cursor and the sidebar never read as focused. Focus belongs to the
-        # Sidebar (§4.3); the cursor scrolls the list through ``scroll_visible``.
+        # highlight and the sidebar never read as focused. Focus belongs to the
+        # Sidebar (§4.3); the arrows scroll the list through ``scroll_visible``.
         with VerticalScroll(id="projects", can_focus=False):
-            yield Static(
-                Text("No projects yet — press + to onboard one.", style="dim"),
-                id="projects-empty",
-            )
+            yield Static(Text(NO_PROJECTS, style="dim"), id="projects-empty")
         yield OthersSection(id="others")
 
     # --- data in -----------------------------------------------------------------
@@ -1694,20 +2132,41 @@ class Sidebar(Vertical):
         group is collapsed), then the loose projects — pins and manual order
         from the store, nothing sorted behind the user's back. Children are
         reconciled into that order by id, so a frame costs moves, not rebuilds.
+
+        While :attr:`active_only` is on, a project with no live agent
+        (:func:`has_live_agent`) keeps its card, hidden, and so does a group header
+        none of whose members passes, and the Pinned label with no pinned entry
+        shown: the cursor walks only what is on screen, and the arrangement, the
+        Spawn dialog's projects and the open view are the whole fleet's still. A
+        project whose agents could not be read (``notices``) is not known to be idle,
+        and stays. The Captain section is not a project, and is never filtered.
         """
         notices = notices or {}
-        # A mark is on a card the user can see. One whose project left the list
-        # (forgotten from a shell, a captured directory hidden again with `a`)
-        # lost its highlight with its card, and the next drag, `g` or shift+g
-        # still carried it: a forgotten id refused the whole drop, and a hidden
-        # directory was moved into the group without a word (final review of
-        # #203, F5). A card folded away in its group is still listed, and keeps it.
+        self._frame_rest = (notices, groups, live)
+        self._always_show_paths = always_show_paths
         listed = {project.id for project in projects}
-        self._marked = [pid for pid in self._marked if pid in listed]
+        passing = (
+            {
+                project.id
+                for project in projects
+                if project.id in notices or has_live_agent(project.id, agents, live)
+            }
+            if self.active_only
+            else listed
+        )
+        self.hidden_projects = frozenset(listed - passing)
+        # A mark is on a card the user can see. One whose project left the list
+        # (forgotten from a shell, a captured directory hidden again with `a`, an
+        # idle one the active-only filter hides) lost its highlight with its card,
+        # and the next drag, `g` or shift+g still carried it: a forgotten id refused
+        # the whole drop, and a hidden directory was moved into the group without a
+        # word (final review of #203, F5). A card folded away in its group is still
+        # listed, and keeps it.
+        self._marked = [pid for pid in self._marked if pid in passing]
         arrangement = arrange(projects, groups or [])
         self.arrangement = arrangement
         holder = self.query_one("#projects", VerticalScroll)
-        self.query_one("#projects-empty", Static).display = not projects
+        self._show_empty(projects=bool(projects), passing=bool(passing))
         # Its own children, not a query: a query walks every row of every card beneath them.
         shown = holder.children
         existing_cards = {c.project.id: c for c in shown if isinstance(c, ProjectCard)}
@@ -1734,34 +2193,50 @@ class Sidebar(Vertical):
             card.set_class(project.id in self._marked, "marked")
             card.set_class(stripe % 2 == 0, "even")
             card.set_class(stripe % 2 == 1, "odd")
-            card.display = not hidden
-            stripe += 1
+            card.display = not hidden and project.id in passing
+            # A card the filter hides takes no stripe: the two around it still alternate.
+            if project.id in passing:
+                stripe += 1
             ordered.append(card)
 
-        def header_for(entry: GroupEntry) -> None:
+        hidden_groups: set[str] = set()
+
+        def header_for(entry: GroupEntry) -> bool:
+            """The header and its members; whether the header is on screen."""
             header = existing_headers.pop(entry.group.id, None)
             if header is None:
                 header = GroupHeader(entry, agents, live)
             else:
                 header.show(entry, agents, live)
+            # Off, every header shows, an empty group's as ever.
+            header.display = not self.active_only or any(
+                member.id in passing for member in entry.members
+            )
+            if not header.display:
+                hidden_groups.add(entry.group.id)
             ordered.append(header)
             for member in entry.members:
                 card_for(member, scope=entry.group.id, hidden=entry.group.collapsed)
+            return header.display
 
         if arrangement.pinned:
             label = existing_labels.pop("pinned-label", None) or SectionLabel(
                 Text("📌 Pinned"), id="pinned-label"
             )
             ordered.append(label)
+            pinned_shown = False
             for entry in arrangement.pinned:
                 if isinstance(entry, GroupEntry):
-                    header_for(entry)
+                    pinned_shown |= header_for(entry)
                 else:
                     card_for(entry, scope=None, hidden=False)
+                    pinned_shown |= entry.id in passing
+            label.display = pinned_shown
         for entry in arrangement.groups:
             header_for(entry)
         for project in arrangement.loose:
             card_for(project, scope=None, hidden=False)
+        self.hidden_groups = frozenset(hidden_groups)
 
         stale: list[Widget] = [
             *existing_cards.values(),
@@ -1784,10 +2259,53 @@ class Sidebar(Vertical):
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
 
+    def _show_empty(self, *, projects: bool, passing: bool) -> None:
+        """The projects' one dim line: none onboarded — filter or no filter, the ``+`` is the
+        way on — or projects the active-only filter all hides."""
+        line = self.query_one("#projects-empty", Static)
+        said = ACTIVE_ONLY_EMPTY if projects else NO_PROJECTS
+        if said != self._empty_said:
+            line.update(Text(said, style="dim"))
+            self._empty_said = said
+        line.display = not passing
+
+    def set_active_only(self, on: bool) -> None:
+        """List only the projects with a live agent, or every project again: the header's
+        glyph follows, and the frame on screen is repainted at once, not at the next tick."""
+        self.active_only = on
+        self.query_one(ActiveOnlyButton).show(on=on)
+        if self.last_frame is None:
+            return  # no frame yet: the first one is painted so
+        projects, agents = self.last_frame
+        notices, groups, live = self._frame_rest
+        self.show_projects(
+            projects,
+            agents,
+            notices=notices,
+            groups=groups,
+            live=live,
+            always_show_paths=self._always_show_paths,
+        )
+
+    def action_toggle_active_only(self) -> None:
+        """``l``: the header's ○/●, from the keyboard."""
+        self.query_one(ActiveOnlyButton).activate()
+
+    def show_live_total(self, live_total: int) -> None:
+        """The header's count, from the frame just read: shown at once after a spawn or a stop,
+        and gone with the last live agent. A frame that could not be read keeps the last."""
+        if live_total == self.live_total:
+            return
+        self.live_total = live_total
+        title = self.query_one("#fleet-title", Static)
+        title.update(fleet_title(live_total))
+        title.tooltip = fleet_title_tooltip(live_total)
+
     def show_paths(self, always: bool) -> None:
         """``[ui] always_show_project_path`` changed (App settings saved, reloaded or reset):
         every card's directory line follows now, from the frame on screen, rather than at the
         next frame's read."""
+        self._always_show_paths = always
         if self.last_frame is None:
             return
         names = Counter(project_name(project) for project in self.last_frame[0])
@@ -1814,7 +2332,7 @@ class Sidebar(Vertical):
             card.set_class(card.project.id in self._marked, "marked")
 
     def action_toggle_mark(self) -> None:
-        """``m``: shift+click's twin, on the card under the cursor (or the card of its row).
+        """``m``: shift+click's twin, on the highlighted card (or the highlighted row's card).
 
         Most terminals keep Shift+click for their own text selection while an
         app reports the mouse (kitty, the VTE terminals, Konsole, Alacritty,
@@ -1832,8 +2350,8 @@ class Sidebar(Vertical):
             card.remove_class("marked")
 
     def _cursor_target(self) -> tuple[str, str] | None:
-        """``("project", id)`` or ``("group", id)`` for the row under the cursor (or selected)."""
-        key = self._cursor_key or self.selected_key
+        """``("project", id)`` or ``("group", id)`` for the highlighted row."""
+        key = self.selected_key
         if not key:
             return None
         kind, _, ident = key.partition(":")
@@ -1901,9 +2419,37 @@ class Sidebar(Vertical):
         for other in self.query(ProjectCard):
             if other.project.id != project_id and other.renaming:
                 other.close_rename(refocus=False)
+        self._close_agent_fields()
         card = self._card(project_id)
         if card is not None and card.display:
             card.open_rename(typed)
+
+    def _agent_row(self, agent_id: str) -> AgentRow | None:
+        return next((row for row in self.query(AgentRow) if row.status.agent.id == agent_id), None)
+
+    def _close_agent_fields(self, but: AgentRow | None = None) -> None:
+        """Close every agent row's open name field, unsaved, but ``but``'s: one at a time."""
+        for row in self.query(AgentRow):
+            if row is not but and row.renaming:
+                row.close_rename(refocus=False)
+
+    def open_agent_rename(self, agent_id: str, typed: str | None = None) -> str | None:
+        """Open ``agent_id``'s name field on its row (``typed`` in it), every other field
+        closing unsaved; or, for a row that offers no rename, why not
+        (``fleet_service.relabel_refusal``), and nothing opens. ``None`` once it is open, or
+        when the row is not on screen."""
+        row = self._agent_row(agent_id)
+        if row is None or not self._on_screen(row):
+            return None
+        refusal = fleet_service.relabel_refusal(row.status.agent)
+        if refusal is not None:
+            return refusal
+        for card in self.query(ProjectCard):
+            if card.renaming:
+                card.close_rename(refocus=False)
+        self._close_agent_fields(but=row)
+        row.open_rename(typed)
+        return None
 
     def open_menu(self, project_id: str) -> None:
         """Ask the shell for ``project_id``'s menu, under its card."""
@@ -1912,13 +2458,22 @@ class Sidebar(Vertical):
             self.post_message(OpenProjectMenu(project_id, card.region))
 
     def action_rename(self) -> None:
-        """F2: rename the card under the cursor (or the card of the row under it)."""
+        """F2: rename the highlighted row — an agent row's agent (``fleet relabel``), a card
+        title's project (or the card of another highlighted row). On an agent's row that offers
+        no rename (the manager's, the captain's, an ended agent's), say why."""
+        kind, _, ident = (self.selected_key or "").partition(":")
+        row = self._agent_row(ident) if kind == "agent" else None
+        if row is not None and self._on_screen(row):
+            refusal = self.open_agent_rename(ident)
+            if refusal is not None:
+                self.notify(f"not renamed: {refusal}", severity="warning", timeout=6, markup=False)
+            return
         target = self._cursor_target()
         if target is not None and target[0] == "project":
             self.open_rename(target[1])
 
     def action_project_menu(self) -> None:
-        """``.``: the menu of the card under the cursor, as its ⋯ opens it."""
+        """``.``: the menu of the highlighted card, as its ⋯ opens it."""
         target = self._cursor_target()
         if target is not None and target[0] == "project":
             self.open_menu(target[1])
@@ -2057,6 +2612,11 @@ class Sidebar(Vertical):
         notice.update(Text(text or "", style="bold yellow"))
         notice.display = bool(text)
 
+    def show_instances(self, live: Sequence[Instance], this_id: str | None) -> None:
+        """The asqs live on this home (#20): the chip under the status line, while there are
+        two or more; ``this_id`` is this asq's record."""
+        self.query_one(InstancesChip).show_instances(live, this_id)
+
     def show_aisquare(self, signed_in: bool | None) -> None:
         """The status line's AISquare dot: signed in, out, or ``None`` when it cannot be read."""
         self.aisquare = signed_in
@@ -2107,8 +2667,9 @@ class Sidebar(Vertical):
 
     def spawn_project_id(self) -> str | None:
         """The project *Spawn agent* opens on: the selected card's, or the selected agent's
-        project; else ``None`` (the first one listed). The captain's row, whose board is no
-        listed project, and a group, Settings or nothing selected, name none."""
+        project; else ``None``, and the shell opens it on the open view's project (else the
+        first listed). The captain's row, whose board is no listed project, and a group,
+        Settings, *Spawn agent* itself (reached by the arrows) or nothing selected name none."""
         kind, _, ident = (self.selected_key or "").partition(":")
         listed = {project.id for project in self.ordered_projects()}
         if kind == "project":
@@ -2124,23 +2685,42 @@ class Sidebar(Vertical):
     # --- selection ------------------------------------------------------------------
 
     def select(self, key: str | None) -> None:
-        """Highlight the row for ``key`` (a project, an agent or ``settings``)."""
+        """Put the one highlight on the row for ``key``; ``None`` highlights no row.
+
+        A key already highlighted costs nothing: an arrow selects its row, the row selects
+        itself as it posts its message, and the shell's answer selects it again — three
+        passes over every row (and a title lookup per card) for each key pressed.
+        """
+        if key == self.selected_key:
+            return
         self.selected_key = key
+        if key is not None:
+            self._anchor_key = key
         self._apply_selection()
 
+    def highlight_opens_a_view(self) -> bool:
+        """Whether the highlighted row stands for a view, so that its own message — posted as it
+        took the highlight — is on its way to open it (:attr:`Activatable.opens_view`)."""
+        key = self.selected_key
+        return key is not None and any(
+            row.selection_key == key and row.opens_view for row in self.query(Activatable)
+        )
+
     def _apply_selection(self) -> None:
+        # Over EVERY row, the ones hidden in a folded card or group too: a row that kept
+        # the class while hidden was a second highlight the moment it came back.
         for row in self.query(Activatable):
             row.set_class(row.selection_key == self.selected_key, "selected")
         self._show_active_menus()
 
     def _show_active_menus(self) -> None:
-        """A card's ⋯ shows on hover, and while its name is selected or under the cursor."""
+        """A card's ⋯ shows on hover, and while its name is the highlighted row."""
         for card in self.query(ProjectCard):
             try:
                 title = card.query_one(ProjectTitle)
             except NoMatches:  # not composed yet: the next frame paints it
                 continue
-            card.set_class(title.has_class("selected") or title.has_class("cursor"), "-active")
+            card.set_class(title.has_class("selected"), "-active")
 
     # --- bell -----------------------------------------------------------------------
 
@@ -2163,7 +2743,7 @@ class Sidebar(Vertical):
     # --- keyboard -------------------------------------------------------------------
 
     def _rows(self) -> list[Activatable]:
-        """The rows the cursor may land on: activatable and actually on screen."""
+        """The rows the arrows may land on: activatable and actually on screen."""
         return [
             row for row in self.query(Activatable) if row.selection_key and self._on_screen(row)
         ]
@@ -2173,7 +2753,7 @@ class Sidebar(Vertical):
 
         A collapsed card hides its rows by hiding their ``#agents`` holder
         (``_paint_decorations``); the rows' own ``display`` stays True. Filtering
-        on that alone walked the cursor onto invisible rows, so ↑/↓ lost the
+        on that alone walked the arrows onto invisible rows, so ↑/↓ lost the
         highlight and Enter opened an agent the user could not see.
         """
         if not row.display:
@@ -2186,39 +2766,43 @@ class Sidebar(Vertical):
         return True
 
     def _move_cursor(self, step: int) -> None:
+        """↑/↓: the highlight goes one row on from the highlighted one, and that row opens.
+
+        It goes on from THE highlight — the row a click put it on, or the shell — since
+        there is no other: a keyboard cursor of its own stayed behind on the row the
+        arrows last left, and the next ↓ jumped back to it from the row just clicked.
+        A row that acts rather than shows (``+``, a group header, *Spawn agent*, *Start
+        captain*, ⬆) is only highlighted (:meth:`Activatable.arrive`); Enter acts.
+        """
         every = [row for row in self.query(Activatable) if row.selection_key]
         on_screen = [index for index, row in enumerate(every) if self._on_screen(row)]
-        # Cleared over EVERY row, not only the visible ones: a row hidden inside
-        # a collapsed card kept the class forever, so two rows rendered as the
-        # keyboard cursor as soon as the card came back.
-        for row in every:
-            row.remove_class("cursor")
         if not on_screen:
             return
         keys = [every[index].selection_key for index in on_screen]
-        anchor = self._cursor_key or self.selected_key
+        anchor = self.selected_key or self._anchor_key
         if anchor in keys:
             slot = max(0, min(len(on_screen) - 1, keys.index(anchor) + step))
         else:
             slot = self._nearest_on_screen(every, on_screen, anchor, step)
         row = every[on_screen[slot]]
-        self._cursor_key = row.selection_key
-        row.add_class("cursor")
         row.scroll_visible()
-        self._show_active_menus()
+        if row.selection_key == self.selected_key:
+            return  # at an end of the list: still there, and already open
+        self.select(row.selection_key)
+        row.arrive()
 
     @staticmethod
     def _nearest_on_screen(
         every: list[Activatable], on_screen: list[int], anchor: str | None, step: int
     ) -> int:
-        """Which visible row takes the cursor when the anchor row is not one.
+        """Which visible row takes the highlight when the anchor row is not one.
 
-        A collapsed card takes its rows off screen with the cursor still on one
+        A collapsed card takes its rows off screen with the highlight still on one
         of them: continuing from the top of the pane (index 0) is a jump the user
-        did not ask for, so the cursor resumes at the nearest row that IS on
+        did not ask for, so the highlight resumes at the nearest row that IS on
         screen, ahead of the old one when moving down and behind it when moving
-        up. No cursor and no selection yet is the other case, and there the first
-        row is right — there is no "above" to move to.
+        up. Nothing highlighted yet is the other case, and there the first row is
+        right — there is no "above" to move to.
         """
         home = next((index for index, row in enumerate(every) if row.selection_key == anchor), None)
         if home is None:
@@ -2230,24 +2814,25 @@ class Sidebar(Vertical):
         return behind[-1] if behind else ahead[0]
 
     def put_cursor(self, key: str) -> bool:
-        """Put the keyboard cursor on the row for ``key``; whether that row is on screen.
+        """Put the highlight on the row for ``key`` and scroll to it; whether it is on screen.
 
         For a caller that hands the keyboard to a row on the user's behalf (the ui
         receiver's ``focus_project``): ↑/↓ and Enter then go on from that row, as
-        they would had the arrows brought the cursor there. A row that is not on
-        screen — a card inside a folded group — is not one to land on (the arrows ask
-        ``_on_screen`` too), so the cursor stays where it was.
+        they would had the arrows brought the highlight there. Its view is the
+        caller's to open. A row that is not on screen — a card inside a folded group —
+        is not one to land on (the arrows ask ``_on_screen`` too): nothing moves here.
         """
-        rows = [row for row in self.query(Activatable) if row.selection_key]
         target = next(
-            (row for row in rows if row.selection_key == key and self._on_screen(row)), None
+            (
+                row
+                for row in self.query(Activatable)
+                if row.selection_key == key and self._on_screen(row)
+            ),
+            None,
         )
         if target is None:
             return False
-        for row in rows:
-            row.remove_class("cursor")
-        self._cursor_key = key
-        target.add_class("cursor")
+        self.select(key)
         target.scroll_visible()
         return True
 
@@ -2262,8 +2847,10 @@ class Sidebar(Vertical):
         self._move_cursor(-1)
 
     def action_activate(self) -> None:
+        """Enter: what a click on the highlighted row does — an agent's pane takes the keyboard,
+        ``+`` onboards, *Spawn agent* opens its dialog, a group header folds."""
         for row in self._rows():
-            if row.selection_key == self._cursor_key:
+            if row.selection_key == self.selected_key:
                 row.activate()
                 return
 
@@ -2272,8 +2859,10 @@ class Sidebar(Vertical):
 
         The binding is the sidebar's, not the row's — the rows are Statics with
         ``can_focus=False`` on purpose (see ``#projects`` above), so there is no
-        focused row to bind to. It acts on what is selected, which is what the
-        user sees highlighted and what the open view is showing.
+        focused row to bind to. It acts on the highlighted row: an agent's row the
+        arrows or a click put it on, whose view is the one open. With the highlight
+        on a row that opens no view (``+``, a group header, *Spawn agent*) while an
+        agent's view still shows, it does nothing — the key stops what is lit.
 
         The agent names its own project, so a row selected under one card cannot
         be stopped against another's ``ProjectInfo``.

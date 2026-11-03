@@ -649,7 +649,9 @@ class GeminiShapedAccounts:
     def token_state(self, account: ClaudeAccount) -> str:
         return "ok" if self.signed_in(account) else "missing"
 
-    def usage(self, account: ClaudeAccount, *, now: datetime | None, fetch: object) -> ClaudeUsage:
+    def usage(
+        self, account: ClaudeAccount, *, now: datetime | None, fetch: object, fresh: bool = False
+    ) -> ClaudeUsage:
         """Its quotas are per day per model (docs/resources/quota-and-pricing.md): one window
         of a day for each model, from ``quota.json`` in its config dir (``{"models": {model:
         {"used_percent", "resets_at"}}, "recorded_at"}``, a stand-in for the real CLI, which

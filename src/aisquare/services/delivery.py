@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Literal
 
 from aisquare.core import claude_screen as screen
-from aisquare.core import paths
+from aisquare.core import paths, prompt_origin
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import (
     TmuxError,
@@ -105,6 +105,9 @@ def write_prompt_file(agent_id: str, text: str) -> Path:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(text)
+    prompt_origin.mark_origin(
+        text, prompt_origin.SPAWN
+    )  # its first turn is the spawn's, not a person's
     return path
 
 
@@ -284,6 +287,7 @@ def deliver_typed(
     re_press: tuple[float, ...] = RE_PRESS,
     last_wait: float = LAST_WAIT,
     gap: float = ENTER_GAP,
+    origin: str | None = None,
 ) -> Delivered:
     """Paste ``text`` into a ready pane, check it is in the input box, press Enter, and see a
     turn start; press Enter again only while it provably did not.
@@ -314,6 +318,10 @@ def deliver_typed(
        Stop at once when the box is empty, holds anything else, or a dialog shows: a human
        is typing, or the Enter brought up a question an Enter would answer.
 
+    ``origin``, when given, is the kind of prompt this is (``core.prompt_origin``: ``tell``,
+    ``spawn``, ``wake``…): a marker for the text is left before the paste, so the turn it starts
+    records who sent it, and withdrawn when the paste did not go through.
+
     This narrows ``type_then_enter``'s "never a second Enter" rule (review of #259, round
     10) rather than dropping it: a second Enter is pressed only when the first one provably
     did not submit, with the text still there and nothing else on the screen (W0: one
@@ -329,10 +337,13 @@ def deliver_typed(
     box = _composer(server, pane_id) if reads_box else None
     reads_box = reads_box and box is not None
     waiting = guard is not None and reads_box and holds(box, text)
+    marker = prompt_origin.mark_origin(text, origin) if origin is not None else None
     pasted = (
         PaneWrite("yes", what) if waiting else pane_write(what, lambda: server.paste(pane_id, text))
     )
     if pasted.typed != "yes":
+        if pasted.typed == "no":
+            prompt_origin.unmark_origin(marker)
         return Delivered(pasted, None, 0)
     if reads_box:
         deadline = monotonic() + RENDER_WAIT
@@ -643,6 +654,7 @@ def type_then_enter(
     what: str = "the text",
     gap: float = 0.0,
     sleep: Callable[[float], None] = time.sleep,
+    origin: str | None = None,
 ) -> TellResult | PaneWrite:
     """Paste ``text`` (``what``) at the prompt in ``label``'s pane, then press Enter, ``gap``
     seconds later as a key of its own (``services.fleet._KEY_GAP``: Codex takes keys that
@@ -655,15 +667,20 @@ def type_then_enter(
     Past the paste the text is at the prompt, and the answer is how the Enter ended:
     ``done``, or :func:`pasted_unsent` (``press``). The three wrote paste, Enter and
     :func:`pasted_unsent` out each in words of its own (review of #259, round 11, 12/13).
+
+    ``origin`` leaves a marker for the text first, as :func:`deliver_typed` does.
     """
 
     def enter() -> None:
         sleep(gap)
         server.send_keys(pane_id, "Enter")
 
+    marker = prompt_origin.mark_origin(text, origin) if origin is not None else None
     wrote = pane_writes((what, lambda: server.paste(pane_id, text)), ("Enter", enter))
     if wrote.typed == "yes":
         return TellResult("yes", done)
+    if wrote.typed == "no" and not wrote.went:
+        prompt_origin.unmark_origin(marker)
     return pasted_unsent(wrote, label, press=press) if wrote.went else wrote
 
 

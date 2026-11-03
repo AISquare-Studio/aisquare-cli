@@ -214,7 +214,9 @@ def test_a_malformed_cpu_pressure_is_no_reading_and_no_probe_raises(
     monkeypatch.setattr(load, "PSI_CPU", psi)
     monkeypatch.setattr(os, "getloadavg", lambda: (1.0, 2.0, 3.0), raising=False)
     monkeypatch.setattr(os, "cpu_count", lambda: 8)
-    assert REAL_CPU_LOAD() == load.CpuLoad(2.0, 8, None)
+    # Windows has no load average: ``cpu_load`` never asks it, faked or not.
+    load5 = None if sys.platform == "win32" else 2.0
+    assert REAL_CPU_LOAD() == load.CpuLoad(load5, 8, None)
 
     def broken() -> object:
         raise RuntimeError("probe exploded")

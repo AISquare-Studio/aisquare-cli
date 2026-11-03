@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import process_table
 from aisquare.core import usage as usage_core
 from aisquare.core.agent_adapters import recorded_adapter
@@ -142,7 +143,8 @@ class AgentUse:
     label: str
     role: str
     account: str | None
-    """The account's label (its alias, ``plain claude``, ``account N``); ``None``: none chosen."""
+    """The account's label (its alias, an agent's plain home by its own name, ``plain claude`` or
+    ``plain codex``, else ``account N``); ``None``: none chosen."""
     account_slot: int | None
     session_id: str | None
     pane_id: str
@@ -285,7 +287,9 @@ def sample(
             if project_ids is None or row.project_id in project_ids
         ]
         projects = {row.project_id: store.get_project(row.project_id) for row in rows}
-        labels = accounts_service.slot_labels(store) if any(r.account_slot for r in rows) else {}
+        # Slot 0 is an account too (Codex's plain home): "none chosen" is None alone.
+        chosen = any(r.account_slot is not None for r in rows)
+        labels = accounts_service.slot_labels(store) if chosen else {}
     if not rows:  # nothing to read the processes of: neither tmux nor ps is asked
         spend.forget(())
         return TopReport([], datetime.now(tz=UTC), (time.perf_counter() - began) * 1000)
@@ -352,9 +356,12 @@ def _pane_pids(rows: list[FleetAgent], locate: ServerOf) -> tuple[dict[str, _Pan
 
 
 def _account(slot: int | None, labels: dict[int, str]) -> str | None:
+    """The slot's alias, else its built-in name, as ``fleet ls`` names it
+    (``core.claude_accounts.slot_name``: every agent's plain home by its own name, ``plain
+    claude``, ``plain codex``, else ``account N``); ``None`` for a row that chose none."""
     if slot is None:
         return None
-    return labels.get(slot) or ("plain claude" if slot == 1 else f"account {slot}")
+    return labels.get(slot) or accounts_core.slot_name(slot)
 
 
 def _agent_use(

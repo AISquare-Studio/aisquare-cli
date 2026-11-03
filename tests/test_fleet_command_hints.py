@@ -148,7 +148,6 @@ PROJECT_OF: dict[tuple[str, str], str] = {
         "the ones ``--project``, ``--group`` or ``--all`` named"
     ),
     ("cli/fleet.py", "attach"): _TARGET,
-    ("cli/project.py", "_emit_fresh"): _TARGET,
     ("services/fresh.py", "start_fresh"): (
         "the project being started fresh, as its plan read it from the store"
     ),
@@ -161,12 +160,13 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fresh.py", "_confirm_down"): (
         "the project being started fresh, whose tmux session still stands, or cannot be asked"
     ),
+    ("services/fresh.py", "manager_hint"): (
+        "the project the Start fresh report is about (``project fresh``'s target, or the one "
+        "the UI's dialog was opened on), whose manager did not start"
+    ),
     ("services/fresh.py", "found_after_stop"): (
         "the project whose plan found the work, the one being started fresh, whose fleet the "
         "stop left stopped"
-    ),
-    ("cli/ui/app.py", "FleetApp._project_freshened"): (
-        "the project the Start fresh report is about, the one its dialog was opened on"
     ),
     ("cli/ui/views/project.py", "no_manager_text"): _SHOWN,
     ("cli/ui/views/welcome.py", "WelcomeView._paint_fleet"): _SHOWN,

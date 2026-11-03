@@ -72,11 +72,16 @@ the default sidebar.**
   `upgrade --version 0.9.1`. Quit the asqs first (`q` in each). Inside asq, its Update and
   Uninstall refuse only while another asq runs.
 - **`[fleet] max_agents_per_project` now defaults to `auto` (was `4`).** It is the one
-  change every upgrader gets without touching anything: auto has no fixed per-project
-  number, and admits by the machine's load and `busy_burst` (see *Changed*). A file that
-  sets a number keeps it, but a setting equal to its default is left out of the file, so a
-  `4` chosen before is not there to keep. To keep the old cap, set it again: `aisquare
-  config set fleet.max_agents_per_project 4`, or App settings ▸ *max agents per project*.
+  default that moves, so every upgrader gets it without touching anything: auto has no
+  fixed per-project number, and admits by the machine's load and `busy_burst` (see
+  *Changed*). A file that sets a number keeps it, but a setting equal to its default is
+  left out of the file, so a `4` chosen before is not there to keep. To keep the old cap,
+  set it again: `aisquare config set fleet.max_agents_per_project 4`, or App settings ▸
+  *max agents per project*. Moved back, 0.9.1 ignores the `busy_*` settings and its
+  default is 4 again, but it cannot load a `config.toml` that says
+  `max_agents_per_project = "auto"` (its setting takes only a number): take such a line,
+  typed by hand, out first. Neither `config set` nor App settings writes it there, since
+  `auto` is the default.
 - **Settings are added, none removed; no extra or dependency is.** `[fleet]` gains auto
   admission's `busy_floor`, `busy_burst`, `busy_load_per_cpu`, `busy_cpu_psi`,
   `busy_memory`, `busy_thermal` and `busy_hold_minutes`. Four new commands, `aisquare fleet
@@ -111,7 +116,12 @@ the default sidebar.**
   `upgrade --json` and `uninstall --json` plans add `asqs` (the asqs running, named), and
   their refusal while one runs is `"error": "asq_running"`. Under `accounts usage --json` a
   reading another process took carries `"recorded_elsewhere": true`, and a usage `cause`
-  may be `keychain_locked_ssh`.
+  may be `keychain_locked_ssh`. `fleet capacity --json` may give `max_agents_per_project`
+  as the string `"auto"`, and adds `busy`, `busy_floor`, `busy_burst`, `busy_hold_minutes`,
+  `signals`, `holds` and `bursts`; a spawn auto admission holds fails with
+  `"error": "capacity_busy"`, its `hint` the `retry_at`. `metrics stats --json` gives a
+  repository's real name as its `name` (in `repos.rows` and `repos.top`), not its
+  nickname. `aisquare outcomes --json` and `aisquare fleet top --json` are new.
 
 ### Added
 
@@ -490,7 +500,9 @@ the default sidebar.**
   added again. It gets a fresh key and number now, and says what it replaces:
   `✓ added: #9 … (supersedes dropped #4)`; `--json` carries `supersedes` (`number`, `id`,
   `status`), `null` when nothing was replaced. A title whose task is still open stays
-  idempotent, as before.
+  idempotent, as before. MCP `task_add` and the captain's add name the task they supersede
+  too, and `task add --help`, the MCP tool's description, the board's protocol and the
+  planner's cycle say a re-add is idempotent only while the task is open.
 - **The prompt log no longer records Claude Code's own blocks as your prompts.** A
   background task's `<task-notification>`, a slash command's `<command-name>`,
   `<command-message>`, `<command-args>` and `<local-command-caveat>`, and a hook's

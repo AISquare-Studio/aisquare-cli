@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import outcomes as outcomes_cli
 from aisquare.cli.app import app
-from aisquare.core import prompt_origin
+from aisquare.core import prompt_origin, repo_profile
 from aisquare.core.ids import new_trace_id
 from aisquare.core.store import store_session
 from aisquare.models import (
@@ -30,6 +30,8 @@ from aisquare.models import (
     ClientReason,
     FleetAgent,
     ProjectInfo,
+    RepoProfile,
+    TaskEventRow,
     TeamEvent,
     TeamSession,
     TurnMetric,
@@ -495,6 +497,41 @@ def test_outcomes_count_prs_commits_and_tasks_per_repository_by_its_real_name(
         "merged:2026-10-26T00:00:00+05:30..2026-10-29T14:59:59+05:30" in query
     )
     assert "created:2026-10-19T00:00:00+05:30..2026-10-22T14:59:59+05:30" in query
+
+
+_N = repo_profile.normalise_remote
+
+
+@pytest.mark.parametrize(
+    ("remote", "github"),
+    [
+        pytest.param("github.com/acme/widget", "acme/widget", id="normalised"),
+        pytest.param(_N("git@github.com:Acme/Widget.git"), "acme/widget", id="scp"),
+        pytest.param(_N("https://u:tok@github.com/acme/widget.git"), "acme/widget", id="https"),
+        pytest.param(_N("ssh://git@github.com:22/acme/widget/"), "acme/widget", id="ssh-port"),
+        pytest.param("github.com.evil.com/x/y", None, id="host-suffixed"),
+        pytest.param(_N("https://github.com.evil.com/x/y"), None, id="host-suffixed-url"),
+        pytest.param("evilgithub.com/x/y", None, id="host-prefixed"),
+        pytest.param("x/github.com/y", None, id="in-path"),
+        pytest.param(_N("git@evil.com:github.com/x/y"), None, id="in-path-url"),
+        pytest.param("github.com/", None, id="empty-path"),
+        pytest.param("github.com", None, id="no-path"),
+        pytest.param("github.com/acme", None, id="owner-only"),
+        pytest.param("github.com/acme/widget/wiki", None, id="deeper-path"),
+        pytest.param("gitlab.com/acme/widget", None, id="gitlab"),
+        pytest.param(None, None, id="no-remote"),
+    ],
+)
+def test_only_a_remote_on_github_com_itself_is_asked_of_github(
+    remote: str | None, github: str | None
+) -> None:
+    profile = RepoProfile(
+        repo_id="p1", name="widget", root="/srv/widget", remote=remote, refreshed_at=NOW
+    )
+    event = TaskEventRow(created_at=NOW, kind="task_done", project_id="p1")
+    store: Any = None  # a profiled checkout's root is its profile's: the store is not asked
+    repos = outcomes._week_repos(store, {"p1": profile}, lambda pid: pid, [], [event], [])
+    assert repos["p1"].github == github
 
 
 def test_without_gh_one_line_says_pull_requests_were_skipped(

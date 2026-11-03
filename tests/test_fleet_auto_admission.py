@@ -197,9 +197,7 @@ def test_config_set_takes_auto_in_any_case_as_the_settings_field_does(raw: str) 
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "true"])
-def test_a_file_with_a_max_agents_below_1_is_refused_as_invalid(
-    tmp_path: Path, value: str
-) -> None:
+def test_a_file_with_a_max_agents_below_1_is_refused_as_invalid(tmp_path: Path, value: str) -> None:
     path = tmp_path / "config.toml"
     path.write_text(f"config_version = 3\n[fleet]\nmax_agents_per_project = {value}\n", "utf-8")
     with pytest.raises(ValueError, match="max_agents_per_project"):

@@ -677,6 +677,8 @@ class CodexAdapter:
         sandbox_permissions=True,
         sandboxes_tools=True,
         redraws_while_asking=True,
+        # No `process_env`: its hooks get no variable of its own (0.164.0 native, `env` in
+        # each hook under `codex exec`); its tools' shells are `tool_shell_env`'s.
         tool_shell_env="CODEX_THREAD_ID",
         # `RUN env` in a `codex exec` tool shell: 0.162.1 set these beside CODEX_THREAD_ID and
         # CODEX_HOME, 0.164.0 (npm) CODEX_TOOL_CALL_ID and its two package variables too.

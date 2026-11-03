@@ -54,6 +54,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.sidebar import ALIVE_STATES
 from aisquare.cli.ui.views.app_settings import UiSettingsChanged
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.config import UiSettings
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -80,7 +81,7 @@ StopAgentScreen #stop-dont-ask:focus { text-style: bold reverse; }
 
 
 def grace_seconds() -> float:
-    """How long ``stop`` waits after ``/exit`` — asked of the service, never copied.
+    """How long ``stop`` waits after the exit command — asked of the service, never copied.
 
     The dialog promises the user a number of seconds. Typing that number here
     would make the sentence true only until someone changed the service's
@@ -186,14 +187,23 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         return self.label == fleet_service.MANAGER_LABEL
 
     def has_process(self) -> bool:
-        """Whether there is a process to ``/exit`` — ``ALIVE_STATES``, the button's own rule.
+        """Whether there is a process to type the exit command into — ``ALIVE_STATES``, the
+        button's own rule.
 
         On a 💤 exited row the window is dead and kept only for its last screen
         (`remain-on-exit`, #138): the stop removes it and the row leaves the
-        listing, with no ``/exit`` and no grace, so the question says that and
-        *Force* — which only skips the ``/exit`` — has nothing to offer.
+        listing, with no exit command and no grace, so the question says that and
+        *Force* — which only skips the exit command — has nothing to offer.
         """
         return self.status.state in ALIVE_STATES
+
+    def exit_command(self) -> str | None:
+        """What the stop types to end this row's session: its agent's own
+        ``AgentAdapter.exit_command`` (Claude Code's and Codex's ``/exit``, another agent's
+        its own), the one ``fleet stop`` types; ``None`` for an agent this install does not
+        know, whose command the dialog does not guess."""
+        adapter = recorded_adapter(self.status.agent.agent)
+        return adapter.exit_command if adapter is not None else None
 
     def question(self) -> Text:
         """The whole question as data — the label is the user's, brackets and all."""
@@ -221,8 +231,12 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         text.append("Stop ")
         text.append(self.label, style="bold")
         text.append("?\n")
-        text.append(f"/exit, then the window is killed after {grace_seconds():g} s. ", style="dim")
-        text.append("Force skips the /exit.", style="dim")
+        command = self.exit_command()
+        typed = command if command is not None else "Its exit command"
+        text.append(
+            f"{typed}, then the window is killed after {grace_seconds():g} s. ", style="dim"
+        )
+        text.append(f"Force skips the {command or 'exit command'}.", style="dim")
         if self.is_manager():
             text.append(
                 "\nThis is the project's manager; the agents it started keep running.",
@@ -288,7 +302,7 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
     @on(Button.Pressed, "#stop-cancel")
     def action_cancel(self) -> None:
         if self._stopping:
-            # The /exit is already typed and the kill is on its way: closing now
+            # The exit command is already typed and the kill is on its way: closing now
             # would leave the service's answer — including a refusal — nowhere to
             # land. The Spawn dialog waits out its own spawn for the same reason.
             return

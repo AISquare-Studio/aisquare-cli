@@ -333,6 +333,15 @@ class AgentCapabilities:
     (``core.spawn.agent_identity_env_vars``), and from the agent ``aisquare launch`` starts.
     A shell holding any of them is that agent's tool shell, whose
     :attr:`AgentAdapter.home_env` is the spawner's own (``core.spawn.tool_shell_homes``)."""
+    process_env: str | None = None
+    """The variable the agent sets in every process it starts, its hooks included (Claude
+    Code's ``CLAUDECODE``): a command run where it is set runs under that agent, so a
+    ``fleet tell`` or a spawn sent from it is the agent's, never a person's
+    (``core.prompt_origin.origin_sender``, beside :attr:`tool_shell_env`). ``None`` for an
+    agent that marks no such process: Codex sets nothing of its own in its hooks
+    (measured on 0.164.0's native binary under ``codex exec``; its npm launcher's
+    ``CODEX_MANAGED_BY_NPM`` is the package manager's, not Codex's), and its tools' shells
+    are :attr:`tool_shell_env`'s."""
     exports_home_env: bool = True
     """A launch sets :attr:`AgentAdapter.home_env` to the config dir it resolved; Claude
     Code's ``CLAUDE_CONFIG_DIR`` stays as the shell or the binding wrote it."""

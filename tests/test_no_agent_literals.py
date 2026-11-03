@@ -150,10 +150,10 @@ OPTION_CALLS = frozenset({"Option", "Argument"})
 #: its agent's adapter, and before-limit's gate (F2) the row's own agent's transcript reader
 #: (``AgentTranscript.background_work``): no row for either.
 #:
-#: 0.9.2's one row (SCOPE #113 092, a GAP with its lane in its note): who started a turn
-#: (``metric.origin``) reads Claude Code's own mark of the processes it starts, ``CLAUDECODE``,
-#: beside every agent's launch and tool-shell marks (``core.spawn.run_agents``); no slot names
-#: an agent's mark of every process it starts, its hooks included.
+#: 0.9.2 added no row: who started a turn (``metric.origin``) reads the mark an agent sets in
+#: every process it starts, its hooks included, by its ``AgentCapabilities.process_env``
+#: (Claude Code's ``CLAUDECODE``), beside every agent's launch and tool-shell marks
+#: (``core.spawn.run_agents``). The literal it spelled went with SCOPE #113 092's row 11 lane.
 BASELINE: dict[str, dict[Shape, int]] = {
     "cli/fleet.py": {"flag": 1},
     "cli/hook.py": {"binary": 3},
@@ -164,7 +164,6 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "core/codex_accounts.py": {"binary": 1, "env": 1, "dir": 3},
     "core/config.py": {"flag": 3},
     "core/harness.py": {"env": 30, "dir": 1, "flag": 6},  # + MODEL_FLAG and EFFORT_FLAG
-    "core/prompt_origin.py": {"env": 1},  # CLAUDECODE: who started a turn (0.9.2, #11)
     "core/spawn.py": {"env": 1},
     "services/diagnostics.py": {"env": 5, "dir": 4},  # + the remote control row (#289)
     "services/explainability.py": {"env": 4},

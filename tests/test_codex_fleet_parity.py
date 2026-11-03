@@ -37,7 +37,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.cli.ui.views.app_settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import harness, launch_seal
+from aisquare.core import harness, launch_seal, prompt_origin
 from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, prepare_store, screen_of, store_dir
 from aisquare.core.config import (
@@ -631,6 +631,120 @@ def test_a_queue_that_fails_leaves_the_message_on_the_board(
     assert told.delivered is False
     assert "could not queue it (error: thread not found)" in told.how and "board note" in told.how
     assert _notes_to(codex.project, codex.agent.label) == ["rebase on main first"]
+
+
+# --- the turn a queued tell starts is the tell's (SCOPE #113 092, row 11) ------------------
+
+
+def _markers_for(text: str) -> list[Path]:
+    """The origin markers waiting for ``text`` (``prompt_origin.mark_origin``'s files)."""
+    folder = prompt_origin.origin_markers_dir()
+    if not folder.is_dir():
+        return []
+    return sorted(folder.glob(f"{prompt_origin.origin_digest(text)}.*.json"))
+
+
+def _from_a_persons_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run as a person's terminal: no fleet window's variables, no agent's process mark."""
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
+    for adapter in (CODEX, get_adapter("claude-code")):
+        for name in (adapter.capabilities.process_env, adapter.capabilities.tool_shell_env):
+            if name:
+                monkeypatch.delenv(name, raising=False)
+    assert prompt_origin.origin_sender() == prompt_origin.HUMAN
+
+
+@pytest.mark.parametrize(
+    ("sender", "origin"), [("a person", "human:tell"), ("an agent", "agent:tell")]
+)
+def test_a_tell_queued_to_a_busy_codex_is_the_origin_of_the_turn_it_starts(
+    codex_agent: tuple[Codex, TeamTask],
+    monkeypatch: pytest.MonkeyPatch,
+    sender: str,
+    origin: str,
+) -> None:
+    """``codex queue`` hands the text to the running thread, whose next turn its
+    ``UserPromptSubmit`` opens with it: the queue path leaves the tell's marker first, as a
+    typed tell does, so that turn is the sender's tell and never a person's typing (it read
+    ``human:typed``: SCOPE #113 092, row 11's GAP a)."""
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+    waiting: list[int] = []
+
+    def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        waiting.append(len(_markers_for("rebase on main first")))
+        return subprocess.CompletedProcess(argv, 0, "Queued message m for thread t.\n", "")
+
+    monkeypatch.setattr(fleet_service, "_run_native", run)
+    if sender == "a person":
+        _from_a_persons_shell(monkeypatch)
+    else:
+        assert prompt_origin.origin_sender() == prompt_origin.AGENT, "told from a fleet window"
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
+
+    assert told.delivered is True and "queued for its next turn" in told.how, told
+    assert waiting == [1], "the marker is there before the queue runs"
+    codex.become()  # its hooks run in its own window
+    codex.hook("Stop", THREAD_ONE, turn_id="turn-1", stop_hook_active=False)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="rebase on main first", turn_id="turn-2")
+    with store_session() as store:
+        turns = store.turn_metrics(session_id=codex.board_id(THREAD_ONE))
+    assert [turn.origin for turn in turns] == [origin, "human:typed"]
+    assert _markers_for("rebase on main first") == [], "taken by the turn it named"
+
+
+@pytest.mark.parametrize("failure", ["codex refused it", "codex could not start"])
+def test_a_queue_that_fails_leaves_no_origin_marker(
+    codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """Nothing queued is no turn of the tell's: its marker is taken back, so the text a
+    person types later from the board note is theirs (``human:typed``), not this tell's."""
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+    waiting: list[int] = []
+
+    def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        waiting.append(len(_markers_for("rebase on main first")))
+        if failure == "codex could not start":
+            raise PermissionError(13, "Permission denied", argv[0])
+        return subprocess.CompletedProcess(argv, 1, "", "error: thread not found\n")
+
+    monkeypatch.setattr(fleet_service, "_run_native", run)
+    _from_a_persons_shell(monkeypatch)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
+
+    assert told.delivered is False and "could not queue it" in told.how, told
+    assert waiting == [1], "left before the queue ran"
+    assert _markers_for("rebase on main first") == [], "and taken back when it failed"
+    assert prompt_origin.origin_of_prompt("rebase on main first") == "human:typed"
+    assert _notes_to(codex.project, codex.agent.label) == ["rebase on main first"]
+
+
+def test_a_queue_killed_past_its_wait_keeps_its_marker(
+    codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``codex queue`` killed at its timeout may have queued the text before it was: the
+    marker stays (it goes stale unused if nothing came of it), as a paste tmux may still have
+    run keeps its own (``delivery.deliver_typed``'s ``maybe``)."""
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+
+    def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, fleet_service._QUEUE_TIMEOUT)
+
+    monkeypatch.setattr(fleet_service, "_run_native", run)
+    _from_a_persons_shell(monkeypatch)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
+
+    assert told.delivered is False and "could not queue it (TimeoutExpired" in told.how, told
+    assert len(_markers_for("rebase on main first")) == 1
+    assert prompt_origin.take_origin("rebase on main first") == "human:tell"
 
 
 def test_tell_to_a_codex_agent_that_is_not_working_queues_nothing(

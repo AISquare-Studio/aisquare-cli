@@ -191,7 +191,7 @@ adapter.**
   `fleet relabel`, the project rename that renames the codename and session, auto admission,
   `aisquare outcomes`, who started each turn, `aisquare fleet top`, the quiet refresh of a
   stale token, the sidebar's count, filter and highlight, asking in place, and the fixes), each
-  bullet of its entry with a Codex status (SCOPE #113 092: 35 rows, 14 PARITY, 3 GAP, 18 N-A).
+  bullet of its entry with a Codex status (SCOPE #113 092: 35 rows, 15 PARITY, 2 GAP, 18 N-A).
   **The store is v50**: main's v41-v43 (the codename aliases, `fleet_agent.paused_at`,
   `metric.origin`) and this line's seven steps behind them (v44-v50, renumbered once more); a
   store from 0.9.2 (v43) and one from this line before the merge (stamped 47) both reach v50.
@@ -207,23 +207,26 @@ adapter.**
     resume <id>`) with the pause's carry-on line, or starts it fresh with its claims when no
     thread was bound; `fleet relabel` moves the label its launch record holds too, so the new
     label finds it and the old one names nothing, and its window is renamed where its record
-    places it; Stop's *Don't ask again* stops it gracefully, by its exit command; a project
-    rename renames the sessions its launch records name, by tmux's id; `fleet top` reads its
-    spend off its rollout by its own reader, and its processes as its pane's tree; a tell, a
-    spawn's first message, a wake and the upkeep line leave the marker its `UserPromptSubmit`
-    records as its turn's origin, and a command in a Codex tool shell is an agent's; auto
-    admission holds a Codex coder on a busy machine and never a Codex manager; the Accounts
-    table with Codex rows still fits 160 columns, the agent mark inside the name's 12 cells;
-    the live count, Active only, the "1 account" line and the real repository names count
-    every agent's rows. Main's hook launcher change (its pinned release) is in the Codex
-    plugin's copy too.
+    places it; Stop's *Don't ask again* stops it gracefully, by its exit command, and the Stop
+    dialog's line names the command the stop types into the agent it stops
+    (`AgentAdapter.exit_command`), never `/exit` as text; a project rename renames the sessions
+    its launch records name, by tmux's id; `fleet top` reads its spend off its rollout by its
+    own reader, and its processes as its pane's tree; a tell (typed, or queued to a busy Codex
+    by `codex queue`, whose marker a queue that failed takes back), a spawn's first message, a
+    wake and the upkeep line leave the marker its `UserPromptSubmit` records as its turn's
+    origin, and a command in a Codex tool shell is an agent's, as one is wherever an agent's
+    `AgentCapabilities.process_env` is set (Claude Code's `CLAUDECODE`; Codex sets none in its
+    hooks, measured on 0.164.0); auto admission holds a Codex coder on a busy machine and
+    never a Codex manager; the Accounts table with Codex rows still fits 160 columns, the agent
+    mark inside the name's 12 cells; the live count, Active only, the "1 account" line and the
+    real repository names count every agent's rows. Main's hook launcher change (its pinned release) is in the Codex
+    plugin's copy too. `tests/test_no_agent_literals.py`'s BASELINE is 109, as before the
+    merge: its one new line, `CLAUDECODE` in `core/prompt_origin.py`, is Claude Code's
+    `process_env` now.
   - **Gaps for Codex**, each with its lane: a fleet tmux server is never started from an SSH
     login on macOS, for Claude Code's Keychain, a Codex spawn included
     (`AgentAccounts.keychain_login`); `aisquare outcomes` reads its transcript facts (prompts,
-    interrupts, denials, edits) in Claude Code's format alone (`AgentTranscript.facts`); a tell
-    queued to a busy Codex by `codex queue` leaves no origin marker, and Claude Code's own
-    process mark is the literal `CLAUDECODE` (`AgentCapabilities.process_env`).
-    `tests/test_no_agent_literals.py`'s BASELINE counts that one line (109 → 110).
+    interrupts, denials, edits) in Claude Code's format alone (`AgentTranscript.facts`).
   - **Not Codex's** (N-A): usage over SSH from what the Mac recorded and the quiet refresh of a
     stale token are Claude Code's login, in the Keychain and refreshed by Claude Code (a Codex
     slot's login is its own file, refreshed by Codex, its usage read off its rollouts); the

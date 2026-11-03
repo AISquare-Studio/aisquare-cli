@@ -605,3 +605,30 @@ def test_the_help_says_whether_x_asks_first() -> None:
 
     assert x_line(True).endswith("(asks first)")
     assert "at once" in x_line(False) and "asks first" not in x_line(False)
+
+
+# --- the line says the exit command the stop types (SCOPE #113 092, row 2) -----------------
+
+
+@pytest.mark.parametrize(
+    ("agent", "said"),
+    [
+        ("claude-code", "/exit, then the window is killed after"),
+        ("codex", "/exit, then the window is killed after"),
+        ("an-agent-this-install-does-not-know", "Its exit command, then the window is killed"),
+    ],
+)
+def test_the_question_names_the_exit_command_of_the_rows_own_agent(agent: str, said: str) -> None:
+    """``fleet stop`` types the row's agent's ``AgentAdapter.exit_command``, and the question
+    says that command, Force skipping it (a synthetic agent's own: ``tests/
+    test_third_agent_seams.py``); an agent this install does not know is named by no command
+    the dialog would guess."""
+    row = status("prj_a", "coder-auth", "coder", "waiting")
+    row = row.model_copy(update={"agent": row.agent.model_copy(update={"agent": agent})})
+
+    question = StopAgentScreen(ProjectInfo(id="prj_a", root=Path("/w")), row).question().plain
+
+    assert said in question, question
+    known = said.startswith("/exit")
+    assert ("Force skips the /exit." in question) is known, question
+    assert ("Force skips the exit command." in question) is not known, question

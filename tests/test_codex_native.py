@@ -29,7 +29,7 @@ from typing import Any
 import httpx
 import pytest
 
-from aisquare.core import agents, launch_seal, outbox, selfcli
+from aisquare.core import agents, launch_seal, outbox, prompt_origin, selfcli
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import screen_of, store_dir, store_read_only
@@ -444,6 +444,16 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 queued = fleet.tell(project, label, told)
                 assert queued.delivered and "queued for its next turn" in queued.how, queued
                 until(lambda: ran(told), 40, "the queued line ran", pane)
+                # The turn it ran as is the tell's, by the marker the queue path left before
+                # `codex queue` ran (SCOPE #113 092, row 11), never a person's typing: its
+                # `UserPromptSubmit` opened the newest turn before the request went out.
+                bound_session = fleet.status_of(receipt.agent).session
+                assert bound_session is not None
+                with store_session() as store:
+                    turns = store.turn_metrics(session_id=bound_session.id)
+                assert turns and turns[0].origin == f"{prompt_origin.origin_sender()}:tell", [
+                    turn.origin for turn in turns
+                ]
                 # A restart resumes the bound thread: `codex ... resume <id> -- <line>`,
                 # the history before it and the claims with it.
                 until(lambda: state(receipt.agent) == "waiting", 20, "waiting again", pane)

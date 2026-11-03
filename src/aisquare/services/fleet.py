@@ -9864,6 +9864,10 @@ def _queue_message(
     the home the agent's own hook reported, never the store's columns, which a sandbox
     could write before its broker (review r3 of #113, finding 1; r4, finding 1's class).
     The thread, even so, only in the shape the agent makes it (r3, finding 2).
+
+    The text leaves its origin marker (``prompt_origin.mark_origin``, a ``tell`` by this
+    process's sender) before the queue runs, so the turn it starts is the tell's and not a
+    person's typing (SCOPE #113 092, row 11); a queue that failed takes it back.
     """
     if adapter.queue_args(session.id, text) is None:
         return None  # no queue: asked before anything it would run with is read
@@ -9890,11 +9894,20 @@ def _queue_message(
     executable = shutil.which(record.binary)
     if executable is None:
         return f"{record.binary!r} is not on your PATH to queue it"
+    # The turn the queued text starts is a tell, as a typed one is (`deliver_typed`'s
+    # marker): left before the queue runs, so its `UserPromptSubmit` finds it however soon.
+    marker = prompt_origin.mark_origin(text, prompt_origin.TELL)
     try:
         done = _run_native([executable, *argv], env={**untraced_env(), adapter.home_env: home})
+    except subprocess.TimeoutExpired as exc:
+        # Killed past its wait, it may have queued the text first: the marker stays, as a
+        # paste tmux may still run keeps its own (`delivery.deliver_typed`'s "maybe").
+        return f"{adapter.label} could not queue it ({type(exc).__name__}: {exc})"
     except (OSError, subprocess.SubprocessError) as exc:
+        prompt_origin.unmark_origin(marker)
         return f"{adapter.label} could not queue it ({type(exc).__name__}: {exc})"
     if done.returncode != 0:
+        prompt_origin.unmark_origin(marker)  # nothing queued: no turn of the tell's to name
         said = (done.stderr or done.stdout or "").strip().splitlines()
         return f"{adapter.label} could not queue it ({said[-1] if said else done.returncode})"
     return True

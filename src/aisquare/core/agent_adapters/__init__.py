@@ -150,6 +150,10 @@ service that reads it: `pid_env` (the variable that hands a hook the agent's own
 Claude Code's `CLAUDE_PID`) or `tool_shell_env` (the variable the agent sets in its
 tools' shells and never in its own hooks, Codex's `CODEX_THREAD_ID`, with `tool_shell_vars` the rest it sets there, stripped from every tmux client too) — how a fleet row
 tells its agent's own process from a nested child, across a `/clear` or a `/resume` —
+`process_env` (the variable the agent sets in every process it starts, its hooks included,
+Claude Code's `CLAUDECODE`; `None` for Codex, which sets none of its own there: a tell or a
+spawn sent where it is set is the agent's, `core.prompt_origin.origin_sender`, as one sent
+from a `tool_shell_env` shell is),
 `assigns_session_id` (AISquare names the session at launch) with its `session_flags`, a
 `SessionFlags` in the agent's own spelling (Claude Code's: `names` is `--session-id`, which
 takes the id a fresh start or a fork is handed, `minted(id)` those two arguments; `resumes`

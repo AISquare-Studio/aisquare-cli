@@ -250,6 +250,8 @@ class ClaudeCodeAdapter:
         starts_at_its_prompt=True,
         resumes_across_homes=True,
         pid_env="CLAUDE_PID",
+        # Set in its hooks and its tools' shells alike: who sent a tell (0.9.2's origin).
+        process_env="CLAUDECODE",
         exports_home_env=False,
         own_doctor_check=True,
         model_proxy=True,

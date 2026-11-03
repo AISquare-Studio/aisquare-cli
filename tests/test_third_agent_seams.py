@@ -22,6 +22,7 @@ import json
 import os
 import re
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1369,3 +1370,178 @@ def test_its_old_quota_reading_over_the_line_counts_as_full_by_the_age_of_its_re
         ), decision.notes
     finally:
         unregister(adapter.id)
+
+
+# --- who started a turn, and how it is stopped (SCOPE #113 092, rows 11 and 2) -----------
+
+#: Its sessions' ids, in the shape a queue names them (``launch_seal.native_id``: a UUID).
+GEMINI_SESSION = "a1b2c3d4-0e0f-4a1b-8c2d-000000000092"
+
+
+class _Queuing(GeminiShapedAdapter):
+    """The Gemini-shaped agent with a queue for a busy session's next turn (``queue_args``)
+    and a mark it sets in every process it starts, its hooks included (``process_env``); its
+    ``exit_command`` is its own already, ``/quit``. A queue names the session the row's
+    launch record holds, which a hook adds only once it proves it is the agent's own process,
+    so it marks its tools' shells too (``tool_shell_env``), as Codex does. Nothing shared is
+    edited for it."""
+
+    capabilities = replace(
+        GeminiShapedAdapter.capabilities,
+        process_env="GEMINI_CLI",
+        tool_shell_env="GEMINI_TOOL_SESSION",
+    )
+
+    def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
+        return ["queue", native_session_id, f"--message={message}"]
+
+
+def _no_agents_mark(monkeypatch: pytest.MonkeyPatch, *adapters: AgentAdapter) -> None:
+    """A person's shell: no fleet window, no launch, no agent's process or tool-shell mark."""
+    from aisquare.core.agent_adapters import adapters as registered
+    from aisquare.core.spawn import LAUNCH_AGENT_ENV
+
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
+    monkeypatch.delenv(LAUNCH_AGENT_ENV, raising=False)
+    for adapter in (*registered(), *adapters):
+        for name in (adapter.capabilities.process_env, adapter.capabilities.tool_shell_env):
+            if name:
+                monkeypatch.delenv(name, raising=False)
+
+
+def test_a_tell_its_queue_takes_is_the_origin_of_the_turn_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row 11's GAP a: a ``fleet tell`` to a busy session goes through the agent's own queue
+    (``AgentAdapter.queue_args``), whose text starts its next turn. Declaring the queue is
+    all it takes for that turn to read the tell's (``human:tell``), as a typed tell's does:
+    the queue path leaves the marker, and the agent's prompt hook takes it."""
+    import subprocess
+
+    from aisquare.core.config import FleetRoleSettings, load_config, save_config
+    from aisquare.core.orchestrator import team_project
+    from aisquare.core.store import store_session
+    from aisquare.services import agent_events
+    from aisquare.services import fleet as fleet_service
+    from tests import fakebin
+    from tests.test_fleet_service import FakeTmux
+
+    adapter = _Queuing()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        config = load_config()
+        config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+        save_config(config)
+        bin_dir = tmp_path / "bin"
+        fakebin.executable_fake(bin_dir, "gemini", windows="set /p line=", posix="read line")
+        fakebin.prepend_to_path(bin_dir, monkeypatch)
+        tmux = FakeTmux()
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+        project = team_project(tmp_path)
+        with store_session() as store:
+            store.onboard_project(project)
+        row = fleet_service.spawn(project, "coder", agent=adapter.id).agent
+        mark = adapter.capabilities.process_env
+        assert mark is not None
+        window = tmux.spawned[-1]["env"]
+        assert isinstance(window, dict)
+        home = _home(adapter)
+
+        def hook(event: str, **extra: object) -> None:
+            """Its hook, run in its window (the row's variables, its own mark)."""
+            for name, value in window.items():
+                if name.startswith("AISQUARE_"):
+                    monkeypatch.setenv(name, value)
+            monkeypatch.setenv("AISQUARE_LAUNCH_ID", "launch-gemini")
+            monkeypatch.setenv("AISQUARE_ROLE", "coder")  # as `aisquare launch` exports it
+            monkeypatch.setenv(mark, "1")
+            payload = {
+                "hook_event_name": event,
+                "session_id": GEMINI_SESSION,
+                "cwd": str(project.root),
+                "transcript_path": str(home / "tmp" / "chats" / "session.json"),
+                **extra,
+            }
+            agent_events.handle(adapter, payload, home)
+
+        hook("SessionStart", source="startup")
+        hook("BeforeAgent", prompt="work")  # busy with a turn
+        queued: list[list[str]] = []
+
+        def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            queued.append(argv[1:])
+            return subprocess.CompletedProcess(argv, 0, "queued\n", "")
+
+        monkeypatch.setattr(fleet_service, "_run_native", run)
+        _no_agents_mark(monkeypatch, adapter)  # told from a person's terminal
+
+        told = fleet_service.tell(project, row.label, "rebase on main first")
+
+        assert told.delivered is True and "queued for its next turn" in told.how, told
+        assert queued == [["queue", GEMINI_SESSION, "--message=rebase on main first"]]
+        hook("AfterAgent", prompt="work", stop_hook_active=False)
+        hook("BeforeAgent", prompt="rebase on main first")
+        with store_session() as store:
+            bound = store.get_meta("launch-session:launch-gemini")
+            turns = store.turn_metrics(session_id=bound)
+    finally:
+        unregister(adapter.id)
+
+    assert [turn.origin for turn in turns] == ["human:tell", "human:typed"]
+
+
+def test_a_tell_sent_where_it_marks_every_process_is_its_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Row 11's GAP b: a command run where an agent's ``process_env`` is set (Claude Code's
+    ``CLAUDECODE``) runs under that agent, its hooks included, so a tell or a spawn it sends
+    is ``agent``'s. Declaring the variable is all it takes: no literal names it."""
+    from aisquare.core import prompt_origin
+
+    adapter = _Queuing()
+    mark = adapter.capabilities.process_env
+    assert mark is not None
+    _no_agents_mark(monkeypatch, adapter)
+    monkeypatch.setenv(mark, "1")
+    assert prompt_origin.origin_sender() == prompt_origin.HUMAN, "no agent declares it yet"
+
+    register(adapter)
+    try:
+        assert prompt_origin.origin_sender() == prompt_origin.AGENT
+        prompt_origin.mark_origin("go on", prompt_origin.TELL)
+        assert prompt_origin.take_origin("go on") == "agent:tell"
+        monkeypatch.delenv(mark)
+        assert prompt_origin.origin_sender() == prompt_origin.HUMAN, "unset, a person's shell"
+    finally:
+        unregister(adapter.id)
+
+
+def test_its_stop_dialog_says_its_own_exit_command(third: AgentAdapter) -> None:
+    """Row 2's note for a future agent: the Stop dialog spelled ``/exit`` as text. It says
+    what ``fleet stop`` types into this agent, its ``exit_command`` (``/quit`` for both
+    synthetic agents), and Force skips that."""
+    from datetime import UTC, datetime
+
+    from aisquare.cli.ui.stop import StopAgentScreen
+    from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
+
+    assert third.exit_command != "/exit", "the premise: a command of its own"
+    row = FleetAgent(
+        id="agt_third_coder",
+        project_id="prj_third",
+        label="coder-third",
+        role="coder",
+        agent=third.id,
+        pane_id="%1",
+        tmux_socket="asq-test-third",
+        cwd=Path("/w"),
+        created_at=datetime.now(UTC),
+    )
+    where = ProjectInfo(id="prj_third", root=Path("/w"))
+
+    question = StopAgentScreen(where, FleetAgentStatus(agent=row, state="waiting")).question()
+
+    assert f"{third.exit_command}, then the window is killed after" in question.plain
+    assert f"Force skips the {third.exit_command}." in question.plain
+    assert "/exit" not in question.plain

@@ -28,13 +28,14 @@ is still a wake.
 
 **Who authored it.** ``wake``, ``upkeep``, ``continuation`` and ``notice`` are ``agent`` by kind
 (:data:`AGENT_KINDS`): no person writes them, whatever process sends them. A ``tell`` and a
-``spawn`` are their sender's: ``agent`` when the write runs inside an agent (Claude Code exports
-``CLAUDECODE`` to its tools, another agent its own mark, ``core.spawn.run_agents``; a fleet
-window carries ``AISQUARE_FLEET_AGENT``), ``human``
-otherwise (``asq``, a shell, the phone's server: :func:`sent_by`). So a ``fleet tell`` typed in
-a terminal is ``human:tell``, and the manager's is ``agent:tell``; a spawn is ``human`` when a
-person ran it and ``agent`` when an agent session did, its ``--as`` session included
-(``services.fleet.spawn``).
+``spawn`` are their sender's: ``agent`` when the write runs inside an agent (one that marks
+every process it starts, its hooks included, by ``AgentCapabilities.process_env``: Claude
+Code's ``CLAUDECODE``; another's launch or tool-shell mark, ``core.spawn.run_agents``; a fleet
+window carries ``AISQUARE_FLEET_AGENT``), ``human`` otherwise (``asq``, a shell, the phone's
+server: :func:`sent_by`). So a ``fleet tell`` typed in a terminal is ``human:tell``, and the
+manager's is ``agent:tell``; a spawn is ``human`` when a person ran it and ``agent`` when an
+agent session did, its ``--as`` session included (``services.fleet.spawn``). A tell a busy
+agent's own queue takes (``AgentAdapter.queue_args``) leaves its marker as a typed one does.
 
 Nothing here raises: a marker that cannot be written or read costs the record (the turn reads
 ``human:typed``), never the write or the turn.
@@ -102,7 +103,7 @@ CLOSED — ``<command-name> is the tag the parser misses`` has no ``</command-na
 person's words, as typed, not this. (It lived in ``services.hooks``, which still strips it from
 a recorded prompt.)"""
 
-_ENV_AGENT = ("CLAUDECODE", "AISQUARE_FLEET_AGENT")
+_FLEET_AGENT_ENV = "AISQUARE_FLEET_AGENT"
 _SENDER: ContextVar[str | None] = ContextVar("prompt_origin_sender", default=None)
 _WRITES = itertools.count()
 
@@ -141,17 +142,30 @@ def origin_digest(text: str) -> str:
 
 def origin_sender() -> str:
     """Who is sending from this process: :func:`sent_by`'s word when one is in force, else
-    ``agent`` inside an agent (``CLAUDECODE``, ``AISQUARE_FLEET_AGENT``, or any agent's own
-    mark of its launch or its tools' shells: ``core.spawn.run_agents``, Codex's
-    ``CODEX_THREAD_ID`` among them), else ``human``."""
+    ``agent`` inside an agent (a fleet window's ``AISQUARE_FLEET_AGENT``, the mark an agent
+    sets in every process it starts, :func:`_agent_marks`, or any agent's own mark of its
+    launch or its tools' shells: ``core.spawn.run_agents``, Codex's ``CODEX_THREAD_ID`` among
+    them), else ``human``."""
     pinned = _SENDER.get()
     if pinned is not None:
         return pinned
-    if any(os.environ.get(name, "").strip() for name in _ENV_AGENT):
+    if any(os.environ.get(name, "").strip() for name in (_FLEET_AGENT_ENV, *_agent_marks())):
         return AGENT
     from aisquare.core.spawn import run_agents  # lazy: the spawn module imports far more
 
     return AGENT if run_agents() else HUMAN
+
+
+def _agent_marks() -> tuple[str, ...]:
+    """Every registered agent's ``AgentCapabilities.process_env``: the variable it sets in
+    each process it starts, its hooks included (Claude Code's ``CLAUDECODE``)."""
+    from aisquare.core.agent_adapters import adapters  # lazy, as run_agents is
+
+    return tuple(
+        adapter.capabilities.process_env
+        for adapter in adapters()
+        if adapter.capabilities.process_env
+    )
 
 
 @contextlib.contextmanager

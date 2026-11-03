@@ -88,6 +88,12 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   paused agent's `fleet restart`, bring back every agent the pause stopped: no new agent,
   so neither the load nor the burst guard holds one. The hard floors still apply to the
   manager and a resume, as in 0.9.1. A new coder or reviewer is held as before.
+- **`max_agents_per_project` takes `auto` or a number of at least 1.** 0.9.1 also took `0`
+  (which refused every spawn), a negative number and `true` (a cap of 1). 0.9.2 refuses
+  them: a `config.toml` that holds one is invalid (`aisquare doctor`: `config.toml is
+  invalid`), and `config set` cannot change it then. Before you upgrade, set a number of 1
+  or more (0.9.1 takes no `auto`); after, take the line out of `~/.aisquare/config.toml` by
+  hand, which leaves `auto`. `auto` is now taken in any case, as App settings takes it.
 - **`fleet pause` now exits the agents, not only the signal.** In 0.9.1 it set the
   project's `fleet-paused` signal and nothing else; now it also pauses every running agent
   of the project (or `--group`, `--all`), and `fleet resume` starts them again. A script
@@ -476,7 +482,9 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
     unchanged and never asks the load. A file 0.8.0 wrote, which holds every default
     including `4`, follows the new default like every other moved default. Set `4` again to
     keep it. App settings ▸ *max agents per project* takes `auto` or a number, and shows
-    `auto` as the default. No new dependency.
+    `auto` as the default. No new dependency. A number is at least 1 now: `0`, a negative
+    number and `true` (a cap of 1), which 0.9.1 took, make the file invalid (see
+    *Upgrading*); `auto` is taken in any case, by `config set` too.
 
 ### Fixed
 

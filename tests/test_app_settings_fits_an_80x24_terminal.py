@@ -184,3 +184,46 @@ def test_at_80x24_every_row_of_every_tab_ends_inside_the_tab_folded_and_unfolded
     # Measured, not vacuous: the folds hide most rows, and opened they are all there.
     assert rows[f"{AGENT_TAB} unfolded"] > rows[f"{AGENT_TAB} folded"] >= 3, rows
     assert rows[f"{PREFERENCES_TAB} folded"] >= 1 and rows[f"{REMOTE_TAB} unfolded"] >= 1, rows
+
+
+def test_at_80x24_reset_all_and_a_binding_s_clear_armed_stay_whole_in_the_view() -> None:
+    """Armed in place (``ui.confirm_button``), *Reset all* and a binding's *Clear* show their
+    longer question in the place they had: on screen beside the sidebar, not cut."""
+    from aisquare.cli.ui.confirm_button import ConfirmButton
+    from aisquare.services import settings as settings_service
+
+    settings_service.bind_role("reviewer", agent_bin="claude2", args=["-v"])
+
+    async def go(pilot: Pilot[None]) -> dict[str, tuple[bool, bool]]:
+        app = fleet_app(pilot)
+        app.post_message(AppSettingsSelected())
+        await settle(app)
+        view = app.query_one(AppSettingsView)
+        seen: dict[str, tuple[bool, bool]] = {}
+        reset = app.query_one("#reset-settings", ConfirmButton)
+        await pilot.click(reset)
+        await settle(app)
+        seen["reset"] = (reset.armed, _whole(reset, view.region))
+        reset.disarm()
+        app.query_one(f"#{AGENT_ADVANCED}", Collapsible).collapsed = False
+        await settle(app)
+        clear = app.query_one("#binding-clear-reviewer", ConfirmButton)
+        clear.scroll_visible(animate=False)
+        await settle(app)
+        await pilot.click(clear)
+        await settle(app)
+        seen["clear"] = (clear.armed, _whole(clear, view.region))
+        # Review of #486, m3: in a line under its row, Clear's note could be scrolled out of
+        # sight; in the note line under the buttons it is always in it.
+        note = app.query_one("#settings-note", Static)
+        seen["clear note"] = (
+            str(note.content).startswith("The whole binding of reviewer goes"),
+            _whole(note, view.region),
+        )
+        return seen
+
+    assert drive(go, size=(80, 24)) == {
+        "reset": (True, True),
+        "clear": (True, True),
+        "clear note": (True, True),
+    }

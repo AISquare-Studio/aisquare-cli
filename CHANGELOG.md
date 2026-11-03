@@ -90,7 +90,9 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   the `busy_*` settings: moved forward again, the setting is `auto`, so set 4 again.
 - **Settings are added, none removed; no extra or dependency is.** `[fleet]` gains auto
   admission's `busy_floor`, `busy_burst`, `busy_load_per_cpu`, `busy_cpu_psi`,
-  `busy_memory`, `busy_thermal` and `busy_hold_minutes`. Four new commands, `aisquare fleet
+  `busy_memory`, `busy_thermal` and `busy_hold_minutes`. `[ui]` gains `confirm_stop`, on by
+  default, so Stop asks first as it did in 0.9.1 until you tick the Stop dialog's *Don't ask
+  again*; 0.9.1 ignores the key if you move back, and asks. Four new commands, `aisquare fleet
   relabel`, `aisquare instances`, `aisquare outcomes` and `aisquare fleet top`, and two new
   flags on `fleet pause` and `fleet resume`, `--all` and `--managers`.
 - **`auto` never holds a project's manager or the captain, nor a resume.** Their spawn and
@@ -166,6 +168,19 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   keep their labels, no agent can take `manager` or `captain`, and an agent that ended,
   or is paused, is not renamed (resume a paused one first). `fleet rename` still renames
   the project's codename.
+- **Stop an agent in one click: the Stop dialog's *Don't ask again*.** Tick it and press
+  Stop (or Force), and from then on the agent view's Stop button and the sidebar's `x` stop
+  the agent at once, with no dialog: gracefully, as the dialog's Stop does (`/exit`, the
+  grace, then the window killed; never Force), for every agent alike, the manager and the
+  captain included. A toast says `stopping <label> …` until the stop answers, then
+  `✓ stopped` as before, and asq leaves the stopped agent's view; a stop the fleet refuses
+  is a warning toast with its reason, and the agent is left as it was. Pressing Stop again
+  while the stop runs does nothing. The choice is kept in `~/.aisquare/config.toml` as
+  `[ui] confirm_stop = false`; *⚙ Settings ▸ App settings ▸ User preferences ▸ Advanced ▸
+  Ask before stopping an agent* turns the dialog back on (or off), and so does `aisquare
+  config set ui.confirm_stop true`. Cancel or Esc never saves the tick, and the dialog
+  still opens on Stop, so `x` then Enter stops as before. The captain's `ui open_stop`
+  still opens the dialog and stops nothing, whatever the setting says.
 - **Pause and resume the agents of a project, or of every project**, so idle managers and
   coders stop spending tokens without being reaped, and come back from one dialog — before
   a reboot or an OS update too. A pause exits each running agent's Claude process as
@@ -441,6 +456,36 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   so `x` asks to stop the agent the arrows just reached. *Spawn agent* reached by the
   arrows opens on the project whose view is on screen, else the first listed. A held arrow
   does not open every view it passes.
+- **A click on a button that has just appeared works as soon as the button is on screen.**
+  Stop and Restart in an agent's view, the Confirm of *Restart all…*, *Stop all…*, *Pause
+  all…* and *Resume all…*, *Start fresh* and *Discard and start fresh*, the Settings hub's
+  four Fleet buttons, *Share anonymous usage* and Usage & stats' *Turn sharing on/off*
+  ignored every mouse click for a second after the view came up, moved them or a dialog
+  over them closed, and said so in a toast (`ignored a click on Restart — the view had just
+  changed under the pointer`). They now ignore only a click that reaches asq before the
+  frame showing the change has been read off asq's terminal: the one aimed at what was
+  under the pointer before, which is what stopped a manager on 2026-10-19. What reads it
+  is the terminal, or tmux or sshd when they are in between, and asq sees no further. When
+  that reader can't keep up with asq, a click is held a second at most; a click still on
+  its way once the frame has been read (over a slow SSH link, say) is not held back. A
+  click once the button is on screen acts at once, and an ignored click raises no toast.
+  It still leaves the keyboard focus where it was, and Enter on a focused button is never
+  ignored.
+- **Five yes/no questions are asked in place: click the button again to go ahead.**
+  *Remove from fleet* (a card's ⋯ menu), a role binding's *Clear* and *Reset all settings
+  to default* (⚙ Settings), *Take over* (Spawn agent, handing off from a teammate) and
+  attaching a persona to a running agent (the Personas tab) opened a dialog whose button
+  you then had to reach. Now the first click, or Enter, turns the button into its question
+  where it is (`Remove? click again`, `Reset all? click again`, `Stop coder-1? click
+  again`) and shows beside it what the second will do: what leaves the fleet, the backup
+  *Reset all* keeps, the whole binding going, the teammate stopped, the persona an attach
+  replaces. A second click on the same spot, or a double-click, or Enter again, acts. Three
+  seconds, Esc, the focus leaving it or its view changing put it back as it was. In the
+  attach picker it is the agent's row that asks, marked ▶, with the question above the
+  list. The button's own change of label never makes the click guard above ignore that
+  second click. Stop (unless *Don't ask again* is ticked), *Start fresh*, *Discard*,
+  *Restart all…*, *Pause all…*, the update and the usage-sharing consent keep their
+  dialogs.
 - **`aisquare upgrade` and `aisquare uninstall` refuse while an asq runs on the home, and so
   do asq's Update, Uninstall and ⬆ *Restart & update* while another asq runs.** Left
   running, an asq would go on running the old release over the new one's files, or lose

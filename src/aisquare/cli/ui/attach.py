@@ -16,6 +16,14 @@ attaches to an agent (``fleet_service.attach_persona``) or opens the Spawn
 dialog preset for a bind or an account; the Spawn dialog's *Pick…* fills its
 own fields — so there is one picker and no second spawn or attach path.
 
+Opened to attach (``attaching``, the Personas tab), a running agent's row asks first, in
+place (user, 2026-10-30: a double click in place, not a dialog's button): the first choice
+of it, a click or Enter, arms it, marked ▶, and the line above the list asks the question
+and names the persona it replaces; a second choice of the same row answers it. It disarms as
+:class:`~aisquare.cli.ui.confirm_button.ConfirmButton` does (:class:`Arming`): after a few
+seconds, on Esc, when the list loses the focus or another row is highlighted, and when the
+list is drawn again or another screen comes over it.
+
 Two footer actions make a target without leaving the flow. **+ New bind** is
 :class:`NewBindScreen`, saved through ``services.settings.bind_role`` — the
 writer ``aisquare team bind`` uses — after which the list is read again with the
@@ -38,21 +46,23 @@ import re
 import shlex
 import shutil
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, Select, Static, Switch, TextArea
-from textual.widgets.option_list import Option
+from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.confirm_button import Arming
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.config import RoleLaunchProfile, load_config
 from aisquare.models import AccountsOverview, ClaudeAccountStatus, FleetAgentStatus, ProjectInfo
@@ -227,6 +237,10 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
     DEFAULT_CSS = _BOX_CSS.format(name="AttachTargetScreen") + (
         "AttachTargetScreen #picker-list { height: 22; }"
+        # Two lines whether armed or not: grown, it would push the list, and the row under the
+        # pointer that armed it, down.
+        "AttachTargetScreen #picker-armed { height: 2; text-wrap: nowrap;"
+        " text-overflow: ellipsis; }"
     )
     BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
 
@@ -239,10 +253,16 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         accounts: Callable[[], AccountsOverview] | None,
         select: str | None = None,
         filter_text: str = "",
+        attaching: bool = False,
     ) -> None:
         super().__init__()
         self.project = project
         self.persona_name = persona
+        self.attaching = attaching
+        """A running agent's row asks first, in place: the caller attaches the persona to it."""
+        self._arming: Arming[str] = Arming(self, self._armed_row)
+        self._prompts: dict[str, str] = {}
+        """Each row's text as :meth:`paint` drew it, to give an armed row back."""
         self.attach_intent: Intent = intent
         self._accounts = accounts
         self.targets = Targets()
@@ -272,6 +292,9 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                 placeholder="filter agents, binds and accounts",
                 id="picker-filter",
             )
+            if self.attaching:
+                # Above the list: under it, the box ran out at 80x24 and cut it off.
+                yield Static(self._at_rest(), id="picker-armed", classes="picker-note")
             yield OptionList(id="picker-list")
             yield Static(id="picker-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
@@ -328,6 +351,7 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         return [(f"account:{s.account.slot}", account_text(s)) for s in targets.accounts or []]
 
     def paint(self) -> None:
+        self._arming.disarm()  # the rows are drawn again
         query = self.query_one("#picker-filter", Input).value.strip().lower()
         options: list[Option] = []
         for section in SECTION_ORDER[self.attach_intent]:
@@ -344,6 +368,7 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                     Option(Text("  (none)", style="dim"), id=f"empty:{section}", disabled=True)
                 )
             options.extend(Option(f"  {text}", id=oid) for oid, text in rows)
+            self._prompts.update((oid, text) for oid, text in rows)
         listing = self.query_one("#picker-list", OptionList)
         listing.clear_options()
         listing.add_options(options)
@@ -377,9 +402,70 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
     @on(OptionList.OptionSelected, "#picker-list")
     def _chosen(self, event: OptionList.OptionSelected) -> None:
-        target = self.target_for(event.option.id or "")
-        if target is not None:
-            self.dismiss(target)
+        option = event.option.id or ""
+        target = self.target_for(option)
+        if target is None:
+            return
+        if self.attaching and target.kind == "agent" and not self._arming.press(option):
+            return  # armed in place: the second choice of this row answers
+        self._arming.disarm()
+        self.dismiss(target)
+
+    # --- an agent row armed in place (``attaching``) -----------------------------------
+
+    def _at_rest(self) -> Text:
+        return Text(
+            "A running agent asks first: choose it, then choose it again to attach.", style="dim"
+        )
+
+    def _armed_row(self, was: str | None, now: str | None) -> None:
+        listing = self.query_one("#picker-list", OptionList)
+        note = self.query_one("#picker-armed", Static)
+        if was is not None and was in self._prompts:
+            with suppress(OptionDoesNotExist):  # drawn again since, as it was
+                listing.replace_option_prompt(was, f"  {self._prompts[was]}")
+        if now is None:
+            note.update(self._at_rest())
+            note.tooltip = None
+            return
+        # The same cells as at rest, ▶ in place of its indent: a row that grew or wrapped
+        # would move the rows under it, and the pointer resting on it.
+        listing.replace_option_prompt(
+            now, Text.assemble(("▶ ", "bold red"), (self._prompts.get(now, now), "bold"))
+        )
+        target = self.target_for(now)
+        persona = self.persona_name or "the persona"
+        label = target.key if target is not None else now
+        replaces = target.persona if target is not None else None
+        # The persona it replaces first, where a long name cannot cut it off; each line cut
+        # short with an ellipsis at 80 columns has its whole in the tooltip.
+        replacing = bool(replaces) and replaces != persona
+        question = Text(
+            f"Replace {replaces} with {persona} on {label}?"
+            if replacing
+            else f"Attach {persona} to {label}?",
+            style="bold",
+        )
+        question.append("\nChoose it again to attach. A busy agent gets it as a board note.")
+        note.update(question)
+        note.tooltip = (
+            f"Attach {persona} to {label}?"
+            + (f" It replaces {replaces}." if replacing else "")
+            + " Choose its row again to attach. A waiting agent has the briefing typed now;"
+            " a busy one gets it as a board note."
+        )
+
+    @on(OptionList.OptionHighlighted, "#picker-list")
+    def _moved(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option.id != self._arming.armed:
+            self._arming.disarm()
+
+    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        if event.widget.id == "picker-list":
+            self._arming.disarm()
+
+    def on_screen_suspend(self) -> None:
+        self._arming.disarm()  # another screen over the picker
 
     @on(Button.Pressed, "#picker-new-bind")
     def _new_bind(self) -> None:
@@ -393,8 +479,15 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         self.dismiss(Target("new-account", self.query_one("#picker-filter", Input).value))
 
     @on(Button.Pressed, "#picker-cancel")
-    def action_cancel(self) -> None:
+    def _cancel(self) -> None:
         self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Esc: an armed row disarms first; else the picker closes, as Cancel closes it."""
+        if self._arming.armed is not None:
+            self._arming.disarm()
+        else:
+            self.dismiss(None)
 
 
 class NewBindScreen(ModalScreen[str | None]):
@@ -582,39 +675,3 @@ class NewBindScreen(ModalScreen[str | None]):
     @on(Button.Pressed, "#bind-cancel")
     def action_cancel(self) -> None:
         self.dismiss(None)
-
-
-class ConfirmAttachScreen(ModalScreen[bool]):
-    """One question before a running agent's persona changes; ``True`` attaches."""
-
-    DEFAULT_CSS = _BOX_CSS.format(name="ConfirmAttachScreen")
-    BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
-
-    def __init__(self, persona: str, label: str, replaces: str | None) -> None:
-        super().__init__()
-        self.persona_name = persona
-        self.agent_label = label
-        self.replaces = replaces
-
-    def compose(self) -> ComposeResult:
-        text = Text()
-        text.append(f"Attach {self.persona_name} to {self.agent_label}?\n", style="bold")
-        if self.replaces and self.replaces != self.persona_name:
-            text.append(f"It replaces {self.replaces}.\n")
-        text.append(
-            "A waiting agent has the briefing typed now; a busy one gets it as a board note.",
-            style="dim",
-        )
-        with Vertical():
-            yield Static(text, classes="picker-header", id="attach-question")
-            with Horizontal(classes="picker-buttons"):
-                yield Button("Attach", id="attach-confirm", variant="primary")
-                yield Button("Cancel", id="attach-cancel")
-
-    @on(Button.Pressed, "#attach-confirm")
-    def _confirm(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#attach-cancel")
-    def action_cancel(self) -> None:
-        self.dismiss(False)

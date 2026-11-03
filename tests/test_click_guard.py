@@ -2,33 +2,38 @@
 
 User feedback (2026-10-19): a view that came up under a resting pointer took the
 click aimed at what was there before, on its Stop or Restart. A
-:class:`GuardedButton` ignores a mouse press within ``CLICK_GUARD`` of its place on
-screen changing, says so once, and presses as a Button does after that. Keys
-are not guarded. The agent view's own buttons are tested through the shell in
-``tests/test_ui_shell.py``.
+:class:`GuardedButton` ignores a mouse press that reaches the app before its changed
+place on screen is painted, says nothing, and presses as a Button does once the paint
+is out: no time to wait out (user, 2026-10-30). Keys are not guarded. The agent view's
+own buttons are tested through the shell in ``tests/test_ui_shell.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+import threading
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from typing import TypeVar
 
 import pytest
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
+from textual.geometry import Offset
 from textual.pilot import Pilot
 from textual.screen import ModalScreen
 from textual.widgets import Button, ContentSwitcher, Static
 
+from aisquare.cli.ui import click_guard
 from aisquare.cli.ui.click_guard import GuardedButton
-from tests import guard_clock, toast_log
-from tests.guard_clock import GuardClock
-from tests.ui_workers import settle_page
+from tests import guard_paint, toast_log
+from tests.guard_paint import PaintHold
+from tests.ui_workers import released, settle_page, watch_until
 
 T = TypeVar("T")
-NOTICE = "ignored a click on Restart — the view had just changed under the pointer"
 
 
 class Dialog(ModalScreen[None]):
@@ -45,6 +50,7 @@ class Host(App[None]):
         self.told = toast_log.record(self)
 
     def compose(self) -> ComposeResult:
+        yield Button("Typing here", id="typing")
         with ContentSwitcher(initial="one", id="switcher"):
             yield Static("the view the user was on", id="one")
             with Horizontal(id="two"):
@@ -58,10 +64,13 @@ class Host(App[None]):
     def notices(self) -> list[str]:
         return list(self.told)
 
+    def focused_id(self) -> str | None:
+        return self.focused.id if self.focused else None
+
 
 @pytest.fixture
-def clock(monkeypatch: pytest.MonkeyPatch) -> GuardClock:
-    return guard_clock.install(monkeypatch)
+def hold(monkeypatch: pytest.MonkeyPatch) -> PaintHold:
+    return guard_paint.install(monkeypatch)
 
 
 def drive(fn: Callable[[Pilot[None], Host], Awaitable[T]]) -> T:
@@ -80,41 +89,274 @@ async def _shown(pilot: Pilot[None], host: Host) -> GuardedButton:
     return host.query_one("#restart", GuardedButton)
 
 
-def test_a_click_as_the_view_switches_in_is_ignored_and_said_once_and_one_after_presses(
-    clock: GuardClock,
-) -> None:
-    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], list[str], list[str]]:
-        button = await _shown(pilot, host)
-        await pilot.click(button)
-        await pilot.click(button)  # still inside the window: no second notice
-        await settle_page(host)
-        ignored, told = list(host.pressed), host.notices()
-        clock.step()
-        await pilot.click(button)
-        await settle_page(host)
-        return ignored, told, host.pressed
+def test_a_click_once_the_button_is_painted_presses_it_with_no_time_to_wait() -> None:
+    """User, 2026-10-30: the second the guard held a button after it was drawn was in the way
+    of someone who knows where it is. The clock is not stepped: there is none."""
 
-    ignored, told, pressed = drive(go)
-    assert ignored == []
-    assert told == [NOTICE]
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], list[str], str | None]:
+        button = await _shown(pilot, host)  # switched in, laid out and painted
+        await pilot.click(button)
+        await settle_page(host)
+        await host.push_screen(Dialog())
+        await settle_page(host)
+        host.pop_screen()  # uncovered: guarded until the screen beneath is painted again
+        await settle_page(host)
+        await released(pilot, button)  # Button's own 0.2 s after the first press, not the guard
+        await pilot.click(button)
+        await settle_page(host)
+        return host.pressed, host.notices(), host.focused_id()
+
+    pressed, told, focused = drive(go)
+    assert pressed == ["restart", "restart"]
+    assert told == []
+    assert focused == "restart"
+
+
+def test_a_press_queued_before_the_paint_is_ignored_and_takes_no_focus() -> None:
+    """The 2026-10-19 case as it happens. The app is busy putting the new view up (the shell
+    awaits its mount), and the press the user made on the view before it waits in the app's
+    queue behind that. Meanwhile the screen lays the view out and paints it, so when the app
+    reads the press, the button is what is under it. It must press nothing, take no focus
+    and raise no toast; the guard comes down behind it, and the next press goes through."""
+
+    async def go(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[bool, list[str], str | None, list[str], list[str]]:
+        button = await _shown(pilot, host)
+        where = button.region.offset  # where it comes up again
+        host.query_one(ContentSwitcher).current = "one"
+        host.query_one("#typing", Button).focus()
+        await settle_page(host)
+        host.query_one(ContentSwitcher).current = "two"
+        free = guard_paint.busy(host)
+        guard_paint.queue_press(host, where)
+        # The app is held, so its queue cannot move; the screen lays out and paints apart.
+        await watch_until(lambda: host.get_widget_at(*where)[0] is button)
+        laid_out = host.get_widget_at(*where)[0] is button
+        free.set()
+        await settle_page(host)
+        ignored, focused = list(host.pressed), host.focused_id()
+        await pilot.click(button)
+        await settle_page(host)
+        return laid_out, ignored, focused, host.pressed, host.notices()
+
+    laid_out, ignored, focused, pressed, told = drive(go)
+    assert laid_out, "the press must reach the app with the button under it"
+    assert ignored == [], "the press made before the button was painted pressed it"
+    assert focused == "typing"
     assert pressed == ["restart"]
+    assert told == []
+
+
+async def _shown_again(pilot: Pilot[None], host: Host) -> tuple[GuardedButton, Offset]:
+    """The button shown once, then the view before it back, with the keyboard on
+    ``#typing``: the next switch puts the button under a pointer resting at the place
+    returned."""
+    button = await _shown(pilot, host)
+    where = button.region.offset
+    host.query_one(ContentSwitcher).current = "one"
+    host.query_one("#typing", Button).focus()
+    await settle_page(host)
+    return button, where
+
+
+def test_a_press_after_a_layout_pass_made_in_a_batch_is_ignored() -> None:
+    """UI tester on #8 (re-pass 2, PR #478 at 695e19bb): the guard came down from the layout
+    pass, and while Textual batches updates it publishes a pass before it paints it. A press
+    that reaches the app after such a pass and before any paint was aimed at what the
+    screen still showed: it presses nothing and takes no focus. A pass made after the
+    batch paints the button, and the next press goes through."""
+
+    async def go(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[bool, list[str], str | None, list[str], list[str]]:
+        button, where = await _shown_again(pilot, host)
+        with host.batch_update():
+            host.query_one(ContentSwitcher).current = "two"
+            host.refresh_css()  # a layout pass now, in the batch: published, not painted
+            laid_out = host.get_widget_at(*where)[0] is button
+            guard_paint.queue_press(host, where)
+        await settle_page(host)
+        ignored, focused = list(host.pressed), host.focused_id()
+        await pilot.click(button)
+        await settle_page(host)
+        return laid_out, ignored, focused, host.pressed, host.notices()
+
+    laid_out, ignored, focused, pressed, told = drive(go)
+    assert laid_out, "the press must reach the app with the button laid out under it"
+    assert ignored == [], "a press before the batched pass was painted pressed the button"
+    assert focused == "typing"
+    assert pressed == ["restart"]
+    assert told == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a pty for the terminal")
+@pytest.mark.parametrize(
+    ("unread", "tty_says"),
+    [
+        pytest.param(1 << 20, True, id="the-writer-still-writing"),
+        # As on a Linux pty: only the writer, still writing, says the frame is not out.
+        # (On macOS the full tty says so as well, and hid a probe that missed the writer:
+        # REVIEW 478 r3.)
+        pytest.param(1 << 20, False, id="the-writer-still-writing-to-a-tty-that-does-not-say"),
+        pytest.param(
+            512,
+            True,
+            id="in-the-tty",
+            marks=pytest.mark.skipif(
+                sys.platform != "darwin", reason="only macOS says what a pty holds unread"
+            ),
+        ),
+    ],
+)
+def test_a_press_before_the_terminal_has_the_frame_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, unread: int, tty_says: bool
+) -> None:
+    """UI tester on #8 (re-pass 2, PR #478 at 695e19bb): in 2 of 74 switches the frame that
+    showed agent-1's view reached the terminal some 270 ms after asq had drawn it, and a
+    press made in between, on agent-2's view, opened agent-1's Stop dialog. Here the
+    terminal reads nothing until told. A press that reaches the app after the paint and
+    before the terminal has the frame presses nothing and takes no focus; once the terminal
+    has read it all, the next press goes through."""
+    if not tty_says:
+        monkeypatch.setattr(click_guard, "_unread", lambda fd: 0)
+
+    async def go(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[bool, bool, list[str], str | None, bool, list[str], list[str]]:
+        button, where = await _shown_again(pilot, host)
+        terminal = guard_paint.terminal_behind(monkeypatch, host, unread)
+        try:
+            host.query_one(ContentSwitcher).current = "two"
+            await watch_until(lambda: host.get_widget_at(*where)[0] is button)
+            await settle_page(host)
+            laid_out, up = host.get_widget_at(*where)[0] is button, button.guarding
+            guard_paint.queue_press(host, where)
+            await settle_page(host)
+            ignored, focused = list(host.pressed), host.focused_id()
+            await terminal.catch_up()
+            await watch_until(lambda: not button.guarding, timeout=5)
+            down = not button.guarding
+        finally:
+            terminal.close()
+        await pilot.click(button)
+        await settle_page(host)
+        return laid_out, up, ignored, focused, down, host.pressed, host.notices()
+
+    laid_out, up, ignored, focused, down, pressed, told = drive(go)
+    assert laid_out, "the press must reach the app with the button painted under it"
+    assert up, "the guard came down before the terminal had the frame"
+    assert ignored == [], "a press before the terminal had the frame pressed the button"
+    assert focused == "typing"
+    assert down, "the guard stayed up after the terminal had read it all"
+    assert pressed == ["restart"]
+    assert told == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a pty for the terminal")
+def test_a_terminal_that_never_catches_up_holds_the_guard_up_no_longer_than_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVIEW 478 r3, major 2: the guard waits for the terminal to have read every frame, and
+    a terminal or link slower than asq's output may never get there while a pane streams
+    (Stop dead for 9.4 s at 64 KB/s). It waits ``WRITTEN_MAX`` after the paint at most: up
+    until then, down at it with the terminal still behind, and the next click presses."""
+    ceiling = 0.3
+    downs: list[float] = []
+    painted = GuardedButton._painted
+
+    def timed(button: GuardedButton, change: int) -> None:
+        painted(button, change)
+        if not button.guarding:
+            downs.append(asyncio.get_running_loop().time())
+
+    monkeypatch.setattr(GuardedButton, "_painted", timed)
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[float, list[str], list[str]]:
+        button, _ = await _shown_again(pilot, host)
+        terminal = guard_paint.terminal_behind(monkeypatch, host, 1 << 20, ceiling=ceiling)
+        try:
+            downs.clear()
+            switched = asyncio.get_running_loop().time()
+            host.query_one(ContentSwitcher).current = "two"
+            await watch_until(lambda: downs and not button.guarding, timeout=5)
+            await pilot.click(button)  # the terminal has not read a byte
+            await settle_page(host)
+        finally:
+            terminal.close()
+        return downs[0] - switched, host.pressed, host.notices()
+
+    down_after, pressed, told = drive(go)
+    assert down_after >= ceiling, f"the guard came down {down_after:.3f} s after the switch"
+    assert pressed == ["restart"]
+    assert told == []
+
+
+class _Stranger:
+    """A writer thread of a Textual this guard does not know: alive, and nothing else."""
+
+    def is_alive(self) -> bool:
+        return True
+
+
+class _QueueOfAnotherPython:
+    """A writer whose queue's condition keeps its waiters elsewhere."""
+
+    def __init__(self) -> None:
+        self._queue = SimpleNamespace(mutex=threading.Lock(), queue=[], not_empty=object())
+
+    def is_alive(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("writer", [_Stranger, _QueueOfAnotherPython])
+def test_a_writer_the_guard_does_not_know_lets_it_come_down_at_the_paint(
+    monkeypatch: pytest.MonkeyPatch, writer: type[object]
+) -> None:
+    """REVIEW 478 r3, major 1: whether the terminal has a frame is read off Textual's private
+    writer thread and CPython's queue internals. A change in either raised in the layout
+    signal, which Textual logs and goes on, and the guard never came down: Stop, Restart
+    and Confirm ignored the mouse for the session. A writer it does not know counts as
+    written, so the guard comes down at the paint, as before the terminal was asked."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[bool, list[str]]:
+        await _shown_again(pilot, host)
+        monkeypatch.setattr(host._driver, "_writer_thread", writer(), raising=False)
+        button = await _shown(pilot, host)
+        guarding = button.guarding
+        await pilot.click(button)
+        await settle_page(host)
+        return guarding, host.pressed
+
+    assert drive(go) == (False, ["restart"]), "the guard stayed up on a writer it did not know"
+
+
+def test_an_output_that_is_no_tty_holds_nothing_unread() -> None:
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, b"a frame nobody has read")
+        assert click_guard._unread(writer) == 0
+    finally:
+        os.close(reader)
+        os.close(writer)
 
 
 def test_a_button_its_bar_moves_is_guarded_again_and_one_left_in_place_is_not(
-    clock: GuardClock,
+    hold: PaintHold,
 ) -> None:
     """A layout pass that leaves the button where it was is no change under the pointer;
     one that moves it is, as when the neighbour beside it goes."""
 
     async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], list[str]]:
         button = await _shown(pilot, host)
-        clock.step()
+        hold.release()
+        await settle_page(host)
+        hold.hold()
         host.screen.refresh(layout=True)  # a pass that moves nothing
         await settle_page(host)
         await pilot.click(button)
         await settle_page(host)
         in_place = list(host.pressed)
-        clock.step()
         host.query_one("#neighbour").display = False
         await settle_page(host)
         await pilot.click(button)
@@ -126,10 +368,73 @@ def test_a_button_its_bar_moves_is_guarded_again_and_one_left_in_place_is_not(
     assert moved == [], "the click on the button that had just moved pressed it"
 
 
-def test_a_dialog_closing_off_the_button_guards_it_again(clock: GuardClock) -> None:
+def test_a_press_that_reaches_the_app_with_the_pop_is_ignored() -> None:
+    """Re-review of #478 (seq 5737): a dialog closing off the button puts the guard up until
+    the frame that shows the button again. A press queued at the app in the same turn as
+    the pop was aimed at the dialog: ignored, and the focus stays where it was."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], str | None, list[str]]:
+        button = await _shown(pilot, host)
+        where = button.region.offset
+        host.query_one("#neighbour", Button).focus()
+        await host.push_screen(Dialog())
+        await settle_page(host)
+        host.pop_screen()
+        guard_paint.queue_press(host, where)
+        await settle_page(host)
+        return host.pressed, host.focused_id(), host.notices()
+
+    assert drive(go) == ([], "neighbour", [])
+
+
+def test_a_press_right_after_the_frame_that_uncovers_the_button_presses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UI tester on #8 (seq 5724, PR #478 at 26643fa7): Stop, clicked once the dialog over it
+    had visibly gone, was dropped as late as 0.36 s after. The screen beneath repaints on its
+    resume with no layout pass of its own, and the guard came down on the layout pass it
+    asked for, a frame or more later. A press that reaches the app right after the frame
+    that shows the button again presses it. No settling between the pop and the press."""
+    frame = guard_paint.next_frame(monkeypatch)
+
     async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], list[str]]:
         button = await _shown(pilot, host)
-        clock.step()
+        where = button.region.offset
+        await host.push_screen(Dialog())
+        await settle_page(host)
+        host.pop_screen()
+        frame.then(lambda: guard_paint.queue_press(host, where))
+        await settle_page(host)
+        return host.pressed, host.notices()
+
+    assert drive(go) == (["restart"], [])
+
+
+def test_the_guard_comes_down_after_an_installed_dialog_closes() -> None:
+    """Re-review of #478 (seq 5737): Textual prunes a dialog it does not keep, and the prune
+    lays out the screen beneath, which takes a guard down on its own. An installed dialog is
+    kept, and nothing lays the screen out on its pop. The guard asks for that pass itself."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], bool]:
+        button = await _shown(pilot, host)
+        host.install_screen(Dialog(), name="dialog")
+        await host.push_screen("dialog")
+        await settle_page(host)
+        host.pop_screen()
+        await settle_page(host)
+        await pilot.click(button)
+        await settle_page(host)
+        return host.pressed, button.guarding
+
+    assert drive(go) == (["restart"], False)
+
+
+def test_a_dialog_closing_off_the_button_guards_it_again(hold: PaintHold) -> None:
+    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], list[str]]:
+        button = await _shown(pilot, host)
+        hold.release()
+        await settle_page(host)
+        hold.hold()
         await host.push_screen(Dialog())
         await settle_page(host)
         host.pop_screen()
@@ -140,11 +445,11 @@ def test_a_dialog_closing_off_the_button_guards_it_again(clock: GuardClock) -> N
 
     pressed, told = drive(go)
     assert pressed == []
-    assert told == [NOTICE]
+    assert told == []
 
 
 def test_an_ignored_click_leaves_the_focus_where_it_was_for_the_next_enter(
-    clock: GuardClock,
+    hold: PaintHold,
 ) -> None:
     """Review of #266, round 2: Textual focuses a widget on the mouse-down, before the click
     the guard drops. The ignored click left the keyboard on Restart, and the user's next
@@ -156,13 +461,14 @@ def test_an_ignored_click_leaves_the_focus_where_it_was_for_the_next_enter(
         await settle_page(host)
         await pilot.click(button)
         await settle_page(host)
-        ignored_on = host.focused.id if host.focused else None
+        ignored_on = host.focused_id()
         await pilot.press("enter")
         await settle_page(host)
-        clock.step()
+        hold.release()
+        await settle_page(host)
         await pilot.click(button)  # a click the guard lets through focuses it, as a Button's does
         await settle_page(host)
-        return ignored_on, host.pressed, host.focused.id if host.focused else None
+        return ignored_on, host.pressed, host.focused_id()
 
     ignored_on, pressed, after = drive(go)
     assert ignored_on == "neighbour"
@@ -176,54 +482,61 @@ async def _release(pilot: Pilot[None], button: GuardedButton) -> None:
     await pilot._post_mouse_events([events.MouseUp, events.Click], button)
 
 
-def test_a_press_held_across_the_window_s_start_gets_one_verdict_for_focus_and_press(
-    clock: GuardClock,
+def test_a_press_held_as_the_guard_goes_up_gets_one_verdict_for_focus_and_press(
+    hold: PaintHold,
 ) -> None:
     """Review of #266, round 3: the focus was judged at the mouse-down and the press again at
     the click, on the mouse-up. Down on a button at rest, the bar re-laid out under the
     held button before the release: the click was ignored, the focus taken all the same,
     and the next Enter pressed it. One verdict now, the mouse-down's, for both."""
 
-    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], str | None]:
+    async def go(pilot: Pilot[None], host: Host) -> tuple[bool, list[str], str | None]:
         button = await _shown(pilot, host)
-        clock.step()
+        hold.release()
+        await settle_page(host)
+        hold.hold()
         host.query_one("#neighbour", Button).focus()
         await settle_page(host)
         await pilot.mouse_down(button)
         await settle_page(host)
         button.changed_under_pointer()  # the bar moves it while the button is held
+        up_at_release = button.guarding
         await _release(pilot, button)
         await settle_page(host)
-        return host.pressed, host.focused.id if host.focused else None
+        return up_at_release, host.pressed, host.focused_id()
 
-    pressed, focused = drive(go)
+    up_at_release, pressed, focused = drive(go)
+    assert up_at_release is True
     assert (pressed, focused) == (["restart"], "restart"), "focus and press must agree"
 
 
-def test_a_press_down_inside_the_window_is_ignored_though_released_after_it(
-    clock: GuardClock,
+def test_a_press_down_while_the_guard_is_up_is_ignored_though_released_after_it_came_down(
+    hold: PaintHold,
 ) -> None:
-    """The reverse straddle: the mouse-down lands in the window, aimed at the old view, and
-    the mouse-up comes after the window ended. The focus stayed where it was, and the
-    press went through on the button that had just appeared."""
+    """The reverse straddle: the mouse-down lands before the paint, aimed at the old view, and
+    the mouse-up comes after it. The focus stayed where it was, and the press went through
+    on the button that had just appeared."""
 
-    async def go(pilot: Pilot[None], host: Host) -> tuple[list[str], str | None, list[str]]:
+    async def go(pilot: Pilot[None], host: Host) -> tuple[bool, list[str], str | None, list[str]]:
         button = await _shown(pilot, host)
         host.query_one("#neighbour", Button).focus()
         await settle_page(host)
         await pilot.mouse_down(button)
         await settle_page(host)
-        clock.step()
+        hold.release()
+        await settle_page(host)
+        down_at_release = not button.guarding
         await _release(pilot, button)
         await settle_page(host)
-        return host.pressed, host.focused.id if host.focused else None, host.notices()
+        return down_at_release, host.pressed, host.focused_id(), host.notices()
 
-    pressed, focused, told = drive(go)
+    down_at_release, pressed, focused, told = drive(go)
+    assert down_at_release is True
     assert (pressed, focused) == ([], "neighbour")
-    assert told == [NOTICE]
+    assert told == []
 
 
-def test_a_key_or_a_press_from_code_is_not_guarded(clock: GuardClock) -> None:
+def test_a_key_or_a_press_from_code_is_not_guarded(hold: PaintHold) -> None:
     """Enter on the focused button is a deliberate gesture, whenever it comes."""
 
     async def go(pilot: Pilot[None], host: Host) -> tuple[bool, list[str], list[str]]:

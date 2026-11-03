@@ -74,6 +74,13 @@ spending tokens without losing them, *⚙ Settings ▸ Fleet ▸ Pause all…* e
 one and keeps its task, worktree and session; *Resume all…* brings each back where
 it was.
 
+A few buttons ask before they act, in place rather than in a dialog: *Remove from
+fleet*, *Reset all settings*, a role binding's *Clear*, *Take over* and attaching a
+persona to a running agent. The first click turns the button into its question
+(`Remove? click again`) and says beside it what will happen; click it again, or
+double-click it, to go ahead. Esc, or three seconds without that second click, puts
+it back.
+
 You can open `asq` over SSH into the same Mac while the Mac's own is open: both
 show the same fleet, and a line in the sidebar says where each one runs. Start
 the first agent at the Mac, since on macOS an SSH login can't start the fleet's

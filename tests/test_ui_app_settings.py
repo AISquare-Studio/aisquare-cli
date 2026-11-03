@@ -971,6 +971,29 @@ def test_edit_opens_the_bind_form_on_the_binding_and_writes_what_team_bind_write
     assert "args -v" in str(seen["shown"]), "the section shows what the file holds now"
 
 
+def test_the_unset_dialogs_button_is_guarded_against_the_opener_s_double_click() -> None:
+    """REVIEW-RC092-MI round 3, MAJOR 1: the dialog is centred and does not move with the page,
+    so with three bindings the first role's *Unset key…* can be scrolled under its Unset (36
+    cells at 140x44). A GuardedButton ignores the second click of a double-click begun on
+    something else (``tests/test_click_guard.py``)."""
+    from aisquare.cli.ui.click_guard import GuardedButton
+    from aisquare.cli.ui.views.app_settings import UnsetKeyScreen
+
+    _bind_cli("tester", "--env", "A=1")
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        await settle(pilot)
+        host.query_one("#binding-unset-tester", Button).press()
+        await settle(pilot)
+        dialog = host.screen
+        return {
+            "asked": isinstance(dialog, UnsetKeyScreen),
+            "guarded": isinstance(dialog.query_one("#unset-confirm"), GuardedButton),
+        }
+
+    assert drive(scenario) == {"asked": True, "guarded": True}
+
+
 def test_unset_key_and_clear_write_what_team_bind_writes() -> None:
     """Clear asks in place: one press arms it and the note line under the buttons, always in
     sight, says the whole binding goes, and it writes nothing; the focus leaving disarms it; a

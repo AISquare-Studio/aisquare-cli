@@ -66,6 +66,10 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   `ui_state` (macOS only), which 0.9.1 never asks for: it reads `ui_state` by exact key. A
   fleet tmux window may carry a `@asq-size-owner` option, which 0.9.1 never reads, so its
   asq resizes the pane as it always did.
+- **The sidebar's active-only filter is no setting.** It is a `ui_state` row
+  (`fleet.active_only`), not a `config.toml` key, so `config set` does not take it. 0.9.1
+  never reads it: its sidebar lists every project, and back on 0.9.2 the filter is as you
+  left it.
 - **`aisquare upgrade` and `aisquare uninstall` refuse while an asq runs on the home**
   (asqs of 0.9.2 or later; quit a 0.9.1 asq yourself), where 0.9.1 went ahead: a script
   that runs `upgrade --yes` beside an open asq exits 1 now, and so does a move back with
@@ -291,8 +295,8 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   on the two-second refresh as its agents start and exit; a group header with no member
   shown, and the 📌 Pinned label with no pinned entry shown, go with them. The Captain
   section is never filtered, the open view stays open when its card is hidden, and
-  shift+↑/↓ step over the hidden rows. The choice is remembered across restarts
-  (`fleet.active_only`).
+  shift+↑/↓ step over the hidden rows. The choice is remembered across restarts, in the
+  store's `ui_state` (`fleet.active_only`), not in `config.toml`.
 - **↻ in the Onboard view reloads its directory tree.** The tree read the disk once, so a
   repo cloned after the view opened could only be onboarded by typing its path. The ↻ at
   the start of the hint line, or ctrl+r while the keyboard is anywhere in the view (the

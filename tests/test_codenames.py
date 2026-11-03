@@ -106,7 +106,21 @@ def test_every_name_taken_raises() -> None:
 # --- the shape ------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("text", ["amber-otter", "ruby-fox", "scarlet-narwhal", "zzz-zzz"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "amber-otter",
+        "ruby-fox",
+        "scarlet-narwhal",
+        "zzz-zzz",
+        # A chosen one may be wider (task #6): a slug of a project's name.
+        "aisquare-cli",
+        "amber-otter-x",
+        "amber-otterfish",
+        "amber",
+        "billing-v2",
+    ],
+)
 def test_is_codename_accepts_the_shape(text: str) -> None:
     assert is_codename(text)
 
@@ -116,11 +130,15 @@ def test_is_codename_accepts_the_shape(text: str) -> None:
     [
         "Amber-Otter",
         "amber_otter",
-        "amber-otter-x",
-        "ab-otter",
-        "amber-otterfish",
         "amber otter",
-        "amber",
+        "amber--otter",
+        "amber.otter",
+        "amber:otter",
+        "-amber",
+        "amber-",
+        "1amber",
+        "x" * 25,
+        "prj",
         "",
     ],
 )

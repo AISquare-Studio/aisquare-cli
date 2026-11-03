@@ -699,12 +699,13 @@ function turnTime(iso) {
 const STATES = {
   working: ["working", "s-working"], waiting: ["waiting", "s-waiting"], attention: ["NEEDS YOU", "s-attention"],
   limited: ["limited", "s-limited"], exited: ["exited 💤", "s-exited"], lost: ["lost", "s-lost"],
-  unknown: ["unknown", "s-unknown"],
+  paused: ["paused ⏯", "s-paused"], unknown: ["unknown", "s-unknown"],
 };
 
 const STATE_SENTENCES = {
   working: "working", waiting: "waiting at its prompt", attention: "waiting on you", limited: "at its usage limit",
-  exited: "exited", lost: "gone: its pane is lost", unknown: "in a state tmux does not say",
+  exited: "exited", lost: "gone: its pane is lost",
+  paused: "paused: its claims, worktree and session wait for fleet resume", unknown: "in a state tmux does not say",
 };
 
 /* The state badge, and a NEEDS YOU badge beside it when the feed has an item for this
@@ -3108,7 +3109,7 @@ if (typeof document !== "undefined") boot();
 
 if (typeof module === "object" && module && module.exports) {
   module.exports = {
-    API, WRITES, SOCKET_MESSAGES, ansiToRuns, renderRuns, renderNeedsCard, markCursor, plainText,
-    parseRoute, routeHash, ago,
+    API, WRITES, SOCKET_MESSAGES, STATES, STATE_SENTENCES, ansiToRuns, renderRuns, renderNeedsCard,
+    markCursor, plainText, parseRoute, routeHash, ago,
   };
 }

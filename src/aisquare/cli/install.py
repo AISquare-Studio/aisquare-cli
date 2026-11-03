@@ -79,6 +79,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "live_agents": list(plan.live_agents),
         "fleet_error": plan.fleet_error,
         "remote": plan.remote,
+        # The asq UIs live on this home: the upgrade refuses while one runs.
+        "asqs": list(plan.asqs),
         # The roles a move back ignores the file-bound variables of, each with its keys.
         "env_files_dropped": list(plan.env_files_dropped),
         # The roles a move back launches with tools their safety list denies here.
@@ -199,6 +201,8 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     for site in plan.left:
         _say(f"  leaves:  {site.config_dir} — {site.reason}")
     _fleet_lines(plan)
+    if plan.asqs_refusal is not None:
+        _say(f"✗ it will not run: {plan.asqs_refusal}")
 
 
 def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False) -> None:
@@ -574,10 +578,19 @@ def _upgrade(
             )
         _reopen(reopen, one_click=one_click, started=started)
         return
+    if plan.asqs_refusal is not None and yes and not dry_run:
+        # Refused, not warned of as the fleet and a Remote are (#17): left running, an asq
+        # runs the old release over the new one's files, two releases on one home.
+        fail(plan.asqs_refusal, error="asq_running", detail=", ".join(plan.asqs))
     if dry_run or not yes:
         _emit_plan(plan)
         if dry_run or json_output:
             return
+        if plan.asqs_refusal is not None:
+            # The plan just said why (#17), as uninstall's refusal is said: no question whose
+            # yes is refused, and off a terminal no "re-run with --yes" into the refusal.
+            _reopen(reopen)
+            raise typer.Exit(1)
         if not _stdin_is_a_terminal():
             _say("dry run: nothing installed — re-run with --yes to upgrade")
             return
@@ -698,6 +711,7 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
         "unlistened": plan.unlistened,
         "fleet_error": plan.fleet_error,
         "remote": plan.remote,
+        "asqs": list(plan.asqs),
         "refusal": None if refusal is None else {"error": refusal.error, "message": str(refusal)},
     }
 

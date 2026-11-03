@@ -215,6 +215,33 @@ def test_a_failing_source_is_said_once_per_streak_while_the_others_run(
     assert [item.summary for item in second.items] == ["1 unread"], "the good one still runs"
 
 
+def test_a_source_that_still_says_a_codename_the_project_gave_up_reaches_it(
+    project: ProjectInfo, tmp_path: Path
+) -> None:
+    """A project renamed takes a new codename (task #6), and a source an operator wrote
+    before says the old one: its line still lands on the project, as ``--project`` does."""
+    with store_session() as store:
+        store.set_codename(project.id, "earnest-hawk")
+        store.set_codename(project.id, "aisquare-cli")
+    said = tmp_path / "said.py"
+    said.write_text(
+        "import json\n"
+        "for name in ('earnest-hawk', 'aisquare-cli', 'nobody-here'):\n"
+        "    print(json.dumps({'id': name, 'project': name, 'kind': 'inbox', 'summary': name}))\n"
+    )
+    sources = {"mail": WatchSource(command=[sys.executable, str(said)], every_seconds=1)}
+    current = project.model_copy(update={"codename": "aisquare-cli"})
+    watcher = _watcher(current, Fleet(), sources=sources)
+    watcher._projects = lambda: [current]  # type: ignore[method-assign]
+
+    report = watcher.tick(NOW)
+
+    assert sorted((item.summary, item.project_id) for item in report.new) == [
+        ("aisquare-cli", project.id),
+        ("earnest-hawk", project.id),
+    ]
+
+
 # --- one watcher per home, and the doctor ---------------------------------------------------
 
 

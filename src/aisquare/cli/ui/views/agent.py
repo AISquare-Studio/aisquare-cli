@@ -11,10 +11,12 @@ markup, so a label or a model name with brackets in it reaches the screen intact
 when its slow headroom read lands; a changed ``pane_id`` (a restart) re-attaches
 the pane.
 
-**Stop** and **Restart** are the actions §4.2 promised. Stop only asks: it
-posts :class:`StopAgent` and the shell opens the dialog (``cli/ui/stop.py``),
+**Stop** and **Restart** are the actions §4.2 promised. Stop only posts
+:class:`StopAgent`, and the shell opens the dialog (``cli/ui/stop.py``),
 which owns the service call — one confirmation, *Force* included, over the
-same ``services.fleet.stop`` the CLI runs. It shows where
+same ``services.fleet.stop`` the CLI runs. With ``[ui] confirm_stop`` off (the
+dialog's *Don't ask again*) the shell opens no dialog and stops the agent at
+once, gracefully (``FleetApp._stop_at_once``). It shows where
 ``sidebar.STOP_STATES`` says: while the agent HAS a process (``ALIVE_STATES``,
 the constant the card's "agents alive" chip counts by), and on a 💤 exited
 row, whose dead window `remain-on-exit` kept for the last screen (#138) — Stop
@@ -285,7 +287,8 @@ class SlotLabels:
 
 
 def shown_pane(status: FleetAgentStatus) -> str | None:
-    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row, and
+    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row, a
+    ``paused`` one (its window was killed, and its id is the next agent's to be given), and
     for one the listing held as another server's.
 
     ``lost`` is the listing's word for a live row it found no pane of its own
@@ -306,7 +309,7 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
     word alone, the tabs showed and typed into another agent's pane under it (review of
     #259, round 1).
     """
-    return None if status.state == "lost" or status.held else status.agent.pane_id
+    return None if status.state in ("lost", "paused") or status.held else status.agent.pane_id
 
 
 RESTART_WORKER = "agent-restart"
@@ -322,13 +325,16 @@ class AgentView(Vertical):
     never had: a manager ended with ctrl+c inside its window showed 💤 forever
     with nothing to click, and ``fleet spawn manager`` refused until a hand-run
     ``reap``. Stop asks the shell for its dialog (:class:`StopAgent`); the dialog
-    runs the stop and owns its answer, including a refusal. Restart runs the
+    runs the stop and owns its answer, including a refusal. With ``[ui]
+    confirm_stop`` off the shell stops the agent at once instead, with no dialog,
+    and a refusal is a warning toast. Restart runs the
     service off the UI thread; the shell's next frame is what repaints, never an
     optimistic guess. A restart resumes the agent's own
     session when its transcript is on disk, so the manager comes back knowing
     its intake and its coders; the shell then shows the new row if this view is
     still the one on screen (:class:`AgentRestarted`). Both buttons ignore a mouse
-    press that lands just as the view came up or moved under the pointer
+    press that reaches the app before the view that came up or moved under the pointer
+    is painted, and take one after it at once
     (:class:`~aisquare.cli.ui.click_guard.GuardedButton`).
     """
 
@@ -386,8 +392,9 @@ class AgentView(Vertical):
             header = InfoLine(id="agent-header")
             header.show_line(self.status, self.labels.labels, self.usage)
             yield header
-            # Guarded (``click_guard``): a click that was aimed at what this view replaced
-            # must not stop or restart the agent it shows instead.
+            # Guarded (``click_guard``): a click that was aimed at what this view replaced,
+            # made before the view was painted, must not stop or restart the agent it shows
+            # instead.
             yield GuardedButton("Stop", id="agent-stop", compact=True)
             yield GuardedButton("Restart", id="agent-restart", compact=True, variant="primary")
         yield from self.compose_bars()
@@ -430,8 +437,8 @@ class AgentView(Vertical):
             self.pane.attach(wanted)
 
     def _paint_actions(self) -> None:
-        """Stop where ``STOP_STATES`` says — a process, or a dead window; Restart always (an
-        exited row is exactly its case).
+        """Stop where ``STOP_STATES`` says — a process, a dead window, or a pause to end;
+        Restart always (an exited row is exactly its case), named *Resume* on a paused row.
 
         Greyed while THIS view's own restart runs, and only then (a stop runs inside its
         own modal dialog): ``self.workers``
@@ -447,15 +454,25 @@ class AgentView(Vertical):
         stop = self.query_one("#agent-stop", Button)
         stop.display = self.status.state in STOP_STATES
         stop.disabled = busy
+        paused = self.status.state == "paused"
         stop.tooltip = (
             "/exit, a grace period, then the window is killed (as `fleet stop` does)"
             if self.status.state in _STOPPABLE
+            else "End the pause for good: its claims go back to the board, and `fleet resume` "
+            "leaves it (as `fleet stop` does)"
+            if paused
             else "Remove the dead window tmux kept for the last screen; the row leaves the "
             "listing (as `fleet stop` does)"
         )
         restart = self.query_one("#agent-restart", Button)
         restart.disabled = busy
-        restart.label = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
+        restart.label = (
+            "Restart"
+            if self.status.state in _STOPPABLE
+            else "Resume"
+            if paused
+            else "Restart (resume)"
+        )
         restart.tooltip = (
             "Start it again under this label — same role, task, worktree, account and "
             "persona; its session is resumed from the transcript when that is on disk (as "

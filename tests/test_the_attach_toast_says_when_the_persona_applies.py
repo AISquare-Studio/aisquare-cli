@@ -21,7 +21,7 @@ from typing import Literal
 import pytest
 from textual.pilot import Pilot
 
-from aisquare.cli.ui.attach import AttachTargetScreen, ConfirmAttachScreen
+from aisquare.cli.ui.attach import AttachTargetScreen
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from tests import test_ui_personas as ui_suite
@@ -49,7 +49,8 @@ def _toasts_after_attaching(
     delivered: Literal["typed", "noted", "unsent", "maybe"],
     how: str,
 ) -> list[tuple[str, str]]:
-    """Attach ``pair`` to the picker's one agent, confirmed; every toast the tab raised."""
+    """Attach ``pair`` to the picker's one agent, asked in place and confirmed; every toast the
+    tab raised."""
 
     def attach(target: ProjectInfo, label: str, name: str) -> fleet_service.AttachReceipt:
         agent = targets[0].agent.model_copy(update={"persona": name})
@@ -64,9 +65,7 @@ def _toasts_after_attaching(
         await press(pilot, "#persona-attach-existing")
         await wait_for(pilot, AttachTargetScreen)
         await settle(pilot)
-        await pilot.press("enter")  # the highlighted agent
-        await wait_for(pilot, ConfirmAttachScreen)
-        await press(pilot, "#attach-confirm")
+        await pilot.press("enter", "enter")  # the highlighted agent: armed, then confirmed
         await settle(pilot)
         return list(host.notices)
 

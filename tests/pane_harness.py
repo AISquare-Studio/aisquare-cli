@@ -35,11 +35,11 @@ from textual.pilot import Pilot
 from textual.widget import Widget
 
 from aisquare.cli.ui import terminal as terminal_module
-from aisquare.core.tmux import Completed, TmuxServer, parse_version
+from aisquare.core.tmux import SIZE_OWNER_OPTION, Completed, TmuxServer, parse_version
 
 # --- the fake tmux --------------------------------------------------------------------
 
-_FORMAT_FIELD = re.compile(r"#\{(\w+)\}")
+_FORMAT_FIELD = re.compile(r"#\{(@?[\w-]+)\}")
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -70,6 +70,9 @@ class FakePane:
     wrapped: set[int] = field(default_factory=set)
     """Screen rows (0 = the top of the visible screen) that tmux soft-wrapped into
     the row below — the ``W`` flag ``capture-pane -F`` prints for them."""
+    size_owner: str = ""
+    """The window's ``@asq-size-owner`` (``core.tmux.SIZE_OWNER_OPTION``): ``""`` unset.
+    Every fake pane is its own window, so the window option is the pane's."""
 
     def facts(self, pane_id: str, fmt: str) -> str:
         """``display-message`` output for ``fmt`` — any field order the caller asks for."""
@@ -92,6 +95,7 @@ class FakePane:
             "pane_current_command": "sh",
             "pane_title": "",
             "window_activity_flag": "0",
+            SIZE_OWNER_OPTION: self.size_owner,
         }
         return _FORMAT_FIELD.sub(lambda m: values.get(m.group(1), ""), fmt)
 
@@ -127,6 +131,20 @@ class FakeTmux:
         """What ``tmux -V`` answers when the binary on PATH is not the one the server
         runs — the package upgraded in place under a running server. ``None``: the
         same binary."""
+        self.claims: list[tuple[str, str]] = []
+        """``(pane, value)`` per ``set-option -w @asq-size-owner`` — an asq taking the size."""
+        self.owner_reads = 0
+        """``show-options`` of ``@asq-size-owner`` — what an earlier pane asked before each
+        resize; kept so a test can be run against that code too."""
+        self.conditional_resizes = 0
+        """``if-shell -F`` resizes (``core.tmux.resize_unless_owned_command``), run or refused."""
+        self.before_resize: Callable[[FakePane], None] | None = None
+        """A hook run as a resize reaches tmux — plain or conditional — before tmux runs it:
+        another asq's claim landing between a pane's last look and its resize."""
+        self.refuse_claims = False
+        """Whether ``set-option @asq-size-owner`` fails, the option left as it was."""
+        self.claim_attempts = 0
+        """Every ``set-option @asq-size-owner``, refused or not."""
         self.fail_resizes = 0
         """How many ``resize-window`` calls fail like a killed window first. The
         attempt is still recorded: a test counts the retries."""
@@ -213,7 +231,7 @@ class FakeTmux:
     def _flag(group: list[str], flag: str) -> str:
         return group[group.index(flag) + 1]
 
-    def _one(self, group: list[str], stdin: bytes | None) -> Completed:
+    def _one(self, group: list[str], stdin: bytes | None, *, hooked: bool = False) -> Completed:
         name = group[0]
         if name == "load-buffer":
             self.input.append((name, (stdin or b"").decode("utf-8")))
@@ -283,7 +301,39 @@ class FakeTmux:
         if name == "paste-buffer":
             self.input.append((name, pane_id))
             return Completed(0, "", "")
+        if name == "set-option" and group[-2] == SIZE_OWNER_OPTION:
+            assert group[1:4] == ["-w", "-t", pane_id], group
+            self.claim_attempts += 1
+            if self.refuse_claims:
+                return Completed(1, "", "refused\n")
+            pane.size_owner = group[-1]
+            self.claims.append((pane_id, group[-1]))
+            return Completed(0, "", "")
+        if name == "if-shell":
+            # ``if-shell -F -t <pane> <format> <resize> <refused>``, as tmux runs it: the
+            # format read against the window's claim NOW (resize_unless_owned_command).
+            assert group[1:4] == ["-F", "-t", pane_id], group
+            sizable, resize, _ = group[4:7]
+            self.conditional_resizes += 1
+            if self.before_resize is not None:
+                self.before_resize(pane)
+            mine = re.search(r"#\{m:(\d+)@\*,", sizable)
+            gone = re.search(r"#\{==:#\{@asq-size-owner\},([^}]+)\}", sizable)
+            held = pane.size_owner
+            if (
+                not held
+                or (mine is not None and held.startswith(f"{mine.group(1)}@"))
+                or (gone is not None and held == gone.group(1))
+            ):
+                return self._one(resize.split(), stdin, hooked=True)
+            return Completed(0, held + "\n", "")
+        if name == "show-options" and group[-1] == SIZE_OWNER_OPTION:
+            assert group[1:4] == ["-wqv", "-t", pane_id], group
+            self.owner_reads += 1
+            return Completed(0, pane.size_owner + "\n" if pane.size_owner else "", "")
         if name == "resize-window":
+            if self.before_resize is not None and not hooked:
+                self.before_resize(pane)
             width, height = int(self._flag(group, "-x")), int(self._flag(group, "-y"))
             self.input.append((name, pane_id, str(width), str(height)))
             if self.fail_resizes > 0:

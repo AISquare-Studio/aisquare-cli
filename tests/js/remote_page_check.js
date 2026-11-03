@@ -277,5 +277,7 @@ report.exports = Object.keys(page).sort();
 report.api = page.API;
 report.writes = page.WRITES;
 report.socketMessages = page.SOCKET_MESSAGES;
+// Each agent state's badge and sentence, for the Python side to hold against FleetAgentState.
+report.states = { badges: page.STATES, sentences: page.STATE_SENTENCES };
 
 process.stdout.write(JSON.stringify(report) + "\n");

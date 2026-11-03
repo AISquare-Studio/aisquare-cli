@@ -73,7 +73,7 @@ from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
+from aisquare.core.tmux import Capture, Completed, PaneFacts, SizeOwner, TmuxServer
 from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     DoctorCheck,
@@ -258,6 +258,16 @@ class ScriptedServer(TmuxServer):
     def resize(self, pane_id: str, width: int, height: int) -> None:
         self.resizes.append((pane_id, width, height))
 
+    def resize_unless_owned(
+        self, pane_id: str, width: int, height: int, *, owner_pid: int, gone: str | None = None
+    ) -> str | None:
+        """No asq has claimed a scripted window: the pane sizes it, as these tests expect."""
+        self.resizes.append((pane_id, width, height))
+        return None
+
+    def claim_size(self, pane_id: str, owner: SizeOwner, width: int, height: int) -> None:
+        self.resizes.append((pane_id, width, height))
+
     def at(self, path: Path | None) -> TmuxServer:
         """This server asked for at ``path`` (``tmux -S``): scripted there too, and saying
         where it was asked (:attr:`path`), so no real tmux is run for a recorded row."""
@@ -298,6 +308,7 @@ def project() -> ProjectInfo:
 def no_fleet(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fleet with no manager and no tmux: the view must never reach the real service."""
     monkeypatch.setattr(fleet_service, "manager_of", lambda project: None)
+    monkeypatch.setattr(fleet_service, "paused_manager_of", lambda project: None)
     monkeypatch.setattr(
         fleet_service, "status_of", lambda agent: FleetAgentStatus(agent=agent, state="waiting")
     )
@@ -1024,6 +1035,39 @@ def test_a_resize_after_the_manager_leaves_keeps_the_no_manager_text(
         assert "🧭 manager" not in text and "%11" not in text, text  # no stale info line
 
 
+def test_with_no_frame_yet_a_paused_managers_tab_says_paused_and_offers_resume(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the #457 fold, n3: the tab's own read as it mounts (no frame yet: asq
+    starting, or a frame whose fleet read failed) asked for the LIVE manager alone, and a
+    paused one read as "no manager yet" beside *Start manager*, which the spawn refuses beside
+    a paused manager. It says paused, and offers *Resume agents…*, as a frame shows it."""
+    now = datetime.now(tz=UTC)
+    paused = fake_agent(project, pane_id="%41").model_copy(
+        update={"ended_at": now, "ended_by": "stopped", "paused_at": now}
+    )
+    monkeypatch.setattr(
+        fleet_service,
+        "paused_manager_of",
+        lambda asked: (
+            FleetAgentStatus(agent=paused, state="paused", detail=fleet_service.PAUSED_DETAIL)
+            if asked.id == project.id
+            else None
+        ),
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, bool, bool]:
+        await settle(pilot)
+        header = " ".join(shown(host.query_one("#manager-header", Static)).split())
+        start = host.query_one("#start-manager", Button).display
+        return header, start, host.query_one("#resume-manager", Button).display
+
+    header, start, resume = drive(project, scenario)
+    assert f"{project.root.name}'s manager is paused." in header, header
+    assert "no manager yet" not in header and "exited" not in header
+    assert (start, resume) == (False, True), "Resume agents in place of Start manager"
+
+
 def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
     project: ProjectInfo,
 ) -> None:
@@ -1455,19 +1499,26 @@ def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
     value, placeholder, line, machine_fields, note = drive(project, scenario)
     assert value == "Auth work" and placeholder == project.root.name
     assert line == (
-        "fleet id: amber-otter — tmux session asq-amber-otter, branches fleet/amber-otter/…"
+        "fleet id: amber-otter — tmux session asq-amber-otter, branches fleet/amber-otter/…, "
+        "--project amber-otter; renaming the project renames it"
     )
-    assert machine_fields == [], "no codename rename, and nothing machine-wide"
+    assert machine_fields == [], "no codename field of its own, and nothing machine-wide"
+    assert "The fleet id follows it." in note
     assert "aisquare project rename sets the same" in note
     assert "`" not in note, "the note is a Text: backticks would show as they are"
 
 
-def test_settings_saves_a_nickname_and_a_blank_one_clears_it(project: ProjectInfo) -> None:
-    """Enter saves what the field holds through ``set_nickname`` — what ``project rename``
-    does — the title follows, and the app is told; a blank field clears it."""
+def test_settings_saves_a_nickname_and_a_blank_one_clears_it(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enter saves what the field holds — what ``project rename`` does: the nickname, and the
+    codename it gives with the tmux session (task #6) — the title and the fleet id line
+    follow, and the app is told; a blank field clears it, and the codename is the folder's."""
     from aisquare.cli.ui.sidebar import ProjectRenamed
     from aisquare.core.store import store_session
+    from tests.fleet_fakes import tmux_sessions_as
 
+    sessions = tmux_sessions_as(monkeypatch)
     renamed: list[str] = []
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[object]:
@@ -1492,6 +1543,8 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(project: ProjectInf
             seen.append(store.get_project(project.id).nickname)  # type: ignore[union-attr]
         seen.append(field.value)
         seen.append(shown(host.query_one("#settings-title", Static)))
+        seen.append(shown(host.query_one("#fleet-id", Static)))
+        sessions.sessions.add("asq-auth-wip")  # an agent started under the new codename
         field.value = ""
         host.query_one("#save-nickname", Button).press()
         await settle(pilot)
@@ -1501,15 +1554,23 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(project: ProjectInf
         seen.append(host.notices)
         return seen
 
-    saved, field_value, title, cleared, title_after, notices = drive(project, scenario)
+    saved, field_value, title, line, cleared, title_after, notices = drive(project, scenario)
     assert saved == "Auth [wip] 🚀" and field_value == "Auth [wip] 🚀"  # trimmed, kept as typed
     assert title == "project settings — Auth [wip] 🚀"
+    assert str(line).startswith("fleet id: auth-wip — tmux session asq-auth-wip"), line
     assert cleared is None
     assert title_after == f"project settings — {project.root.name}"
     assert renamed == [project.id, project.id], "the app hears of both, to repaint the name"
     assert isinstance(notices, list)
-    assert any("is now called Auth [wip] 🚀" in m for m, _ in notices), notices
-    assert any("shows its folder name again" in m for m, _ in notices), notices
+    assert any(
+        m.endswith("is now called Auth [wip] 🚀 · fleet codename auth-wip") for m, _ in notices
+    ), notices
+    assert any(
+        "shows its folder name again · fleet codename repo (was auth-wip; --project auth-wip "
+        "still works)" in m
+        for m, _ in notices
+    ), notices
+    assert sessions.renamed == [("asq-auth-wip", "asq-repo")]
 
 
 def test_a_nickname_the_store_refuses_is_said_and_nothing_is_written(

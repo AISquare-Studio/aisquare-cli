@@ -31,7 +31,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import code_index, harness, insights, orchestrator, paths, selfcli, transcripts
+from aisquare.core import (
+    code_index,
+    harness,
+    insights,
+    orchestrator,
+    paths,
+    prompt_origin,
+    selfcli,
+    transcripts,
+)
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import AccountsSettings, load_config
 from aisquare.core.injection import build_block, claude_md_files, without_loaded_preferences
@@ -272,6 +281,10 @@ def turn_stopped(
         metrics_service.record_usage(
             session_id, transcript_path, cwd, trigger="stop", trace_id=trace_id
         )
+    if decision is not None:
+        # The decision keeps the turn going with no UserPromptSubmit: the stretch it starts is a
+        # turn of its own, the Stop hook's (``agent:continuation``), closed by the next Stop.
+        metrics_service.continue_turn(session_id)
     # Last, and it swallows its own errors too: auto-mode refusals in the
     # transcript's tail put the row in attention with one board line (#150).
     auto_mode.record_refusals(session_id)
@@ -1237,6 +1250,19 @@ def hand_over(
         )
 
 
+_HARNESS_BLOCK = prompt_origin.HARNESS_BLOCK
+"""A closed tag Claude Code itself writes into the prompt field (``core.prompt_origin``)."""
+
+
+def _without_harness_blocks(text: str) -> str | None:
+    """``text`` with every :data:`_HARNESS_BLOCK` cut out, or ``None`` if nothing is left.
+
+    A prompt that is entirely such blocks (a background task's completion, a slash
+    command's own echo) is not a person's turn; one that mixes real words with one
+    keeps the words, trimmed where the cut left space behind."""
+    return _HARNESS_BLOCK.sub("", text).strip() or None
+
+
 def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
     """Record the prompt, consult CI, open this turn's row.
 
@@ -1265,6 +1291,13 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     block below is work the turn already contains, not a delay before it.
     """
     began = datetime.now(tz=UTC)
+    # Who sent it, decided first and from the prompt itself: the marker an aisquare write left
+    # for this text (taken, so it is never read twice), else Claude Code's own notice of a
+    # finished task, else a person typed it, a slash command too (``core.prompt_origin``).
+    # Never raises.
+    origin = prompt_origin.origin_of_prompt(
+        prompt, notice=prompt_origin.only_task_notifications(prompt)
+    )
     # ``capture.enabled``, read once a prompt (#268). Off, the prompt is neither stored nor
     # spooled; the turn row below still opens, without text, and the teammate delta is the
     # caller's, not capture. A config that cannot be read may have said off, so it records
@@ -1278,6 +1311,8 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
         )
         record = False
     text = prompt if record and prompt is not None and prompt.strip() else None
+    if text is not None and _HARNESS_BLOCK.search(text):
+        text = _without_harness_blocks(text)
     try:
         with store_session() as store:
             project = active_project(store, cwd)
@@ -1309,7 +1344,8 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
             prompt, project=project, session_id=session_id, cwd=cwd, began=began
         )
         block = augmentation.block
-        metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=False))
+        metric = augmentation.metric(project.id, session_id, closed=False)
+        metrics_service.open_turn(metric.model_copy(update={"origin": origin}))
         if augmentation.run_id:
             insights.record_turn(
                 augmentation.join_facts(session_id), session_id=session_id, project_id=project.id

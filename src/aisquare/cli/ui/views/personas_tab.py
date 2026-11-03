@@ -14,7 +14,8 @@ module at call time, so a test replaces each with a recorder.
 
 **Attach to existing / Attach to new** post :class:`AttachRequested`, which the
 tab answers itself with the target picker (``cli/ui/attach.py``): an agent is
-attached to after one confirmation (``fleet_service.attach_persona`` in a thread
+attached to once its row was chosen twice, the first asking in place
+(``fleet_service.attach_persona`` in a thread
 worker; the toast says whether the briefing was typed, and when it was not, why and how
 the persona reaches the agent), a bind or an account opens the Spawn dialog preset with the
 persona, and *+ New account* hands over to the Accounts page. The message is not
@@ -45,7 +46,6 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui import persona_dialogs as dialogs
 from aisquare.cli.ui.attach import (
     AttachTargetScreen,
-    ConfirmAttachScreen,
     NewAccountRequested,
     ReturnTo,
     Target,
@@ -389,6 +389,7 @@ class PersonasTab(Vertical):
                 accounts=accounts_service.overview,
                 select=select,
                 filter_text=filter_text,
+                attaching=True,  # an agent's row asks in place before it answers
             ),
             callback=lambda target: self._target_chosen(persona, intent, target),
         )
@@ -396,12 +397,8 @@ class PersonasTab(Vertical):
     def _target_chosen(self, persona: str, intent: AttachIntent, target: Target | None) -> None:
         if target is None:
             return
-        if target.kind == "agent":
-            label = target.key
-            self.app.push_screen(
-                ConfirmAttachScreen(persona, label, target.persona),
-                callback=lambda yes: self._attach_persona(persona, label) if yes else None,
-            )
+        if target.kind == "agent":  # chosen twice in the picker, which asked in place
+            self._attach_persona(persona, target.key)
         elif target.kind == "new-account":
             form = {"persona": persona, "intent": intent, "filter": target.key}
             self.post_message(NewAccountRequested(ReturnTo("picker", self.project.id, form)))

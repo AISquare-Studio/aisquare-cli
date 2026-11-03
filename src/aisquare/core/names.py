@@ -35,6 +35,7 @@ over the digits or letters after it, and is kept where one follows.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Literal
 
@@ -94,6 +95,23 @@ def name_key(text: str) -> str:
     """``text`` as two names are compared: without case, and without any variation selector,
     which changes how a character is drawn and never which one it is."""
     return "".join(char for char in text if not _is_variation_selector(char)).casefold()
+
+
+def slug(text: str, *, max_len: int = 24) -> str:
+    """``text`` as a name where only ``[a-z0-9-]`` may stand: a fleet agent's label
+    (``services.fleet.label_from_text``) and a project's codename typed as free text, one rule
+    so the two make the same of one name.
+
+    Its accents folded (NFKD, the combining marks dropped: ``Café`` is ``cafe``), case folded
+    (``Straße`` is ``strasse``), each run of anything else one ``-`` (a space, ``_``, an emoji,
+    a letter with no ASCII base: ``Søren`` is ``s-ren``), no ``-`` at either end, and cut to
+    ``max_len`` characters with no ``-`` left at its end. Empty when nothing is left; the
+    caller says what it needs of the rest."""
+    folded = "".join(
+        char for char in unicodedata.normalize("NFKD", text) if not unicodedata.combining(char)
+    )
+    slugged = re.sub(r"[^a-z0-9]+", "-", folded.casefold()).strip("-")
+    return slugged[:max_len].rstrip("-")
 
 
 def _is_variation_selector(char: str) -> bool:

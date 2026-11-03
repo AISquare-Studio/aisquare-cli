@@ -14,6 +14,7 @@ beta, each with a running manager and coder-1).
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -281,21 +282,32 @@ def test_an_agent_that_died_before_the_column_is_read_by_its_exit_status(
     tmp_path: Path,
 ) -> None:
     """A row ended before v34 (``ended_by`` NULL): killed (143) is restarted; no status
-    (a stop's kill, or a reap) cannot be told apart and is left."""
+    (a stop's kill, or a reap) cannot be told apart and is left. They died an hour before the
+    fleet's own clock (``fleet_service._now``), inside ``DEAD_RESTART_WITHIN``: pinned to the
+    day of the incident (2026-10-23 16:50 UTC), the rows aged past the 7 days at 2026-10-30
+    16:50 UTC, and the killed one was left as "died over 7 days ago" on every branch. A minute
+    past the window, the killed one is no target either."""
     killed, quiet = fleet.agents["alpha/coder-1"], fleet.agents["beta/coder-1"]
-    for agent, status in ((killed, KILLED), (quiet, None)):
-        tmux.vanish(agent.pane_id)
+
+    def died(agent: FleetAgent, status: int | None, ago: timedelta) -> None:
         with store_session() as store:
             store._conn.execute(  # type: ignore[attr-defined]
                 "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = NULL "
                 "WHERE id = ?",
-                ("2026-10-23T16:50:00+00:00", status, agent.id),
+                ((fleet_service._now() - ago).isoformat(), status, agent.id),
             )
             store._conn.commit()  # type: ignore[attr-defined]
+
+    for agent, status in ((killed, KILLED), (quiet, None)):
+        tmux.vanish(agent.pane_id)
+        died(agent, status, timedelta(hours=1))
 
     targets = {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
 
     assert killed.id in targets and quiet.id not in targets
+    died(killed, KILLED, fleet_service.DEAD_RESTART_WITHIN + timedelta(minutes=1))
+    late = {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
+    assert killed.id not in late, "a minute past the window, nothing brings it back"
 
 
 # --- #274 delta review 2: m1-m3 ------------------------------------------------------

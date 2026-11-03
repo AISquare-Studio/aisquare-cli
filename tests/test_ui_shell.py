@@ -37,10 +37,22 @@ from textual._xterm_parser import XTermParser
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
-from textual.geometry import Region
+from textual.css.stylesheet import Stylesheet
+from textual.dom import DOMNode
+from textual.geometry import Offset, Region
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, Input, OptionList, Static, Switch, Tabs
+from textual.widgets import (
+    Button,
+    Checkbox,
+    DataTable,
+    Input,
+    OptionList,
+    Static,
+    Switch,
+    Tabs,
+    Tree,
+)
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
@@ -58,6 +70,7 @@ from aisquare.cli.ui.sidebar import (
     STOP_STATES,
     Activatable,
     AgentRow,
+    AgentSelected,
     CardChips,
     Disclosure,
     GroupHeader,
@@ -108,10 +121,10 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
 from aisquare.services.captain import state as captain_state
-from tests import guard_clock, toast_log
+from tests import guard_paint, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import settle_page, settle_until_held, watch_until
+from tests.ui_workers import released, settle_page, settle_until_held, watch_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -385,6 +398,13 @@ def card_for(app: FleetApp, project_id: str) -> ProjectCard:
 
 def row_for(app: FleetApp, agent_id: str) -> AgentRow:
     return app.query_one(f"#agent-row-{agent_id}", AgentRow)
+
+
+def highlighted(app: FleetApp) -> list[str]:
+    """The sidebar rows carrying the highlight, hidden ones too: never more than one."""
+    return [
+        row.selection_key for row in app.sidebar.query(Activatable) if row.has_class("selected")
+    ]
 
 
 # --- pure helpers ------------------------------------------------------------------
@@ -800,8 +820,9 @@ def test_a_project_opened_between_two_ticks_names_its_session_at_once(
 def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(
     tmp_path: Path, script: Script
 ) -> None:
-    """The codename names the tmux session and the branches; the card says the name a
-    person knows the project by (its nickname, else its folder), and nothing else."""
+    """The card's title is the name a person knows the project by (its nickname, else its
+    folder), and nothing else; a codename that name does not give is said dim under it, after
+    the path that tells twins apart (task #6)."""
     seed(
         tmp_path,
         ("prj_w", "work/api", "amber-otter"),
@@ -827,9 +848,10 @@ def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apar
         "🗂 api",
         "🗂 unique",
     ]
-    # The two `api` projects are told apart by their path; the unique one is not decorated.
-    assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api")
-    assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api")
+    # The two `api` projects are told apart by their path, then their codename, which `api`
+    # does not give; the unique one, with no codename, is not decorated.
+    assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api · amber-otter")
+    assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api · ruby-fox")
     assert cards["prj_u"][1] is False and cards["prj_u"][2] == ""
 
 
@@ -2493,33 +2515,46 @@ def test_help_from_the_board_opens_at_its_section_with_every_icon_in_view(
     )
 
 
-def test_keyboard_cursor_walks_the_rows_and_enter_activates(
+def test_the_arrows_walk_the_one_highlight_and_open_each_row_they_land_on(
     tmp_path: Path, script: Script, captain_off: None
 ) -> None:
+    """↑/↓ move THE highlight — there is no second, keyboard-only one — and the row they
+    land on opens as a click opens it, the keyboard staying in the sidebar so the next
+    arrow moves on. ``+`` and *Spawn agent* only take the highlight: passing over them
+    onboards nothing and opens no dialog. Enter on an agent's row is its click: the pane
+    takes the keyboard (#147)."""
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
 
-    async def go(pilot: Pilot[None]) -> tuple[int, list[str], str | None]:
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[tuple[str, ...]], str, str]:
         app = fleet_app(pilot)
         app.sidebar.focus()
         await pilot.pause()
-        cursors_before = len(app.query(".cursor"))
-        walk: list[str] = []
+        before = highlighted(app)
+        walk: list[tuple[str, ...]] = []
         # Up at the top already stays on the first row; then down past Spawn agent to the
-        # card, its agent row, and back up to the title (the captain's walk: test_sidebar_actions).
-        for key in ("up", "down", "down", "down", "up"):
+        # card, its agent row, back up to the title and down again (the captain's walk:
+        # test_sidebar_actions).
+        for key in ("up", "down", "down", "down", "up", "down"):
             await pilot.press(key)
             await settle(app)
-            walk.append(type(app.query_one(".cursor")).__name__)
+            (row,) = (row for row in app.sidebar.query(Activatable) if row.has_class("selected"))
+            walk.append((type(row).__name__, str(app.content.current), type(app.focused).__name__))
         await pilot.press("enter")
         await settle(app)
-        return cursors_before, walk, app.content.current
+        return before, walk, str(app.content.current), type(app.focused).__name__
 
-    before, walk, current = drive(go)
-    assert before == 0  # no cursor until a key is pressed
-    assert walk == ["AddButton", "SpawnButton", "ProjectTitle", "AgentRow", "ProjectTitle"]
-    assert current == "project-prj_a"  # Enter on the title opened the project
-    assert len(walk) == len(set(walk)) + 1  # the cursor moved, it did not stick
+    before, walk, current, focused = drive(go)
+    assert before == []  # nothing highlighted until a row is chosen
+    assert walk == [
+        ("AddButton", "welcome", "Sidebar"),  # highlighted, and the Onboard view not opened
+        ("SpawnButton", "welcome", "Sidebar"),  # highlighted, and no Spawn dialog
+        ("ProjectTitle", "project-prj_a", "Sidebar"),
+        ("AgentRow", "agent-agt_a_manager", "Sidebar"),  # its pane did not take the keys
+        ("ProjectTitle", "project-prj_a", "Sidebar"),
+        ("AgentRow", "agent-agt_a_manager", "Sidebar"),
+    ]
+    assert (current, focused) == ("agent-agt_a_manager", "TerminalPane"), "Enter is the click"
 
 
 def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
@@ -2531,7 +2566,7 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     bindings then ate the arrows as soon as the list overflowed — the documented
     ``↑ ↓ Enter`` model died after any click. Measured on the unfixed tree:
     focus landed on ``VerticalScroll``, no ``.cursor`` row existed and each
-    ``down`` moved ``scroll_y`` by one instead.
+    ``down`` moved ``scroll_y`` by one instead (the cursor is the highlight now).
     """
     specs = [(f"prj_{index:02d}", f"p{index:02d}", None) for index in range(25)]
     seed(tmp_path, *specs)
@@ -2550,10 +2585,9 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
         for _ in range(2):
             await pilot.press("down")
             await settle(app)
-            # Not query_one: with the arrows eaten there is no cursor at all, and
-            # the claim should read as a diff, not as a NoMatches from the probe.
-            cursors = app.query(".cursor").results(Activatable)
-            walk.append(next((row.selection_key for row in cursors), "(no cursor)"))
+            # A list, not one key: with the arrows eaten the highlight stays on the
+            # clicked title, and the claim should read as a diff.
+            walk.append(" ".join(highlighted(app)))
             scrolls.append(holder.scroll_y)
         # Control: a widget that IS focusable still takes the click — focus was
         # not nailed to the sidebar, only handed the rows' clicks.
@@ -2567,15 +2601,15 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     overflow, focused, walk, scrolls, on_pane = drive(go)
     assert overflow > 0, "the list must overflow, or the bug cannot show"
     assert focused == "Sidebar"
-    assert walk == ["agent:agt_00_manager", "project:prj_01"]  # the arrows moved the cursor…
+    assert walk == ["agent:agt_00_manager", "project:prj_01"]  # the arrows moved the highlight…
     assert scrolls == [0.0, 0.0]  # …and not the scroll
     assert on_pane == "RecordingPane"
 
 
-def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside_it(
+def test_collapsing_the_highlighted_rows_card_leaves_one_highlight_and_moves_beside_it(
     tmp_path: Path, script: Script, captain_off: None
 ) -> None:
-    """Exactly one row may render as the keyboard cursor, collapsed cards included.
+    """Exactly one row may carry the highlight, collapsed cards included.
 
     ``_move_cursor`` re-applied the class over the VISIBLE rows only, so a row
     hidden inside a collapsed card kept it forever: two rows highlighted, and
@@ -2589,40 +2623,41 @@ def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside
 
     async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str], list[str]]:
         app = fleet_app(pilot)
-
-        def cursors() -> list[str]:
-            return [row.selection_key for row in app.query(".cursor").results(Activatable)]
-
         app.sidebar.focus()
         await pilot.pause()
         for _ in range(4):  # add → spawn-agent → project:prj_a → agent:agt_a_manager
             await pilot.press("down")
             await settle(app)
-        walked = cursors()
-        await pilot.click(card_for(app, "prj_a").query_one(Disclosure))  # hides the cursor's row
+        walked = highlighted(app)
+        await pilot.click(card_for(app, "prj_a").query_one(Disclosure))  # hides the lit row
         await pilot.pause()
-        collapsed = cursors()
+        collapsed = highlighted(app)
         await pilot.press("down")
         await settle(app)
-        moved = cursors()
-        # Control: the walk goes on from there, one cursor at a time.
+        moved = highlighted(app)
+        # Control: the walk goes on from there, one highlight at a time.
         await pilot.press("down")
         await settle(app)
-        return walked, collapsed, moved, cursors()
+        return walked, collapsed, moved, highlighted(app)
 
     walked, collapsed, moved, onwards = drive(go)
     assert walked == ["agent:agt_a_manager"]
-    assert collapsed == walked  # the hidden row keeps it until the cursor next moves
-    assert moved == ["project:prj_b"], "one cursor row, and it resumed beside the collapsed card"
+    assert collapsed == walked  # the hidden row keeps it until the arrows next move
+    assert moved == ["project:prj_b"], "one highlight, and it resumed beside the collapsed card"
     assert onwards == ["agent:agt_b_manager"]
 
 
-def test_the_cursor_skips_the_rows_of_a_collapsed_card(
+def test_the_arrows_skip_the_rows_of_a_collapsed_card(
     tmp_path: Path, script: Script, captain_off: None
 ) -> None:
     """Collapsing hides the rows through their ``#agents`` holder, not their own flag."""
 
     def walk(*, collapse: bool) -> list[str]:
+        # The rows the arrows open are remembered, as a click's are: each walk starts at
+        # launch with nothing to reopen, or it would start where the last one ended.
+        with store_session() as store:
+            store.set_ui_state("fleet.selected", None)
+
         async def go(pilot: Pilot[None]) -> list[str]:
             app = fleet_app(pilot)
             card = card_for(app, "prj_a")
@@ -2636,7 +2671,8 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(
             for _ in range(5):
                 await pilot.press("down")
                 await settle(app)
-                keys.append(app.query_one(".cursor", Activatable).selection_key)
+                (key,) = highlighted(app)
+                keys.append(key)
             return keys
 
         return drive(go)
@@ -2654,7 +2690,7 @@ def test_the_cursor_skips_the_rows_of_a_collapsed_card(
         "agent:agt_b_manager",
     ]
     assert not any(key.endswith("agt_a_manager") for key in collapsed), (
-        "the cursor must not land on a row hidden inside the collapsed card"
+        "the highlight must not land on a row hidden inside the collapsed card"
     )
     # Control: expanded, the very same keys walk through those rows.
     assert walk(collapse=False) == [
@@ -3393,23 +3429,16 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
     has ever mounted, so a test that opens a second agent would otherwise click
     the first view's button, which is not on screen and opens nothing.
 
-    The click lands as a person's would, a moment after the view came up: past the click
-    guard's window (``click_guard``), which the guard's own clock is moved on for.
+    The click lands as a person's would, once the view is on screen: after its paint, which
+    is what the click guard (``click_guard``) waits for.
     """
-    from aisquare.cli.ui import click_guard
-
     await pilot.click(row_for(app, agent_id))
     await pilot.pause()
     await settle(app)
     view = app.current_view()
     assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
-    real = click_guard.clock
-    click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
-    try:
-        await pilot.click(view.query_one("#agent-stop", Button))
-        await pilot.pause()
-    finally:
-        click_guard.clock = real
+    await pilot.click(view.query_one("#agent-stop", Button))
+    await pilot.pause()
     screen = app.screen
     assert isinstance(screen, StopAgentScreen), f"Stop opened {type(screen).__name__}"
     return screen
@@ -3422,8 +3451,6 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
     none of its agents (``refresh_data`` fails open, the cost on the card), and Stop on
     the agent's still-open view was then refused as "no longer listed" while the agent
     ran. The dialog opens on the row the view shows; the service decides."""
-    from aisquare.cli.ui import click_guard
-
     seed(tmp_path, ("prj_a", "alpha", None))
     live = [status("prj_a", "coder-auth", "coder", "working")]
     failing: list[Exception] = []
@@ -3443,13 +3470,8 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
         assert isinstance(view, AgentView)
         failing.append(fleet_service.FleetUnavailable("database is locked"))
         await refreshed(app)
-        real = click_guard.clock
-        click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
-        try:
-            await pilot.click(view.query_one("#agent-stop", Button))
-            await pilot.pause()
-        finally:
-            click_guard.clock = real
+        await pilot.click(view.query_one("#agent-stop", Button))
+        await pilot.pause()
         said = [str(n.message) for n in app._notifications]
         return type(app.screen).__name__, said
 
@@ -4443,6 +4465,264 @@ def test_the_divider_is_the_line_and_lights_while_the_navigator_has_focus(
     )
 
 
+def _sides(app: FleetApp) -> tuple[bool, bool, bool]:
+    """``(sidebar faded, content faded, divider lit)``."""
+    return (
+        app.sidebar.has_class("-unfocused"),
+        app.content.has_class("-unfocused"),
+        app.query_one(Divider).has_class("-neighbour-focused"),
+    )
+
+
+def test_the_side_without_the_focus_is_faded_and_the_fade_follows_every_focus_change(
+    tmp_path: Path, script: Script
+) -> None:
+    """A sentence typed at an agent landed on the sidebar's one-key bindings (x stops an
+    agent, q quits), and the divider's one accented column was the only sign of where keys
+    were going. The side without the focus is faded now; the one keys go to is unchanged."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = fleet_app(pilot)
+        seen: dict[str, object] = {}
+        app.sidebar.focus()
+        await pilot.pause()
+        seen["sidebar"] = _sides(app)
+        pane = RecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        await pilot.pause()  # let it lay out, or the click lands on the old view
+        await pilot.click(pane)
+        await pilot.pause()
+        seen["click on the pane"] = (_sides(app), app.focused is pane)
+        await pilot.press("f12")
+        await settle(app)  # the pane posts EscapeToSidebar, and the app moves the focus
+        seen["escape hatch"] = (_sides(app), app.focused is app.sidebar)
+        await pilot.press("tab")
+        await pilot.pause()
+        seen["tab"] = (_sides(app), app.focused is pane)
+        await pilot.click(app.sidebar, offset=(1, app.sidebar.size.height - 1))
+        await pilot.pause()
+        seen["click on the sidebar"] = (_sides(app), app.focused is app.sidebar)
+        view = Vertical(Static("a view"), Input(id="fade-probe"), id="fade-view")
+        await app.content.add_content(view, set_current=True)
+        app.query_one("#fade-probe", Input).focus()
+        await pilot.pause()
+        seen["a view's widget"] = _sides(app)
+        app.screen.set_focus(None)
+        await pilot.pause()
+        seen["nothing focused"] = (_sides(app), app.focused)
+        return seen
+
+    on_sidebar = (False, True, True)
+    on_content = (True, False, False)
+    assert drive(go) == {
+        "sidebar": on_sidebar,
+        "click on the pane": (on_content, True),
+        "escape hatch": (on_sidebar, True),
+        "tab": (on_content, True),
+        "click on the sidebar": (on_sidebar, True),
+        "a view's widget": on_content,
+        "nothing focused": ((False, False, False), None),
+    }
+
+
+def test_a_focus_change_restyles_the_two_sides_and_nothing_under_them(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fade is the side's ``opacity``, which Textual multiplies into every row as it
+    paints, so the side alone is restyled; the rows below are only told their styles
+    changed (``notify_style_update``), which matches no CSS. A plain ``set_class`` on the
+    sidebar restyled every row under it as well, on top of the restyle Textual already
+    gives them when the sidebar's own ``:focus`` changes: ~80 ms of CPU a focus change at
+    50 projects of 3 agents, growing with the fleet. Counted, not timed, as the tick's
+    budget is."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        status("prj_a", "coder-1", "coder", "working"),
+        status("prj_a", "coder-2", "coder", "working", minute=1),
+    ]
+    restyled: list[DOMNode] = []
+    marking = False
+    apply, mark = Stylesheet.apply, Panes._mark_focus
+
+    def counting_apply(self: Stylesheet, node: DOMNode, *args: Any, **kwargs: Any) -> None:
+        if marking:
+            restyled.append(node)
+        apply(self, node, *args, **kwargs)
+
+    def counted_mark(self: Panes) -> None:
+        nonlocal marking
+        marking = True
+        try:
+            mark(self)
+        finally:
+            marking = False
+
+    monkeypatch.setattr(Stylesheet, "apply", counting_apply)
+    monkeypatch.setattr(Panes, "_mark_focus", counted_mark)
+
+    async def go(pilot: Pilot[None]) -> tuple[set[str], list[str]]:
+        app = fleet_app(pilot)
+        pane = RecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        await pilot.pause()
+        app.sidebar.focus()
+        await pilot.pause()
+        restyled.clear()
+        for target in (pane, app.sidebar, pane):
+            target.focus()
+            await pilot.pause()
+        sides = {app.sidebar, app.content, app.query_one(Divider)}
+        return (
+            {type(node).__name__ for node in restyled if node in sides},
+            [type(node).__name__ for node in restyled if node not in sides],
+        )
+
+    sides, below = drive(go)
+    assert sides == {"Sidebar", "ContentSwitcher", "Divider"}, "each flip restyles the sides"
+    assert below == [], "and nothing under them"
+
+
+def _painted(widget: Widget) -> list[tuple[str, str, str]]:
+    """``widget`` as Textual composites it: each segment's text, foreground and background."""
+    width, height = widget.size
+    return [
+        (segment.text, str(segment.style.color), str(segment.style.bgcolor))
+        for strip in widget.render_lines(Region(0, 0, width, height))
+        for segment in strip
+        if segment.style is not None
+    ]
+
+
+def test_a_widget_that_caches_its_style_repaints_as_a_full_restyle_would(
+    tmp_path: Path, script: Script
+) -> None:
+    """``_fade`` restyles the side alone, and Textual's ``get_visual_style`` keeps every
+    ancestor's ``opacity`` in a cache only ``notify_style_update`` clears. So an OptionList
+    (the Board's live feed), a DataTable or a Tree kept the faded highlight after the focus
+    went to the sidebar and back (review of #470, M2). Each step is held against what a
+    full restyle of the content paints."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, bool]]:
+        app = fleet_app(pilot)
+        table: DataTable[str] = DataTable(id="fade-table")
+        tree: Tree[None] = Tree("root", id="fade-tree")
+        view = Vertical(
+            OptionList("one", "two", id="fade-list"),
+            table,
+            tree,
+            Input(id="fade-input"),
+            id="fade-view",
+        )
+        await app.content.add_content(view, set_current=True)
+        table.add_columns("a", "b")
+        table.add_rows([("1", "2"), ("3", "4")])
+        tree.root.expand()
+        tree.root.add_leaf("leaf")
+        await pilot.pause()
+        widgets = [app.query_one("#fade-list"), table, tree]
+        field = app.query_one("#fade-input", Input)
+        seen: list[tuple[str, bool]] = []
+        for step, target in (
+            ("in the content", field),
+            ("to the sidebar", app.sidebar),
+            ("back to the content", field),
+            ("to the sidebar again", app.sidebar),
+        ):
+            target.focus()
+            await pilot.pause()
+            painted = [_painted(widget) for widget in widgets]
+            app.stylesheet.update(app.content)
+            await pilot.pause()
+            seen.append((step, painted == [_painted(widget) for widget in widgets]))
+        return seen
+
+    assert drive(go) == [
+        ("in the content", True),
+        ("to the sidebar", True),
+        ("back to the content", True),
+        ("to the sidebar again", True),
+    ]
+
+
+Rgb = tuple[int, int, int]
+
+
+def _ink(widget: Widget, word: str) -> tuple[Rgb, Rgb]:
+    """``(foreground, background)`` of ``word`` as Textual composites ``widget``."""
+    width, height = widget.size
+    for strip in widget.render_lines(Region(0, 0, width, height)):
+        for segment in strip:
+            if word in segment.text and segment.style is not None:
+                fg, bg = segment.style.color, segment.style.bgcolor
+                assert fg is not None and bg is not None, segment
+                fg_rgb, bg_rgb = fg.triplet, bg.triplet
+                assert fg_rgb is not None and bg_rgb is not None, segment
+                return (
+                    (fg_rgb.red, fg_rgb.green, fg_rgb.blue),
+                    (bg_rgb.red, bg_rgb.green, bg_rgb.blue),
+                )
+    raise AssertionError(f"{word!r} is not painted in {widget!r}")
+
+
+def test_the_fade_is_painted_slight_and_reaches_the_agents_own_colours(
+    tmp_path: Path, script: Script
+) -> None:
+    """What the eye gets, not the class: the faded side's text is drawn a little toward
+    its background — the sidebar's rows, a pane's own text, and a 24-bit colour such as
+    Claude Code draws in, since ``opacity`` is multiplied into every widget below the
+    side — and the side the keys go to is drawn exactly as with nothing focused."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    tmux = FakeTmux()
+    # Claude Code's own orange, 24-bit; the cursor off the words, as its cell is a
+    # segment of its own.
+    tmux.panes["%1"] = FakePane(
+        screen=["\x1b[38;2;215;119;87mclaude\x1b[0m plain"], cursor=(20, 0), width=40, height=1
+    )
+
+    async def go(pilot: Pilot[None]) -> dict[str, list[tuple[Rgb, Rgb]]]:
+        app = fleet_app(pilot)
+        server = tmux.server(tmp_path, socket=PRIVATE_SOCKET)
+        pane = TerminalPane("%1", server=server, id="fade-pane")
+        await app.content.add_content(pane, set_current=True)
+        deadline = time.monotonic() + 3.0
+        while "plain" not in pane_text(pane):
+            assert time.monotonic() < deadline, "the pane never painted the scripted row"
+            await pilot.pause()
+        row = app.query_one(SettingsRow)
+
+        def inks() -> list[tuple[Rgb, Rgb]]:
+            return [_ink(row, "Settings"), _ink(pane, "claude"), _ink(pane, "plain")]
+
+        seen: dict[str, list[tuple[Rgb, Rgb]]] = {}
+        app.screen.set_focus(None)
+        await pilot.pause()
+        seen["nothing focused"] = inks()
+        app.sidebar.focus()
+        await pilot.pause()
+        seen["sidebar"] = inks()
+        pane.focus()
+        await pilot.pause()
+        seen["pane"] = inks()
+        return seen
+
+    seen = drive(go)
+    full = seen["nothing focused"]
+    assert seen["sidebar"][0] == full[0] and seen["pane"][1:] == full[1:], (
+        "the side the keys go to is drawn as it always was"
+    )
+    faded = [seen["pane"][0], *seen["sidebar"][1:]]
+    for name, (ink, under), (was, _) in zip(
+        ("sidebar", "claude", "plain"), faded, full, strict=True
+    ):
+        assert ink != was, f"{name}: the side without the focus is faded"
+        # Slight: 10-25 % of the way to the background on every channel that moves.
+        for now, before, bg in zip(ink, was, under, strict=True):
+            if abs(before - bg) > 40:
+                assert 0.10 <= (before - now) / (before - bg) <= 0.25, (name, ink, was, under)
+
+
 def test_a_state_file_that_is_not_an_object_is_left_alone_and_said_so_once(
     tmp_path: Path, script: Script, isolated_home: Path
 ) -> None:
@@ -5117,7 +5397,6 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         )  # fmt: skip
 
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
-    clock = guard_clock.install(monkeypatch)
 
     async def go(
         pilot: Pilot[None],
@@ -5128,7 +5407,6 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         view = app.current_view()
         assert isinstance(view, AgentView)
         stop_shown = view.query_one("#agent-stop", Button).display
-        clock.step()  # the 💤 row read, then Restart: past the click guard's window
         await pilot.click("#agent-restart")
         await settle(app)
         await pilot.pause()
@@ -5322,7 +5600,16 @@ def _acting_fleet(
             tmux_session="asq-brave-lynx",
         )  # fmt: skip
 
-    def fake_stop(project: ProjectInfo, label: str, **kw: object) -> fleet_service.StopReceipt:
+    def fake_stop(
+        project: ProjectInfo,
+        label: str,
+        *,
+        force: bool = False,
+        grace: float = 5.0,
+        agent_id: str | None = None,
+        actor: str | None = None,
+    ) -> fleet_service.StopReceipt:
+        # The full signature: the Stop dialog reads ``grace`` off it to word its question.
         acted.append(("stop", project.id))
         return fleet_service.StopReceipt(one.agent, [])
 
@@ -5331,46 +5618,166 @@ def _acting_fleet(
     return acted
 
 
-def test_a_click_on_stop_or_restart_as_the_view_switches_in_acts_on_nothing(
+def _manager_1_under(app: FleetApp, where: dict[str, Offset]) -> list[GuardedButton]:
+    """Manager 1's buttons, once its view is laid out with each under the place in ``where``
+    for its id; none before."""
+    view = app.current_view()
+    if not isinstance(view, AgentView) or view.status.agent.id != "agt_b_manager":
+        return []
+    buttons = [view.query_one(f"#{id_}", GuardedButton) for id_ in where]
+    under = [app.get_widget_at(*where[button.id or ""])[0] for button in buttons]
+    return buttons if under == buttons else []
+
+
+def test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_its_paint_acts(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """User feedback (2026-10-19), the other half: a view that came up under a resting
-    pointer took the click aimed at the one before it, on its Stop or Restart. Within
-    CLICK_GUARD of the view switching in, a click on either starts no worker and says
-    so; the same click after it acts."""
+    pointer took the click aimed at the one before it, on its Stop or Restart. Presses on
+    both wait at the app while it puts manager 1's view up, and the view is laid out and
+    painted before the app reads them, its buttons under them. They start no worker, say
+    nothing and leave the keyboard on the pane. A click once the view is on screen acts at
+    once: there is no time to wait out (user, 2026-10-30)."""
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
     script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
     one = status("prj_b", "manager", "manager", "working")
     script["prj_b"] = [one]
     acted = _acting_fleet(monkeypatch, script, one)
-    clock = guard_clock.install(monkeypatch)
+    ids = ("agent-restart", "agent-stop")
 
-    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], list[str]]:
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[bool, list[tuple[str, str]], str, bool, list[str]]:
         app = fleet_app(pilot)
         told = toast_log.record(app)
         await pilot.click(row_for(app, "agt_a_manager"))
         await settle(app)
-        clock.step()  # a while on manager 0's pane
+        before = app.current_view()
+        assert isinstance(before, AgentView)
+        # Where the pointer rests, on manager 0's buttons; manager 1's come up in their place.
+        where = {id_: before.query_one(f"#{id_}", Button).region.offset for id_ in ids}
+        # The row's message, and the app still busy putting its view up when the presses come.
+        app.post_message(AgentSelected("prj_b", "agt_b_manager"))
+        free = guard_paint.busy(app)
+        for id_ in ids:
+            guard_paint.queue_press(app, where[id_])
+
+        await watch_until(lambda: _manager_1_under(app, where))
+        guarded = _manager_1_under(app, where)
+        free.set()
+        await settle(app)
+        ignored, screen = list(acted), type(app.screen).__name__
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        typing_reaches = app.focused is view.pane
+        await pilot.click(view.query_one("#agent-restart", Button))
+        await settle(app)
+        return bool(guarded), ignored, screen, typing_reaches, list(told)
+
+    laid_out, ignored, screen, typing_reaches, told = drive(go, notifications=True)
+    assert laid_out, "the presses must reach the app with manager 1's buttons under them"
+    assert ignored == [], "a press made as the view switched in restarted or stopped an agent"
+    assert screen != "StopAgentScreen", "a press made as the view switched in asked to stop"
+    assert typing_reaches, "an ignored press took the keyboard off the pane"
+    assert not [toast for toast in told if "ignored a click" in toast], told
+    assert acted == [("restart", "prj_b")], "the click once the view is painted acts at once"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a pty for the terminal")
+def test_a_press_before_the_terminal_shows_the_switched_in_view_acts_on_nothing(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UI tester on #8 (re-pass 2, PR #478 at 695e19bb), the 2026-10-19 case again: agent-2's
+    view settled, agent-1's row clicked, Stop clicked 50-67 ms after. In 2 of 74 runs the
+    frame with agent-1's view reached the terminal 270 ms after asq had drawn it, and the
+    press, made on agent-2's view, opened "Stop agent-1?"; Restart, which does not ask,
+    would have restarted it. Here the terminal is that far behind when manager 1's view is
+    drawn: presses on both start nothing, ask nothing and leave the keyboard on the pane.
+    Once the terminal has caught up, a click acts at once."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    ids = ("agent-restart", "agent-stop")
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[bool], list[tuple[str, str]], str, bool, list[str]]:
+        app = fleet_app(pilot)
+        told = toast_log.record(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        before = app.current_view()
+        assert isinstance(before, AgentView)
+        where = {id_: before.query_one(f"#{id_}", Button).region.offset for id_ in ids}
+        terminal = guard_paint.terminal_behind(monkeypatch, app, 1 << 20)
+        try:
+            app.post_message(AgentSelected("prj_b", "agt_b_manager"))
+            await watch_until(lambda: _manager_1_under(app, where))
+            await settle(app)
+            buttons = _manager_1_under(app, where)
+            up = [button.guarding for button in buttons]
+            for id_ in ids:
+                guard_paint.queue_press(app, where[id_])
+            await settle(app)
+            ignored, screen = list(acted), type(app.screen).__name__
+            view = app.current_view()
+            assert isinstance(view, AgentView)
+            typing_reaches = app.focused is view.pane
+            await terminal.catch_up()
+            await watch_until(lambda: not any(button.guarding for button in buttons))
+        finally:
+            terminal.close()
+        await pilot.click(view.query_one("#agent-restart", Button))
+        await settle(app)
+        return up, ignored, screen, typing_reaches, list(told)
+
+    up, ignored, screen, typing_reaches, told = drive(go, notifications=True)
+    assert up == [True, True], "manager 1's buttons took presses before the terminal had them"
+    assert ignored == [], "a press made before the view reached the terminal acted"
+    assert screen != "StopAgentScreen", "a press made before the view reached the terminal asked"
+    assert typing_reaches, "an ignored press took the keyboard off the pane"
+    assert not [toast for toast in told if "ignored a click" in toast], told
+    assert acted == [("restart", "prj_b")], "the click once the terminal has the view acts"
+
+
+def test_stop_clicked_right_after_its_dialog_closes_opens_it_again(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UI tester on #8 (seq 5724, PR #478 at 26643fa7): Esc or Cancel on the Stop dialog, then
+    a click on Stop once the dialog had visibly gone, was often dropped, as late as 0.36 s
+    after. A click that reaches the app right after the frame that shows the view again
+    acts: the dialog opens again. No settling between the close and the click."""
+    seed(tmp_path, ("prj_b", "beta", "brave-lynx"))
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    frame = guard_paint.next_frame(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
+        app = fleet_app(pilot)
+        told = toast_log.record(app)
         await pilot.click(row_for(app, "agt_b_manager"))
         await settle(app)
         view = app.current_view()
-        assert isinstance(view, AgentView) and view.status.agent.id == "agt_b_manager"
-        await pilot.click(view.query_one("#agent-restart", Button))
-        await pilot.click(view.query_one("#agent-stop", Button))
+        assert isinstance(view, AgentView)
+        stop = view.query_one("#agent-stop", Button)
+        where = stop.region.offset
+        stop.press()
         await settle(app)
-        toasts = list(told)
-        ignored = list(acted)
-        clock.step()
-        await pilot.click(view.query_one("#agent-restart", Button))
+        await released(pilot, stop)  # Button's own 0.2 s after a press, not the guard
+        dialog = app.screen
+        assert isinstance(dialog, StopAgentScreen)
+        dialog.action_cancel()  # what Esc and Cancel run
+        frame.then(lambda: guard_paint.queue_press(app, where))
         await settle(app)
-        return ignored, toasts
+        return type(app.screen).__name__, list(told)
 
-    ignored, toasts = drive(go, notifications=True)
-    assert ignored == [], "a click as the view switched in restarted or stopped an agent"
-    for verb in ("Restart", "Stop"):
-        notice = f"ignored a click on {verb} — the view had just changed under the pointer"
-        assert toasts.count(notice) == 1, toasts
-    assert acted == [("restart", "prj_b")], "the click after the window restarts as it did"
+    screen, told = drive(go, notifications=True)
+    assert screen == "StopAgentScreen", "the click right after the dialog closed was dropped"
+    assert not [toast for toast in told if "ignored a click" in toast], told
+    assert acted == []
 
 
 def test_enter_on_a_focused_restart_is_not_guarded(
@@ -5382,7 +5789,7 @@ def test_enter_on_a_focused_restart_is_not_guarded(
     one = status("prj_b", "manager", "manager", "working")
     script["prj_b"] = [one]
     acted = _acting_fleet(monkeypatch, script, one)
-    guard_clock.install(monkeypatch)
+    guard_paint.install(monkeypatch)  # the view's paint is held back: the guard stays up
 
     async def go(pilot: Pilot[None]) -> bool:
         app = fleet_app(pilot)
@@ -5397,7 +5804,7 @@ def test_enter_on_a_focused_restart_is_not_guarded(
         await settle(app)
         return guarding
 
-    assert drive(go) is True, "the window was open when Enter was pressed"
+    assert drive(go) is True, "the guard was up when Enter was pressed"
     assert acted == [("restart", "prj_b")]
 
 
@@ -5585,7 +5992,7 @@ def test_the_sidebar_shows_groups_pins_and_manual_order_and_the_keys_move_them(
         app = fleet_app(pilot)
         initial = _cards(app)
         app.sidebar.focus()
-        app.sidebar.select("project:prj_c")  # the cursor's anchor
+        app.sidebar.select("project:prj_c")  # the highlight the keys act on
         await pilot.press("shift+up")
         await settle(app)
         moved = _cards(app)
@@ -5914,11 +6321,11 @@ def test_m_marks_the_card_under_the_cursor_so_a_selection_needs_no_shift_click(
         app = fleet_app(pilot)
         app.sidebar.focus()
         for key in ("project:prj_a", "project:prj_b", "agent:agt_c_coder-1", "project:prj_b"):
-            app.sidebar.select(key)  # the cursor's anchor
+            app.sidebar.select(key)  # the highlight the keys act on
             await pilot.press("m")  # cli twice: marked, then unmarked
             # `m` is the sidebar's binding, not a priority one: it runs once the key has
             # bubbled back up to the sidebar, and the next select must not move the
-            # cursor before it has.
+            # highlight before it has.
             await settle(app)
         marked = app.sidebar.marked_ids()
         highlighted = sorted(c.project.id for c in app.query(ProjectCard) if c.has_class("marked"))
@@ -6446,7 +6853,7 @@ def test_a_handle_removed_mid_press_lets_the_mouse_go(
 
 
 def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
-    tmp_path: Path, script: Script
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The tab kept the project it was built with: after a card rename it still showed the
     folder name, and Save with a blank field was refused as "already that" against its stale
@@ -6457,7 +6864,9 @@ def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
     from aisquare.cli.ui.views.settings import SettingsView
     from aisquare.core.store import store_session
     from aisquare.services import project as project_service
+    from tests.fleet_fakes import tmux_sessions_as
 
+    tmux_sessions_as(monkeypatch)  # the rename's codename half asks for its session
     projects = seed(tmp_path, ("prj_a", "alpha", None))
 
     def stored() -> str | None:

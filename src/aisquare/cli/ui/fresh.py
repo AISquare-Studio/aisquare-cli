@@ -159,7 +159,8 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
     Answers a :class:`FreshChoice` when confirmed (through :class:`ConfirmDiscard` when the
     plan finds unpushed work), ``None`` on Cancel or Escape. *Start fresh* is greyed until
     the plan is read, and for good when it is refused. It is a :class:`GuardedButton`: the
-    dialog opens where *Start fresh…* was clicked.
+    dialog opens where *Start fresh…* was clicked, and a click that reaches it before the
+    dialog is painted is not a confirmation.
     """
 
     CSS = """
@@ -330,7 +331,8 @@ class ConfirmFresh(ModalScreen[FreshChoice | None]):
 class ConfirmDiscard(ModalScreen[bool]):
     """ "Throw away the work no remote has?" — each tree or branch, *Discard and start fresh*
     and Cancel. Answers ``True`` for the first; Cancel or Escape ``False``. Cancel has the
-    focus."""
+    focus. *Discard and start fresh* is a :class:`GuardedButton`: it opens where *Start
+    fresh* was clicked, and a click that reaches it before it is painted discards nothing."""
 
     CSS = """
     ConfirmDiscard { align: center middle; }

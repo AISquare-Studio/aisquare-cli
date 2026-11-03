@@ -4,10 +4,11 @@ One ``TabbedContent`` per selected project (docs/plans/fleet-tui.md §4.2). The
 Manager tab is where goal intake happens — the user types to the manager's real
 Claude Code session exactly as they would to any other, so the tab is the
 manager's ``TerminalPane`` and nothing more, plus a **Start manager** button
-while the project has none. The Board tab is ``cli.ui.board.BoardPanel``, the
-widgets of ``aisquare board -w``; Settings and Personas are the two forms in this
-package. (An AISquare tab, ``ExplainabilityView``, sat between Board and Settings
-until tracing went dormant: ``views/explainability.py`` says how to mount it again.)
+while the project has none — **Resume agents…** in its place while its manager is paused
+(``fleet pause``), which ``spawn`` would refuse a second one beside. The Board tab is
+``cli.ui.board.BoardPanel``, the widgets of ``aisquare board -w``; Settings and Personas are
+the two forms in this package. (An AISquare tab, ``ExplainabilityView``, sat between Board and
+Settings until tracing went dormant: ``views/explainability.py`` says how to mount it again.)
 
 There is no Doctor tab: the doctor is the app's, on its own page, run at start
 and when that page opens — not once per project view, nor per tab activation.
@@ -39,6 +40,7 @@ from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.sidebar import CUSTOM_ROLE_ICON, ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, shown_pane
+from aisquare.cli.ui.views.fleet_bulk import BulkAsked
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core.tmux import TmuxServer
@@ -63,11 +65,20 @@ def no_manager_text(
     the listing keeps it so the last screen stays readable). "No manager yet"
     would be false for that project; the header says what happened and names
     both ways back — the button for a new session, the row's **Restart** for
-    the same one.
+    the same one. A PAUSED manager (``fleet pause``) is no manager that exited: the header
+    says it is paused, and the way back is the resume of the project's paused agents.
     """
     name = project.root.name or project.id
     text = Text()
-    if exited is not None:
+    if exited is not None and exited.state == "paused":
+        text.append(f"{name}'s manager is paused.\n", style="bold")
+        resume = project_service.fleet_command("resume", project)
+        text.append(
+            "Its session, claims and team wait for Resume agents, which brings back every "
+            f"paused agent of {name} and clears its fleet-paused signal; {resume} does the "
+            "same from a shell.",
+        )
+    elif exited is not None:
         status = exited.agent.exit_status
         suffix = f" ({status})" if status is not None else ""
         text.append(f"{name}'s manager exited{suffix}.\n", style="bold")
@@ -181,7 +192,7 @@ class ManagerTab(Vertical):
     ManagerTab #manager-header.-info { text-wrap: nowrap; text-overflow: ellipsis; }
     ManagerTab #manager-hint { height: auto; padding: 0 1; }
     ManagerTab #team-strip { height: 1; padding: 0 1; }
-    ManagerTab #start-manager { margin: 1 1; }
+    ManagerTab #start-manager, ManagerTab #resume-manager { margin: 1 1; }
     ManagerTab #manager-pane { height: 1fr; }
     """
 
@@ -211,6 +222,9 @@ class ManagerTab(Vertical):
         hint.display = False
         yield hint
         yield Button("Start manager", id="start-manager", variant="primary")
+        resume = Button("▶ Resume agents…", id="resume-manager", variant="primary")
+        resume.display = False
+        yield resume
         yield TerminalPane(
             None, escape_key=self.escape_key, placeholder=PANE_GONE, id="manager-pane"
         )
@@ -251,7 +265,13 @@ class ManagerTab(Vertical):
             self.show(None, unavailable=str(exc))
             return
         if manager is None:
-            self.show(None)
+            # A paused manager is no "no manager yet": its header says paused, and its button
+            # is Resume agents, as a frame shows it (review of the #457 fold, n3).
+            try:
+                paused = fleet_service.paused_manager_of(self.project)
+            except Exception:  # the store is briefly unavailable: the next frame says it
+                paused = None
+            self.show(None, exited=paused)
             return
         try:
             status = fleet_service.status_of(manager)
@@ -269,7 +289,9 @@ class ManagerTab(Vertical):
         """Render ``status`` — the pane when there is a manager, the button when not.
 
         ``exited`` is the ended manager row the snapshot still lists (#138); it
-        only changes what the header above the button says. A ``lost`` manager, or one
+        only changes what the header above the button says — and which button: a paused
+        manager's is **Resume agents…** (:class:`BulkAsked`), never **Start manager**, which
+        ``spawn`` refuses beside a paused manager. A ``lost`` manager, or one
         held as another server's, keeps its header and gets no pane
         (:func:`~aisquare.cli.ui.views.agent.shown_pane`): after a reboot or a
         ``kill-server`` its id is the next server's, most often ANOTHER project's
@@ -281,9 +303,12 @@ class ManagerTab(Vertical):
         pane = self.query_one("#manager-pane", TerminalPane)
         header.set_class(status is not None, "-info")
         self.query_one("#manager-hint", Static).display = status is not None
+        resume = self.query_one("#resume-manager", Button)
+        paused = status is None and exited is not None and exited.state == "paused"
+        resume.display = paused
         if status is None:
             header.show_text(no_manager_text(self.project, unavailable, exited=exited))
-            button.display = True
+            button.display = not paused
             pane.display = False
             if pane.pane_id is not None:
                 pane.attach(None)
@@ -299,6 +324,12 @@ class ManagerTab(Vertical):
                 # alone, from another TMUX_TMPDIR, shows and types into another's %N.
                 pane.server = TmuxServer(status.agent.tmux_socket).at(status.socket_at)
             pane.attach(wanted)
+
+    @on(Button.Pressed, "#resume-manager")
+    def _resume_manager(self, event: Button.Pressed) -> None:
+        """*Resume agents…*: the shell asks, for this project, as its card's menu has it ask."""
+        event.stop()
+        self.post_message(BulkAsked("resume", self.project.id))
 
     @on(Button.Pressed, "#start-manager")
     def _start_manager(self) -> None:
@@ -417,6 +448,8 @@ class ProjectView(TabbedContent):
             self.compose_add_child(pane)
         self._pending: list[FleetAgentStatus] | None = None
         """A snapshot pushed before the tabs mounted, applied at mount."""
+        self._fleet_paused = False
+        """Whether the project's ``fleet-paused`` signal read on in the last frame."""
 
     def refresh_project(self, project: ProjectInfo) -> None:
         """Take the project as the store has it now — renamed from a card or the CLI, say.
@@ -428,13 +461,17 @@ class ProjectView(TabbedContent):
         for settings in self.query(SettingsView):
             settings.show_project(project)
 
-    def refresh_status(self, agents: Sequence[FleetAgentStatus]) -> None:
+    def refresh_status(
+        self, agents: Sequence[FleetAgentStatus], *, fleet_paused: bool = False
+    ) -> None:
         """Take the shell's fresh snapshot of this project's agents.
 
-        The Manager tab shows the manager; the Settings tab, the tmux attach command. Safe
-        before mount: the snapshot waits for the tabs and lands then.
+        The Manager tab shows the manager; the Settings tab, the tmux attach command, and
+        Pause / Resume by what they would act on (``fleet_paused``: the project's signal
+        reads on). Safe before mount: the snapshot waits for the tabs and lands then.
         """
         tabs = self.query(ManagerTab)
+        self._fleet_paused = fleet_paused
         if not tabs:
             self._pending = list(agents)
             return
@@ -442,7 +479,7 @@ class ProjectView(TabbedContent):
         tab.show(manager_status(agents), exited=exited_manager(agents))
         tab.show_team(agents)
         for settings in self.query(SettingsView):
-            settings.show_agents(agents)
+            settings.show_agents(agents, fleet_paused=fleet_paused)
 
     def show_usage(self, usage: Mapping[int, float]) -> None:
         """The accounts' session use from the shell's slow headroom read, for the Manager tab."""
@@ -452,7 +489,7 @@ class ProjectView(TabbedContent):
     def on_mount(self) -> None:
         if self._pending is not None:
             pending, self._pending = self._pending, None
-            self.refresh_status(pending)
+            self.refresh_status(pending, fleet_paused=self._fleet_paused)
 
     @on(TeamStrip.Opened)
     def _open_board(self) -> None:

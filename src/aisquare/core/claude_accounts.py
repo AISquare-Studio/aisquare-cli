@@ -534,6 +534,13 @@ def keychain_platform() -> bool:
     return sys.platform == "darwin"
 
 
+def over_ssh(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether this process runs in an SSH login (:data:`SSH_MARKERS`): a locked Keychain is
+    then the rule, and the Mac's own asq is what reads it (``services.claude_accounts``)."""
+    source = os.environ if environ is None else environ
+    return any(source.get(marker) for marker in SSH_MARKERS)
+
+
 # --- the macOS Keychain -------------------------------------------------------------------
 #
 # Claude Code on macOS keeps each config dir's login in one generic-password item of the
@@ -568,6 +575,11 @@ SECURE_STORAGE_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 KEYCHAIN_ACCOUNT_FALLBACK = "claude-code-user"
 KEYCHAIN_LOCKED_REASON = "the login Keychain is locked"
 KEYCHAIN_LOCKED = f"{KEYCHAIN_LOCKED_REASON} — unlock it (or log in to the Mac) and refresh"
+KEYCHAIN_LOCKED_SSH_REASON = "the login Keychain is locked in this SSH session"
+"""Said for a locked read in an SSH login (:func:`over_ssh`): the Mac's own login unlocks the
+Keychain for its own session, not for one that came in over SSH, which is why it says locked."""
+SSH_MARKERS = ("SSH_CONNECTION", "SSH_TTY")
+"""Set in an SSH login's environment (``core.clipboard``'s attach markers)."""
 KEYCHAIN_REFUSED_REASON = "macOS refused aisquare access to the Claude Code item"
 KEYCHAIN_REFUSED = f"{KEYCHAIN_REFUSED_REASON} — allow it in Keychain Access"
 """Said for errSecAuthFailed (51): the Deny button on the item's access prompt."""

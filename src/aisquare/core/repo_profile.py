@@ -81,6 +81,21 @@ def normalise_remote(url: str | None) -> str | None:
     and the scp form ``git@host:org/repo.git``; a local path (``/srv/repo.git``,
     ``C:\\git\\repo.git``, ``file://…``) names no host and reads as ``None``.
     """
+    parts = _host_and_path(url)
+    return f"{parts[0]}/{parts[1]}".lower() if parts is not None else None
+
+
+def remote_repo_name(url: str | None) -> str | None:
+    """The repository's name as ``url`` spells it: the last part of its path, its case kept
+    (``git@github.com:Org/MyRepo.git`` is ``MyRepo``), where :func:`normalise_remote` lowers
+    it to group the clones of one remote. ``None`` for a URL that names no host."""
+    parts = _host_and_path(url)
+    return parts[1].rpartition("/")[2] if parts is not None else None
+
+
+def _host_and_path(url: str | None) -> tuple[str, str] | None:
+    """``url``'s host (lower case) and path (as spelt, without ``.git``), or ``None`` when it
+    names no host: what :func:`normalise_remote` and :func:`remote_repo_name` read."""
     text = (url or "").strip()
     if not text or _DRIVE_PATH.match(text):
         return None
@@ -99,7 +114,7 @@ def normalise_remote(url: str | None) -> str | None:
     host = host.strip().lower()
     if not host or not path:
         return None
-    return f"{host}/{path}".lower()
+    return host, path
 
 
 def host_of(remote: str | None) -> str:
@@ -168,6 +183,12 @@ def git_output(root: Path, *args: str) -> bytes | None:
 
 def read_remote(root: Path) -> str | None:
     """The normalised URL of ``origin``, else of the first remote there is."""
+    return normalise_remote(read_remote_url(root))
+
+
+def read_remote_url(root: Path) -> str | None:
+    """The URL of ``origin``, else of the first remote there is, as git has it (its case kept,
+    credentials and all: never stored or sent), among those that name a host."""
     for args in (("config", "--get", "remote.origin.url"), ("remote", "-v")):
         out = git_output(root, *args)
         if not out:
@@ -176,9 +197,9 @@ def read_remote(root: Path) -> str | None:
         if args[0] == "remote":
             fields = text.split()
             text = fields[1] if len(fields) > 1 else ""
-        remote = normalise_remote(text.splitlines()[0] if text else "")
-        if remote is not None:
-            return remote
+        url = text.splitlines()[0] if text else ""
+        if normalise_remote(url) is not None:
+            return url
     return None
 
 

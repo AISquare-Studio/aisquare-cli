@@ -372,7 +372,8 @@ def test_a_group_pause_pauses_parent_and_members_and_an_agent_may_not_spawn_ther
     hq = _member_of_a_parented_group(project, tmp_path)
     result = CliRunner().invoke(app, ["--json", "fleet", "pause", "--group", "app"])
     assert result.exit_code == 0, result.output
-    assert {row["project"]["id"] for row in json.loads(result.stdout)} == {project.id, hq.id}
+    paused = json.loads(result.stdout)["signals"]
+    assert {row["project"]["id"] for row in paused} == {project.id, hq.id}
     assert fleet_service.is_paused(project) and fleet_service.is_paused(hq)
 
     with pytest.raises(fleet_service.FleetError, match="is paused — an agent may not spawn"):

@@ -191,7 +191,7 @@ adapter.**
   `fleet relabel`, the project rename that renames the codename and session, auto admission,
   `aisquare outcomes`, who started each turn, `aisquare fleet top`, the quiet refresh of a
   stale token, the sidebar's count, filter and highlight, asking in place, and the fixes), each
-  bullet of its entry with a Codex status (SCOPE #113 092: 35 rows, 16 PARITY, 1 GAP, 18 N-A).
+  bullet of its entry with a Codex status (SCOPE #113 092: 35 rows, 17 PARITY, 0 GAP, 18 N-A).
   **The store is v50**: main's v41-v43 (the codename aliases, `fleet_agent.paused_at`,
   `metric.origin`) and this line's seven steps behind them (v44-v50, renumbered once more); a
   store from 0.9.2 (v43) and one from this line before the merge (stamped 47) both reach v50.
@@ -219,17 +219,18 @@ adapter.**
     hooks, measured on 0.164.0); auto admission holds a Codex coder on a busy machine and
     never a Codex manager; the Accounts table with Codex rows still fits 160 columns, the agent
     mark inside the name's 12 cells; the live count, Active only, the "1 account" line and the
-    real repository names count every agent's rows. Main's hook launcher change (its pinned release) is in the Codex
-    plugin's copy too. From an SSH login on macOS a Codex spawn starts the fleet's tmux server
-    and the agent in it: whether a server may be started there is the agent's accounts fact
-    `AgentAccounts.keychain_login` (Claude Code's login is in the Keychain, Codex's
-    `auth.json` is a file), and a server an SSH login started is marked, so no agent whose
-    login is in the Keychain is opened in it, from SSH or at the Mac (a restart and the
-    sign-in window included). `tests/test_no_agent_literals.py`'s BASELINE is 109, as before
-    the merge: its one new line, `CLAUDECODE` in `core/prompt_origin.py`, is Claude Code's
-    `process_env` now.
-  - **Gaps for Codex**, with its lane: `aisquare outcomes` reads its transcript facts (prompts,
-    interrupts, denials, edits) in Claude Code's format alone (`AgentTranscript.facts`).
+    real repository names count every agent's rows; `aisquare outcomes` reads who steered a
+    Codex session off its rollout by its own reader (`AgentTranscript.facts`: a prompt, a Stop
+    hook's continuation, an Esc, an approval refused, a patch applied), so its week counts its
+    files edited, interrupts and denials, and a turn from before origins were recorded has its
+    origin inferred, as a Claude Code session's does. Main's hook launcher change (its pinned
+    release) is in the Codex plugin's copy too. From an SSH login on macOS a Codex spawn starts the
+    fleet's tmux server and the agent in it: whether a server may be started there is the agent's
+    accounts fact `AgentAccounts.keychain_login` (Claude Code's login is in the Keychain, Codex's
+    `auth.json` is a file), and a server an SSH login started is marked, so no agent whose login is
+    in the Keychain is opened in it, from SSH or at the Mac (a restart and the sign-in window
+    included). `tests/test_no_agent_literals.py`'s BASELINE is 109, as before the merge: its one new
+    line, `CLAUDECODE` in `core/prompt_origin.py`, is Claude Code's `process_env` now.
   - **Not Codex's** (N-A): usage over SSH from what the Mac recorded is Claude Code's login in
     the Keychain (a Codex slot's login is its own file, its usage read off its rollouts); the
     quiet refresh of a stale token runs the agent's own command, its accounts slot's

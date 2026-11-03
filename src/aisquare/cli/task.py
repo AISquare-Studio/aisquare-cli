@@ -1,4 +1,4 @@
-"""``aisquare task`` — the shared, idempotent team task list."""
+"""``aisquare task`` — the shared team task list: add is idempotent while a task is open."""
 
 from __future__ import annotations
 
@@ -31,7 +31,8 @@ _STATUSES: tuple[str, ...] = get_args(TaskStatus)
 _STATUS_HELP = ", ".join(_STATUSES)
 
 app = typer.Typer(
-    help="Shared team tasks: add is idempotent, claim is atomic.", no_args_is_help=True
+    help="Shared team tasks: add is idempotent while a task is open, claim is atomic.",
+    no_args_is_help=True,
 )
 
 TaskRef = Annotated[
@@ -139,7 +140,8 @@ def add(
     ] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Add a shared task. Re-adding the same task is safe — you get the original.
+    """Add a shared task. Re-adding an open task is safe — you get it back; re-adding a
+    done or dropped task's title adds a new task, which names the one it supersedes.
 
     The contract is checked for ``\\[team] brief_blocks`` (objective:, acceptance:,
     boundaries:): a missing block warns, or refuses under ``\\[team] brief_strict``."""
@@ -203,10 +205,7 @@ def add(
         typer.echo(json.dumps(payload))
     else:
         verb = "added" if created else "already tracked (idempotent)"
-        note = ""
-        if supersedes is not None:
-            old_ref = f"#{supersedes.number}" if supersedes.number is not None else supersedes.id
-            note = f" (supersedes {supersedes.status} {old_ref})"
+        note = team_service.supersedes_note(supersedes)
         stdout_console().print(
             f"✓ {verb}: {team_service.task_label(task)} {task.title}"
             f"{note}{receipt_suffix(delivery)}"

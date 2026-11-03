@@ -443,6 +443,16 @@ def last_supersedes() -> TeamTask | None:
     return _SUPERSEDES.get()
 
 
+def supersedes_note(task: TeamTask | None) -> str:
+    """`` (supersedes done #1)`` after an add that bumped ``task`` off its key, else ``""``:
+    what ``task add``, MCP ``task_add`` and the captain say, so a re-added done or
+    dropped title never reads as the original (REVIEW-RC092-MI, minor 1)."""
+    if task is None:
+        return ""
+    ref = f"#{task.number}" if task.number is not None else task.id
+    return f" (supersedes {task.status} {ref})"
+
+
 def short_id(value: str) -> str:
     """The display form of a session id (leading characters, git-style)."""
     return value[:_SHORT_ID]
@@ -1674,7 +1684,9 @@ def add_task(
     project: str | None = None,
     origin: str | None = None,
 ) -> tuple[TeamTask, bool]:
-    """Add a shared task; idempotent on its key (re-adding returns the original).
+    """Add a shared task; idempotent on its key while the task holding it is open
+    (re-adding returns it). A done or dropped holder is superseded: the re-add is a
+    new task, and :func:`last_supersedes` names the old one.
 
     ``needs`` are task refs (prefixes fine) this task depends on; ``task
     next`` will not hand it out until they are resolved.
@@ -3939,8 +3951,9 @@ def _protocol_lines(
     board (:func:`_render_board`) and a manager's start pack (:func:`_start_pack`)."""
     lines = [
         "Protocol: check this board before starting work; teammate updates",
-        "arrive automatically on each prompt. Tasks are shared and idempotent —",
-        'e.g. `aisquare task add "wire auth flow"` (safe to re-run). Claim before',
+        "arrive automatically on each prompt. Tasks are shared; re-adding an open one is",
+        'idempotent (`aisquare task add "wire auth flow"`), but a done or dropped one\'s',
+        "title adds a new task, so re-add only what is still open. Claim before",
         f"working: `aisquare task claim <id> --as {short_id(me.id)}`; finish with",
         f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
         f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',

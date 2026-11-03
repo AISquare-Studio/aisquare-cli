@@ -486,6 +486,48 @@ def test_doctors_update_and_uninstall_are_refused_while_another_asq_runs(
     asyncio.run(run())
 
 
+def test_restart_and_updates_refusal_names_its_own_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVIEW-RC092-MI, nit 4: the ⬆ dialog's *Restart & update* hands over as Doctor's
+    Update does, and its refusal said "press Update again", a button that dialog has not."""
+    monkeypatch.setattr(instances, "HEARTBEAT_SECONDS", 0.05)
+    registration = _registered()
+    registration.start()
+
+    async def run() -> None:
+        app = ui_app.FleetApp(refresh_seconds=3600, doctor=lambda: [])
+        async with app.run_test(size=(120, 40), notifications=True) as pilot:
+            await settle_page(app)
+            with asq_running(version="0.0.1") as other:
+                await _beaten(registration, [other])
+                app.on_doctor_view_hand_off(DoctorView.HandOff(ui_app.UPDATE_HAND_OFF))
+                await pilot.pause()
+                said = " ".join(note.message for note in app._notifications)
+                assert app.hand_off is None and not app._exit, "it stays"
+                assert "Quit it first (q in it), then press Restart & update again." in said
+                assert "press Update again" not in said
+
+    asyncio.run(run())
+
+
+def test_the_refusal_of_several_asqs_says_they() -> None:
+    """REVIEW-RC092-MI, nit 1: "and them would go on running", "the program them run"."""
+    from aisquare.services import lifecycle
+
+    two = ("asq 0.0.1 (mac, pid 1)", "asq 0.0.1 (ssh on mini, pid 2)")
+    upgrade = lifecycle.asqs_refusal("upgrade", two)
+    uninstall = lifecycle.asqs_refusal("uninstall", two)
+    assert upgrade is not None and uninstall is not None
+    assert "replaced under them, and they would go on running the old release" in upgrade
+    assert "it would remove the program they run, with nothing left to quit them cleanly" in (
+        uninstall
+    )
+    assert "Quit them first (q in each)" in upgrade
+    one = lifecycle.asqs_refusal("uninstall", two[:1])
+    assert one is not None and "the program it runs, with nothing left to quit it cleanly" in one
+
+
 async def _beaten(registration: instances.Registration, others: list[Instance]) -> None:
     """Wait for the beat thread to have read ``others`` as the other live asqs."""
     for _ in range(500):

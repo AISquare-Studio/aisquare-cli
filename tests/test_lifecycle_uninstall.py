@@ -24,7 +24,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import paths
+from aisquare.core import instances, paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -102,8 +102,9 @@ def _record(*directories: Path) -> None:
 def _snapshot(root: Path, *, held: Path | None = None) -> dict[str, bytes]:
     """Every file, directory and link under ``root``, by path — what "unchanged" means.
 
-    ``held`` is a file another descriptor holds locked (a Remote's ``remote-serve.lock``),
-    whose bytes Windows will not read meanwhile: recorded as there, not read."""
+    ``held`` is a file another descriptor holds locked (a Remote's ``remote-serve.lock``, a
+    running asq's ``instances/<id>.lock``), whose bytes Windows will not read meanwhile:
+    recorded as there, not read."""
     found: dict[str, bytes] = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
@@ -737,11 +738,12 @@ def test_it_refuses_while_another_asq_runs_on_this_home_and_names_it(
     with asq_running(kind="ssh") as other, asq_running(pid=2**22 + 12345, hold_lock=False):
         # And a stale record beside it: the plans read the registry without pruning it, as a
         # plan writes nothing to the home (review of #462).
-        before = _snapshot(tmp_path)
+        held = instances.registry_dir() / f"{other.id}.lock"
+        before = _snapshot(tmp_path, held=held)
         refused = runner.invoke(app, ["--json", "uninstall", "--yes"])
         plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
         human = runner.invoke(app, ["uninstall", "--yes"])
-        after = _snapshot(tmp_path)
+        after = _snapshot(tmp_path, held=held)
     alone = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
 
     named = f"asq {other.version} (ssh on {other.host}, pid {other.pid})"

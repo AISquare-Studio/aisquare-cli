@@ -428,8 +428,14 @@ def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> Non
         return (accounts_view.problem_tooltip(status, reading) or "").partition("\n")[0]
 
     expired = _status(1, "me@example.com", token_state="expired")
-    assert reason_of(expired, None) == ("!", "")
-    assert said(expired, None) == "the stored token has expired"
+    # Owed, an expired token is the reading's to say: Claude Code may yet refresh it (task
+    # #9). Only the reading that gave up on it is a '!', with the reason it always had.
+    assert reason_of(expired, None) == ("…", "…") and said(expired, None) == ""
+    gave_up = accounts_service.unreadable_usage(
+        UsageCause.token_expired, "the stored token has expired", slot=1, needs_login=True
+    )
+    assert reason_of(expired, gave_up) == ("!", "")
+    assert said(expired, gave_up) == "the stored token has expired"
     logged_out = _status(2, "two@example.com", signed_in=False)
     assert reason_of(logged_out, usage) == ("!", "") and "not signed in" in said(logged_out, usage)
     cut_out = account_cells(logged_out, usage).values()
@@ -456,8 +462,17 @@ def test_log_in_is_offered_for_no_login_a_missing_an_expired_or_a_rejected_token
     locked = ClaudeUsage(available=False, reason=core.KEYCHAIN_LOCKED)
     assert needs_login(_status(3, None), None)  # never signed in
     assert needs_login(_status(2, "two@example.com", signed_in=False), fine)  # token missing
-    assert needs_login(_status(2, "two@example.com", token_state="expired"), None)
+    expired = _status(2, "two@example.com", token_state="expired")
+    assert needs_login(expired, rejected), "expired, and the refresh gave up on it"
+    off = _arranged(expired, disabled=True)
+    assert needs_login(off, None), "never refreshed: a disabled account asks at once"
     assert needs_login(_status(2, "two@example.com"), rejected)  # 401
+    # An enabled account's expired token, owed or being refreshed (task #9): not yet.
+    refreshing = accounts_service.unreadable_usage(
+        UsageCause.token_refreshing, "the stored token has expired — Claude Code is refreshing it"
+    )
+    for reading in (None, refreshing, fine):
+        assert not needs_login(expired, reading), reading
     # Negatives: a working login, one whose reading is owed, an endpoint that is down, and
     # a login in a locked macOS Keychain: none is a log-in to do.
     for reading in (fine, None, offline, locked):
@@ -1038,9 +1053,16 @@ def test_rows_in_a_rate_limit_wait_hold_no_timer_thread(no_network: dict[str, An
 
 
 def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
+    # Slot 5's token expired and Claude Code could not refresh it (task #9): what the read
+    # answers once the quiet refresh has given up — no Claude Code runs in the suite.
+    gave_up = accounts_service.unreadable_usage(
+        UsageCause.token_expired, "the stored token has expired", slot=5, needs_login=True
+    )
     no_network["usage"] = lambda account: (
         ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
         if account.slot == 4
+        else gave_up
+        if account.slot == 5
         else ClaudeUsage(available=True, session_percent=10, week_percent=10)
     )
     overview = _overview(

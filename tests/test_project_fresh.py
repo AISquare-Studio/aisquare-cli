@@ -584,6 +584,33 @@ def test_a_manager_the_fleet_refuses_is_said_and_the_board_is_clear_all_the_same
     assert _rows(alpha.id)["team_task"] == []
 
 
+def test_a_manager_ssh_could_not_start_is_said_to_start_at_the_mac(
+    runner: CliRunner,
+    two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REVIEW-RC092-MI, nit 3: from SSH, a stop that ended the fleet server's last session left
+    the new manager's spawn refused (#20), and the report said to run the same spawn, which
+    SSH refuses again. The hint names the Mac; any other refusal keeps its plain hint."""
+    alpha, _, _, _ = two
+
+    def refuse(*_: Any, **__: Any) -> fleet_service.SpawnReceipt:
+        raise fleet_service.FleetError(f"not started: {fleet_service.SSH_START_REFUSAL}")
+
+    monkeypatch.setattr(fleet_service, "spawn", refuse)
+
+    result = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])
+
+    assert result.exit_code == 1, result.output
+    said = " ".join(result.output.split())
+    assert "— start one at the Mac: aisquare fleet spawn --project alpha-x manager" in said
+    assert _rows(alpha.id)["team_task"] == []
+    plain = FreshReport(project=alpha, manager_error="tmux is not installed")
+    assert fresh_service.manager_hint(plain) == (
+        "start one: aisquare fleet spawn --project alpha-x manager"
+    )
+
+
 def test_fresh_and_reset_are_the_same_command(
     runner: CliRunner,
     two: tuple[ProjectInfo, ProjectInfo, dict[str, str], dict[str, str]],

@@ -82,6 +82,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeVar
 
+from aisquare.core import prompt_origin
 from aisquare.services import delivery, remote_needs, remote_server
 from aisquare.services.remote_server import RequestError
 
@@ -1134,9 +1135,15 @@ def action_paste(
             f"{sent}{label}: {held}, which nothing types over — nothing was typed",
             audit=trail(f"delivered=no{escape} failed=draft"),
         )
-    told = fleet_service.type_then_enter(
-        server, agent.pane_id, text, label, press="press Enter on the pad"
-    )
+    with prompt_origin.sent_by(prompt_origin.HUMAN):  # the phone's holder sent it
+        told = fleet_service.type_then_enter(
+            server,
+            agent.pane_id,
+            text,
+            label,
+            press="press Enter on the pad",
+            origin=prompt_origin.TELL,
+        )
     if isinstance(told, fleet_service.PaneWrite):
         if told.typed == "maybe":
             raise RequestError(
@@ -1275,8 +1282,17 @@ def action_tell_auto(
             target,
             label,
             agent_id,
-            lambda: fleet_service.tell(target, label, text, sender=None, agent_id=pin),
+            lambda: _human_tell(target, label, text, pin),
         )
+
+
+def _human_tell(target: ProjectInfo, label: str, text: str, pin: str | None) -> TellResult:
+    """The phone's tell: its turn is the person's holding the phone, whatever process started
+    the server (``core.prompt_origin.sent_by``)."""
+    from aisquare.services import fleet as fleet_service
+
+    with prompt_origin.sent_by(prompt_origin.HUMAN):
+        return fleet_service.tell(target, label, text, sender=None, agent_id=pin)
 
 
 # --- the actions ---------------------------------------------------------------------------

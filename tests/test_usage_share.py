@@ -1149,6 +1149,96 @@ def test_turning_it_off_while_a_shipment_is_in_flight_stops_it_and_it_leaves_no_
     assert usage_share.status().last_sent_at is None  # off says nothing of a "last sent"
 
 
+def test_a_reply_that_lands_while_the_switch_is_written_still_gets_the_opt_out_notice(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race the test above lost now and then (0.9.2, board 5492): the first shipment's reply
+    landed after the switch read off and before `off` looked at the shipper's lock, so `off` found
+    it free and nothing ever sent, and no notice went. Made certain here: the reply lands, and the
+    shipment ends, inside the switch's write."""
+    import threading
+
+    _backlog(machine)
+    order: list[str] = []
+    in_post, release = threading.Event(), threading.Event()
+    done: dict[str, Any] = {}
+
+    def slow(url: str, body: dict[str, Any], token: str | None, timeout: float) -> iam.HttpResult:
+        order.append(f"batch:{len(body['days'])}")
+        in_post.set()
+        release.wait(timeout=60)
+        return ok(len(body["days"]))
+
+    def ping(url: str, body: dict[str, Any], token: str | None, timeout: float) -> iam.HttpResult:
+        order.append("opt_out" if body["opt_out"] else "BATCH AFTER OFF")
+        return ok(1)
+
+    shipper = threading.Thread(
+        target=lambda: done.update(ship=usage_share.ship(now=NOW, tz=IST, transport=slow))
+    )
+    write_the_switch = settings_service.set_value
+
+    def the_reply_lands_as_it_goes_off(key: str, value: str) -> str:
+        stored = write_the_switch(key, value)  # the switch reads off from here
+        release.set()
+        shipper.join(15)  # the shipment saw it off, recorded nothing and let its lock go
+        return stored
+
+    monkeypatch.setattr(settings_service, "set_value", the_reply_lands_as_it_goes_off)
+    shipper.start()
+    assert in_post.wait(10)
+    off = usage_share.disable(now=NOW, transport=ping)
+
+    assert not shipper.is_alive()
+    assert order == ["batch:31", "opt_out"], order
+    assert done["ship"].skipped == "sharing was turned off" and not done["ship"].sent
+    assert off.opt_out and off.sent, off
+    after = sharing.read()
+    assert (after.acked, after.last_sent_at, after.since) == ({}, None, None)
+
+
+def test_no_shipment_starts_while_the_switch_is_being_turned_off(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shipment that read the switch on just before `off` wrote it cannot take the shipper's
+    lock in between: `off` holds it from before the write, so nothing is posted whose reply could
+    land unseen."""
+    _history(machine)
+    _on()
+    server = Server()
+    started: list[Any] = []
+    write_the_switch = settings_service.set_value
+
+    def a_shipment_starts_first(key: str, value: str) -> str:
+        assert sharing.switch_on()
+        started.append(usage_share.ship(now=NOW, tz=IST, transport=server))
+        return write_the_switch(key, value)
+
+    monkeypatch.setattr(settings_service, "set_value", a_shipment_starts_first)
+    off = usage_share.disable(now=NOW, transport=server)
+
+    assert started[0].skipped == "another shipment is running", started
+    assert server.calls == []  # neither a batch nor a notice: nothing was ever sent
+    assert off.skipped == "nothing had been sent" and sharing.switch_on() is False
+
+
+def test_off_lets_the_shipper_lock_go_when_the_switch_cannot_be_written(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _history(machine)
+    _on()
+
+    def unwritable(key: str, value: str) -> str:
+        raise PermissionError(13, "config.toml is read-only")
+
+    monkeypatch.setattr(settings_service, "set_value", unwritable)
+    with pytest.raises(PermissionError) as raised:
+        usage_share.disable(now=NOW, transport=Server())
+
+    with locking.holding(sharing.lock_path(), wait_s=0):  # free again, while the error is alive
+        assert raised.value.errno == 13
+
+
 def test_the_switch_is_looked_at_again_before_every_post(machine: Machine) -> None:
     _backlog(machine)
     calls: list[int] = []

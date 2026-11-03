@@ -22,10 +22,10 @@ import tomllib
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -755,6 +755,26 @@ BUSY_LOAD_PER_CPU_MAX = 1000.0
 """The highest ``busy_load_per_cpu``: past any load a machine survives."""
 
 
+def _max_agents(value: object) -> object:
+    """``max_agents_per_project`` as a file, ``config set`` or a caller gives it: ``"auto"``
+    in any case and around any spaces, as App settings' field takes it; anything else is
+    left to the number it must be, of at least 1. A boolean is refused: a TOML ``true`` was
+    read as 1 (REVIEW-RC092-MI round 2, nit 1)."""
+    if isinstance(value, bool):
+        raise ValueError('max_agents_per_project is "auto" or a whole number of at least 1')
+    if isinstance(value, str):
+        text = value.strip()
+        return "auto" if text.lower() == "auto" else text
+    return value
+
+
+MaxAgents = Annotated[
+    Annotated[int, Field(ge=1)] | Literal["auto"], BeforeValidator(_max_agents)
+]
+"""``[fleet] max_agents_per_project``: ``"auto"`` or a number of at least 1. Unbounded, a
+``config set`` of 0 saved, and every spawn was then refused "already runs 0 agents"."""
+
+
 class FleetSettings(BaseModel):
     """The fleet: one private tmux server, one session per project, agents as windows.
 
@@ -774,8 +794,8 @@ class FleetSettings(BaseModel):
     ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
     ``test_gate_wait_minutes`` how long the gate waits for it.
 
-    ``max_agents_per_project`` is a number, refused at as it always was, or ``"auto"``,
-    the default: a spawn is admitted unless the machine is busy, and while it is, a spawn
+    ``max_agents_per_project`` is a number of at least 1, refused at as it always was, or
+    ``"auto"`` (in any case), the default: a spawn is admitted unless the machine is busy, and while it is, a spawn
     into a project that already runs ``busy_floor`` live agents is held (refused,
     ``capacity_busy``) for ``busy_hold_minutes``, without probing again; a project below
     the floor is always admitted. Auto has no fixed per-project number: on a calm machine
@@ -831,7 +851,7 @@ class FleetSettings(BaseModel):
 
     tmux_socket: str = "asq"
     escape_key: str = "f12"
-    max_agents_per_project: int | Literal["auto"] = "auto"
+    max_agents_per_project: MaxAgents = "auto"
     worktree_dir: str = ".aisquare-worktrees"
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30

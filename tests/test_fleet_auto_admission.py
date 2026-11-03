@@ -141,6 +141,8 @@ def test_auto_is_the_default_and_parses_beside_old_ints(tmp_path: Path) -> None:
         # 0.8.0 wrote every setting, the default 4 too: a value it cannot tell from one
         # nobody chose follows today's default, as every other moved default does.
         ("[fleet]\nmax_agents_per_project = 4\n", "auto"),
+        ("config_version = 3\n[fleet]\nmax_agents_per_project = 1\n", 1),
+        ('config_version = 3\n[fleet]\nmax_agents_per_project = " Auto "\n', "auto"),
     ],
 )
 def test_an_existing_file_loads_its_int_unchanged(
@@ -167,6 +169,41 @@ def test_config_set_takes_auto_and_a_number_and_refuses_anything_else() -> None:
 )
 def test_the_settings_field_takes_auto_or_a_number(raw: str, parsed: object) -> None:
     assert parse_max_agents(raw) == parsed
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, "0", "-1"])
+def test_max_agents_per_project_is_at_least_1_or_auto(value: object) -> None:
+    """REVIEW-RC092-MI round 2, nit 1: unbounded, ``config set … 0`` stored 0 and every spawn
+    was refused "already runs 0 agents"; -1 was taken, and a TOML ``true`` read as 1."""
+    with pytest.raises(ValueError):
+        FleetSettings(max_agents_per_project=value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_config_set_refuses_a_max_agents_below_1_and_keeps_the_file(value: str) -> None:
+    settings_service.set_value("fleet.max_agents_per_project", "5")
+    with pytest.raises(ValueError):
+        settings_service.set_value("fleet.max_agents_per_project", value)
+    assert load_config().fleet.max_agents_per_project == 5
+    assert settings_service.set_value("fleet.max_agents_per_project", "1") == "1"
+
+
+@pytest.mark.parametrize("raw", ["AUTO", " Auto "])
+def test_config_set_takes_auto_in_any_case_as_the_settings_field_does(raw: str) -> None:
+    settings_service.set_value("fleet.max_agents_per_project", "5")
+    assert settings_service.set_value("fleet.max_agents_per_project", raw) == "auto"
+    assert load_config().fleet.max_agents_per_project == parse_max_agents(raw) == "auto"
+    assert "max_agents_per_project" not in settings_service.overrides().get("fleet", {})
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true"])
+def test_a_file_with_a_max_agents_below_1_is_refused_as_invalid(
+    tmp_path: Path, value: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"config_version = 3\n[fleet]\nmax_agents_per_project = {value}\n", "utf-8")
+    with pytest.raises(ValueError, match="max_agents_per_project"):
+        load_config(path)
 
 
 @pytest.mark.parametrize(("raw", "why"), [("0", "at least 1"), ("many", "auto or a whole")])

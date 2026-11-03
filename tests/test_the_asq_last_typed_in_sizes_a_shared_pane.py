@@ -103,10 +103,13 @@ def test_a_claim_says_how_its_terminal_reached_the_machine() -> None:
     assert where({"SSH_TTY": "/dev/ttys004"}, "linux") == "ssh"
     assert where({}, "darwin") == "mac"
     assert where({"SSH_CONNECTION": ""}, "linux") == "local"
+    before = time.time_ns()
     claim = SizeOwner.claiming(7, environ={}, platform="darwin")
     assert claim.pid == 7 and SizeOwner.parse(claim.value()) == claim
     later = SizeOwner.claiming(7, environ={}, platform="darwin")
-    assert later.stamp > claim.stamp, "each claim's value is its own"
+    # On the clock the registry's reads are stamped with (``others_read_ns``). Two claims of
+    # one process may share a tick of a coarse clock (Windows': 15.6 ms on Python 3.12).
+    assert before <= claim.stamp <= later.stamp <= time.time_ns(), "stamped when it claims"
 
 
 def test_the_hint_names_the_other_asqs_terminal_when_it_is_known() -> None:

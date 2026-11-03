@@ -33,6 +33,10 @@ _REAL_PS = instance_scan._ps
 
 POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="the scan is skipped on Windows")
 
+ELSEWHERE = os.path.abspath("/elsewhere")
+"""Another home's ``AISQUARE_HOME``, absolute on every platform: Windows reads ``/elsewhere``
+as relative to the current drive, and a relative one is taken for this home."""
+
 UV = "/Users/u/.local/share/uv/tools/aisquare-cli/bin/python"
 BIN = "/Users/u/.local/bin"
 VENV = "/Users/u/src/aisquare-cli/.venv/bin"
@@ -134,7 +138,7 @@ def listing(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
         monkeypatch.setattr(
             instance_scan,
             "_environment",
-            lambda process: {"AISQUARE_HOME": "/elsewhere"} if process.pid in elsewhere else None,
+            lambda process: {"AISQUARE_HOME": ELSEWHERE} if process.pid in elsewhere else None,
         )
 
     return say
@@ -177,6 +181,7 @@ def test_with_nothing_else_running_the_look_is_one_ps_bounded_at_two_seconds(
 
     monkeypatch.setattr(instance_scan, "_ps", _REAL_PS)
     monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "getuid", lambda: 501, raising=False)  # Windows has none
     monkeypatch.setattr(subprocess, "run", run)
 
     assert instance_scan.unregistered_uis(set()) == []
@@ -427,7 +432,7 @@ def test_the_look_in_ps_runs_outside_the_gates_lock(monkeypatch: pytest.MonkeyPa
 
     def environment(process: Any) -> dict[str, str]:
         seen.append(("ps -E", _gate_held()))
-        return {"AISQUARE_HOME": "/elsewhere"}
+        return {"AISQUARE_HOME": ELSEWHERE}
 
     monkeypatch.setattr(instance_scan, "_ps", ps)
     monkeypatch.setattr(instance_scan, "_environment", environment)

@@ -100,6 +100,7 @@ from textual.widgets import (
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import NewBindScreen
+from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.confirm_button import ConfirmButton
 from aisquare.cli.ui.sidebar import short_path
 from aisquare.cli.ui.views.settings_captain import CaptainToggle
@@ -250,7 +251,10 @@ class UnsetKeyScreen(ModalScreen[str | None]):
                 id="unset-key",
             )
             with Horizontal():
-                yield Button("Unset", id="unset-confirm", variant="warning")
+                # Guarded: with three bindings or more, the page can be scrolled so that the
+                # first role's *Unset key…* sits under this button, and a double-click on it
+                # unset the variable selected first (REVIEW-RC092-MI round 3, MAJOR 1).
+                yield GuardedButton("Unset", id="unset-confirm", variant="warning")
                 yield Button("Cancel", id="unset-cancel")
 
     @on(Button.Pressed, "#unset-confirm")

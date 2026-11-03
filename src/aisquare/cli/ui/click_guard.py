@@ -16,6 +16,12 @@ out (user, 2026-10-30: the second it used to hold a button after it was drawn, a
 the toast saying so, were in the way of someone who knows where the button is). An
 ignored press says nothing. A key press (enter on the focused button) is a
 deliberate gesture, and so is :meth:`Button.press`; neither is guarded.
+
+Nor does it take the later clicks of a double-click whose first click it did not take
+(REVIEW-RC092-MI round 3): a double-click on Settings ▸ *Stop all…* with one agent opened
+its dialog with the first click, and the second, once that dialog was drawn, landed on its
+Confirm, which sat over *Stop all…*, and stopped the manager. A double-click on the button
+itself still goes through: the inline confirm's (:mod:`~aisquare.cli.ui.confirm_button`).
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from textual import events
 from textual.app import App
 from textual.geometry import NULL_REGION, Region
 from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Button
 
 if sys.platform != "win32":
@@ -111,6 +118,12 @@ class GuardedButton(Button):
     verdict is made once per press, at its mouse-down, and stands for the focus and the
     click alike.
 
+    It also ignores a click that Textual counts as the second or a later one of a run on one
+    spot (``Click.chain``, a double-click's second is 2) unless it took every click of that
+    run itself. Textual counts the run whatever was under each click, so the second of a
+    double-click on a button that opens a dialog over itself reached that dialog's button
+    (:meth:`_on_click`).
+
     A drop-in: the same constructor, and a press it lets through posts the same
     ``Button.Pressed``, so an ``@on(Button.Pressed, "#id")`` handler stays as it is.
     """
@@ -127,6 +140,12 @@ class GuardedButton(Button):
     _down_guarded: bool | None = None
     """The verdict on the press in progress, made at its mouse-down (:meth:`focus_on_click`);
     ``None`` once its click has used it."""
+    _run: int = 0
+    """The ``chain`` of its last click when it took every click of that run on its spot, and
+    nothing changed under the pointer since; else 0 (:meth:`_on_click`)."""
+    _down_took_focus: tuple[Widget | None] | None = None
+    """Whose focus the press in progress took at its mouse-down, ``(None,)`` for nobody's;
+    ``None`` when it took none (:meth:`focus_on_click`)."""
 
     def on_mount(self) -> None:
         self.screen.screen_layout_refresh_signal.subscribe(self, self._laid_out, immediate=True)
@@ -189,6 +208,7 @@ class GuardedButton(Button):
     def _put_up(self) -> None:
         self._change += 1
         self._guarding = True
+        self._run = 0  # what is under the pointer changed: a run of clicks goes on elsewhere
 
     def _painted(self, change: int) -> None:
         if change == self._change:  # an older change's paint leaves a newer one's guard up
@@ -209,13 +229,40 @@ class GuardedButton(Button):
         # the press, and a Stop focused by a click then ignored was pressed by the next
         # Enter all the same (review of #266, round 3).
         self._down_guarded = self.guarding
-        return not self._down_guarded and super().focus_on_click()
+        takes = not self._down_guarded and super().focus_on_click()
+        focused = self.screen.focused
+        self._down_took_focus = (focused,) if takes and focused is not self else None
+        return takes
 
     async def _on_click(self, event: events.Click) -> None:
         # No super() call: Textual dispatches Button._on_click itself after this one, and
         # ``prevent_default`` is what stops it (``MessagePump._get_dispatch_methods``).
         guarded = self.guarding if self._down_guarded is None else self._down_guarded
+        took_focus, self._down_took_focus = self._down_took_focus, None
         self._down_guarded = None
-        if guarded:
+        # Textual counts the clicks in a run on one cell, each within half a second of the one
+        # before (``App.CLICK_CHAIN_TIME_THRESHOLD``), whatever was under each. The first of
+        # a double-click on *Stop all…* opened ConfirmBulk, whose Confirm a small fleet's box
+        # puts over *Stop all…*; the second, made before the user could see it, came once
+        # Confirm was drawn, as click 2 of the run, and stopped every agent (REVIEW-RC092-MI
+        # round 3, MAJOR 1). So a click goes on a run only on the button that took the click
+        # before it: one it ignored, or one on something else, ends the run for it. The
+        # inline confirm's own double-click is a run it takes from the first click on.
+        mine = event.chain == 1 or self._run == event.chain - 1
+        self._run = event.chain if mine and not guarded else 0
+        if guarded or not mine:
             event.prevent_default()
             event.stop()
+        if not guarded and not mine and took_focus is not None:
+            # Its mouse-down took the focus, as a press the guard lets through does: give it
+            # back, or the Enter after a double-click on *Stop all…* pressed Confirm instead
+            # of Cancel (review of #266, round 2, for the guard's own ignored press).
+            self._give_focus_back(took_focus[0])
+
+    def _give_focus_back(self, before: Widget | None) -> None:
+        if not self.has_focus:
+            return  # the focus moved on since the mouse-down: nothing of the press's left
+        if before is not None and before.is_attached and before.focusable:
+            self.screen.set_focus(before, scroll_visible=False)
+        else:
+            self.blur()

@@ -469,8 +469,13 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
   that reader can't keep up with asq, a click is held a second at most; a click still on
   its way once the frame has been read (over a slow SSH link, say) is not held back. A
   click once the button is on screen acts at once, and an ignored click raises no toast.
-  It still leaves the keyboard focus where it was, and Enter on a focused button is never
-  ignored.
+  A double-click never confirms the dialog its first click opened: its second click is
+  ignored on any of these buttons but the one that took the first, so a double-click on
+  *Stop all…* or *Pause all…* leaves the dialog up even when a small fleet's dialog puts
+  its Confirm right there. *Unset* in a role binding's *Unset key…* dialog (⚙ Settings)
+  has this guard now too: with three bindings, the page could be scrolled to put it over
+  the button that opened it. An ignored click still leaves the keyboard focus where it
+  was, and Enter on a focused button is never ignored.
 - **Five yes/no questions are asked in place: click the button again to go ahead.**
   *Remove from fleet* (a card's ⋯ menu), a role binding's *Clear* and *Reset all settings
   to default* (⚙ Settings), *Take over* (Spawn agent, handing off from a teammate) and

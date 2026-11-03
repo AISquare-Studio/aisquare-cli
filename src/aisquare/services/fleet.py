@@ -3564,6 +3564,7 @@ def spawn(
     hub: str | None = None,
     remote_control: bool | None = None,
     admit: bool = True,
+    auto_admit: bool = True,
     kickoff: bool = True,
     ack_wait: float = 0.0,
     board_context: str | None = None,
@@ -3635,7 +3636,9 @@ def spawn(
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project`` (in auto mode, past ``busy_floor`` while the machine is
     busy: :func:`_admit_by_load`), a second manager, a worktree in a non-git
-    project, and an unknown role — each with the reason in the message.
+    project, and an unknown role — each with the reason in the message. Auto admission never
+    holds the manager or the captain, nor a paused agent's resume (``auto_admit=False``): it
+    brings back what the pause stopped, as the hard floors ``admit`` names still ask.
 
     The window runs ``python -P -m aisquare launch <role> …`` (§3.4; ``-P`` is
     :func:`aisquare.core.selfcli.argv_for`'s guard against a project's own
@@ -3851,7 +3854,11 @@ def spawn(
     if admit and not experimental.captain_role(role):
         notes.extend(_admit_or_make_room(config))
         # Auto admission, after the hard floors above: they refuse below its floor too.
-        if not isinstance(cap, int):
+        # Never the manager's: it runs the others, and held, a project had nobody left to
+        # retry what auto held, nor to come back after a resume. Nor a paused agent's resume
+        # (`auto_admit`): it brings back what the pause stopped, no new agent (review of
+        # RC092-MI, round 2, M1).
+        if not isinstance(cap, int) and auto_admit and role != "manager":
             seats = _admit_by_load(project, len(live), config, notes)
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
@@ -5925,12 +5932,15 @@ def _held(project: ProjectInfo, live: int, floor: int, hold: Hold, now: datetime
 
 
 def _retry(hold: Hold, now: datetime) -> str:
-    """``retry at <time> or later (in 4m 59s). `aisquare watch` wakes …``: a hold's retry."""
+    """``retry at <time> or later (in 4m 59s); while `aisquare watch` runs, …``: a hold's
+    retry, read by whoever was refused: the owner, or the project's manager, which auto
+    admission never holds (review of RC092-MI, round 2, M1), so the one it names is never
+    the one it refused."""
     left = max(int((hold.until - now).total_seconds()), 0)
     at = hold.until.astimezone().isoformat(timespec="seconds")
     return (
-        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s). `aisquare watch` wakes "
-        "the manager when a seat frees up"
+        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s); while `aisquare watch` "
+        "runs, it wakes this project's manager when a seat frees up"
     )
 
 
@@ -10102,6 +10112,7 @@ def _respawn(
     model: str | None = None,
     effort: str | None = None,
     admit: bool | None = None,
+    auto_admit: bool = True,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -10126,6 +10137,8 @@ def _respawn(
     hand-over — its claims went back with its end — so it passes neither. A paused
     agent's restart takes its claims over as a hand-over does, and is ADMITTED as a new
     agent is (``admit``; ``None`` is ``not takes_over``): nothing of it runs to free a seat.
+    Auto admission is not asked of it (``auto_admit=False``): it is no new agent, but one the
+    pause stopped, and a resume brings back every one.
 
     The replacement replays the row's launch spec (#144; ``spawn(spec=…)``);
     ``permission_mode`` is a restart's explicit one, which wins over the spec
@@ -10208,6 +10221,7 @@ def _respawn(
         board_and_hub=board_and_hub,
         # A hand-over replaces a running agent 1:1: admitted as the agent it replaces.
         admit=not takes_over if admit is None else admit,
+        auto_admit=auto_admit,
         # Its own first line, never a kickoff: the resume line and the hand-off prompt
         # both name the task already.
         kickoff=False,
@@ -10771,8 +10785,10 @@ def restart(
             size=size,
             resume_prompt=_restart_prompt(agent),
             takes_over=handed_over is not None or paused,
-            # Paused, it has no process whose seat and memory its replacement takes over.
+            # Paused, it has no process whose seat and memory its replacement takes over;
+            # and it is what the pause stopped, so auto admission never holds it.
             admit=True if paused else None,
+            auto_admit=not paused,
             permission_mode=permission_mode,
             role=role,
             persona=persona,

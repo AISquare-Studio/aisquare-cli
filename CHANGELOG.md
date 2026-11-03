@@ -15,15 +15,15 @@ others, the one over SSH shows the usage the Mac recorded, and an asq of another
 starts nothing beside a running one until that one quits. Spawns follow the machine's
 load: `max_agents_per_project` now defaults to `auto`, which holds a spawn into a project
 running three agents while the machine is busy, and admits at most two more every five
-minutes while it is calm. `aisquare outcomes` says what your agents achieved this week and
-how much of it you steered, and `aisquare fleet top` (asq's Agent resources page) what
-each live agent consumes. An idle account whose token went stale is refreshed quietly
-instead of reading as logged out. Stats name each repository by its real name, and the
-sidebar's header counts the live agents. Rename a running agent from its sidebar row or
-`fleet relabel`. Renaming a project now renames its fleet codename and tmux session too,
-and the old codename keeps working. One sidebar highlight for a click and the arrow keys.
-Usage & stats scrolls to its end, and the Accounts table fits a 160-column terminal beside
-the default sidebar.**
+minutes while it is calm; it never holds a manager, nor a resume. `aisquare outcomes` says
+what your agents achieved this week and how much of it you steered, and `aisquare fleet
+top` (asq's Agent resources page) what each live agent consumes. An idle account whose
+token went stale is refreshed quietly instead of reading as logged out. Stats name each
+repository by its real name, and the sidebar's header counts the live agents. Rename a
+running agent from its sidebar row or `fleet relabel`. Renaming a project now renames its
+fleet codename and tmux session too, and the old codename keeps working. One sidebar
+highlight for a click and the arrow keys. Usage & stats scrolls to its end, and the
+Accounts table fits a 160-column terminal beside the default sidebar.**
 
 **Upgrading:**
 - From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.
@@ -89,6 +89,18 @@ the default sidebar.**
   `busy_memory`, `busy_thermal` and `busy_hold_minutes`. Four new commands, `aisquare fleet
   relabel`, `aisquare instances`, `aisquare outcomes` and `aisquare fleet top`, and two new
   flags on `fleet pause` and `fleet resume`, `--all` and `--managers`.
+- **`auto` never holds a project's manager or the captain, nor a resume.** Their spawn and
+  restart are admitted however busy the machine reads, and take no seat of `busy_burst`
+  (they still count toward `busy_floor` for the agents after them). A `fleet resume`, and a
+  paused agent's `fleet restart`, bring back every agent the pause stopped: no new agent,
+  so neither the load nor the burst guard holds one. The hard floors still apply to the
+  manager and a resume, as in 0.9.1. A new coder or reviewer is held as before.
+- **`max_agents_per_project` takes `auto` or a number of at least 1.** 0.9.1 also took `0`
+  (which refused every spawn), a negative number and `true` (a cap of 1). 0.9.2 refuses
+  them: a `config.toml` that holds one is invalid (`aisquare doctor`: `config.toml is
+  invalid`), and `config set` cannot change it then. Before you upgrade, set a number of 1
+  or more (0.9.1 takes no `auto`); after, take the line out of `~/.aisquare/config.toml` by
+  hand, which leaves `auto`. `auto` is now taken in any case, as App settings takes it.
 - **`fleet pause` now exits the agents, not only the signal.** In 0.9.1 it set the
   project's `fleet-paused` signal and nothing else; now it also pauses every running agent
   of the project (or `--group`, `--all`), and `fleet resume` starts them again. A script
@@ -351,7 +363,9 @@ the default sidebar.**
   long turn counts as it runs. Read-only: nothing on the page stops or restarts anything,
   and an agent whose pane is gone reads `gone` until `fleet ls` or `reap` records it — so
   does one left from before a reboot or a `kill-server`, whose pane id the next tmux server
-  gave to another agent: that agent's processes are counted once, for it.
+  gave to another agent: that agent's processes are counted once, for it. The line over
+  the table counts the live agents as the sidebar's header does, the captain named apart
+  (`3 live agents + the captain`); its row and the totals row keep it.
 
 ### Changed
 
@@ -457,7 +471,10 @@ the default sidebar.**
 - **Fleet admission follows the machine's load: `[fleet] max_agents_per_project` takes
   `"auto"`, and `"auto"` is the default.** A spawn is admitted unless the machine is busy.
   While it is busy, a spawn into a project that already runs 3 live agents is held, and a
-  project with fewer is always admitted. Auto has no fixed per-project number: with the
+  project with fewer is always admitted. The manager and the captain are never held,
+  busy or calm, and count toward the 3 for the agents after them; a resume brings back
+  every agent the pause stopped (`fleet resume`, or a paused agent's `fleet restart`), held
+  by neither the load nor the burst guard. Auto has no fixed per-project number: with the
   machine calm, the only per-project bound is the burst guard below. Busy means any one of
   these: the 5-minute load average per logical CPU at 1.0; on Linux, `/proc/pressure/cpu`
   `some avg60` at 40; memory pressure at `warn`; on macOS, thermal pressure at `heavy`
@@ -478,9 +495,9 @@ the default sidebar.**
     parallel are settled once their rows are written, in the order they were written, from
     below the floor too: 10 started at once into an empty project leave 5 (the floor's 3,
     then the burst's 2), and the rest are refused as held, their windows closed. The
-    floor's agents are not counted, and a restart or switch of a running agent is not a
-    new agent. With `busy_burst = 0`, only `max_agents_total`, or a number here, bounds a
-    project while the machine reads calm.
+    floor's agents are not counted, and a restart or switch of a running agent, a resume
+    and the manager are not new agents. With `busy_burst = 0`, only `max_agents_total`, or
+    a number here, bounds a project while the machine reads calm.
   - **A held spawn never waits.** It is refused with the new code `capacity_busy`, and the
     message names the signal, its value, its threshold and the earliest retry (5 minutes
     on). A retry inside those 5 minutes is held again without probing, and one after them
@@ -497,13 +514,16 @@ the default sidebar.**
     A busy machine is reported there, not warned about: the doctor row stays ok, and still
     warns, as before, when a spawn would be refused or memory pressure is at `warn`.
   - **The hard floors still apply in auto mode, below 3 agents too:** `min_free_mb`,
-    critical memory pressure, `max_agents_total` and a group's `max_agents`. A replacement
-    of a running agent (`restart`, `switch`) is never held.
+    critical memory pressure, `max_agents_total` and a group's `max_agents`, for the
+    manager and a resume too. A replacement of a running agent (`restart`, `switch`), the
+    manager and a resume are never held by the load or the burst guard.
   - **A number keeps today's behaviour exactly.** A file that sets one (`8`, say) loads
     unchanged and never asks the load. A file 0.8.0 wrote, which holds every default
     including `4`, follows the new default like every other moved default. Set `4` again to
     keep it. App settings ▸ *max agents per project* takes `auto` or a number, and shows
-    `auto` as the default. No new dependency.
+    `auto` as the default. No new dependency. A number is at least 1 now: `0`, a negative
+    number and `true` (a cap of 1), which 0.9.1 took, make the file invalid (see
+    *Upgrading*); `auto` is taken in any case, by `config set` too.
 
 ### Fixed
 

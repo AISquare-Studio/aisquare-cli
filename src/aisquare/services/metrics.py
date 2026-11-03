@@ -110,9 +110,12 @@ def close_turn(session_id: str | None, *, store: ContextStore | None = None) -> 
 def continue_turn(session_id: str | None, *, store: ContextStore | None = None) -> str | None:
     """Open a row for the stretch a Stop hook's decision starts (``{"decision": "block"}``): the
     agent goes on with no ``UserPromptSubmit``, so nothing else would. The row is the session's
-    previous turn's project, a baseline as that one was (the CI was not asked), and its origin is
-    ``agent:continuation``; the next Stop closes it. Its trace id, or ``None`` for a session with
-    no turn recorded, or a write that failed. Silent either way."""
+    previous turn's project, and its origin is ``agent:continuation``; the next Stop closes it.
+    The CI was not asked, so its reason is in that turn's arm: the same baseline reason when
+    that one was a baseline (the experiment off), else ``no_prompt``, by design (the
+    experiment on, and no prompt to send), never a baseline reason, which would count it as
+    control data among the consulted (REVIEW-RC092-MI round 2, minor 2). Its trace id, or
+    ``None`` for a session with no turn recorded, or a write that failed. Silent either way."""
     if not session_id:
         return None
     try:
@@ -132,7 +135,7 @@ def _continue_turn(store: ContextStore, session_id: str) -> str | None:
     metric = baseline_turn(
         last[0].project_id,
         session_id=session_id,
-        reason=reason if reason in BASELINE_REASONS else ClientReason.disabled,
+        reason=reason if reason in BASELINE_REASONS else ClientReason.no_prompt,
     ).model_copy(update={"origin": prompt_origin.AGENT_CONTINUATION})
     store.open_turn(metric)
     return metric.trace_id

@@ -12,6 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from aisquare.cli import usage_format as fmt
+from aisquare.services.fleet import CAPTAIN_ROLE
 from aisquare.services.fleet_top import AgentUse, SortKey, TopReport, Totals
 
 SORT_LABELS: dict[SortKey, str] = {"cpu": "CPU", "mem": "memory", "tokens": "tokens"}
@@ -114,12 +115,16 @@ def top_table(report: TopReport, by: SortKey = "cpu") -> Table:
 
 
 def summary(report: TopReport, by: SortKey = "cpu") -> str:
-    """The line over the table: what was read, how fast, and how it is sorted."""
-    totals = report.totals()
-    line = (
-        f"{totals.agents} live agent{'' if totals.agents == 1 else 's'} · "
-        f"sampled in {report.took_ms / 1000:.2f} s · sorted by {SORT_LABELS[by]}"
-    )
+    """The line over the table: what was read, how fast, and how it is sorted. The live
+    agents are counted as the sidebar's "Fleet · N live" counts them, the captain apart and
+    named (``+ the captain``): counted in, the two said one apart with a captain running,
+    and neither said why (REVIEW-RC092-MI round 2, nit 2). Its row and the totals keep it."""
+    captains = sum(1 for agent in report.agents if agent.role == CAPTAIN_ROLE)
+    live = len(report.agents) - captains
+    line = f"{live} live agent{'' if live == 1 else 's'}"
+    if captains:
+        line += " + the captain"
+    line += f" · sampled in {report.took_ms / 1000:.2f} s · sorted by {SORT_LABELS[by]}"
     if not report.ps_read:
         line += " · ps could not be read: no process figures"
     if report.unanswered:

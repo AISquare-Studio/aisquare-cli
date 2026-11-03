@@ -12,11 +12,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 stop spending tokens without being reaped, and come back where they were from one dialog.
 Run asq at the Mac and over SSH into the same Mac at once, on one home: each asq shows the
 others, the one over SSH shows the usage the Mac recorded, and an asq of another release
-starts nothing beside a running one until that one quits. Rename a running agent from its
-sidebar row or `fleet relabel`. Renaming a project now renames its fleet codename and tmux
-session too, and the old codename keeps working. One sidebar highlight for a click and the
-arrow keys. Usage & stats scrolls to its end, and the Accounts table fits a 160-column
-terminal beside the default sidebar.**
+starts nothing beside a running one until that one quits. Spawns follow the machine's
+load: `max_agents_per_project` now defaults to `auto`, which holds a spawn into a project
+running three agents while the machine is busy, and admits at most two more every five
+minutes while it is calm. `aisquare outcomes` says what your agents achieved this week and
+how much of it you steered, and `aisquare fleet top` (asq's Agent resources page) what
+each live agent consumes. An idle account whose token went stale is refreshed quietly
+instead of reading as logged out. Stats name each repository by its real name, and the
+sidebar's header counts the live agents. Rename a running agent from its sidebar row or
+`fleet relabel`. Renaming a project now renames its fleet codename and tmux session too,
+and the old codename keeps working. One sidebar highlight for a click and the arrow keys.
+Usage & stats scrolls to its end, and the Accounts table fits a 160-column terminal beside
+the default sidebar.**
 
 **Upgrading:**
 - From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.
@@ -29,12 +36,14 @@ terminal beside the default sidebar.**
   again. Nothing is killed for you. A 0.9.1 asq started in the 10 seconds before is not
   counted, nor is one on another home, nor any on Windows, where there is no `ps` to ask.
   From 0.9.2 on, an asq of another release is asked instead: `Quit the other asq? [y/N]`.
-- **The store migrates from v40 (0.9.1's) to v42 on first open, automatically, in two
+- **The store migrates from v40 (0.9.1's) to v43 on first open, automatically, in three
   steps.** v41 adds one table, `project_codename_alias` (the codenames a renamed project
   gave up), and its index; v42 adds one nullable column, `fleet_agent.paused_at`: when
-  `fleet pause` ended the row. Nothing is rewritten or dropped.
+  `fleet pause` ended the row; v43 adds one nullable column, `metric.origin`: who started
+  the turn. Nothing is rewritten or dropped.
 - **Moving back to 0.9.1 is safe.** Its migrator treats a store at or past its own version
-  as current: `user_version` stays 42, and it never reads the alias table or `paused_at`.
+  as current: `user_version` stays 43, and it never reads the alias table, `paused_at` or
+  `metric.origin` (its turns record no origin, and `aisquare outcomes` infers theirs).
   So `--project <old codename>` finds nothing there (use the new one), and a paused agent's
   row reads as one `fleet stop` ended (its `ended_by` is `stopped`, a value 0.9.1 knows):
   it is in neither asq's sidebar nor `fleet ls`, `fleet ls --all` lists it as `💤
@@ -49,7 +58,7 @@ terminal beside the default sidebar.**
   resumed, and its claims wait for `task release`. **Resume paused agents before moving
   back.** Moved forward again, 0.9.2 reads the paused rows and the old codenames as it left
   them.
-- **Several asqs on one home add no migration (the store stays at v42), and what they
+- **Several asqs on one home add no migration (the store stays at v43), and what they
   leave behind, 0.9.1 ignores.** The instance registry is a folder, `~/.aisquare/instances/`
   (each asq removes its own record as it quits; a crashed one's stays until a 0.9.2 asq
   clears it), which 0.9.1 never reads and its `uninstall --purge` deletes with the home.
@@ -62,9 +71,17 @@ terminal beside the default sidebar.**
   that runs `upgrade --yes` beside an open asq exits 1 now, and so does a move back with
   `upgrade --version 0.9.1`. Quit the asqs first (`q` in each). Inside asq, its Update and
   Uninstall refuse only while another asq runs.
-- **No setting, extra or dependency is added or removed.** Two new commands, `aisquare
-  fleet relabel` and `aisquare instances`, and two new flags on `fleet pause` and `fleet
-  resume`, `--all` and `--managers`.
+- **`[fleet] max_agents_per_project` now defaults to `auto` (was `4`).** It is the one
+  change every upgrader gets without touching anything: auto has no fixed per-project
+  number, and admits by the machine's load and `busy_burst` (see *Changed*). A file that
+  sets a number keeps it, but a setting equal to its default is left out of the file, so a
+  `4` chosen before is not there to keep. To keep the old cap, set it again: `aisquare
+  config set fleet.max_agents_per_project 4`, or App settings ▸ *max agents per project*.
+- **Settings are added, none removed; no extra or dependency is.** `[fleet]` gains auto
+  admission's `busy_floor`, `busy_burst`, `busy_load_per_cpu`, `busy_cpu_psi`,
+  `busy_memory`, `busy_thermal` and `busy_hold_minutes`. Four new commands, `aisquare fleet
+  relabel`, `aisquare instances`, `aisquare outcomes` and `aisquare fleet top`, and two new
+  flags on `fleet pause` and `fleet resume`, `--all` and `--managers`.
 - **`fleet pause` now exits the agents, not only the signal.** In 0.9.1 it set the
   project's `fleet-paused` signal and nothing else; now it also pauses every running agent
   of the project (or `--group`, `--all`), and `fleet resume` starts them again. A script
@@ -243,6 +260,68 @@ terminal beside the default sidebar.**
     login, whoever attaches to it. Once the Mac has started the server, agents spawn into
     it from SSH as before.
 
+- **The sidebar's header says how many agents are live: `Fleet · 19 live`.** Every live
+  agent of every project, the captain excluded: the `live_total` of `aisquare fleet
+  capacity`, so a folded group's, a hidden directory's and a forgotten project's agents
+  count although no card shows them. It follows the next frame after a spawn or a stop,
+  and drops on the very frame whose card shows an agent exited because its pane died.
+  With none live the header is `Fleet` alone. The Welcome page's *3 Fleet* step keeps
+  its title: it is about the one project being set up, whose agents it already lists.
+
+- **`aisquare outcomes`: what your agents achieved this week, and how much of it you
+  steered.** One ISO week on the local clock (Monday 00:00 to now; `--week last` or
+  `--week 2026-W43` for another), against the week before to the same point, as text or
+  `--json`. No day, month or all-time view, by design. Four sections: **outcomes** per
+  repository, by its real name (the remote's, else the folder's, never a nickname): the
+  pull requests you authored merged and opened (`gh`, one GraphQL call, the only network
+  call; skipped, and said so, without it), your commits and their lines in the checkouts
+  the agents worked in (a rebased commit once, none GitHub made), board tasks done and
+  reopened; **effort**: agent-hours (the turns' durations), sessions, turns, tool calls,
+  files edited, tokens, list-price cost, and cost per merged PR and per done task;
+  **direction**, who steered: the share of turns a person started against those an agent
+  did, agent-minutes and tool calls per human prompt, interrupts and denied tool uses, and
+  each session as directive, guided or collaborative (after Anthropic's Economic Index),
+  never human tokens against agent tokens; and **vs last week**. `aisquare outcomes --help`
+  says how each figure is measured. The interrupts, denials, edited files and the origin of
+  older turns come from Claude Code's transcripts, kept in `~/.aisquare/cache/` as they are
+  read: asq's usage sweep (every 10 minutes while asq is open) and `metrics stats` keep that
+  cache filled, so the weekly run reads it warm (2 to 5 s here, under load). Without them, a
+  run reads a week or two of transcripts first, once: 17 s for 2 GB of them on this machine,
+  36 s under heavy load. The first sweep after the upgrade pays the same read once: asq's in
+  the background, and the first `aisquare metrics stats` (or `metrics backfill`) in the
+  foreground: 3 s on this machine when it is quiet (0.6 s with a warm cache), 8 s under
+  heavy load (2.6 s warm).
+- **Who started each turn is recorded, by who authored the instruction.** Every write
+  aisquare makes into an agent's prompt (a fleet spawn's first message, `fleet tell`, the
+  phone's tell, the manager's wake, the quiet compaction's lines) leaves a marker for its
+  text, which the turn's `UserPromptSubmit` takes. A wake, a compaction line, a Stop hook's
+  continuation and Claude Code's `<task-notification>` are an agent's whoever sends them; a
+  tell and a spawn are their sender's: `human:tell` from your terminal, asq or the phone,
+  `agent:tell` from a manager; a spawn you run is `human:spawn`, one an agent session runs
+  (its `--as` session, or its environment) `agent:spawn`. A prompt you type, slash commands
+  included, is `human:typed`. A Stop hook that keeps a turn going opens a row of its own
+  (`agent:continuation`), so its time is counted too. Turns from before are inferred for the
+  report by the same rule (a spawn by what its fleet row recorded of its spawner), and said
+  to be.
+
+- **See what each running agent consumes: `aisquare fleet top`, and asq's ⚙ Settings ▸
+  Agent resources.** One row per live agent of every project (project, label, role,
+  account): the CPU, resident memory and number of processes of its pane's whole process
+  tree (`claude` and what it runs: MCP servers, a `pytest`, a build), how long it has run,
+  and its session's tokens and list-price cost so far, heaviest CPU first, with a totals
+  row. `fleet top` reads once and prints the table; `--sort cpu|mem|tokens`, `--project/-P`
+  for one fleet, `--json` for one object (`agents`, `totals`). The asq page draws the same
+  table, sorts by CPU, memory or tokens (keys `1` to `3`, or its buttons), reads again
+  every 5 s while it is open and nothing while it is not; `r` reads at once. Each read is
+  one `ps -A` and one tmux listing for every agent at once, about a quarter of a second for
+  26 agents. CPU is `ps`'s figure, in percent of one core: on macOS a decaying average over
+  about the last minute, on Linux the CPU time over the process's life. Tokens start from
+  what the session's Stop hooks recorded and add what its transcript gained since, so a
+  long turn counts as it runs. Read-only: nothing on the page stops or restarts anything,
+  and an agent whose pane is gone reads `gone` until `fleet ls` or `reap` records it — so
+  does one left from before a reboot or a `kill-server`, whose pane id the next tmux server
+  gave to another agent: that agent's processes are counted once, for it.
+
 ### Changed
 
 - **Renaming a project renames its fleet codename and tmux session too.** Saving a card's
@@ -324,6 +403,69 @@ terminal beside the default sidebar.**
   in the registry are counted: one from 0.9.1 writes no record, and the 0.9.2 asq started
   beside it refuses instead.
 
+- **Usage & stats names a repository by its actual name, never a nickname or a codename.**
+  The Stats page's *Top repositories*, `aisquare metrics stats` and its `--json` `name`
+  (in `repos.rows` and `repos.top`) show the git remote's repository name, spelt as its
+  URL spells it (`git@github.com:Org/MyRepo.git` is `MyRepo`), else the checkout folder's:
+  a project nicknamed *the big one* left the owner unable to tell which repository was
+  meant. The lower-cased remote stays only the key that makes the clones of one remote one
+  repository, and they are named by the remote rather than by the checkout that spent the
+  most. Repository profiles stored with a nickname show the real name at once (lower case
+  until rewritten: the stored remote has lost the case) and are rewritten with the URL's
+  spelling at the next sweep, not the next day; the store is not migrated. Nicknames stay
+  everywhere else: the sidebar's cards, `fleet ls`, the project views.
+
+- **Fleet admission follows the machine's load: `[fleet] max_agents_per_project` takes
+  `"auto"`, and `"auto"` is the default.** A spawn is admitted unless the machine is busy.
+  While it is busy, a spawn into a project that already runs 3 live agents is held, and a
+  project with fewer is always admitted. Auto has no fixed per-project number: with the
+  machine calm, the only per-project bound is the burst guard below. Busy means any one of
+  these: the 5-minute load average per logical CPU at 1.0; on Linux, `/proc/pressure/cpu`
+  `some avg60` at 40; memory pressure at `warn`; on macOS, thermal pressure at `heavy`
+  (`notifyutil`, no root). Each threshold, the floor and the hold are settings:
+  `busy_load_per_cpu`, `busy_cpu_psi` (`0` turns either off), `busy_memory`,
+  `busy_thermal` (`"off"` turns either off), `busy_floor = 3`, `busy_burst = 2` and
+  `busy_hold_minutes = 5`. Each number is finite and bounded: no `inf` or `nan`, a hold of
+  at most a year (525600 minutes), a floor of 1 to 1000, a burst of 0 to 1000, CPU
+  pressure up to 100, and load per CPU up to 1000. Before this, a box at load 54 on 14
+  cores with normal memory pressure admitted every spawn.
+  - **A burst guard bounds a fan-out while the machine is calm.** Above `busy_floor`, a
+    project is admitted at most `busy_burst` new agents per `busy_hold_minutes` (2 per 5
+    minutes by default; `0` turns the guard off), because the 5-minute load average moves
+    minutes after a burst of spawns does: a manager fanning out a board, or a spawn loop,
+    was admitted in full before it did. One more is held as a busy spawn is:
+    `capacity_busy`, its signal `burst`, with `retry_at` when the oldest of those admits
+    is 5 minutes old, and `aisquare watch` wakes the manager then. Spawns started in
+    parallel are settled once their rows are written, in the order they were written, from
+    below the floor too: 10 started at once into an empty project leave 5 (the floor's 3,
+    then the burst's 2), and the rest are refused as held, their windows closed. The
+    floor's agents are not counted, and a restart or switch of a running agent is not a
+    new agent. With `busy_burst = 0`, only `max_agents_total`, or a number here, bounds a
+    project while the machine reads calm.
+  - **A held spawn never waits.** It is refused with the new code `capacity_busy`, and the
+    message names the signal, its value, its threshold and the earliest retry (5 minutes
+    on). A retry inside those 5 minutes is held again without probing, and one after them
+    probes again. Under `--json`, `hint` carries `retry_at`. With `auto_stop_finished` on,
+    the project's finished workers are stopped first, and the spawn goes ahead if that
+    frees a seat. The TUI's spawn dialog shows the hold reason.
+  - **`aisquare watch` wakes the held project's manager when capacity frees up** (a
+    `capacity_freed` item: a seat freed, or the hold ran out and the machine calmed), so a
+    manager retries without polling. One wake per hold.
+  - **`fleet capacity` and the doctor's `fleet capacity` row list each signal** with its
+    value, threshold and verdict (`busy`, `ok`, `off`, `unknown`), plus the holds in force,
+    the burst guard's setting and each project whose burst is full, with its retry
+    (`--json`: `busy_burst`, `busy_hold_minutes`, `bursts`, and each hold's `kind`).
+    A busy machine is reported there, not warned about: the doctor row stays ok, and still
+    warns, as before, when a spawn would be refused or memory pressure is at `warn`.
+  - **The hard floors still apply in auto mode, below 3 agents too:** `min_free_mb`,
+    critical memory pressure, `max_agents_total` and a group's `max_agents`. A replacement
+    of a running agent (`restart`, `switch`) is never held.
+  - **A number keeps today's behaviour exactly.** A file that sets one (`8`, say) loads
+    unchanged and never asks the load. A file 0.8.0 wrote, which holds every default
+    including `4`, follows the new default like every other moved default. Set `4` again to
+    keep it. App settings ▸ *max agents per project* takes `auto` or a number, and shows
+    `auto` as the default. No new dependency.
+
 ### Fixed
 
 - **Settings ▸ Usage & stats scrolls to its last section.** Its body was a plain
@@ -374,6 +516,28 @@ terminal beside the default sidebar.**
   after *off*, and nothing was kept. *Off* now looks for a shipment in flight before it
   writes the switch, and no shipment can start while it does; the one notice is sent, best
   effort, as it is whenever anything was sent.
+
+- **An idle account no longer reads as signed out because its token went stale.** Claude
+  Code's access token lasts hours and only Claude Code renews it, on the account's next
+  session, so an account no agent ran on lately showed `!` and *Log in* on the Accounts
+  page, and `aisquare accounts usage` said `the stored token has expired`, though the
+  login was fine. Now a usage read that finds the token expired, or refused (HTTP 401),
+  has Claude Code refresh it on that account (`claude mcp get` of a server no one has,
+  whose startup renews the token and waits for the answer: no window, no keystroke, no
+  model request; aisquare still never exchanges a token itself) and reads again. Failing
+  that it tries once more after a minute, and only then says what it said before, with the
+  same fix. In between, the row shows the last good reading with its age, and its tooltip
+  says the token is being refreshed. One refresh at a time per account, across every asq
+  and `aisquare` process; the Accounts page, `accounts usage`, the status line and the
+  sidebar read through it. A launch's, a spawn's or a hand-over's account pick never
+  starts or waits for the refresh, nor for any other read of an account's usage under way
+  in the same asq: it skips an account whose token is stale (or decides by its kept
+  reading), and reads for itself an account another read is holding, without waiting for
+  it (one request more); the Accounts page, `accounts usage`, the status line or the
+  sidebar refresh a stale token. Disabled accounts, accounts never signed in and a
+  Keychain that will not say are as before. A 401 on a token Claude Code still holds as
+  valid is not refreshed by it outside a session: there the retry catches a token another
+  session renewed meanwhile, and otherwise *Log in* follows the minute.
 
 ## [0.9.1] - 2026-10-27
 

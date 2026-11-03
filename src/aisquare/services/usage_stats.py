@@ -81,6 +81,7 @@ from aisquare.models import (
     UsageTurnRow,
 )
 from aisquare.services import metrics as metrics_service
+from aisquare.services import transcript_facts
 
 SWEEP_EVERY = timedelta(minutes=10)
 """How often :func:`maybe_sweep` reads the transcripts again."""
@@ -488,10 +489,38 @@ def _sweep(
     if progress is not None:
         progress(len(found), len(found))
     report.attributed = _attribute(store, types, repos)
+    # A profile written before names were the repositories' own is renamed at the next sweep,
+    # its repository worked in since or not; the ones worked in go first, within the budget.
+    for profile in store.repo_profiles().values():
+        if _misnamed(profile):
+            seen_repos.setdefault(profile.repo_id, Path(profile.root))
     report.profiles = refresh_profiles(store, seen_repos, now=now)
     report.features = feature_use.fold(store)
+    _warm_facts(found, known, now)
     store.set_meta(_SWEPT_KEY, (now or datetime.now(UTC)).isoformat())
     return report
+
+
+FACTS_SPAN = timedelta(days=15)
+"""How far back the sweep keeps the transcript-facts cache filled: this ISO week and the one
+before, which ``aisquare outcomes`` reads."""
+
+
+def _warm_facts(found: list[Transcript], known: dict[str, str], now: datetime | None) -> None:
+    """Bring the transcript-facts cache (``services.transcript_facts``) up to the transcripts'
+    ends, as the sweep has just read them: ``aisquare outcomes`` then reads it warm, where on its
+    own it reads a week or two of transcripts first. Each by the path its session's row recorded
+    (``known``: path → session), which is the one the report asks for, else as it was found.
+    Incremental (a file's new bytes only, and none of a file untouched for :data:`FACTS_SPAN`),
+    and it fails open: a cache that could not be filled costs the report's speed, never the
+    sweep."""
+    when = now or datetime.now(UTC)
+    recorded = {session_id: path for path, session_id in known.items()}
+    paths = [Path(recorded.get(t.session_id, str(t.path))) for t in found]
+    try:
+        transcript_facts.read_facts(paths, since=when - FACTS_SPAN, now=when)
+    except Exception as exc:
+        metrics_service.log_failure("transcript facts not read by the sweep", exc)
 
 
 @dataclass
@@ -700,52 +729,101 @@ def refresh_profiles(
     now: datetime | None = None,
     budget_s: float = _PROFILE_BUDGET_S,
 ) -> int:
-    """Profile the repositories in ``roots`` (id → root) that have none, or one older than
-    :data:`PROFILE_MAX_AGE`, for at most ``budget_s`` seconds (the rest wait for the next
-    call). A root that is gone keeps the profile it had. Returns how many were written."""
+    """Profile the repositories in ``roots`` (id → root) that have none, one older than
+    :data:`PROFILE_MAX_AGE`, or one whose name is not its real name (:func:`_misnamed`), for
+    at most ``budget_s`` seconds (the rest wait for the next call). A root that is gone keeps
+    the profile it had. Returns how many were written."""
     when = now or datetime.now(UTC)
     profiles = store.repo_profiles()
     deadline = time.monotonic() + budget_s
     done = 0
     for repo_id, root in roots.items():
         current = profiles.get(repo_id)
-        if current is not None and when - current.refreshed_at < PROFILE_MAX_AGE:
+        if (
+            current is not None
+            and when - current.refreshed_at < PROFILE_MAX_AGE
+            and not _misnamed(current)
+        ):
             continue
         if not root.is_dir():
             if current is None:
-                store.save_repo_profile(_bare_profile(store, repo_id, root, when))
+                store.save_repo_profile(_bare_profile(repo_id, root, when))
                 done += 1
             continue
         if time.monotonic() >= deadline:
             break
-        store.save_repo_profile(profile_repo(store, repo_id, root, when))
+        store.save_repo_profile(profile_repo(repo_id, root, when))
         done += 1
     return done
 
 
-def _display_name(store: ContextStore, repo_id: str, root: Path) -> str:
-    project = store.get_project(repo_id)
-    return (project.nickname if project is not None and project.nickname else None) or (
-        root.name or repo_id
-    )
+def real_name(remote: str | None, root: Path | None) -> str:
+    """A repository's real name: its remote's repository name as ``remote`` spells it
+    (``git@github.com:Org/MyRepo.git`` is ``MyRepo``; a normalised remote has lost the case, so
+    ``github.com/org/myrepo`` is ``myrepo``); else its folder's name. Never a project's
+    nickname, which a profile's ``name`` may be. ``""`` when there is neither."""
+    folder = root.name if root is not None else ""
+    if remote:
+        name = repo_profile.remote_repo_name(remote) or remote.rstrip("/").rsplit("/", 1)[-1]
+        if name:
+            return name
+    return folder
 
 
-def _bare_profile(store: ContextStore, repo_id: str, root: Path, when: datetime) -> RepoProfile:
+def repo_name_of(
+    store: ContextStore, repo_id: str, profiles: dict[str, RepoProfile] | None = None
+) -> str:
+    """The name stats give the repository recorded as ``repo_id`` (a project id): its real
+    name, off its profile (:func:`_profile_name`); a repository not profiled yet goes by its
+    folder's until it is. Never the project's nickname or codename. ``profiles``: the store's,
+    when the caller has read them already."""
+    if repo_id == TEMP_REPO:
+        return TEMP_NAME
+    profile = (profiles if profiles is not None else store.repo_profiles()).get(repo_id)
+    if profile is not None:
+        name = _profile_name(profile)
+    else:
+        project = store.get_project(repo_id, include_forgotten=True)
+        name = real_name(None, project.root) if project is not None else ""
+    return name or repo_id[-8:]
+
+
+def _profile_name(profile: RepoProfile) -> str:
+    """A profiled repository's real name. The profile stores it spelt as the remote's URL spells
+    it (``MyRepo``), where its ``remote`` is lower case to group the clones of one remote; that
+    is the name whenever it is the remote's. A profile written before names were the
+    repositories' own carries the project's nickname or the folder's name instead, and is
+    named again from its remote and root (:func:`real_name`) until it is rewritten."""
+    derived = real_name(profile.remote, Path(profile.root) if profile.root else None)
+    if profile.remote and derived and profile.name.lower() == derived.lower():
+        return profile.name
+    return derived
+
+
+def _misnamed(profile: RepoProfile) -> bool:
+    """Whether ``profile`` was written before names were the repositories' own: profiled again
+    at the next sweep, however fresh, to store the name as its remote spells it."""
+    return profile.name != (_profile_name(profile) or profile.repo_id)
+
+
+def _bare_profile(repo_id: str, root: Path, when: datetime) -> RepoProfile:
     return RepoProfile(
         repo_id=repo_id,
-        name=_display_name(store, repo_id, root),
+        name=real_name(None, root) or repo_id,
         root=str(root),
         refreshed_at=when,
     )
 
 
-def profile_repo(store: ContextStore, repo_id: str, root: Path, when: datetime) -> RepoProfile:
-    """The profile of the repository at ``root``, read from git."""
-    remote = repo_profile.read_remote(root)
+def profile_repo(repo_id: str, root: Path, when: datetime) -> RepoProfile:
+    """The profile of the repository at ``root``, read from git: its ``remote`` normalised (the
+    key the clones of one remote share), its ``name`` as the remote's URL spells it."""
+    url = repo_profile.read_remote_url(root)
+    remote = repo_profile.normalise_remote(url)
     traits, files = repo_profile.read_traits(root, remote)
     return RepoProfile(
         repo_id=repo_id,
-        name=_display_name(store, repo_id, root),
+        name=real_name(url, root) or repo_id,
         root=str(root),
         remote=remote,
         traits=traits,
@@ -930,22 +1008,11 @@ def _main_members(turns: Iterable[_Turn]) -> dict[str, str]:
 def _repo_names(
     store: ContextStore, turns: Iterable[_Turn], profiles: dict[str, RepoProfile]
 ) -> dict[str, str]:
-    """Each repository counted → its name: its main checkout's profile name (the project's
-    nickname, else the folder's), else the project's, else the end of its id."""
-    names: dict[str, str] = {}
-    for repo, member in _main_members(turns).items():
-        if repo == TEMP_REPO:
-            names[repo] = TEMP_NAME
-            continue
-        profile = profiles.get(member)
-        if profile is not None:
-            names[repo] = profile.name
-            continue
-        project = store.get_project(member)
-        names[repo] = (
-            (project.nickname or project.root.name) if project is not None else ""
-        ) or member[-8:]
-    return names
+    """Each repository counted → its main checkout's name (:func:`repo_name_of`)."""
+    return {
+        repo: TEMP_NAME if repo == TEMP_REPO else repo_name_of(store, member, profiles)
+        for repo, member in _main_members(turns).items()
+    }
 
 
 def _stats_in(

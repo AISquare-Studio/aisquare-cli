@@ -70,7 +70,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections.abc import Iterable
-from typing import ClassVar, NamedTuple
+from typing import ClassVar, Literal, NamedTuple
 
 from rich.text import Text
 from textual import on
@@ -123,6 +123,7 @@ PERMISSION_MODES: tuple[tuple[str, str], ...] = (
 
 DEFAULT_ESCAPE_KEY = FleetSettings().escape_key
 DEFAULT_WORKTREE_DIR = FleetSettings().worktree_dir
+DEFAULT_MAX_AGENTS = str(FleetSettings().max_agents_per_project)
 PICK_MODES: tuple[tuple[str, str], ...] = (
     ("the default account", "default"),
     ("the account with headroom", "headroom"),
@@ -288,6 +289,24 @@ class ConfirmClearBinding(ModalScreen[bool]):
     @on(Button.Pressed, "#clear-cancel")
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+def parse_max_agents(raw: str) -> int | Literal["auto"]:
+    """The max-agents field as ``[fleet] max_agents_per_project`` takes it: ``auto``, the
+    default (an empty field too), or a whole number of at least 1. ``ValueError`` says why
+    anything else is not."""
+    text = raw.strip().lower()
+    if text in ("", "auto"):
+        return "auto"
+    try:
+        number = int(text)
+    except ValueError:
+        raise ValueError(
+            f"max agents per project must be auto or a whole number, not {raw.strip()!r}"
+        ) from None
+    if number < 1:
+        raise ValueError("max agents per project must be auto or at least 1")
+    return number
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -744,7 +763,9 @@ class AppSettingsView(Vertical):
         with Horizontal(classes="row"):
             yield Label("max agents per project")
             yield Input(
-                value=str(self.fleet.max_agents_per_project), type="integer", id="max-agents"
+                value=str(self.fleet.max_agents_per_project),
+                placeholder=f"{DEFAULT_MAX_AGENTS} (default) or a number",
+                id="max-agents",
             )
         with Horizontal(classes="row"):
             yield Label("worktree root")
@@ -1018,12 +1039,9 @@ class AppSettingsView(Vertical):
         if "max-agents" in changed:
             raw = self.query_one("#max-agents", Input).value.strip()
             try:
-                max_agents = int(raw)
-            except ValueError:
-                return f"max agents per project must be a whole number, not {raw!r}"
-            if max_agents < 1:
-                return "max agents per project must be at least 1"
-            update["max_agents_per_project"] = max_agents
+                update["max_agents_per_project"] = parse_max_agents(raw)
+            except ValueError as exc:
+                return str(exc)
         roles = dict(current.roles)
         for role in self._roles:
             row = self._role_row(role)

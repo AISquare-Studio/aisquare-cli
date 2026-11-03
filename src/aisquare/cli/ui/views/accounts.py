@@ -491,9 +491,12 @@ def needs_login(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
 
     An expired or rejected token still counts as signed in (``signed_in`` is "a login is
     recorded"), so the old *Sign in* button never showed for the two states a person most
-    often has to fix by hand.
+    often has to fix by hand. Neither is offered while Claude Code is refreshing the token
+    (``awaits_refresh``): only once that and its retry did not take does the reading say so.
     """
-    if not status.signed_in or status.token_state == "expired":
+    if not status.signed_in:
+        return True
+    if status.token_state == "expired" and not accounts_service.awaits_refresh(status, usage):
         return True
     return usage is not None and usage.needs_login
 

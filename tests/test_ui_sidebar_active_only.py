@@ -18,7 +18,7 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Static
 
-from aisquare.cli.ui.app import FleetApp
+from aisquare.cli.ui.app import FleetApp, _FleetRead
 from aisquare.cli.ui.sidebar import (
     ACTIVE_ONLY_EMPTY,
     ALIVE_STATES,
@@ -169,6 +169,38 @@ def test_the_toggle_sits_after_the_plus_and_reads_off_and_on(
     assert [part.strip() for part in on_parts] == ["Fleet", "+", "●"]
     assert "Active only: off" in off_tip and "live agent" in off_tip
     assert "Active only: on" in on_tip and "live agent" in on_tip
+
+
+@pytest.mark.parametrize("width", [30, 24])
+def test_the_live_count_the_plus_and_the_toggle_share_the_header_at_the_sidebars_widths(
+    tmp_path: Path, script: Script, width: int
+) -> None:
+    """rc/0.9.2's ``Fleet · N live`` beside the ``+`` and this ○, with the captain on: at the
+    sidebar's default and minimum widths a three-digit count is whole, and so are both
+    buttons, side by side and inside the header."""
+    seed(tmp_path, *FOUR)
+    script[captain_state.home_project().id] = [_captain("working")]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], bool, bool]:
+        app = fleet_app(pilot)
+        app.sidebar.styles.width = width
+        await refreshed(app)
+        app._paint_fleet(_FleetRead(True, live_total=128))
+        await settle(app)
+        header = app.query_one("#fleet-header")
+        title, plus, glyph = (
+            app.query_one(f"#{name}", Static)
+            for name in ("fleet-title", "add-project", "active-only")
+        )
+        return (
+            [composited(part) for part in (title, plus, glyph)],
+            title.region.right <= plus.region.x and plus.region.right <= glyph.region.x,
+            glyph.region.right <= header.content_region.right,
+        )
+
+    parts, side_by_side, inside = drive(go)
+    assert [part.strip() for part in parts] == ["Fleet · 128 live", "+", "○"]
+    assert side_by_side and inside
 
 
 # --- filtering ----------------------------------------------------------------------------

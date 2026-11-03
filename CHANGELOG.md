@@ -6,24 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.9.2] - 2026-10-30
+## [0.9.2] - 2026-11-03
 
-**Pause and resume the agents of a project, or of every project: idle managers and coders
-stop spending tokens without being reaped, and come back where they were from one dialog.
-Run asq at the Mac and over SSH into the same Mac at once, on one home: each asq shows the
-others, the one over SSH shows the usage the Mac recorded, and an asq of another release
-starts nothing beside a running one until that one quits. Spawns follow the machine's
-load: `max_agents_per_project` now defaults to `auto`, which holds a spawn into a project
+**Run asq at the Mac and over SSH into the same Mac at once, on one home: each asq shows
+the others, the one over SSH shows the usage the Mac recorded, and an asq of another
+release starts nothing beside a running one until that one quits. With it come fixes and
+optimizations across the fleet. Pause and resume the agents of a project, or of every
+project: idle managers and coders stop spending tokens without being reaped, and come
+back where they were from one dialog. Spawns follow the machine's load:
+`max_agents_per_project` now defaults to `auto`, which holds a spawn into a project
 running three agents while the machine is busy, and admits at most two more every five
-minutes while it is calm; it never holds a manager, nor a resume. `aisquare outcomes` says
-what your agents achieved this week and how much of it you steered, and `aisquare fleet
-top` (asq's Agent resources page) what each live agent consumes. An idle account whose
-token went stale is refreshed quietly instead of reading as logged out. Stats name each
-repository by its real name, and the sidebar's header counts the live agents. Rename a
-running agent from its sidebar row or `fleet relabel`. Renaming a project now renames its
-fleet codename and tmux session too, and the old codename keeps working. One sidebar
-highlight for a click and the arrow keys. Usage & stats scrolls to its end, and the
-Accounts table fits a 160-column terminal beside the default sidebar.**
+minutes while it is calm; it never holds a manager, nor a resume. asq asks less, and in
+place: the Stop dialog has *Don't ask again*, five yes/no questions are asked on the
+button itself, a button works as soon as it is on screen, and a double-click never
+confirms the dialog it opens. `aisquare outcomes` says what your agents achieved this
+week and how much of it you steered, and `aisquare fleet top` (asq's Agent resources
+page) what each live agent consumes. An idle account whose token went stale is refreshed
+quietly instead of reading as logged out. Stats name each repository by its real name.
+The sidebar's header counts the live agents and can list only the projects that have one,
+a click and the arrow keys move one highlight, and the side without the keyboard fades.
+Rename a running agent from its sidebar row or `fleet relabel`; renaming a project
+renames its fleet codename and tmux session too, and the old codename keeps working. The
+Onboard view's ↻ reads its folders again, Usage & stats scrolls to its end, and the
+Accounts table fits a 160-column terminal beside the default sidebar. CI and `uv.lock`
+take Dependabot's bumps of certifi, truststore, ruff and setup-uv.**
 
 **Upgrading:**
 - From 0.9.1, run `aisquare upgrade`, or take the update `asq` offers.
@@ -578,6 +584,12 @@ Accounts table fits a 160-column terminal beside the default sidebar.**
     `auto` as the default. No new dependency. A number is at least 1 now: `0`, a negative
     number and `true` (a cap of 1), which 0.9.1 took, make the file invalid (see
     *Upgrading*); `auto` is taken in any case, by `config set` too.
+- **CI and `uv.lock` take Dependabot's four bumps (#481 to #484, through #488).**
+  certifi 2026.10.19 → 2026.10.23 and truststore 0.10.4 → 0.10.5, in `uv.lock` and
+  `ci/constraints.txt`; ruff 0.17.2 → 0.17.3, which changes no lint or format result; and
+  `astral-sh/setup-uv` 10.3.0 → 10.3.3 in `ci.yml`, still pinned to a commit.
+  `pyproject.toml` is unchanged: an install reads no lock, and takes the newest certifi
+  and truststore its floors allow, as before.
 
 ### Fixed
 

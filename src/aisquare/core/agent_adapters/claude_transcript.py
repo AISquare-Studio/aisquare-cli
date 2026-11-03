@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from aisquare.core import prompt_origin
 from aisquare.core.agent_adapters.transcripts import (
     DIM,
     MAX_LINE,
@@ -50,10 +51,17 @@ from aisquare.core.agent_adapters.transcripts import (
     wrap,
 )
 from aisquare.core.agent_adapters.types import (
+    FACT_CONTINUATION,
+    FACT_DENIAL,
+    FACT_EDIT,
+    FACT_INTERRUPT,
+    FACT_PROMPT,
     AnswerKey,
     AnswerKind,
     CallAsk,
+    FactKind,
     HoldsOpen,
+    TranscriptFact,
     TurnsScan,
     UsageScan,
 )
@@ -232,6 +240,11 @@ class ClaudeTranscript:
         from aisquare.core.agent_adapters import claude_usage
 
         return claude_usage.turns(file, state, day_of)
+
+    def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
+        """Main's ``services.transcript_facts`` reader, moved (:func:`read_fact_lines`); a
+        file under ``<session>/subagents/`` is a subagent's."""
+        return read_fact_lines(file, start)
 
 
 def _typed(entry: dict[str, Any]) -> str | None:
@@ -806,3 +819,189 @@ def _tail_unparsed(
                 )
             )
     return "assistant_tool", pending
+
+
+# --- who steered: the facts ``aisquare outcomes`` reads (``AgentTranscript.facts``) ------------
+#
+# Main's ``services.transcript_facts`` scan, moved behind the transcript slot unchanged: a week
+# of transcripts on a busy machine is over a gigabyte, so only the lines that can hold a fact
+# are parsed, found by their marker in the raw bytes, never by splitting the file into lines.
+
+_FACT_USER = b'"user"'
+"""In every user entry (its ``type`` and its ``role``), in no assistant's: the quoted word, as
+``core.usage`` finds its lines, whatever spacing the JSON was written with."""
+_FACT_TOOL_RESULT = b'"tool_result"'
+_FACT_DENIED = b"The user doesn't want to proceed with this tool use"
+_FACT_EDIT_CALL = re.compile(rb'"(?:Edit|Write|MultiEdit|NotebookEdit)"')
+_FACT_INTERRUPTED = "[Request interrupted by user]"
+_FACT_STOP_FEEDBACK = "Stop hook feedback:"
+_SUBAGENTS = "subagents"
+"""The folder beside a session's JSONL its subagents' files are in (``<session>/subagents/``):
+such a file adds its edits and denials alone."""
+
+
+def read_fact_lines(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
+    """The facts of ``file``'s complete lines from byte ``start`` (from its start when it is
+    shorter: rewritten), and the offset past the last of them (``AgentTranscript.facts``)."""
+    try:
+        size = file.stat().st_size
+        begin = start if start <= size else 0
+        with file.open("rb") as handle:
+            handle.seek(begin)
+            data = handle.read()
+    except OSError:
+        return [], start
+    end = data.rfind(b"\n") + 1  # a last line still being written is read next time
+    if end != len(data):
+        data = data[:end]
+    rows = scan_fact_bytes(data, main=file.parent.name != _SUBAGENTS)
+    return [TranscriptFact(stamp, kind, detail) for stamp, kind, detail in rows], begin + end
+
+
+def scan_fact_bytes(data: bytes, *, main: bool) -> list[tuple[str, FactKind, str]]:
+    """The facts in ``data`` (complete JSONL lines), as ``(timestamp, kind, detail)`` rows.
+    ``main``: the session's own file, whose user entries are its prompts; a subagent's file adds
+    its edits and denials only."""
+    found: list[tuple[int, tuple[str, FactKind, str]]] = []
+    if main:
+        for position, line in _lines_holding(data, _FACT_USER, skip=_FACT_TOOL_RESULT):
+            fact = _user_fact(line)
+            if fact is not None:
+                found.append((position, fact))
+    for position, line in _lines_holding(data, _FACT_DENIED):
+        found.extend((position, fact) for fact in _denial_facts(line))
+    for position, line in _lines_matching_call(data, _FACT_EDIT_CALL):
+        found.extend((position, fact) for fact in _edit_facts(line))
+    found.sort(key=lambda item: item[0])
+    return [fact for _, fact in found]
+
+
+def _lines_holding(
+    data: bytes, marker: bytes, *, skip: bytes | None = None
+) -> Iterator[tuple[int, bytes]]:
+    """Each line of ``data`` holding ``marker`` (and not ``skip``), once, with where it starts."""
+    position = data.find(marker)
+    while position != -1:
+        start = data.rfind(b"\n", 0, position) + 1
+        end = data.find(b"\n", position)
+        if end == -1:
+            end = len(data)
+        if skip is None or data.find(skip, start, end) == -1:
+            yield start, data[start:end]
+        position = data.find(marker, end)
+
+
+def _lines_matching_call(data: bytes, pattern: re.Pattern[bytes]) -> Iterator[tuple[int, bytes]]:
+    position = 0
+    while (match := pattern.search(data, position)) is not None:
+        # `span`, not `start()` and `end()`: the call-graph guards resolve a call by its bare
+        # name, and both name hook-unsafe functions elsewhere (tests/test_config_writes_…).
+        found_at, found_end = match.span()
+        start = data.rfind(b"\n", 0, found_at) + 1
+        end = data.find(b"\n", found_end)
+        if end == -1:
+            end = len(data)
+        yield start, data[start:end]
+        position = end
+
+
+def _fact_entry(line: bytes) -> dict[str, Any] | None:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def _fact_stamp(entry: dict[str, Any]) -> str | None:
+    stamp = entry.get("timestamp")
+    return stamp if isinstance(stamp, str) and stamp else None
+
+
+def _user_words(entry: dict[str, Any]) -> str | None:
+    """A user entry's words: its string content, or its text blocks joined."""
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "\n".join(parts) if parts else None
+    return None
+
+
+def _user_fact(line: bytes) -> tuple[str, FactKind, str] | None:
+    from aisquare.core.agent_adapters import claude_usage
+
+    entry = _fact_entry(line)
+    if entry is None or entry.get("type") != "user" or entry.get("isSidechain"):
+        return None
+    stamp = _fact_stamp(entry)
+    text = _user_words(entry)
+    if stamp is None or text is None:
+        return None
+    if entry.get("isMeta"):
+        return (stamp, FACT_CONTINUATION, "") if text.startswith(_FACT_STOP_FEEDBACK) else None
+    if text.strip() == _FACT_INTERRUPTED:
+        return stamp, FACT_INTERRUPT, ""
+    if text.startswith(INTERRUPTED_MARKER):
+        return None  # "… for tool use": the denial beside it is the fact
+    if not claude_usage._is_prompt(entry):
+        return None
+    if " ".join(text.split()) == prompt_origin.WAKE_TEXT:
+        return stamp, FACT_PROMPT, "wake"
+    if prompt_origin.only_task_notifications(text):
+        return stamp, FACT_PROMPT, "notice"
+    if prompt_origin.only_harness_blocks(text):
+        return stamp, FACT_PROMPT, "command"
+    return stamp, FACT_PROMPT, "text"
+
+
+def _denial_facts(line: bytes) -> list[tuple[str, FactKind, str]]:
+    from aisquare.core.agent_adapters import claude_usage
+
+    entry = _fact_entry(line)
+    if entry is None or entry.get("type") != "user":
+        return []
+    stamp = _fact_stamp(entry)
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if stamp is None or not isinstance(content, list):
+        return []
+    return [
+        (stamp, FACT_DENIAL, "")
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "tool_result"
+        and claude_usage._result_text(block.get("content")).startswith(_FACT_DENIED.decode())
+    ]
+
+
+def _edit_facts(line: bytes) -> list[tuple[str, FactKind, str]]:
+    from aisquare.core.agent_adapters import claude_usage
+
+    entry = _fact_entry(line)
+    if entry is None or entry.get("type") != "assistant":
+        return []
+    stamp = _fact_stamp(entry)
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if stamp is None or not isinstance(content, list):
+        return []
+    out: list[tuple[str, FactKind, str]] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        if block.get("name") not in claude_usage.EDIT_TOOLS:
+            continue
+        tool_input = block.get("input")
+        target = None
+        if isinstance(tool_input, dict):
+            target = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if isinstance(target, str) and target:
+            out.append((stamp, FACT_EDIT, target))
+    return out

@@ -4647,26 +4647,32 @@ class SqliteStore:
 
     def outcome_sessions(self, session_ids: Collection[str]) -> dict[str, OutcomeSessionRow]:
         """For each of ``session_ids`` the store knows: its board role, whether a fleet row ran
-        it (and gave it a first message), and its transcript, by the usage row or the board's."""
+        it (and gave it a first message), its transcript, by the usage row or the board's, and
+        its agent, by the board's row or the usage row (never the usage row's
+        :data:`UNATTRIBUTED_USAGE_AGENT`, which names none)."""
         found: dict[str, OutcomeSessionRow] = {}
         ids = sorted(set(session_ids))
         for start in range(0, len(ids), 500):
             chunk = ids[start : start + 500]
             marks = ", ".join("?" for _ in chunk)
             for row in self._conn.execute(
-                "SELECT session_id, transcript_path FROM usage_session "
+                "SELECT session_id, transcript_path, agent FROM usage_session "
                 f"WHERE session_id IN ({marks})",
                 chunk,
             ).fetchall():
                 found[row["session_id"]] = OutcomeSessionRow(
-                    session_id=row["session_id"], transcript_path=row["transcript_path"]
+                    session_id=row["session_id"],
+                    transcript_path=row["transcript_path"],
+                    agent=row["agent"] if row["agent"] != UNATTRIBUTED_USAGE_AGENT else None,
                 )
             for row in self._conn.execute(
-                f"SELECT id, role, transcript_path FROM team_session WHERE id IN ({marks})", chunk
+                f"SELECT id, role, transcript_path, agent FROM team_session WHERE id IN ({marks})",
+                chunk,
             ).fetchall():
                 session = found.setdefault(row["id"], OutcomeSessionRow(session_id=row["id"]))
                 session.role = row["role"]
                 session.transcript_path = session.transcript_path or row["transcript_path"]
+                session.agent = row["agent"] or session.agent
             for row in self._conn.execute(
                 f"SELECT session_id, role, first_prompt, spawned_by FROM fleet_agent "
                 f"WHERE session_id IN ({marks})",

@@ -67,6 +67,7 @@ from aisquare.core.agent_adapters.types import (
     SharePart,
     SkillDirs,
     TelemetryReader,
+    TranscriptFact,
     TurnsScan,
     UsageScan,
     WriteScope,
@@ -80,7 +81,13 @@ from aisquare.core.agent_adapters.types import (
     store_read_only,
     without_options_named,
 )
-from aisquare.core.agent_adapters.usage_tally import Tally, carries_context, cut_turns, trace
+from aisquare.core.agent_adapters.usage_tally import (
+    Tally,
+    appended,
+    carries_context,
+    cut_turns,
+    trace,
+)
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.core.config import FleetSettings
@@ -250,6 +257,21 @@ class FakeTranscript:
             lambda record: record.get("kind") == "heard",
             day_of,
         )
+
+    def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
+        """Each thing it ``heard`` a prompt, each ``halt`` the human stopping it."""
+        lines, consumed, restarted = appended(file, start)
+        found: list[TranscriptFact] = []
+        for raw in lines:
+            record = parse_line(raw)
+            stamp = record.get("timestamp") if record is not None else None
+            if record is None or not isinstance(stamp, str):
+                continue
+            if record.get("kind") == "heard":
+                found.append(TranscriptFact(stamp, "p", "text"))
+            elif record.get("kind") == "halt":
+                found.append(TranscriptFact(stamp, "i"))
+        return found, (0 if restarted else start) + consumed
 
     def ledger(
         self, file: Path, *, since: datetime | None, until: datetime | None

@@ -1137,6 +1137,10 @@ class OutcomeSessionRow(BaseModel):
     """Who its fleet row says spawned it: ``user`` (a person: their shell, asq, the phone) or the
     session that asked for it (``fleet_agent.spawned_by``)."""
     transcript_path: str | None = None
+    agent: str | None = None
+    """The agent that ran it, as its board session or else its usage row recorded it, whose
+    transcript reader reads its facts (``AgentTranscript.facts``); ``None`` where neither did
+    (a session from before adapters, or a usage row ``unattributed``)."""
 
 
 class TaskEventRow(BaseModel):

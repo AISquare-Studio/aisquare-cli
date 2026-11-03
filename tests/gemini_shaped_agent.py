@@ -78,6 +78,7 @@ from aisquare.core.agent_adapters.types import (
     SharePart,
     SkillDirs,
     TelemetryReader,
+    TranscriptFact,
     TurnsScan,
     UsageScan,
     WriteScope,
@@ -91,7 +92,12 @@ from aisquare.core.agent_adapters.types import (
     stepped_down,
     without_options_named,
 )
-from aisquare.core.agent_adapters.usage_tally import Tally, cut_turns, is_lookup_command
+from aisquare.core.agent_adapters.usage_tally import (
+    Tally,
+    appended,
+    cut_turns,
+    is_lookup_command,
+)
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.core.config import FleetSettings
@@ -328,6 +334,39 @@ class GeminiShapedTranscript:
             lambda record: record.get("type") == "user",
             day_of,
         )
+
+    def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
+        """Who steered, in its own records (SCOPE #113 092 row 10): a ``user`` one a prompt, an
+        ``info`` one the human stopping it, each call of :data:`EDIT_TOOLS` an edit of the
+        ``file_path`` it names, and a call a later ``$patch`` says was ``cancelled`` (its
+        permission dialog's No) a refusal, at that patch's ``timestamp``. Read on from
+        ``start`` a complete line at a time (``usage_tally.appended``)."""
+        lines, consumed, restarted = appended(file, start)
+        found: list[TranscriptFact] = []
+        for raw in lines:
+            record = parse_line(raw)
+            stamp = record.get("timestamp") if record is not None else None
+            if record is None or not isinstance(stamp, str):
+                continue
+            patch = record.get("$patch")
+            kind = record.get("type")
+            if isinstance(patch, dict):
+                found += [
+                    TranscriptFact(stamp, "d")
+                    for call in _calls(patch)
+                    if call.get("status") == "cancelled"
+                ]
+            elif kind == "user":
+                found.append(TranscriptFact(stamp, "p", "text"))
+            elif kind == "info":
+                found.append(TranscriptFact(stamp, "i"))
+            elif kind == "gemini":
+                for call in _calls(record):
+                    args = call.get("args")
+                    path = args.get("file_path") if isinstance(args, dict) else None
+                    if call.get("name") in EDIT_TOOLS and isinstance(path, str):
+                        found.append(TranscriptFact(stamp, "e", path))
+        return found, (0 if restarted else start) + consumed
 
     def ledger(
         self, file: Path, *, since: datetime | None, until: datetime | None

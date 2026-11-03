@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -818,6 +819,302 @@ def test_a_large_read_goes_through_a_pool_and_finds_the_same(
     assert {str(k): _kinds(v) for k, v in pooled.items()} == {
         str(k): _kinds(v) for k, v in serial.items()
     }
+
+
+# --- a Codex session's facts (SCOPE #113 092 row 10) --------------------------------------------
+
+CODEX_FACTS = Path(__file__).parent / "fixtures" / "agent_transcripts" / "codex-facts-0.164.0.jsonl"
+"""Codex 0.164.0's own rollout (a loopback provider, the TUI under tmux, ``gpt-5.5``'s tools):
+``PATCH it`` applied by its freeform ``apply_patch`` (a ``FileChange`` of
+``/work/alpha/hello.txt``), ``ESC touch /work/refused`` whose approval was refused with Esc,
+``SLOW one`` stopped with Esc while the model worked, ``RUN sleep 20`` stopped with Esc while the
+command ran, ``CONT now`` kept going by a Stop hook's ``block``, and ``ESC touch /work/approved``
+approved with ``1``."""
+CODEX_LINES = CODEX_FACTS.read_text(encoding="utf-8").splitlines()
+CODEX_THREAD = "01a1a3a6-20d4-7d93-83bf-8dc18769f53f"
+CODEX_KINDS = [
+    ("p", "text"),
+    ("e", "/work/alpha/hello.txt"),
+    ("p", "text"),
+    ("d", ""),  # its approval refused: the turn it stopped is no interrupt besides
+    ("p", "text"),
+    ("i", ""),  # Esc while the model worked
+    ("p", "text"),
+    ("i", ""),  # Esc while its command ran: no approval held it, so no refusal
+    ("p", "text"),
+    ("c", ""),  # the Stop hook's block, back as <hook_prompt hook_run_id="stop:…">
+    ("p", "text"),  # an escalated command approved: no refusal
+]
+
+
+@pytest.fixture
+def codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A scratch ``CODEX_HOME``: Codex's plain slot, which the usage sweep reads."""
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    return home
+
+
+def _codex_rollout(home: Path, cwd: Path, *, turns: int | None = None) -> Path:
+    """The recorded rollout as Codex writes it in ``home``, run in ``cwd`` and moved to begin on
+    Tuesday 27 Oct, 12:00 IST: its first ``turns`` turns (all of them by default)."""
+    first = datetime.fromisoformat(json.loads(CODEX_LINES[0])["timestamp"].replace("Z", "+00:00"))
+    shift = _at(27, 12) - first
+    path = (
+        home
+        / "sessions"
+        / "2026"
+        / "10"
+        / "27"
+        / f"rollout-2026-10-27T06-30-00-{CODEX_THREAD}.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    started = 0
+    with path.open("w", encoding="utf-8") as handle:
+        for line in CODEX_LINES:
+            record = json.loads(line)
+            started += (record.get("payload") or {}).get("type") == "task_started"
+            if turns is not None and started > turns:
+                break
+            moment = datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")) + shift
+            record["timestamp"] = moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            text = json.dumps(record).replace("/work/alpha", str(cwd))
+            handle.write(text + "\n")
+    return path
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+def test_an_edit_a_refused_tool_and_an_esc_count_alike_whichever_agent_ran_them(
+    machine: Machine, codex_home: Path, agent: str
+) -> None:
+    """The row's acceptance: a session that edits a file, has a tool refused at its permission
+    prompt and is stopped with Esc counts one file edited, one denial and one interrupt in its
+    week, read by its own agent's reader: Claude Code's transcript, and Codex's own rollout
+    (its first three turns: a patch, an approval refused, an Esc). Before the slot a Codex
+    rollout was read as Claude Code's JSONL, and none of the three was found."""
+    repo = machine.repo("alpha")
+    if agent == "codex":
+        _codex_rollout(codex_home, repo, turns=3)
+    else:
+        machine.session(
+            1,
+            repo,
+            S_PLAIN,
+            prompt(_at(27, 12), cwd=repo, text="PATCH it"),
+            _edit(_at(27, 12, 0, 1), "a1", cwd=repo, path=str(repo / "hello.txt")),
+            prompt(_at(27, 12, 0, 2), cwd=repo, text="ESC touch /work/refused"),
+            request(_at(27, 12, 0, 3), "a2", cwd=repo, tool="Bash"),
+            _denial(_at(27, 12, 0, 4), cwd=repo),
+            _user_text(
+                _at(27, 12, 0, 4) + timedelta(milliseconds=100),
+                cwd=repo,
+                text="[Request interrupted by user for tool use]",
+            ),
+            prompt(_at(27, 12, 0, 5), cwd=repo, text="SLOW one"),
+            _user_text(_at(27, 12, 0, 8), cwd=repo, text="[Request interrupted by user]"),
+        )
+    usage_stats.sweep(now=NOW, tz=IST)
+
+    result = _report(use_gh=False)
+    printed = CliRunner().invoke(app, ["--json", "outcomes", "--week", "2026-W44", "--no-gh"])
+
+    assert result.effort.files_edited == 1
+    d = result.direction
+    assert (d.interrupts, d.denied_permissions) == (1, 1)
+    assert d.by_origin == {"human:typed": 3}, "its three prompts, inferred: no hook watched it"
+    assert (d.sessions, d.guided) == (1, 1), "three prompts of a person's and an Esc"
+    assert printed.exit_code == 0, printed.output
+    data = json.loads(printed.output)
+    assert data["effort"]["files_edited"] == 1
+    assert (data["direction"]["interrupts"], data["direction"]["denied_permissions"]) == (1, 1)
+
+
+def test_codexs_rollout_says_who_steered_it_as_its_own_reader_reads_it(tmp_path: Path) -> None:
+    """Every fact of the recorded rollout, in order: Esc while a command ran is an interrupt (no
+    approval held it), an approved escalated command no refusal, a Stop hook's block a
+    continuation, and the patch an edit of the file its ``FileChange`` names."""
+    path = tmp_path / "rollout.jsonl"
+    path.write_text(CODEX_FACTS.read_text(encoding="utf-8"), encoding="utf-8")
+    facts = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    assert _kinds(facts) == CODEX_KINDS
+
+
+CODEX_PATCH_REFUSED = CODEX_FACTS.with_name("codex-patch-refused-0.164.0.jsonl")
+"""Codex 0.164.0's own rollout as :data:`CODEX_FACTS` was recorded: ``PATCH it`` applied, then
+``ESC touch /work/refused`` and ``OUTPATCH it`` (a freeform ``apply_patch`` adding
+``/work/outside.txt``, outside the workspace, which Codex asks about) each refused with ``n``."""
+
+
+def test_a_codex_patch_refused_at_its_approval_is_a_refusal_however_it_was_called(
+    tmp_path: Path,
+) -> None:
+    """A patch applies at once, so one answered ``aborted by user`` was held by its approval
+    alone: a refusal, and the turn it stopped no interrupt. Called as Codex's freeform
+    ``apply_patch`` tool (``aborted by user after 1.3s``), and as the ``apply_patch`` heredoc a
+    model without that tool runs through ``exec_command`` (``local-fixture``'s, its records as
+    0.164.0 wrote them)."""
+    path = tmp_path / "freeform.jsonl"
+    path.write_text(CODEX_PATCH_REFUSED.read_text(encoding="utf-8"), encoding="utf-8")
+    heredoc = tmp_path / "heredoc.jsonl"
+    patch = "*** Begin Patch\n*** Add File: /work/outside.txt\n+fresh\n*** End Patch\n"
+    records = [
+        (
+            "response_item",
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "OUTPATCH it"}],
+            },
+        ),
+        (
+            "response_item",
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c5",
+                "arguments": json.dumps({"cmd": f"apply_patch <<'EOF'\n{patch}EOF\n"}),
+            },
+        ),
+        (
+            "response_item",
+            {
+                "type": "function_call_output",
+                "call_id": "c5",
+                "output": "Wall time: 1.3 seconds\naborted by user",
+            },
+        ),
+        ("event_msg", {"type": "turn_aborted", "reason": "interrupted"}),
+    ]
+    heredoc.write_text(
+        "".join(
+            json.dumps({"timestamp": stamp(_at(27, 12, 0, n)), "type": kind, "payload": payload})
+            + "\n"
+            for n, (kind, payload) in enumerate(records)
+        ),
+        encoding="utf-8",
+    )
+    found = transcript_facts.read_facts(
+        [path, heredoc], since=_at(19, 0), agents={path: "codex", heredoc: "codex"}
+    )
+    assert _kinds(found[path]) == [
+        ("p", "text"),
+        ("e", "/work/alpha/hello.txt"),
+        ("p", "text"),
+        ("d", ""),  # the command refused
+        ("p", "text"),
+        ("d", ""),  # the patch refused: no FileChange, and no interrupt
+    ]
+    assert _kinds(found[heredoc]) == [("p", "text"), ("d", "")]
+
+
+def test_a_codex_rollout_read_in_two_goes_finds_what_one_read_finds(tmp_path: Path) -> None:
+    """Read incrementally, cut after any line or inside one, the rollout gives the same facts,
+    none twice and none missed. A call at its approval is read again until its answer, and its
+    refusal until the turn it stopped ends (its abort is no interrupt): the first read stops
+    before it."""
+    from aisquare.core.agent_adapters import get_adapter
+
+    reader = get_adapter("codex").transcript_reader
+    assert reader is not None
+    data = CODEX_FACTS.read_bytes()
+    whole, end = reader.facts(CODEX_FACTS, 0)
+    assert end == len(data) and [(f.kind, f.detail) for f in whole] == CODEX_KINDS
+    ends = [index + 1 for index, byte in enumerate(data) if byte == ord("\n")]
+    path = tmp_path / "rollout.jsonl"
+    for cut in sorted({*ends, *(start + 9 for start in [0, *ends[:-1]])}):
+        path.write_bytes(data[:cut])
+        first, offset = reader.facts(path, 0)
+        path.write_bytes(data)
+        rest, final = reader.facts(path, offset)
+        assert ([*first, *rest], final) == (list(whole), len(data)), f"cut at byte {cut}"
+
+    asking = next(i for i, line in enumerate(CODEX_LINES) if "require_escalated" in line)
+    path.write_bytes(data[: ends[asking]])  # the call written, its approval up
+    first, offset = reader.facts(path, 0)
+    assert [(f.kind, f.detail) for f in first] == CODEX_KINDS[:3]
+    assert offset == (ends[asking - 1] if asking else 0), "read again from the call"
+
+
+def test_a_rollout_main_read_as_claude_codes_is_read_again_by_codexs_reader(
+    tmp_path: Path,
+) -> None:
+    """Main's scan (Claude Code's reader) cached a rollout at its whole length with no fact and
+    no agent; Codex's reader reads it again from its start. An entry main cached for a Claude
+    Code transcript is its reader's still: read on from its offset, its facts kept."""
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text(CODEX_FACTS.read_text(encoding="utf-8"), encoding="utf-8")
+    claude = write(
+        tmp_path / "s.jsonl",
+        prompt(_at(26, 10), cwd=tmp_path, text="one"),
+        prompt(_at(26, 11), cwd=tmp_path, text="two"),
+    )
+    kept = [stamp(_at(26, 10)), "p", "text"]
+    cache = {
+        "version": transcript_facts.CACHE_VERSION,
+        "files": {
+            str(rollout): {"offset": rollout.stat().st_size, "facts": []},
+            str(claude): {"offset": claude.stat().st_size, "facts": [kept]},
+        },
+    }
+    transcript_facts.facts_cache_path().parent.mkdir(parents=True, exist_ok=True)
+    transcript_facts.facts_cache_path().write_text(json.dumps(cache), encoding="utf-8")
+
+    found = transcript_facts.read_facts(
+        [rollout, claude], since=_at(19, 0), agents={rollout: "codex", claude: None}
+    )
+
+    assert _kinds(found[rollout]) == CODEX_KINDS
+    assert _kinds(found[claude]) == [("p", "text")], "not read again: the cached fact alone"
+    entries = json.loads(transcript_facts.facts_cache_path().read_text(encoding="utf-8"))["files"]
+    assert entries[str(rollout)]["agent"] == "codex"
+
+
+def test_a_large_codex_rollout_is_read_once_and_then_from_where_it_got_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """64 MB of rollout is read whole once, by its markers' bytes (a quarter of a second here),
+    and a turn appended to it is read alone: the reader is asked from the offset the first read
+    reached, never from the start (``tests/budgets.py``)."""
+    import time
+
+    from aisquare.core.agent_adapters import codex_transcript
+    from tests.budgets import budget
+
+    path = tmp_path / "rollout.jsonl"
+    pad = {"type": "function_call_output", "call_id": "c_pad", "output": "x" * 65536}
+    padding = json.dumps(
+        {"timestamp": "2026-10-27T06:30:00.000Z", "type": "response_item", "payload": pad}
+    )
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("\n".join(CODEX_LINES) + "\n")
+        while handle.tell() < 64 * 1024 * 1024:
+            handle.write(padding + "\n")
+    asked: list[int] = []
+    read = codex_transcript._rollout_facts
+
+    def spied(file: Path, start: int) -> Any:
+        asked.append(start)
+        return read(file, start)
+
+    monkeypatch.setattr(codex_transcript, "_rollout_facts", spied)
+    size = path.stat().st_size
+
+    began = time.perf_counter()
+    first = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    whole = time.perf_counter() - began
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(CODEX_LINES[1:19]) + "\n")  # the patch's turn again
+    began = time.perf_counter()
+    again = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    appended = time.perf_counter() - began
+
+    assert _kinds(first) == CODEX_KINDS
+    added = [("p", "text"), ("e", "/work/alpha/hello.txt")]
+    assert Counter(_kinds(again)) == Counter([*CODEX_KINDS, *added])
+    assert asked == [0, size], "the second read began where the first ended"
+    assert whole < budget(5.0), f"64 MB read in {whole:.2f} s"
+    assert appended < budget(0.5), f"a turn appended read in {appended:.2f} s"
 
 
 # --- recording who started a turn --------------------------------------------------------------

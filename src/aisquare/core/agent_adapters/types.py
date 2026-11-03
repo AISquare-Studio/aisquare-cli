@@ -1036,6 +1036,48 @@ class PromptRecord:
     alone and for no other prompt (``services.fleet``)."""
 
 
+# --- who steered: a transcript's facts (SCOPE #113 092 row 10) ----------------------------------
+
+FactKind = Literal["p", "c", "i", "d", "e"]
+"""What a :class:`TranscriptFact` says, as ``aisquare outcomes``' cache spells it: one of the
+``FACT_*`` names below."""
+
+FACT_PROMPT: Literal["p"] = "p"
+"""A message that opened a turn, its :data:`PromptClass` the fact's ``detail``."""
+FACT_CONTINUATION: Literal["c"] = "c"
+"""A Stop hook that kept the turn going (Claude Code's ``Stop hook feedback:`` entry, Codex's
+``<hook_prompt hook_run_id="stop:…">`` message)."""
+FACT_INTERRUPT: Literal["i"] = "i"
+"""The person stopped it while it worked (Esc): Claude Code's ``[Request interrupted by
+user]``, Codex's ``turn_aborted`` ``interrupted``."""
+FACT_DENIAL: Literal["d"] = "d"
+"""The person refused a tool at its permission prompt. The interruption that refusal makes
+(Claude Code's ``… for tool use``, the turn Codex's refusal stops) is the same act and no
+:data:`FACT_INTERRUPT`."""
+FACT_EDIT: Literal["e"] = "e"
+"""A file the agent edited, named (absolute, as the agent wrote it) in the fact's ``detail``:
+Claude Code's ``Edit``, ``Write``, ``MultiEdit`` or ``NotebookEdit``, Codex's ``apply_patch``."""
+
+PromptClass = Literal["text", "wake", "notice", "command"]
+"""Who a prompt is by its words, what infers a turn's origin where none was recorded
+(``services.outcomes``): ``text``, words; ``wake``, the fleet's nudge
+(``core.prompt_origin.WAKE_TEXT``, an agent's); ``notice``, the agent telling itself a
+background task ended (Claude Code's ``<task-notification>``); ``command``, a slash command a
+person typed that the agent records as a message (Claude Code's harness blocks)."""
+
+
+@dataclass(frozen=True)
+class TranscriptFact:
+    """One fact of a session's transcript that says who steered it
+    (:meth:`AgentTranscript.facts`): when (``at``, ISO-8601 UTC as the transcript writes it,
+    as :attr:`TurnChunk.ended_at` is), what (``kind``, a :data:`FactKind`) and its detail (a
+    prompt's :data:`PromptClass`, an edit's file; ``""`` for the rest)."""
+
+    at: str
+    kind: FactKind
+    detail: str = ""
+
+
 class AgentTranscript(Protocol):
     """One agent's session transcript (the path its hooks report, ``TeamSession.
     transcript_path``), read for Remote: the needs-you scan's facts
@@ -1229,6 +1271,22 @@ class AgentTranscript(Protocol):
         no turn holds sum to what :meth:`usage` reads of the same bytes, and the state is the
         one it takes: the sweep and the Stop hook read on from each other. ``None`` where
         :meth:`usage` is. Never raises."""
+        ...
+
+    def facts(self, file: Path, start: int) -> tuple[Sequence[TranscriptFact], int]:
+        """What the transcript ``file`` says of who steered its session, read from byte
+        ``start`` (``0``: its start): each prompt that opened a turn, continuation, interrupt,
+        denial and edit (:class:`TranscriptFact`), oldest first, and the offset to read on
+        from. ``aisquare outcomes`` reads a week of transcripts so, each from where it got to
+        last (``services.transcript_facts``), and a gigabyte of them is read once: only the
+        complete lines from ``start`` are read, the offset is past the last of them (a line
+        still being written is read next time), or no further than a record whose fact a
+        later line decides (Codex's call at its approval), so no fact is found twice. A file
+        shorter than ``start`` was rewritten and is read from its start, the offset then
+        below ``start``. A file of a session's subagent (one under a ``subagents`` folder
+        beside the session's own, as Claude Code keeps them) adds its edits and denials
+        alone. ``((), start)`` for a file it cannot read, and for an agent whose transcript
+        says none of it. Never raises."""
         ...
 
 

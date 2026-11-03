@@ -28,9 +28,11 @@ agent worked in it that week (a recorded turn's session ran there) or a task mov
   the session's next turn started, or until the person interrupted it, whichever came first; one
   with neither has no known end, is counted in ``untimed_turns`` and adds nothing.
 - *Sessions*, *turns*, *tool calls*, *tokens* and *list-price cost*: as ``metrics stats`` counts
-  them, from the same rows, over the week. *Files edited*: the distinct files an ``Edit``,
-  ``Write``, ``MultiEdit`` or ``NotebookEdit`` named (``services.transcript_facts``). Cost per
-  merged pull request and per done task divide the week's cost by those counts.
+  them, from the same rows, over the week. *Files edited*: the distinct files the session's
+  edits named, as its agent's transcript reader reads them (``services.transcript_facts``,
+  ``AgentTranscript.facts``): Claude Code's ``Edit``, ``Write``, ``MultiEdit`` or
+  ``NotebookEdit``, Codex's ``apply_patch``. Cost per merged pull request and per done task
+  divide the week's cost by those counts.
 
 **3. Direction: who steered.** Never tokens against tokens: a human prompt directs everything
 after it, and its tokens say nothing of that.
@@ -48,8 +50,9 @@ after it, and its tokens say nothing of that.
   Stop-hook continuation before v43 had no turn row: its transcript entry is counted as an
   inferred ``agent:continuation``, with no duration.
 - *Leverage*: agent-minutes, and tool calls, per human prompt.
-- *Interventions*: interrupts (Esc while it worked: ``[Request interrupted by user]``) and tool
-  uses denied at their permission prompt.
+- *Interventions*: interrupts (Esc while it worked: Claude Code's ``[Request interrupted by
+  user]``, Codex's ``turn_aborted``) and tool uses denied at their permission prompt (Codex's
+  approval refused, which stops its turn and is no interrupt besides).
 - *Session mode*, after Anthropic's Economic Index (directive vs. iterative use): of the sessions
   with a turn in the week, *directive* had at most one human prompt and no interrupt, *guided* two
   or three (or one and an interrupt), *collaborative* four or more.
@@ -394,12 +397,17 @@ def _usage_row(row: UsageTurnRow, identify: Callable[[str], str]) -> _Usage:
 def _session_facts(
     sessions: dict[str, OutcomeSessionRow], since: datetime, now: datetime
 ) -> dict[str, list[Fact]]:
+    """Each session's transcript facts, read by its agent's reader (``AgentTranscript.facts``:
+    Claude Code's JSONL, Codex's rollout, any agent's that declares it)."""
     paths = {
         session_id: Path(row.transcript_path)
         for session_id, row in sessions.items()
         if row.transcript_path
     }
-    found = transcript_facts.read_facts(sorted(set(paths.values())), since=since, now=now)
+    agents = {paths[session_id]: sessions[session_id].agent for session_id in paths}
+    found = transcript_facts.read_facts(
+        sorted(set(paths.values())), since=since, now=now, agents=agents
+    )
     return {session_id: found.get(path, []) for session_id, path in paths.items()}
 
 

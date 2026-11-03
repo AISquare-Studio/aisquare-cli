@@ -61,6 +61,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from aisquare.core import prompt_origin
 from aisquare.core.agent_adapters.transcripts import (
     DIM,
     MAX_LINE,
@@ -82,10 +83,16 @@ from aisquare.core.agent_adapters.transcripts import (
     wrap,
 )
 from aisquare.core.agent_adapters.types import (
+    FACT_CONTINUATION,
+    FACT_DENIAL,
+    FACT_EDIT,
+    FACT_INTERRUPT,
+    FACT_PROMPT,
     AnswerKey,
     AnswerKind,
     CallAsk,
     HoldsOpen,
+    TranscriptFact,
     TurnsScan,
     UsageScan,
     executable_name,
@@ -300,6 +307,11 @@ class CodexTranscript:
         from aisquare.core.agent_adapters import codex_usage
 
         return codex_usage.turns(file, state, day_of)
+
+    def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
+        """Its rollout's prompts, Stop-hook continuations, interrupts, approvals refused and
+        patches applied (:func:`_rollout_facts`)."""
+        return _rollout_facts(file, start)
 
 
 _ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl$")
@@ -1148,3 +1160,184 @@ def _said_rows(text: str, width: int) -> list[str]:
     if rest.strip():
         lines.extend(wrap(rest.strip() if lines else rest, width))
     return lines
+
+
+# --- who steered: the facts ``aisquare outcomes`` reads (``AgentTranscript.facts``) ------------
+#
+# Measured on 0.164.0 with a loopback provider and the TUI under tmux (``tests/fixtures/
+# agent_transcripts/codex-facts-0.164.0.jsonl``): a patch by the freeform ``apply_patch`` tool
+# (``gpt-5.5``) and by the ``apply_patch`` heredoc ``exec_command`` runs, an approval refused
+# with Esc, ``3`` and ``n``, an Esc while the model worked and while a command ran, and a Stop
+# hook's ``block``.
+#
+# - **A prompt** is a ``response_item`` ``message`` of the ``user`` role that is not Codex's
+#   own context (:func:`_own`), what its usage cuts turns at; the ``event_msg`` copies of it
+#   (``user_message``, an ``item_completed`` ``UserMessage``) are not read again.
+# - **A continuation** is the ``user`` message a Stop hook's ``block`` reason comes back as,
+#   ``<hook_prompt hook_run_id="stop:…">reason</hook_prompt>``, inside the turn it kept going.
+# - **An interrupt** is an ``event_msg`` ``turn_aborted`` of reason ``interrupted`` (the
+#   ``<turn_aborted>`` message beside it is the same act).
+# - **A refusal at an approval** leaves no record of the approval itself: Codex writes none, only
+#   its PermissionRequest hook sees one. Its ``3. No, and tell Codex what to do differently
+#   (esc)`` (``n`` too) stops the turn, the call answered ``aborted by user`` (a function call's
+#   ``Wall time: <s> seconds\naborted by user``, the patch tool's ``aborted by user after
+#   <s>s``) and the turn ``turn_aborted`` ``interrupted``: what an Esc while that call ran
+#   leaves too. So a call answered so is a refusal when only its approval could have held it:
+#   an ``apply_patch`` (a patch applies at once, nothing runs to stop) or a command that asked
+#   to leave the sandbox (``sandbox_permissions`` ``require_escalated``, an earlier version's
+#   ``with_escalated_permissions``), which on-request (the one policy that asks) always asks
+#   about; and the turn it stopped is no interrupt. Three limits, by the rollout alone: a
+#   call asked about for another reason (an MCP tool's, a network request's) refused reads as
+#   an interrupt, an Esc in the seconds an approved escalated command runs reads as a refusal,
+#   and the decline that lets the turn go on (an app-server client's, which its binary words
+#   ``exec command rejected by user``; unmeasured: the TUI has none, and ``codex exec``
+#   refuses an escalation itself, ``approval policy is Never; reject command``) is read as
+#   neither.
+# - **An edit** is each file an ``event_msg`` ``item_completed`` ``FileChange`` names, by its
+#   absolute path, once the patch applied (status ``completed``); a patch refused or failed
+#   writes none.
+#
+# The offset never passes a call whose fact a later line decides: one only its approval can
+# hold that has no answer yet, or that was refused and whose turn has not stopped yet (its
+# ``turn_aborted`` is no interrupt). The read stops before it, and the next reads it again;
+# a new turn, or its own end, settles it.
+
+_PATCH_TOOL = "apply_patch"
+_FACT_MARKS = (
+    b'"user"',
+    b'"task_started"',
+    b'"task_complete"',
+    b'"turn_aborted"',
+    b'"FileChange"',
+    _PATCH_TOOL.encode(),
+    b"require_escalated",
+    b"with_escalated_permissions",
+    b"aborted by user",
+)
+"""Bytes one of which every line holding a fact holds; no other line is parsed."""
+_TURN_EDGES = frozenset({"task_started", "task_complete", "turn_aborted"})
+"""The ``event_msg`` types a turn starts and ends at: what settles a call held for its turn."""
+_HOOK_PROMPT = re.compile(r"\s*<hook_prompt\b([^>]*)>")
+_STOP_HOOK_RUN = re.compile(r'\bhook_run_id\s*=\s*"stop:')
+_ABORTED = re.compile(r"\A(?:Wall time: [^\n]*\n)?aborted by user(?: after [^\n]*)?\Z")
+"""A call's answer when its turn was stopped: a function call's ``Wall time: 1.3 seconds\naborted
+by user``, the patch tool's ``aborted by user after 1.3s``."""
+
+
+def _rollout_facts(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
+    """The facts of the rollout's complete lines from byte ``start`` (from its start when it is
+    shorter: rewritten), and the offset to read on from (``AgentTranscript.facts``)."""
+    try:
+        with file.open("rb") as handle:
+            size = handle.seek(0, 2)
+            begin = start if start <= size else 0
+            handle.seek(begin)
+            data = handle.read(size - begin)
+    except OSError:
+        return [], start
+    end = data.rfind(b"\n") + 1  # a last line still being written is read next time
+    if end != len(data):
+        data = data[:end]
+    found: list[tuple[int, TranscriptFact]] = []
+    asked: dict[str, int] = {}
+    """Each call of the open turn only its approval can hold, unanswered: where its line is."""
+    refused: int | None = None
+    """Where the call is that was refused at its approval, while its turn has not stopped."""
+    for position, line in _marked_lines(data):
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        payload = record.get("payload") if isinstance(record, dict) else None
+        stamp = record.get("timestamp") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict) or not isinstance(stamp, str) or not stamp:
+            continue
+        kind, item = record.get("type"), payload.get("type")
+        if kind == "event_msg" and item in _TURN_EDGES:
+            stopped = item == "turn_aborted" and payload.get("reason") == "interrupted"
+            if stopped and refused is None:
+                found.append((position, TranscriptFact(stamp, FACT_INTERRUPT)))
+            asked.clear()
+            refused = None
+        elif kind == "event_msg" and item == "item_completed":
+            found.extend((position, fact) for fact in _patched(payload, stamp))
+        elif kind != "response_item":
+            continue
+        elif item == "message" and payload.get("role") == "user":
+            fact = _user_fact(_message_text(payload), stamp)
+            if fact is not None:
+                found.append((position, fact))
+        elif item in _CALLS:
+            call = _call_id(payload)
+            if call is not None and _asks_first(payload):
+                asked[call] = position
+        elif item in _RESULTS:
+            call = _call_id(payload)
+            output = _message_text({"content": payload.get("output")}).strip()
+            held = asked.pop(call, None) if call is not None else None
+            if held is not None and _ABORTED.match(output):
+                found.append((position, TranscriptFact(stamp, FACT_DENIAL)))
+                refused = held if refused is None else refused
+    holds = [*asked.values(), *([refused] if refused is not None else [])]
+    if holds:
+        hold = min(holds)
+        return [fact for position, fact in found if position < hold], begin + hold
+    return [fact for _, fact in found], begin + end
+
+
+def _marked_lines(data: bytes) -> Iterator[tuple[int, bytes]]:
+    """Each line of ``data`` holding one of :data:`_FACT_MARKS`, once, in order, with where it
+    starts: found by their bytes, never by splitting a gigabyte into lines."""
+    starts: set[int] = set()
+    for mark in _FACT_MARKS:
+        position = data.find(mark)
+        while position != -1:
+            line = data.rfind(b"\n", 0, position) + 1
+            starts.add(line)
+            following = data.find(b"\n", position)
+            position = -1 if following == -1 else data.find(mark, following)
+    for line in sorted(starts):
+        following = data.find(b"\n", line)
+        yield line, data[line : following if following != -1 else len(data)]
+
+
+def _user_fact(text: str, stamp: str) -> TranscriptFact | None:
+    """A ``user`` message's fact: a Stop hook's continuation, or a prompt of the human's (the
+    fleet's nudge a ``wake``); ``None`` for Codex's own context and any other hook's."""
+    hook = _HOOK_PROMPT.match(text)
+    if hook is not None:
+        return TranscriptFact(stamp, FACT_CONTINUATION) if _STOP_HOOK_RUN.search(hook[1]) else None
+    if not text.strip() or _own(text):
+        return None
+    wake = " ".join(text.split()) == prompt_origin.WAKE_TEXT
+    return TranscriptFact(stamp, FACT_PROMPT, "wake" if wake else "text")
+
+
+def _asks_first(payload: Mapping[str, Any]) -> bool:
+    """Whether a call is one only its approval can hold: a patch (the ``apply_patch`` tool, or
+    the ``apply_patch`` command Codex applies itself) or a command asking to leave the sandbox."""
+    if _call_name(payload) == _PATCH_TOOL:
+        return True
+    arguments = _call_input(payload)
+    if not isinstance(arguments, dict):
+        return False
+    if arguments.get("sandbox_permissions") == "require_escalated":
+        return True
+    if arguments.get("with_escalated_permissions") is True:
+        return True
+    command = arguments.get("cmd", arguments.get("command"))
+    words = command if isinstance(command, list) else [command]
+    return any(isinstance(word, str) and word.lstrip().startswith(_PATCH_TOOL) for word in words)
+
+
+def _patched(payload: Mapping[str, Any], stamp: str) -> list[TranscriptFact]:
+    """An edit for each file an applied patch's ``FileChange`` names."""
+    item = payload.get("item")
+    if not isinstance(item, dict) or item.get("type") != "FileChange":
+        return []
+    if item.get("status") not in (None, "completed"):
+        return []
+    changes = item.get("changes")
+    if not isinstance(changes, dict):
+        return []
+    return [TranscriptFact(stamp, FACT_EDIT, str(path)) for path in changes if path]

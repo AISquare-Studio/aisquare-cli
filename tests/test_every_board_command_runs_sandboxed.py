@@ -38,8 +38,6 @@ from aisquare.services import briefs, store_broker, watch
 from aisquare.services import fleet as fleet_service
 from aisquare.services import parent as parent_service
 from aisquare.services import team as team_service
-from tests.fake_agent import FakeAgentAdapter
-from tests.gemini_shaped_agent import GeminiShapedAdapter
 from tests.test_store_broker import (  # noqa: F401 - the fixture, by name
     LAUNCH,
     MINE,
@@ -51,6 +49,7 @@ from tests.test_store_broker import (  # noqa: F401 - the fixture, by name
     parented,
     work,
 )
+from tests.test_third_agent_seams import SYNTHETIC_AGENTS
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="the broker is POSIX's (FIFOs)")
 
@@ -59,7 +58,7 @@ COMMAND = re.compile(r"(?<![\w-])(?:aisquare|asq)\s+([a-z][a-z-]*)(?:\s+([a-z][a
 
 
 #: The synthetic third agents (tests/test_third_agent_seams.py's), registered for their sweep.
-SYNTHETIC: tuple[AgentAdapter, ...] = (FakeAgentAdapter(), GeminiShapedAdapter())
+SYNTHETIC: tuple[AgentAdapter, ...] = tuple(agent() for agent in SYNTHETIC_AGENTS)
 #: Every agent the sweep renders the texts for: each registered one and each synthetic one.
 AGENTS: tuple[AgentAdapter, ...] = (*adapters(), *SYNTHETIC)
 
@@ -79,16 +78,14 @@ def each_agent(request: pytest.FixtureRequest) -> Iterator[AgentAdapter]:
 
 
 def test_the_sweep_renders_every_agents_texts_the_synthetic_ones_included() -> None:
-    """Both real agents' and both synthetic ones': two whose tools run sandboxed (Codex, the
-    fake agent), whose every command must run through the broker, and two whose tools do not
-    (Claude Code, the Gemini-shaped agent), which no broker stands in front of."""
+    """Both real agents' and the synthetic ones': of each, one whose tools run sandboxed
+    (Codex's), whose every command must run through the broker, and one whose tools do not
+    (Claude Code's), which no broker stands in front of."""
     sandboxed = {adapter.id: adapter.capabilities.sandboxes_tools for adapter in AGENTS}
-    assert sandboxed.items() >= {
-        ("codex", True),
-        (FakeAgentAdapter.id, True),
-        ("claude-code", False),
-        (GeminiShapedAdapter.id, False),
-    }, sandboxed
+    assert sandboxed.items() >= {("codex", True), ("claude-code", False)}, sandboxed
+    synthetic = {adapter.id: adapter.capabilities.sandboxes_tools for adapter in SYNTHETIC}
+    assert set(synthetic.values()) == {True, False}, synthetic
+    assert len(set(sandboxed)) == len(AGENTS), "a synthetic agent is none of the registered"
 
 
 def _as(agent: str, session: TeamSession, role: str) -> TeamSession:

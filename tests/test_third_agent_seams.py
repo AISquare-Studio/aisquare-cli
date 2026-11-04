@@ -57,7 +57,14 @@ from tests.test_lifecycle_uninstall import (  # noqa: F401  (fixtures: pytest fi
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_events"
 
 
-@pytest.fixture(params=[FakeAgentAdapter, GeminiShapedAdapter], ids=lambda cls: cls.id)
+SYNTHETIC_AGENTS: tuple[type[Any], ...] = (FakeAgentAdapter, GeminiShapedAdapter)
+"""The synthetic third agents, each a class whose instance registers as an agent: the fake
+agent, whose tools run sandboxed, and the Gemini-shaped one, whose tools do not. Other suites
+take them from here (the broker sweep, tests/test_every_board_command_runs_sandboxed.py), so
+no file outside the contract's eight names the Gemini-shaped one."""
+
+
+@pytest.fixture(params=SYNTHETIC_AGENTS, ids=lambda cls: cls.id)
 def third(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     adapter = request.param()
     monkeypatch.delenv(adapter.home_env, raising=False)

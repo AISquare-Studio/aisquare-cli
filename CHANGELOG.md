@@ -199,9 +199,11 @@ adapter.**
   holdings, and `AgentAccounts.usage` takes main's `fresh` re-read. Where this line's rules
   meet main's new behaviour they stand: a rename renames the sessions the launch records name,
   by tmux's id (one made by hand is left), a row that ran under the plain home comes back
-  on its plain slot by name, and auto admission counts the agents a project runs as the fixed
-  cap does, by their windows (a row the store ended while its window runs is one, a paused
-  agent none, as on main). Over SSH a launch, a Claude Code one too, takes the Mac's readings
+  on its plain slot by name, and a project's agents are counted one way, as on main: the fixed
+  cap, auto admission and its burst, a hold's wake and `fleet capacity` count the rows the
+  store has live (a paused agent's is ended), the captain's excepted in each as main excepted
+  it from the budget and `fleet capacity`, while a row the store ended as its window runs
+  keeps its label and its tree. Over SSH a launch, a Claude Code one too, takes the Mac's readings
   over the line as floors, and with no live figure the least full of them, where main takes the
   default (the manager's ruling, 2026-11-03, on this line's floor rule of 2026-10-26). On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask
   the item a slot's accounts slot names (`AgentAccounts.keychain_item`; Claude Code's is the

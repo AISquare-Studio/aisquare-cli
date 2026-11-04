@@ -1578,36 +1578,78 @@ def test_a_number_still_counts_the_manager_as_0_9_1_did(
     assert machine.probes == 0 and fleet_service.holds() == []
 
 
-# --- review r36 of #113, finding 5: auto counts what the fixed cap counts ---------------------
+# --- review r36 of #113, finding 5: one count of a project's agents ---------------------------
 
 
-def test_a_busy_machine_counts_an_agent_the_store_ended_while_its_window_runs(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, machine: Machine
+def test_a_held_spawn_and_its_holds_wake_count_alike_so_no_wake_is_for_a_spawn_held_again(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
 ) -> None:
-    """Main 0.9.2 had one count for the fixed cap and for auto admission: the agents the project
-    runs. Here running is what the window says (review r8 of #113), and the cap counts a row
-    the store has ended while its window runs; auto admission counted the store's live rows,
-    so such an agent was no seat toward ``busy_floor``, and a fourth agent was admitted on a
-    busy machine. Counted, the fourth is held."""
+    """The spawn counted a row the store ended while its window runs (by the windows), a
+    hold's wake and ``fleet capacity`` did not (the store's live rows): on a busy machine the
+    fourth spawn was held at 3, its hold freed at once at 2, the manager woken, the retry held
+    again, every watch tick. One count, the store's as on main: the fourth is admitted at 2,
+    the fifth held at 3, and neither the wake nor ``fleet capacity`` says otherwise."""
     machine.busy()
     first, _second, _third = _three(project)
     _ended_in_the_store(first)
-    assert first.pane_id in tmux.facts and len(_live(project)) == 2
+    assert first.pane_id in tmux.facts, "its window runs"
+    assert list(fleet_service.capacity().live.values()) == [2]
 
+    fourth = fleet_service.spawn(project, "coder", worktree=False)
+    assert any("runs 2 of the 3 agents a project always gets" in n for n in fourth.notes), (
+        fourth.notes
+    )
     with pytest.raises(fleet_service.CapacityRefused) as held:
         _coder(project)
 
-    assert held.value.code == "capacity_busy"
-    assert "is held, nothing started: it runs 3 live agents (busy_floor = 3)" in str(held.value)
-    assert len(tmux.spawned) == 3, "nothing started"
+    assert "it runs 3 live agents (busy_floor = 3)" in str(held.value)
+    assert fleet_service.freed_holds(NOW) == [], "no wake while the spawn would be held again"
+    report = fleet_service.capacity()
+    assert list(report.live.values()) == [3] and "held in" in report.reason, report.reason
+    now[0] = NOW + timedelta(seconds=30)
+    assert fleet_service.freed_holds(now[0]) == [], "nor at the next watch tick"
+
+
+def test_a_calm_machines_burst_settles_by_the_count_its_admission_read(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """The spawn read a row the store ended while its window runs as a seat, the burst's
+    settlement did not: the first admit past the spawn's floor sat below the settlement's,
+    was never recorded, and three were admitted past the floor with ``busy_burst = 2``.
+    Settled by the count its admission read, the project runs the floor plus the burst,
+    by that one count, and the burst's two admits are the ones past the floor."""
+    floor = _three(project)
+    _ended_in_the_store(floor[0])
+    admitted: list[FleetAgent] = []
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        for minute in range(1, 6):
+            now[0] = NOW + timedelta(minutes=minute)
+            admitted.append(_coder(project))
+
+    message = str(held.value)
+    assert "it runs 5 live agents (busy_floor = 3)" in message, message  # 3 + busy_burst 2
+    assert "burst: 2 agents started above busy_floor in the last 5 min, busy_burst = 2" in message
+    assert [ident for _at, ident in fleet_service._burst_admits_of(project.id)] == [
+        agent.id for agent in admitted[1:]
+    ], "the admits past the floor, the first one below it"
+    assert list(fleet_service.capacity().live.values()) == [5]
+    assert fleet_service.freed_holds(now[0]) == []
 
 
 def test_a_paused_agent_is_no_seat_toward_the_busy_floor_as_on_main(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, machine: Machine
 ) -> None:
-    """The other half of main's count: a paused agent has no window and its row is ended, so
-    it holds no seat (its resume is admitted as the pause's, never auto's). Three coders, one
-    paused, on a busy machine: a fourth is admitted at 2 of the floor's 3."""
+    """A paused agent has no window and its row is ended, so it holds no seat (its resume is
+    admitted as the pause's, never auto's). Three coders, one paused, on a busy machine: a
+    fourth is admitted at 2 of the floor's 3."""
     first, _second, _third = _three(project)
     fleet_service.pause_agent(project, first.label, agent_id=first.id)
     machine.busy()
@@ -1620,54 +1662,57 @@ def test_a_paused_agent_is_no_seat_toward_the_busy_floor_as_on_main(
     ), receipt.notes
 
 
-def test_a_calm_machines_burst_counts_an_agent_the_store_ended_while_its_window_runs(
-    tmux: FakeTmux,
-    claude_on_path: Path,
-    project: ProjectInfo,
-    machine: Machine,
-    now: list[datetime],
-) -> None:
-    """The burst guard is past ``busy_floor``, by the same count: the floor's three and the
-    burst's two run, three of them ended in the store while their windows run. Counted as
-    the store's live rows, two, the project read below the floor and the sixth was admitted
-    past a full burst; counted as they run, it is held."""
-    floor = _three(project)
-    now[0] = NOW + timedelta(minutes=1)
-    _coder(project)
-    now[0] = NOW + timedelta(minutes=2)
-    _coder(project)
-    for agent in floor:
-        _ended_in_the_store(agent)
-    assert len(_live(project)) == 2
-    now[0] = NOW + timedelta(minutes=3)
-
-    with pytest.raises(fleet_service.CapacityRefused) as held:
-        _coder(project)
-
-    assert held.value.code == "capacity_busy"
-    assert "is held, nothing started: it runs 5 live agents (busy_floor = 3)" in str(held.value)
-    assert len(tmux.spawned) == 5, "nothing started"
+#: Each site that counts a project's agents, or every project's, and what it counts them for.
+COUNTS = {
+    "spawn": "the fixed cap and auto admission",
+    "_verify_cap": "the fixed cap's settlement, and the busy floor's",
+    "_after_stopping_finished": "auto admission's count after it stopped finished workers",
+    "_verify_burst": "the burst's settlement",
+    "freed_holds": "a hold's wake",
+    "_live_by_project": "`fleet capacity` (`capacity`) and the fleet-wide budget (`_admit`)",
+    "_verify_budget": "the fleet-wide budget's settlement",
+    "live_ids": "the sidebar's live total",
+}
 
 
-def test_the_count_after_stopping_finished_workers_keeps_an_agent_the_store_ended(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, machine: Machine, later: None
-) -> None:
-    """P2-W1b's stop of a finished worker frees its seat, one of the count the spawn read. The
-    count after was read again as the store's live rows, and lost a row the store has ended
-    while its window runs: four running, one finished, on a busy machine, the stop left
-    three, which is the floor, and the spawn was admitted at two."""
-    done = autostop_suite._worker(project, tmux)
-    autostop_suite._result(done)
-    _coder(project)
-    _coder(project)
-    ended = _coder(project)  # the burst's first, on a calm machine
-    _ended_in_the_store(ended)
-    machine.busy()
+def test_every_count_of_a_projects_agents_is_made_by_the_one_function() -> None:
+    """Review r36 of #113, finding 5, the manager's ruling: one count of a project's agents,
+    made by one function (``fleet._counted_agents``), which every site in :data:`COUNTS` calls
+    and none counts around: no store query a count could be made of is asked there but
+    through it, and ``spawn`` counts neither its windows (``standing``) nor its rows."""
+    import ast
 
-    with pytest.raises(fleet_service.CapacityRefused) as held:
-        _coder(project)
+    source = Path(fleet_service.__file__).read_text(encoding="utf-8")
+    functions = {
+        node.name: node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
+    }
 
-    assert held.value.code == "capacity_busy"
-    assert "is held, nothing started: it runs 3 live agents (busy_floor = 3)" in str(held.value)
-    assert done.label not in _live(project), "the finished worker was stopped"
-    assert ended.pane_id in tmux.facts
+    def called(node: ast.AST) -> set[str]:
+        return {
+            call.func.id if isinstance(call.func, ast.Name) else call.func.attr
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, (ast.Name, ast.Attribute))
+        }
+
+    missing = [name for name in COUNTS if "_counted_agents" not in called(functions[name])]
+    assert not missing, f"count their agents another way: {missing}"
+    assert "_live_by_project" in called(functions["capacity"])
+    assert "_live_by_project" in called(functions["_live_per_project"])
+    queries = {"live_fleet_agents", "live_fleet_agent_ids_written", "fleet_agents"}
+    around = {
+        name: sorted(queries & called(functions[name]))
+        for name in [*COUNTS, "capacity", "_admit_by_load", "_admit_by_burst"]
+        if name != "spawn" and queries & called(functions[name])
+    }
+    assert not around, f"count the store's rows themselves: {around}"
+    written = [
+        name for name, fn in functions.items() if "live_fleet_agent_ids_written" in called(fn)
+    ]
+    assert written == ["_counted_agents"], written
+    lens = [
+        ast.unparse(call)
+        for call in ast.walk(functions["spawn"])
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "len"
+    ]
+    assert "len(_counted_agents(store, project.id))" in lens, lens
+    assert not {"len(standing)", "len(live)"} & set(lens), "spawn counts by its own rows"

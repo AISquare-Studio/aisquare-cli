@@ -5343,7 +5343,9 @@ def spawn(
             again if placement.row.id == ended.id else placement for placement in placements
         ]
     # Running is what the window says, never the row's `ended_at` (review r8 of #113): a row
-    # ended in the store whose window runs is still an agent of the project's.
+    # ended in the store whose window runs keeps its label and its tree, and is the project's
+    # manager or the home's captain still. The project's COUNT is not these windows: it is the
+    # one count every cap, settlement, wake and `fleet capacity` reads (`_counted_agents`).
     standing = [*live, *(p for p in placements if _ended_but_running(p, views, still))]
     # Their labels and their trees are theirs too, the record's (review r9 of #113, 5).
     held = {placement.agent.label for placement in standing}
@@ -5387,10 +5389,15 @@ def spawn(
                 "`aisquare captain` attaches to it"
             )
     cap = config.max_agents_per_project
-    if isinstance(cap, int) and len(standing) >= cap:
+    # The agents the project runs, as the row's settlement (`_verify_cap`, `_verify_burst`),
+    # a hold's wake and `fleet capacity` count them: one count, read once the dead rows above
+    # are ended (review r36 of #113, finding 5).
+    with store_session() as store:
+        counted = len(_counted_agents(store, project.id))
+    if isinstance(cap, int) and counted >= cap:
         raise CapacityRefused(
             "capacity_project",
-            f"{_name(project)} already runs {len(standing)} agents "
+            f"{_name(project)} already runs {counted} agents "
             f"(max_agents_per_project = {cap}) — stop one, or raise the limit in [fleet]",
         )
     _refuse_by_group(project, spawned_by, admit=admit)
@@ -5407,11 +5414,9 @@ def spawn(
         # retry what auto held, nor to come back after a resume. Nor a paused agent's resume
         # (`auto_admit`): it brings back what the pause stopped, no new agent (review of
         # RC092-MI, round 2, M1).
-        # It counts what the fixed cap above counts, main's one count: the agents the project
-        # runs, a row the store has ended while its window runs among them (review r8 of
-        # #113), a paused agent, which has no window, not (review r36, finding 5).
+        # By the fixed cap's count above, the one count (`_counted_agents`).
         if not isinstance(cap, int) and auto_admit and role != "manager":
-            seats = _admit_by_load(project, len(standing), config, notes)
+            seats = _admit_by_load(project, counted, config, notes)
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -7419,7 +7424,9 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, seats: _Seats) -> None:
     cap = seats.cap
     if cap is None:
         return
-    live = store.fleet_agents(stored.project_id, live_only=True)
+    live = sorted(
+        _counted_agents(store, stored.project_id), key=lambda agent: (agent.created_at, agent.id)
+    )
     if len(live) <= cap or all(agent.id != stored.id for agent in live[cap:]):
         return
     store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
@@ -7521,10 +7528,7 @@ def _verify_budget(store: ContextStore, stored: FleetAgent, total: int) -> None:
     """
     if total <= 0:
         return
-    live = sorted(
-        (agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE),
-        key=lambda agent: (agent.created_at, agent.id),
-    )
+    live = sorted(_counted_agents(store), key=lambda agent: (agent.created_at, agent.id))
     if len(live) <= total or all(agent.id != stored.id for agent in live[total:]):
         return
     store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
@@ -7743,8 +7747,8 @@ def _admit_by_load(
     project: ProjectInfo, live: int, config: FleetSettings, notes: list[str]
 ) -> _Seats:
     """Auto admission (``max_agents_per_project = "auto"``) of one spawn into ``project``,
-    which runs ``live`` agents (counted as the fixed cap counts them, by their windows: a
-    paused agent is none): the seats its row is settled against, or a hold.
+    which runs ``live`` agents (the one count, :func:`_counted_agents`, which the burst's
+    settlement and a hold's wake read too): the seats its row is settled against, or a hold.
 
     The machine reads busy by the project's hold while one is in force, without a probe;
     else by the probes (:func:`core.load.read`). Not busy: admitted, any hold forgotten.
@@ -7851,10 +7855,12 @@ def _admit_by_burst(
 
 def _verify_burst(store: ContextStore, stored: FleetAgent, seats: _Seats) -> None:
     """Settle ``stored`` against ``busy_burst`` once it is written (:func:`_admit_by_burst`):
-    by its place among the project's live rows in the order they were written
-    (:meth:`~aisquare.core.store.SqliteStore.live_fleet_agent_ids_written`), not by the count
-    its spawn read before any row was written. Write order, not ``created_at``: spawns that
-    stamp in one order and write in the other each found themselves first, and all were
+    by its place among the project's agents as the one count has them
+    (:func:`_counted_agents`), in the order they were written
+    (:meth:`~aisquare.core.store.SqliteStore.live_fleet_agent_ids_written`), not by the number
+    its spawn read before any row was written. They are the rows that number counted, so an
+    admit its spawn read past the floor is past it here too. Write order, not ``created_at``:
+    spawns that stamp in one order and write in the other each found themselves first, and all were
     admitted uncounted. Below ``floor``: admitted, uncounted. At or past it: its admit is
     recorded, or the row is backed out when the burst is full.
 
@@ -7865,7 +7871,7 @@ def _verify_burst(store: ContextStore, stored: FleetAgent, seats: _Seats) -> Non
     written admits, unrecorded: a spawn is never failed by its own bookkeeping."""
     if seats.burst <= 0:
         return
-    order = store.live_fleet_agent_ids_written(stored.project_id)
+    order = [agent.id for agent in _counted_agents(store, stored.project_id)]
     if stored.id not in order or order.index(stored.id) < seats.floor:
         return
     key = _BUSY_BURST_KEY + stored.project_id
@@ -7883,7 +7889,7 @@ def _verify_burst(store: ContextStore, stored: FleetAgent, seats: _Seats) -> Non
     else:
         return
     store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
-    live = len(store.fleet_agents(stored.project_id, live_only=True))
+    live = len(_counted_agents(store, stored.project_id))
     signal = _burst_signal(seats.burst, seats.hold_minutes)
     fresh = Hold(stored.project_id, now, retry, signal, seats.project_name, burst=True)
     hold = _hold_project(store, fresh, live=live, floor=seats.floor)
@@ -8004,20 +8010,19 @@ def _hold_minutes(config: FleetSettings) -> float:
 
 
 def _after_stopping_finished(project: ProjectInfo, live: int, notes: list[str]) -> int:
-    """``project``'s finished workers stopped (P2-W1b), and its count after: ``live``, the
-    agents the spawn counted (:func:`spawn`'s ``standing``), less the ones stopped; ``live``
-    when none was. Each one stopped is a row the store had live, so one of those counted.
-    Counted again as the store's live rows, the count lost every row the store has ended
-    while its window runs, which the spawn counted (review r36 of #113, finding 5)."""
+    """``project``'s finished workers stopped (P2-W1b), and its count after, counted again as
+    every count of its agents counts them (:func:`_counted_agents`); ``live`` when none was."""
     try:
         stopped = [item.verdict for item in autostop.reap_finished([project]) if item.stopped]
+        if not stopped:
+            return live
+        with store_session() as store:
+            left = len(_counted_agents(store, project.id))
     except Exception:  # a stop that fails holds the spawn, as none would
-        return live
-    if not stopped:
         return live
     made = ", ".join(f"{v.agent.label} ({v.reason})" for v in stopped)
     notes.append(f"stopped finished workers to make room: {made}")
-    return max(live - len(stopped), 0)
+    return left
 
 
 def _held(project: ProjectInfo, live: int, floor: int, hold: Hold, now: datetime) -> str:
@@ -8076,7 +8081,7 @@ def freed_holds(now: datetime | None = None) -> list[Freed]:
         try:
             with store_session() as store:
                 project = store.get_project(hold.project_id)
-                live = len(store.fleet_agents(hold.project_id, live_only=True))
+                live = len(_counted_agents(store, hold.project_id))
         except Exception:  # asked again next tick
             continue
         if project is None:
@@ -8150,7 +8155,7 @@ def _live_by_project() -> tuple[dict[str, int], dict[str, ProjectInfo | None]]:
     counts: dict[str, int] = {}
     rows: dict[str, ProjectInfo | None] = {}
     with store_session() as store:
-        for agent in _counted_live(store):
+        for agent in _counted_agents(store):
             if agent.project_id not in rows:
                 rows[agent.project_id] = store.get_project(agent.project_id, include_forgotten=True)
             counts[agent.project_id] = counts.get(agent.project_id, 0) + 1
@@ -8177,16 +8182,39 @@ def _project_labels(
     return labels
 
 
-def _counted_live(store: ContextStore) -> list[FleetAgent]:
-    """The live agents the fleet-wide budget counts: every project's, forgotten ones'
-    included, the captain excluded."""
-    return [agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE]
+def _counted_agents(store: ContextStore, project_id: str | None = None) -> list[FleetAgent]:
+    """The agents ``project_id`` runs, every project's for ``None``, as EVERY count of them
+    counts them, read in the caller's ``store`` session: the fixed cap
+    (``max_agents_per_project``, :func:`spawn`) and its settlement (:func:`_verify_cap`),
+    auto admission (:func:`spawn`'s count, and :func:`_after_stopping_finished`'s after a
+    stop) and its burst's settlement (:func:`_verify_burst`), a hold's wake
+    (:func:`freed_holds`), ``fleet capacity`` (:func:`capacity`, through
+    :func:`_live_by_project`) and the fleet-wide budget (:func:`_verify_budget`). One count,
+    as main 0.9.2 had: the rows the store has live (a paused agent's is ended), the
+    captain's excepted, which no budget counts. A project's are in the order they were
+    written (``live_fleet_agent_ids_written``), the one order racing spawns all agree on.
+
+    Not by the windows (``spawn``'s ``standing``): the settlements decide inside the store
+    session that wrote the row, which asks tmux nothing, and a hold's wake and ``fleet
+    capacity`` read no pane. Counted by windows at the spawn and by the store at the
+    settlement and the wake, a row the store ended while its window runs was a seat to the
+    one and none to the other: a held spawn's hold was freed at once, every watch tick, and
+    an admit past the floor went unrecorded in the burst (review r36 of #113, finding 5)."""
+    if project_id is None:
+        return [agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE]
+    rows = {
+        agent.id: agent
+        for agent in store.fleet_agents(project_id, live_only=True)
+        if agent.role != CAPTAIN_ROLE
+    }
+    written = store.live_fleet_agent_ids_written(project_id)
+    return [rows[ident] for ident in written if ident in rows]
 
 
 def live_ids(store: ContextStore) -> frozenset[str]:
     """The agents live across the fleet, the captain excluded, read in the caller's ``store``
     session: as many as ``live_total`` of ``aisquare fleet capacity``."""
-    return frozenset(agent.id for agent in _counted_live(store))
+    return frozenset(agent.id for agent in _counted_agents(store))
 
 
 def live_after(counted: Collection[str], many: ManyAgents) -> int:

@@ -287,6 +287,44 @@ def test_the_state_dir_is_made_below_the_store_or_refused_on_every_platform(
     assert list(outside.iterdir()) == []
 
 
+def test_the_windows_walk_refuses_a_junction_on_the_way_on_python_3_11_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_make_below``'s Windows walk, run on every platform, as Python 3.11 sees a junction:
+    a directory whose ``lstat`` has ``FILE_ATTRIBUTE_REPARSE_POINT`` and no
+    ``os.path.isjunction`` to ask (3.12's). It is refused, nothing made below it; a plain
+    directory is walked. Mutant (``_is_junction`` asking ``os.path.isjunction`` alone, as it
+    did): 3.11 walked through the junction, and made ``manager`` where it leads (review r39
+    of #113, finding 4)."""
+    import stat
+    from types import SimpleNamespace
+
+    root = tmp_path / "home"
+    junction = root / "projects" / "prj_j"
+    junction.mkdir(parents=True)
+    (root / "projects" / "prj_d").mkdir()
+    lstat = os.lstat
+
+    def as_windows(path: str | os.PathLike[str], **kwargs: object) -> object:
+        found = lstat(path, **kwargs)  # type: ignore[arg-type]
+        if Path(path) != junction:
+            return found
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        return SimpleNamespace(st_mode=found.st_mode, st_file_attributes=reparse)
+
+    with monkeypatch.context() as patch:
+        patch.delattr(os.path, "isjunction", raising=False)
+        patch.setattr(os, "lstat", as_windows)
+        assert store_broker._is_junction(junction)
+        assert not store_broker._is_junction(root / "projects" / "prj_d")
+        assert not store_broker._is_junction(root / "nothing-there")
+        with pytest.raises(OSError, match="a link"):
+            store_broker._make_below_windows(root, ("projects", "prj_j", "manager"))
+        store_broker._make_below_windows(root, ("projects", "prj_d", "manager"))
+    assert not (junction / "manager").exists()
+    assert (root / "projects" / "prj_d" / "manager").is_dir()
+
+
 def test_a_launch_with_no_store_profile_makes_no_state_dir(board: ProjectInfo) -> None:
     """A Codex manager launched unsandboxed (``--sandbox danger-full-access``) writes its state
     file itself: its launch is as it was, and makes no manager directory. Mutant (the grant's

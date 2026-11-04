@@ -574,7 +574,8 @@ def read_below(root: Path, names: Sequence[str], limit: int) -> ReadBelow:
     byte is read: a link (``ELOOP``), a directory, a FIFO, a device or a socket is refused,
     and so is a file over ``limit``, by its size and again by what a read returns (one that
     grows meanwhile). Windows has no descriptor walk: each name is ``lstat``-ed first, a link
-    or a junction refused, then the file opened and its ``fstat`` asked as on POSIX.
+    or a junction refused, then the file opened, refused unless its ``fstat`` is the file the
+    ``lstat`` found (:func:`_open_below_windows`), and asked as on POSIX.
 
     Raises ``FileNotFoundError`` when nothing is there, and :class:`NotReadBelow`, saying
     why, for everything else it refuses; any other ``OSError`` as the system raised it."""
@@ -715,11 +716,30 @@ def _open_below_windows(root: Path, names: Sequence[str]) -> int:
     """A descriptor on ``root``/``names`` once :func:`_lstat_below_windows` found no link
     or junction on the way and a regular file there: Windows refuses to open a directory
     (``PermissionError``), so what it is is asked first, as :func:`read_below` asks the
-    descriptor after."""
-    kind = _not_regular(_lstat_below_windows(root, names).st_mode)
+    descriptor after.
+
+    The file is then opened by its name, which follows a link: one put in its place after
+    the ``lstat`` (Developer Mode lets any process make one) was read, its target's bytes in
+    a manager's start pack (review r39 of #113, finding 4). So the descriptor's ``fstat``
+    must be the file the ``lstat`` found (``st_dev`` and ``st_ino``: its volume and its file
+    id on Windows), else it is refused. Only the file's own name can be swapped so: the
+    directories above it are the store's, which no sandbox writes (the one it may is the
+    file's own, ``services.store_broker.own_state_dir``)."""
+    found = _lstat_below_windows(root, names)
+    kind = _not_regular(found.st_mode)
     if kind is not None:
         raise NotReadBelow(errno.EINVAL, f"it is {kind}, not a regular file")
-    return os.open(root.joinpath(*names), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    descriptor = os.open(root.joinpath(*names), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (found.st_dev, found.st_ino):
+            raise NotReadBelow(
+                errno.ELOOP, f"{names[-1]} was put in another file's place as it was opened"
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def credentials_path() -> Path:

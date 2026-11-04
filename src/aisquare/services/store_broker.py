@@ -1894,15 +1894,7 @@ def _make_below(root: Path, names: Sequence[str]) -> None:
     """Make ``root``/``names`` a directory, each missing name made owner-only, none followed:
     ``OSError`` for a link or a name that is not a directory on the way."""
     if sys.platform == "win32":
-        # No descriptors to walk by: each name asked before it is made, and after.
-        here = root
-        for name in names:
-            here = here / name
-            if here.is_symlink() or _is_junction(here):
-                raise OSError(errno.ELOOP, "a link", str(here))
-            here.mkdir(mode=0o700, exist_ok=True)
-            if not here.is_dir() or here.is_symlink() or _is_junction(here):
-                raise OSError(errno.ENOTDIR, "not a directory", str(here))
+        _make_below_windows(root, names)
         return
     descend = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
@@ -1921,10 +1913,31 @@ def _make_below(root: Path, names: Sequence[str]) -> None:
         os.close(descriptor)
 
 
+def _make_below_windows(root: Path, names: Sequence[str]) -> None:
+    """:func:`_make_below` with no descriptors to walk by, as on Windows: each name asked
+    before it is made, and after, a link or a junction (:func:`_is_junction`) refused."""
+    here = root
+    for name in names:
+        here = here / name
+        if here.is_symlink() or _is_junction(here):
+            raise OSError(errno.ELOOP, "a link", str(here))
+        here.mkdir(mode=0o700, exist_ok=True)
+        if not here.is_dir() or here.is_symlink() or _is_junction(here):
+            raise OSError(errno.ENOTDIR, "not a directory", str(here))
+
+
 def _is_junction(path: Path) -> bool:
-    """Whether ``path`` is a Windows junction (Python 3.12 can tell; 3.11 cannot)."""
-    is_junction = getattr(os.path, "isjunction", None)
-    return bool(is_junction is not None and is_junction(path))
+    """Whether ``path`` is a Windows junction, or any reparse point but a link (which
+    ``is_symlink`` tells), by its ``lstat``'s ``FILE_ATTRIBUTE_REPARSE_POINT``, as
+    ``paths._lstat_below_windows`` asks: Python 3.11 has it, and no ``os.path.isjunction``
+    (3.12), which this asked alone, so a junction on 3.11 was walked through (review r39 of
+    #113, finding 4). Nothing there is none; POSIX has no such attribute."""
+    try:
+        found = os.lstat(path)
+    except OSError:
+        return False
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(found, "st_file_attributes", 0) & reparse)
 
 
 #: What holds a Python environment's code under its prefix (a virtualenv, an installation,

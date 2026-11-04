@@ -242,6 +242,40 @@ def test_the_windows_walk_refuses_what_the_posix_one_does(tmp_path: Path, secret
             paths._open_below_windows(tmp_path, names)
 
 
+@pytest.mark.parametrize("swap", ["file", "link"])
+def test_the_windows_walk_refuses_a_file_swapped_in_after_its_lstat(
+    tmp_path: Path, secret: Path, monkeypatch: pytest.MonkeyPatch, swap: str
+) -> None:
+    """Windows' branch ``lstat``-s each name, then opens the file by its name, which follows
+    a link: ``state.md`` swapped for a link to a secret (or another file) between the two
+    was read (review r39 of #113, finding 4). Run on every platform, the swap made right
+    after the ``lstat``: the descriptor is not the file the ``lstat`` found, so it is refused,
+    the secret never read. Mutant (the ``fstat`` and ``lstat`` not compared): the swapped-in
+    file opens."""
+    if swap == "link" and not can_symlink():
+        pytest.skip("this machine makes no symbolic link")
+    (tmp_path / "a").mkdir()
+    state = tmp_path / "a" / "f.md"
+    state.write_text("goal", encoding="utf-8")
+    other = tmp_path / "other.md"
+    other.write_text(SECRET, encoding="utf-8")
+    walked = paths._lstat_below_windows
+
+    def then_swapped(root: Path, names: tuple[str, ...]) -> os.stat_result:
+        found = walked(root, names)
+        if swap == "link":
+            state.unlink()
+            state.symlink_to(secret)
+        else:
+            os.replace(other, state)
+        return found
+
+    monkeypatch.setattr(paths, "_lstat_below_windows", then_swapped)
+    with pytest.raises(paths.NotReadBelow, match="put in another file's place") as refused:
+        paths._open_below_windows(tmp_path, ("a", "f.md"))
+    assert SECRET not in str(refused.value)
+
+
 @posix
 def test_a_fifo_is_refused_at_once_never_waited_on(tmp_path: Path) -> None:
     """Mutants: ``O_NONBLOCK`` dropped (the open waits for a writer: past the bound), the

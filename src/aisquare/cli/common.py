@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ import typer
 from rich import box
 from rich.table import Table
 from rich.text import Text
+from typer.models import TyperPath
 
 from aisquare.core import paths
 from aisquare.core.claude_accounts import format_reset as _format_reset
@@ -1242,3 +1244,21 @@ def fail(
         # values), so this was a class of silent mangling, not one bad string.
         stderr_console().print(f"✗ {message}", markup=False)
     raise typer.Exit(exit_code)
+
+
+class AgentPath(TyperPath):
+    """The type of a path option a sandboxed agent's broker runs a command with (``task add
+    --detail-file``, ``brief evidence|finding --artifact``, ``brief check --source-root``,
+    ``watch show <path>``): there the path is taken as given, and the command judges it, the
+    launch's tree first (``services.store_broker``). Typer's own checks ``stat`` and ``access``
+    the path as the user, outside the sandbox, before that: their "is a directory" and "is not
+    readable" told the sandbox what lies at a path outside its tree, which the command's own
+    refusal says nothing of (review r38 of #113, finding 1). Any other command's path is
+    checked as it always was (a usage error)."""
+
+    def convert(self, value: str | os.PathLike[str], param: Any, ctx: Any) -> Any:
+        from aisquare.services.store_broker import brokered_call
+
+        if brokered_call():
+            return self.coerce_path_result(value)
+        return super().convert(value, param, ctx)

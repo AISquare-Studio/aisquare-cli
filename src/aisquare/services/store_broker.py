@@ -76,8 +76,9 @@ this list to it, and every board call a role's cycle teaches to it:
   session, the event naming its board, and logged: a parent manager's delegation; a
   `--detail-file` only from the launch's own tree, read as `brief evidence`'s `--artifact` is,
   and only a regular file of at most 1 MB (`MAX_DETAIL_FILE`), for its own board and a
-  member's alike: a path outside the tree, a link out of it, a FIFO or a device is refused,
-  `read_in_tree`)
+  member's alike: a path outside the tree, a link out of it, one that does not resolve, a
+  FIFO or a device is refused, and the file is opened along the path resolved, no `..`
+  climbed, `read_in_tree`)
 - `aisquare task list`
 - `aisquare task show`
 - `aisquare task claim`
@@ -463,21 +464,42 @@ def _tree_roots(source: Mapping[str, str]) -> list[Path] | None:
     return [Path(root) for root in source[ROOTS_ENV].split(os.pathsep) if root]
 
 
+def _real(path: Path) -> Path | None:
+    """``path`` as the kernel resolves it, links and ``..`` gone; ``None`` where that cannot
+    be said: a link loop on its way (``Path.resolve`` raises on 3.11 and 3.12), or a result
+    that still holds a ``..`` or ``.`` (3.13 goes on past a loop by the name as written).
+
+    Never the path as written, which :func:`_resolved` falls back to: ``is_relative_to`` is
+    lexical, so ``<tree>/A/../../x`` was taken for a place in the tree, and with ``A`` a link
+    while it was resolved and a directory while it was walked, the walk climbed out of the tree
+    and read the file there (review r38 of #113, finding 1, reopened)."""
+    try:
+        there = path.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if os.pardir in there.parts or os.curdir in there.parts:
+        return None
+    return there
+
+
 def _placed(path: Path, roots: Sequence[Path]) -> tuple[Path, Path] | str:
-    """``path`` as the kernel resolves it and the root of the tree it is in, or why it is
-    in none. A relative path is no place: it is read from the directory of whoever reads it
-    (a report's ``cwd`` or ``source_root`` of ``""`` or ``sub`` was the broker's own
-    directory, which is in the tree: review r24 of #113, finding 7)."""
+    """``path`` as the kernel resolves it (:func:`_real`) and the root of the tree it is in,
+    or why it is in none. A relative path is no place: it is read from the directory of
+    whoever reads it (a report's ``cwd`` or ``source_root`` of ``""`` or ``sub`` was the
+    broker's own directory, which is in the tree: review r24 of #113, finding 7). A path that
+    cannot be resolved is refused as one outside the tree is, in the same words: what is
+    outside is no business of the sandbox's, a link loop there included."""
     named = path.expanduser()
     if not named.is_absolute():
         return (
             f"{path} is not an absolute path: its broker reads only a place in this agent's "
             "tree that the path itself names"
         )
-    there = _resolved(named)
-    for root in roots:
-        if there == root or there.is_relative_to(root):
-            return root, there
+    there = _real(named)
+    if there is not None:
+        for root in roots:
+            if there == root or there.is_relative_to(root):
+                return root, there
     return f"{path} is outside this agent's tree: its broker reads only there"
 
 
@@ -519,11 +541,17 @@ def open_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> int | 
     if sys.platform == "win32":
         raise OutOfScope(f"{path} cannot be read safely here: a broker runs on POSIX", kind="path")
     root, there = placed
+    names = there.relative_to(root).parts
+    if any(name in (os.pardir, os.curdir) for name in names):
+        # O_NOFOLLOW stops a link, never a `..`: walked, it climbs out of the tree, whatever
+        # the path was placed by (review r38 of #113, finding 1, reopened)
+        raise OutOfScope(
+            f"{path} is outside this agent's tree: its broker reads only there", kind="path"
+        )
     walk = os.O_RDONLY | os.O_NOFOLLOW
     descriptor = -1
     try:
         descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-        names = there.relative_to(root).parts
         for name in names[:-1]:
             deeper = os.open(name, walk | os.O_DIRECTORY, dir_fd=descriptor)
             os.close(descriptor)
@@ -558,7 +586,14 @@ def read_in_tree(path: Path, limit: int, environ: Mapping[str, str] | None = Non
     of the file. A relative path is the command's own directory's, which is in the tree
     (:func:`check_cwd`). A path outside the tree is refused whether or not anything is there,
     so the refusal tells the sandbox nothing of a place it may not read; one in the tree that
-    names nothing is :class:`FileNotFoundError`, as for an unbrokered read."""
+    names nothing is :class:`FileNotFoundError`, as for an unbrokered read.
+
+    What :func:`open_in_tree` walks is the path resolved strictly, after it was placed: no link
+    and no ``..`` in it, so a directory of the way swapped for a link, or a link for a
+    directory, is met by the walk and refused, never followed or climbed out of. One that no
+    longer resolves (a link loop) is refused, never read by the name as written: a ``..`` after
+    a link that became a directory led the walk out of the tree (review r38 of #113, finding 1,
+    reopened)."""
     source = os.environ if environ is None else environ
     roots = _tree_roots(source)
     if roots is None:
@@ -569,9 +604,17 @@ def read_in_tree(path: Path, limit: int, environ: Mapping[str, str] | None = Non
     placed = _placed(named, roots)
     if isinstance(placed, str):
         raise OutOfScope(placed, kind="path")
-    if not os.path.lexists(placed[1]):
-        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
-    descriptor = open_in_tree(named, source)
+    try:  # the path walked below the tree's root is this, with no link and no `..` in it
+        real = named.resolve(strict=True)
+    except FileNotFoundError:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path)) from None
+    except RuntimeError:  # a link loop, on 3.11 and 3.12
+        raise OutOfScope(_unresolved(path), kind="path") from None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise OutOfScope(_unresolved(path), kind="path") from None
+        raise  # as an unbrokered read says it (a directory of the tree it may not search)
+    descriptor = open_in_tree(real, source)
     if descriptor is None:  # not brokered after all: never, the tree was read above
         return None
     over = f"{path} is over {limit} bytes: its broker reads a file no larger"
@@ -593,6 +636,14 @@ def read_in_tree(path: Path, limit: int, environ: Mapping[str, str] | None = Non
     if len(body) > limit:  # it grew between the stat and the read
         raise OutOfScope(over, kind="path")
     return body
+
+
+def _unresolved(path: Path) -> str:
+    """Why a path placed in the tree is not read after all: it no longer resolves."""
+    return (
+        f"{path} cannot be resolved: a link on its way loops, and its broker reads only a file "
+        "of this agent's tree it can name with no link"
+    )
 
 
 def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:
@@ -1076,7 +1127,11 @@ class Scope:
     members: tuple[str, ...] = ()
 
     def holds(self, cwd: Path) -> bool:
-        resolved = _resolved(cwd)
+        """Whether ``cwd`` is in the launch's tree, as the kernel resolves it (:func:`_real`:
+        never the path as written, ``..`` and all)."""
+        resolved = _real(cwd)
+        if resolved is None:
+            return False
         return any(resolved == root or resolved.is_relative_to(root) for root in self.roots)
 
 

@@ -734,21 +734,24 @@ def _own_detail_file(path: Path, own: frozenset[str]) -> Path:
     directory (``<watch>/<project>/<stamp>.json``); else ``OutOfScope``."""
     from aisquare.services.store_broker import OutOfScope
 
+    refused = OutOfScope(
+        f"{path} is not a watch detail file of this agent's project: a command from its "
+        "sandbox reads only the ones its own watch lines name"
+    )
     try:
         resolved = path.expanduser().resolve(strict=True)
         root = watch_dir().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise FileNotFoundError(f"{path}: no such watch detail file") from exc
+    except (OSError, RuntimeError):
+        # refused as one that is there: "no such file" told the sandbox what lies at a path
+        # outside its tree (review r38 of #113, finding 1)
+        raise refused from None
     if (
         resolved.parent.parent != root
         or resolved.suffix != ".json"
         or not resolved.is_file()
         or _project_of(resolved) not in own
     ):
-        raise OutOfScope(
-            f"{path} is not a watch detail file of this agent's project: a command from its "
-            "sandbox reads only the ones its own watch lines name"
-        )
+        raise refused
     return resolved
 
 

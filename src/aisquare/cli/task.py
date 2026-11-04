@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import io
 import json
-import os
 from pathlib import Path
-from typing import Annotated, Any, NoReturn, get_args
+from typing import Annotated, NoReturn, get_args
 
 import typer
 from rich.table import Table
-from typer.models import TyperPath
 
-from aisquare.cli.common import fail, local_time
+from aisquare.cli.common import AgentPath, fail, local_time
 from aisquare.cli.team import (
     STORE_ERRORS,
     SessionRef,
@@ -85,19 +83,6 @@ def _emit_task(task: TeamTask, *, verb: str, contract: bool = False, peek: bool 
             console.print(f"\nfull task: `aisquare task show {ref}`", markup=False)
 
 
-class _DetailFile(TyperPath):
-    """``--detail-file``'s type. A path a sandboxed agent's broker runs the add with is taken
-    as given, and judged by :func:`_detail_from` alone: the type's own ``stat`` and ``access``,
-    made as the user outside the sandbox, said of a path outside the agent's tree whether it is
-    a directory and whether the user may read it (review r38 of #113, finding 1). Any other
-    command's is checked as it always was (a directory, an unreadable file: a usage error)."""
-
-    def convert(self, value: str | os.PathLike[str], param: Any, ctx: Any) -> Any:
-        if store_broker.brokered_call():
-            return self.coerce_path_result(value)
-        return super().convert(value, param, ctx)
-
-
 @app.command("add")
 def add(
     title: Annotated[str, typer.Argument(help="What needs doing.")],
@@ -118,7 +103,7 @@ def add(
         typer.Option(
             "--detail-file",
             help="Read the contract from this file instead of --detail.",
-            click_type=_DetailFile(dir_okay=False),
+            click_type=AgentPath(dir_okay=False),
         ),
     ] = None,
     rules: Annotated[

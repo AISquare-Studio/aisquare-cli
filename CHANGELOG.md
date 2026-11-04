@@ -713,12 +713,21 @@ adapter.**
   operation, a launch, a hook, the config or an account. A file a command names is
   read there only from the launch's own tree: `task add --detail-file`, on its own
   board or a member's, reads a regular file of the tree of at most 1 MB (as much as
-  `--detail` may carry inline), opened below the tree's root with no link out of it
-  followed, as `brief evidence --artifact` is (and as there, a hard link in the tree to
-  a file outside it is not told from the tree's own); a path outside the tree, a link out of
-  it, a FIFO, a device or a larger file is refused, saying why and none of the file,
-  so the broker, which reads as the user outside the sandbox, keeps on the board
-  nothing the sandbox may not read itself (its `deny_read` too). Every refusal it or a
+  `--detail` may carry inline), as `brief evidence --artifact` reads one. The path is
+  resolved first, and the file is opened below the tree's root along that resolved path,
+  with no link followed and no `..` climbed; a path that does not resolve (a link loop on
+  its way) is refused, never opened by its name as written. A path outside the tree, a
+  link out of it, a FIFO, a device or a larger file is refused, saying why and none of
+  the file. So the broker, which reads as the user outside the sandbox, puts no file
+  outside the agent's tree on the board, and a sandbox's `deny_read` of a path outside
+  the tree (`~/.codex`) holds. One of a path inside the tree does not: the broker reads
+  any regular file of the tree the user may, and a hard link in the tree to a file
+  outside it is not told from the tree's own. A path option of those commands
+  (`--detail-file`, `--artifact`, `brief check --source-root`, `watch show <path>`) is
+  taken as given there, not checked by the user's `stat` first, and each command
+  refuses a path outside the tree in the same words whatever lies there: nothing, a
+  directory, a file the user may not read or a link (`--source-root` names the path as
+  given, not where a link leads). Every refusal it or a
   command it runs makes is logged, and a forged identity, another board's task or pool,
   a fleet operation or an unsigned request is put on its board once per launch and kind.
   Each is one line of `store-broker.log` whatever the agent's text in it holds: a line

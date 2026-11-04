@@ -21,7 +21,7 @@ import contextlib
 import os
 import sys
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -59,16 +59,27 @@ def brokered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[
 
 
 def _swapped_after_the_check(monkeypatch: pytest.MonkeyPatch, swap: Callable[[], None]) -> None:
-    """The sandbox wins the race: ``swap()`` runs right after the placement of the path, which
-    is where the name was checked and before it is opened."""
-    real = store_broker._placed
+    """The sandbox wins the race: ``swap()`` runs once, right after ``open_in_tree`` placed the
+    path, which is where the name was last checked and before it is opened. (The artifact's
+    path is placed before it is resolved too, so a refusal of one outside the tree says the
+    same whatever is there: review r38 of #113, finding 1. The swap is not made there.)"""
+    real_placed = store_broker._placed
+    real_open = store_broker.open_in_tree
+    opening = [False]
 
     def placed(path: Path, roots: Sequence[Path]) -> tuple[Path, Path] | str:
-        found = real(path, roots)
-        swap()
+        found = real_placed(path, roots)
+        if opening[0]:
+            opening[0] = False
+            swap()
         return found
 
+    def open_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> int | None:
+        opening[0] = True
+        return real_open(path, environ)
+
     monkeypatch.setattr(store_broker, "_placed", placed)
+    monkeypatch.setattr(store_broker, "open_in_tree", open_in_tree)
 
 
 # --- F6: the artifact is read from the descriptor that was checked ----------------------------

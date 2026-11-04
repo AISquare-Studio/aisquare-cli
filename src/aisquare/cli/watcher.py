@@ -13,7 +13,7 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import AgentPath, fail
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.services import store_broker
@@ -132,7 +132,10 @@ def _print_watch_status() -> None:
 
 @app.command("show")
 def show(
-    path: Annotated[Path | None, typer.Argument(help="A detail file a watch line named.")] = None,
+    path: Annotated[
+        Path | None,
+        typer.Argument(help="A detail file a watch line named.", click_type=AgentPath()),
+    ] = None,
     last: Annotated[bool, typer.Option("--last", help="The newest detail file.")] = False,
 ) -> None:
     """Print the items a ``watch`` board line counted, from the file it names."""

@@ -12,7 +12,7 @@ from typing import Annotated, TypeVar
 
 import typer
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import AgentPath, fail
 from aisquare.cli.team import (
     STORE_ERRORS,
     SessionRef,
@@ -351,7 +351,9 @@ def evidence(
     artifact: Annotated[
         Path | None,
         typer.Option(
-            "--artifact", help="The file that shows it, such as a screenshot: manual evidence."
+            "--artifact",
+            help="The file that shows it, such as a screenshot: manual evidence.",
+            click_type=AgentPath(),
         ),
     ] = None,
     report: Annotated[
@@ -395,6 +397,7 @@ def check(
         typer.Option(
             "--source-root",
             help="Compare every pass with this one checkout (the project's, or a worktree).",
+            click_type=AgentPath(),
         ),
     ] = None,
     as_session: SessionRef = None,
@@ -444,7 +447,8 @@ def finding(
     task: TaskOption,
     summary: Summary,
     artifact: Annotated[
-        Path | None, typer.Option("--artifact", help="A file that shows the failure.")
+        Path | None,
+        typer.Option("--artifact", help="A file that shows the failure.", click_type=AgentPath()),
     ] = None,
     as_session: SessionRef = None,
 ) -> None:

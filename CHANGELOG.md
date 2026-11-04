@@ -710,9 +710,17 @@ adapter.**
   (`inject`, `context list`/`search`/`preview`/`show` and `log` read that pool or
   the user pool, never another project's, past any `project switch` pin; writes
   never the user pool), and never a fleet
-  operation, a launch, a hook, the config or an account; every refusal it or a command
-  it runs makes is logged, and a forged identity, another board's task or pool, a
-  fleet operation or an unsigned request is put on its board once per launch and kind.
+  operation, a launch, a hook, the config or an account. A file a command names is
+  read there only from the launch's own tree: `task add --detail-file`, on its own
+  board or a member's, reads a regular file of the tree of at most 1 MB (as much as
+  `--detail` may carry inline), opened below the tree's root with no link out of it
+  followed, as `brief evidence --artifact` is (and as there, a hard link in the tree to
+  a file outside it is not told from the tree's own); a path outside the tree, a link out of
+  it, a FIFO, a device or a larger file is refused, saying why and none of the file,
+  so the broker, which reads as the user outside the sandbox, keeps on the board
+  nothing the sandbox may not read itself (its `deny_read` too). Every refusal it or a
+  command it runs makes is logged, and a forged identity, another board's task or pool,
+  a fleet operation or an unsigned request is put on its board once per launch and kind.
   Each is one line of `store-broker.log` whatever the agent's text in it holds: a line
   break is a space, and any other character that is not printable is escaped (`\x1b`,
   `\u202e`), so its text forges no line in the file or on a terminal showing it. A

@@ -68,7 +68,11 @@ this list to it, and every board call a role's cycle teaches to it:
   its board parented at its launch and still parents, logged: a parent manager's routed
   line points there)
 - `aisquare task add` (`--project` adds on such a member's board alone, as its launch's own
-  session, the event naming its board, and logged: a parent manager's delegation)
+  session, the event naming its board, and logged: a parent manager's delegation; a
+  `--detail-file` only from the launch's own tree, read as `brief evidence`'s `--artifact` is,
+  and only a regular file of at most 1 MB (`MAX_DETAIL_FILE`), for its own board and a
+  member's alike: a path outside the tree, a link out of it, a FIFO or a device is refused,
+  `read_in_tree`)
 - `aisquare task list`
 - `aisquare task show`
 - `aisquare task claim`
@@ -252,6 +256,13 @@ LOCAL = frozenset({"exec", "reports"})
 run for it; ``reports`` reads what ``exec`` saved. Neither writes the store."""
 MAX_REQUEST = 1_000_000
 MAX_OUTPUT = 4_000_000
+MAX_DETAIL_FILE = MAX_REQUEST
+"""The most a brokered ``task add --detail-file`` reads (:func:`read_in_tree`), in bytes: what
+the agent could hand its broker inline as ``--detail``, in a request of at most
+:data:`MAX_REQUEST`, so a file adds no size the broker would not take anyway. A contract is a
+few kilobytes, and the board prints it back whole (a claim, ``task show``, ``board --json``,
+under :data:`MAX_OUTPUT`). A larger file is refused, never cut, and a FIFO or a device, which
+would never end a read, is no file to read."""
 COMMAND_TIMEOUT = 300.0
 """Seconds a command may run: a board call waits out a locked store for its retry
 budget (``core.store``), never this long."""
@@ -524,6 +535,58 @@ def open_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> int | 
             "that was a directory is a link now",
             kind="path",
         ) from None
+
+
+def read_in_tree(path: Path, limit: int, environ: Mapping[str, str] | None = None) -> bytes | None:
+    """The bytes of the regular file ``path`` names, for a command a broker runs, read from the
+    descriptor :func:`open_in_tree` opened (in the launch's tree, no link out of it followed); or
+    ``None`` for a command that is not brokered, which reads the path as it always did.
+
+    The broker reads as the user, outside the sandbox, and what ``task add --detail-file`` reads
+    is kept on the board, its own or a member's, where the sandbox reads it back (``task show``,
+    ``board --json``): ``--detail-file ~/.codex/auth.json`` put the login there, past any
+    ``deny_read`` of the sandbox's, and a FIFO or ``/dev/zero`` held the broker's worker (review
+    r38 of #113, finding 1). So, as for ``brief evidence --artifact``, :class:`OutOfScope` for a
+    path outside the tree, a link in it to a file outside, a way in that turned into a link, a
+    FIFO, a device or a directory, and a file over ``limit`` bytes: each says why, with no byte
+    of the file. A relative path is the command's own directory's, which is in the tree
+    (:func:`check_cwd`). A path outside the tree is refused whether or not anything is there,
+    so the refusal tells the sandbox nothing of a place it may not read; one in the tree that
+    names nothing is :class:`FileNotFoundError`, as for an unbrokered read."""
+    source = os.environ if environ is None else environ
+    roots = _tree_roots(source)
+    if roots is None:
+        return None
+    named = path.expanduser()
+    if not named.is_absolute():
+        named = Path(os.getcwd()) / named
+    placed = _placed(named, roots)
+    if isinstance(placed, str):
+        raise OutOfScope(placed, kind="path")
+    if not os.path.lexists(placed[1]):
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+    descriptor = open_in_tree(named, source)
+    if descriptor is None:  # not brokered after all: never, the tree was read above
+        return None
+    over = f"{path} is over {limit} bytes: its broker reads a file no larger"
+    try:  # on the descriptor, before a file object is made of it (one refuses a directory)
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode):  # a FIFO, a device, a directory
+            raise OutOfScope(
+                f"{path} is not a regular file: its broker reads only a regular file of this "
+                "agent's tree",
+                kind="path",
+            )
+        if status.st_size > limit:
+            raise OutOfScope(over, kind="path")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with os.fdopen(descriptor, "rb") as handle:
+        body = handle.read(limit + 1)
+    if len(body) > limit:  # it grew between the stat and the read
+        raise OutOfScope(over, kind="path")
+    return body
 
 
 def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:

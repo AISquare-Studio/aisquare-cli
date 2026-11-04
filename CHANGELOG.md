@@ -207,9 +207,13 @@ adapter.**
     resume <id>`) with the pause's carry-on line, or starts it fresh with its claims when no
     thread was bound; `fleet relabel` moves the label its launch record holds too, so the new
     label finds it and the old one names nothing, and its window is renamed where its record
-    places it; Stop's *Don't ask again* stops it gracefully, by its exit command, and the Stop
-    dialog's line names the command the stop types into the agent it stops
-    (`AgentAdapter.exit_command`), never `/exit` as text; a project rename renames the sessions
+    places it; Stop's *Don't ask again* stops it gracefully, by its exit command, and what a
+    screen says the stop types is asked of the one resolver `fleet stop` types
+    (`fleet.exit_command_for`, the agent's `AgentAdapter.exit_command`), never `/exit` as text:
+    the Stop dialog's line (for an agent this install does not know too, the default's, as the
+    stop types it), the agent view's Stop tooltip, and the bulk stop's and pause's line, which
+    names the one command its agents share or says each is sent its own, as `fleet stop`'s and
+    `fleet pause`'s help do; a project rename renames the sessions
     its launch records name, by tmux's id; `fleet top` reads its spend off its rollout by its
     own reader, and its processes as its pane's tree; a tell (typed, or queued to a busy Codex
     by `codex queue`, whose marker a queue that failed takes back), a spawn's first message, a

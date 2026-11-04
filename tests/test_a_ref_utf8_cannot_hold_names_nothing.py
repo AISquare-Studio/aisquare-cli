@@ -232,6 +232,33 @@ def test_a_passthrough_s_own_arguments_are_asked_before_and_after_its_double_das
     assert not [ran for ran in swept.ran if ran[0] in PASSTHROUGH], swept.ran
 
 
+@pytest.mark.parametrize("json_led", [False, True], ids=["text", "--json"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--profile", "exec", "--", "fleet", "stop", BAD],
+        ["--profile=exec", "task", "add", "--", BAD],
+        ["--profile", "launch", "task", "add", "--", BAD],
+    ],
+    ids=["--profile exec -- fleet stop", "--profile=exec task add --", "--profile launch …"],
+)
+def test_a_root_option_s_value_naming_a_passthrough_command_exempts_nothing(
+    runner: CliRunner, swept: Swept, argv: list[str], json_led: bool
+) -> None:
+    """``--profile exec`` names a profile, not the command ``exec``: walked as a command, the
+    tail after the ``--`` was let through, and ``fleet stop x$'\\xff'`` a traceback again
+    (r39's tester, seq 10988). Mutant (``_named_command`` skipping no option's value): the
+    command after it runs with the byte."""
+    if json_led:
+        result = runner.invoke(app, ["--json", *argv])
+        assert result.exit_code == 2, (argv, result.output, result.exception)
+        answer = json.loads(result.stdout)
+        assert answer["error"] == "usage" and SAID in answer["message"], answer
+    else:
+        _refused_in_words(runner, argv)
+    assert swept.ran == [], swept.ran
+
+
 def test_with_json_the_refusal_is_one_usage_object(runner: CliRunner, swept: Swept) -> None:
     """``--json`` before any command: ``{"error": "usage"}``, its message the same words."""
     for path in swept.leaves:
@@ -337,6 +364,8 @@ def test_a_fleet_spawn_keeps_the_byte_escaped_in_what_it_records_and_runs(
     assert isinstance(record, launch_seal.LaunchRecord), record
     assert record.spec.command[-2:] == ["--resume", "x\\udcff"], record.spec
     assert fleet_command(tmux)[-2:] == ["--resume", "x\\udcff"]
+    said = "1 of the agent's arguments held a byte that is not UTF-8 (x\\udcff)"
+    assert any(note.startswith(said) for note in agent.notes), agent.notes  # mutant: unsaid
 
 
 # --- the services, for their callers that are not the CLI ----------------------------------

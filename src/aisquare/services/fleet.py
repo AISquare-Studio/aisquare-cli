@@ -5077,6 +5077,7 @@ def spawn(
     record and the row hold only text, and the window runs what they hold, so a restart
     replays what the spawn ran (one held raw failed the record's write: r39 reopen of #113).
     """
+    undecodable = [argument for argument in agent_args if not names_core.holds_utf8(argument)]
     agent_args = [names_core.as_text(argument) for argument in agent_args]
     config = settings()
     _require_role(role)
@@ -5115,6 +5116,12 @@ def spawn(
     srv = server(config)
     _require_tmux(srv)
     notes: list[str] = []
+    if undecodable:  # said, as the agent runs what it was given otherwise
+        notes.append(
+            f"{len(undecodable)} of the agent's arguments held a byte that is not UTF-8 "
+            f"({names_core.as_text(undecodable[0])}): it runs, and is recorded, with the byte "
+            "escaped as shown"
+        )
     # A replay starts the binary its spec recorded or, once that has left the PATH,
     # today's of the same kind (`_launch_binary`); the family follows that binary.
     chosen = binary

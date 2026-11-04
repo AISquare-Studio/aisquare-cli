@@ -532,15 +532,20 @@ def test_a_record_that_no_longer_matches_its_hooks_file_reads_untrusted(tmp_path
     assert _readiness(home) == "unverified"
 
 
+@pytest.mark.parametrize("last", ["ends", "open"], ids=["final-line-end", "no-final-line-end"])
 @pytest.mark.parametrize("nl", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_a_config_toml_keeps_its_own_line_ends_through_connect_reconnect_and_disconnect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nl: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nl: str, last: str
 ) -> None:
     """r37, finding 1 (MAJOR): the file was decoded with its CRLF kept and written back as
     text, so on Windows each CRLF line landed as ``\\r\\r\\n``, no TOML at all (the user's
     ``features.hooks = false`` lost with it), and an LF file came back CRLF. It is read and
     written as bytes: every line aisquare adds ends as the file's own do, on every platform,
-    and a disconnect gives back the very bytes the user had."""
+    and a disconnect gives back the very bytes the user had, for a file that ends in a line
+    end. One whose last line has none (Notepad's) gains exactly one, in the file's own style,
+    after every byte of the user's, and its TOML is the same: review r38 of #113 ruled that
+    acceptable (finding 5), since taking it off again could take off a line end the user has
+    typed since."""
     home = tmp_path / "codex"
     home.mkdir()
     theirs = nl.join(
@@ -552,15 +557,19 @@ def test_a_config_toml_keeps_its_own_line_ends_through_connect_reconnect_and_dis
             "",
             '[projects."/work/repo"]',
             'trust_level = "trusted"',
-            "",
         ]
     ).encode("utf-8")
+    if last == "ends":
+        theirs += nl.encode("utf-8")
+    # From connect on, the file holds the user's bytes and, where their last line has no
+    # line end, exactly one of the file's own style after them.
+    kept = theirs if last == "ends" else theirs + nl.encode("utf-8")
     (home / "config.toml").write_bytes(theirs)
     runner = CliRunner()
 
     def lines_end_as_theirs() -> bytes:
         written = (home / "config.toml").read_bytes()
-        assert written.startswith(theirs), "every byte of the user's kept"
+        assert written.startswith(kept), "every byte of the user's kept, then a line end"
         assert b"\r\r" not in written
         if nl == "\n":
             assert b"\r" not in written
@@ -583,7 +592,9 @@ def test_a_config_toml_keeps_its_own_line_ends_through_connect_reconnect_and_dis
 
     gone = runner.invoke(app, ["agents", "disconnect", "codex", "--config-dir", str(home)])
     assert gone.exit_code == 0, gone.output
-    assert (home / "config.toml").read_bytes() == theirs
+    back = (home / "config.toml").read_bytes()
+    assert back == kept, "the user's very bytes, and one line end of theirs where none ended them"
+    assert tomllib.loads(back.decode("utf-8")) == tomllib.loads(theirs.decode("utf-8"))
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX modes, not as root")

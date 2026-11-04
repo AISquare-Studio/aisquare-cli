@@ -942,6 +942,28 @@ adapter.**
   expired a `first-prompt:`, `fleet-stopped:` or `launch-refused:` key. They go with their
   rows, sessions and project now, and the plan counts each key once.
 
+- **A Codex agent runs every command the board tells it to, and its kickoff's claim works**
+  (SMOKE12 F1, F4, on Codex 0.166.0). Its sandbox refused `aisquare team show <seq>`, the
+  pointer every cut update line ends with, because the store broker did not run it, and
+  `aisquare watch show <path>`, the one a manager's watch line names. Both run through the
+  broker now, each on the launch's own board or project alone: `watch show` reads only a
+  detail file of the agent's own project, never another path. The watcher itself (`watch`,
+  `--detach`, `--stop`) is refused as a fleet operation is, with the same advice: ask for it
+  to run outside the sandbox. A Codex session is no longer told to run
+  `aisquare project list` or `aisquare project group parent`, which list or set the whole
+  machine's projects. A test renders every text aisquare hands a Codex agent (its board,
+  start pack, cycle, kickoffs, update and wake lines, the watch line, restart and hand-off
+  lines, a brief's hint, the claim's hint and the team errors) and holds each command it
+  names to the broker. A Codex kickoff is built before its session exists, so it said
+  `task claim <id> --as <label>`, cut to 8 characters (`--as coder-01` for `coder-01m6j729`).
+  No label resolved, and the CLI reported the missing session as the task: "nothing matches
+  '<task id>'". Now `--as` takes a live fleet label of the caller's project (its own fleet
+  row's, else its directory's) as that agent's current session. A label that is also another
+  session's id prefix is ambiguous. The kickoff names the label whole, and a session that is
+  not there reads "no session matches '<ref>'", with "has no session yet" for an agent whose
+  first hook has not run. Under the broker, `--as` still acts only as the launch's own
+  session.
+
 - **Ids made in one clock tick sort in the order they were made, and a turn's later notices
   keep their place after its first** (#29). `task add` in a loop, a Remote batch, or any
   burst of rows read the same millisecond (a Windows clock reads the same one for ~15 ms),

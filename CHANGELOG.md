@@ -221,16 +221,21 @@ adapter.**
     a project rename renames the sessions its launch records name, by tmux's id, and its old
     codename still finds it in every agent's `--project`; `fleet top` reads its spend off its rollout by its
     own reader, and its processes as its pane's tree; a tell (typed, or queued to a busy Codex
-    by `codex queue`, whose marker a queue that failed takes back), a spawn's first message, a
-    wake and the upkeep line leave the marker its `UserPromptSubmit` records as its turn's
-    origin, and a command in a Codex tool shell is an agent's, as one is wherever an agent's
-    `AgentCapabilities.process_env` is set (Claude Code's `CLAUDECODE`; Codex sets none in its
-    hooks, measured on 0.164.0); auto admission holds a Codex coder on a busy machine and
+    by `codex queue`, whose marker a queue that failed takes back, and which waits for the turn
+    the queue starts however long the turn before it runs, while the agent in its pane runs,
+    up to a day), a spawn's first message, a wake and the upkeep line leave the marker its
+    `UserPromptSubmit` records as its turn's origin, and a command in a Codex tool shell is an
+    agent's, as one is wherever an agent's `AgentCapabilities.process_env` is set (Claude
+    Code's `CLAUDECODE`, which no tmux client hands a server it starts, so no pane there
+    inherits it; Codex sets none in its hooks, measured on 0.164.0); auto admission holds a
+    Codex coder on a busy machine and
     never a Codex manager; the Accounts table with Codex rows still fits 160 columns, the agent
     mark inside the name's 12 cells; the live count, Active only, the "1 account" line and the
     real repository names count every agent's rows; `aisquare outcomes` reads who steered a
     Codex session off its rollout by its own reader (`AgentTranscript.facts`: a prompt, a Stop
-    hook's continuation, an Esc, an approval refused, a patch applied), so its week counts its
+    hook's continuation, an Esc, an approval refused, a patch applied; with the files its
+    reader names as the session's, `related_files`: Claude Code's subagents', none of Codex's;
+    a session of an agent this install does not know read by no reader), so its week counts its
     files edited, interrupts and denials, and a turn from before origins were recorded has its
     origin inferred, as a Claude Code session's does. Main's hook launcher change (its pinned
     release) is in the Codex plugin's copy too, and CI is main's with its Dependabot bumps, this

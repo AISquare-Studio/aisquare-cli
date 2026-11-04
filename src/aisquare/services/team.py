@@ -4459,14 +4459,25 @@ def rules_dir(root: Path) -> Path:
     return root / ".aisquare" / "rules"
 
 
-def _state_lines(path: Path, now: datetime) -> list[str]:
-    """The pack's resume section: the state file, clipped, with its age; or where to write
-    one."""
+def _state_lines(project_id: str, now: datetime) -> list[str]:
+    """The pack's resume section: ``project_id``'s manager's state file, clipped, with its
+    age; or where to write one; or why it was not read. Read through
+    ``paths.read_manager_state``, below the home with no link followed, a regular file of a
+    bounded size or nothing: a sandboxed manager may write its directory, and this runs
+    outside any sandbox (#78 reopen). What it would not read is never quoted."""
+    path = paths.manager_state_file(project_id)
     try:
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
-        written = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-    except OSError:
+        read = paths.read_manager_state(project_id)
+    except FileNotFoundError:
         return [f"Resume: no state file yet: write one at {path} before you stop."]
+    except OSError as exc:
+        why = exc.strerror or type(exc).__name__
+        return [
+            f"Resume: your state file {path} was not read ({why}): write it there again as a "
+            "plain file before you stop."
+        ]
+    text = read.data.decode("utf-8", errors="replace").strip()
+    written = datetime.fromtimestamp(read.info.st_mtime, tz=UTC)
     head = f"Resume: your state file {path} (written {age_text(written, now)} ago):"
     if len(text) > _STATE_CLIP:
         clipped = text[:_STATE_CLIP].rstrip()
@@ -4570,7 +4581,7 @@ def _start_pack(
     ]
     if assigned is not None:
         head += _assignment_lines(assigned, me)
-    head += _state_lines(paths.manager_state_file(home.id), now)
+    head += _state_lines(home.id, now)
     tail = _rules_lines(home.root)
     tail += _parent_briefing(store, home.id)
     tail += _protocol_lines(

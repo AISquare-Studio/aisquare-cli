@@ -1667,7 +1667,10 @@ def own_state_dir(env: Mapping[str, str], store: Path, cwd: Path) -> tuple[Path 
     write out of it: a sandbox writes where a link leads only where it may write there (the
     same measure). An empty file where a directory is named, the one a Codex sandbox leaves
     for a path its profile named that was not there (``launch_seal.ensure_dir``), is made
-    the directory. Refused, the agent runs without it: its state-file writes ask, as before."""
+    the directory. Refused, the agent runs without it: its state-file writes ask, as before.
+    What the sandbox writes there, aisquare reads outside it (the start pack, a quiet
+    compaction's freshness) only through ``paths.read_manager_state``: below the home, no
+    link followed, a regular file of a bounded size, never a FIFO waited on (#78 reopen)."""
     from aisquare.services import team
 
     wanted = team.own_state_dir(

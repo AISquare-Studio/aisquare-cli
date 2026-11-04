@@ -23,7 +23,8 @@ import os
 import stat
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -520,8 +521,144 @@ def brief_evidence_dir(project_id: str, brief_id: str) -> Path:
 def manager_state_file(project_id: str) -> Path:
     """Where a project's manager keeps its state (P1 WS-4, #281): goal, decisions, open items
     and next step, rewritten as a plan step completes. Its start pack reads it back after a
-    compaction or a restart, and a quiet compaction waits for a fresh one."""
+    compaction or a restart, and a quiet compaction waits for a fresh one: each through
+    :func:`read_manager_state`, never a plain open, as a sandboxed manager may write its
+    directory (``services.store_broker.own_state_dir``)."""
     return project_data_dir(project_id) / "manager" / "state.md"
+
+
+#: The most of a manager's state file aisquare reads (:func:`read_manager_state`): 16 times
+#: what its cycle asks it to keep (``harness.STATE_FILE_MAX`` characters, 4 bytes each at most).
+MANAGER_STATE_LIMIT = 64 * 1024
+
+
+class NotReadBelow(OSError):
+    """A file :func:`read_below` would not read, and why (``strerror``): never a missing one,
+    which is ``FileNotFoundError``."""
+
+
+@dataclass(frozen=True)
+class ReadBelow:
+    """What :func:`read_below` read: the file's bytes, and its ``fstat`` from the descriptor
+    they were read through."""
+
+    data: bytes
+    info: os.stat_result
+
+
+def read_manager_state(project_id: str) -> ReadBelow:
+    """The state file of ``project_id``'s manager (:func:`manager_state_file`), read below the
+    aisquare home by :func:`read_below` at most :data:`MANAGER_STATE_LIMIT` bytes. Its
+    directory is the one a sandboxed manager's launch lets its sandbox write (SMOKE13 N1),
+    and aisquare reads this file outside any sandbox at every manager's start: a link there
+    to ``/dev/zero`` read without end, a FIFO hung the hook, and a link to a file outside
+    (``~/.ssh/…``) would have put that file in the start pack (#78 reopen). Raises
+    ``FileNotFoundError`` for none, :class:`NotReadBelow` for anything but a regular file
+    there."""
+    return read_below(
+        aisquare_home(),
+        ("projects", project_id, "manager", "state.md"),
+        MANAGER_STATE_LIMIT,
+    )
+
+
+def read_below(root: Path, names: Sequence[str], limit: int) -> ReadBelow:
+    """Read the file ``root``/``names`` when it is a regular file of at most ``limit`` bytes,
+    reached from ``root`` one name at a time with no link followed: what aisquare reads,
+    outside any sandbox, of a directory a sandbox may write.
+
+    Each name is one component, never ``.``, ``..`` or empty (:class:`NotReadBelow`), so the
+    walk cannot climb out of ``root``. On POSIX each directory is opened from the one before
+    with ``O_NOFOLLOW``, and the file too, with ``O_NONBLOCK`` (a FIFO opens at once, with no
+    writer, and is then refused, never read) and ``O_NOCTTY``. Its ``fstat`` decides before a
+    byte is read: a link (``ELOOP``), a directory, a FIFO, a device or a socket is refused,
+    and so is a file over ``limit``, by its size and again by what a read returns (one that
+    grows meanwhile). Windows has no descriptor walk: each name is ``lstat``-ed first, a link
+    or a junction refused, then the file opened and its ``fstat`` asked as on POSIX.
+
+    Raises ``FileNotFoundError`` when nothing is there, and :class:`NotReadBelow`, saying
+    why, for everything else it refuses; any other ``OSError`` as the system raised it."""
+    for name in names:
+        if name in ("", ".", "..") or "/" in name or os.sep in name or (os.altsep or "/") in name:
+            raise NotReadBelow(errno.EINVAL, f"{name!r} is not one name below {root}")
+    if not names:
+        raise NotReadBelow(errno.EINVAL, f"no file named below {root}")
+    if sys.platform == "win32":
+        descriptor = _open_below_windows(root, names)
+    else:
+        descriptor = _open_below_posix(root, names)
+    try:
+        info = os.fstat(descriptor)
+        kind = _not_regular(info.st_mode)
+        if kind is not None:
+            raise NotReadBelow(errno.EINVAL, f"it is {kind}, not a regular file")
+        if info.st_size > limit:
+            raise NotReadBelow(errno.EFBIG, f"it is {info.st_size:,} bytes, over {limit:,}")
+        chunks: list[bytes] = []
+        size = 0
+        while size <= limit:
+            chunk = os.read(descriptor, limit + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > limit:
+            raise NotReadBelow(errno.EFBIG, f"it grew over {limit:,} bytes while read")
+        return ReadBelow(b"".join(chunks), info)
+    finally:
+        os.close(descriptor)
+
+
+def _not_regular(mode: int) -> str | None:
+    """What a file of ``mode`` is when it is not a regular file, in words; ``None`` for one."""
+    for test, said in (
+        (stat.S_ISDIR, "a directory"),
+        (stat.S_ISFIFO, "a FIFO"),
+        (stat.S_ISLNK, "a symbolic link"),
+        (stat.S_ISSOCK, "a socket"),
+        (stat.S_ISCHR, "a device"),
+        (stat.S_ISBLK, "a device"),
+    ):
+        if test(mode):
+            return said
+    return None if stat.S_ISREG(mode) else "not a regular file"
+
+
+def _open_below_posix(root: Path, names: Sequence[str]) -> int:
+    """A descriptor on ``root``/``names``, each name opened from the last with ``O_NOFOLLOW``."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    descend = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    final = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+    descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for at, name in enumerate(names):
+            last = at == len(names) - 1
+            try:
+                deeper = os.open(name, final if last else descend, dir_fd=descriptor)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP or (not last and exc.errno == errno.ENOTDIR):
+                    what = "a symbolic link" if exc.errno == errno.ELOOP else "not a directory"
+                    raise NotReadBelow(exc.errno, f"{name} on the way is {what}") from None
+                raise
+            os.close(descriptor)
+            descriptor = deeper
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_below_windows(root: Path, names: Sequence[str]) -> int:
+    """A descriptor on ``root``/``names``, each name ``lstat``-ed first: a link or a junction
+    refused (Windows has no ``O_NOFOLLOW`` and no descriptor walk)."""
+    here = root
+    for name in names:
+        here = here / name
+        found = os.lstat(here)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(found.st_mode) or getattr(found, "st_file_attributes", 0) & reparse:
+            raise NotReadBelow(errno.ELOOP, f"{name} on the way is a link or a junction")
+    return os.open(here, os.O_RDONLY | getattr(os, "O_BINARY", 0))
 
 
 def credentials_path() -> Path:

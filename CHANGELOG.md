@@ -1051,7 +1051,13 @@ adapter.**
   store becomes writable. A link or a non-directory on the way is refused and named, and
   the agent then asks as before. A launch decides it from the role, for any agent that
   sandboxes its tools, and every other seat gets nothing. A Claude Code manager already
-  wrote the file freely.
+  wrote the file freely. aisquare reads the file outside the sandbox, for the start pack
+  and for a quiet compaction's freshness check. It reads it only as a regular file of at
+  most 64 KiB, reached from the home without following a link. A link, a FIFO, a
+  directory or an oversize file there is refused, and the start pack says why. A link to
+  `/dev/zero` read without end, a FIFO hung the hook, and a link to a secret outside the
+  home would have put that secret in the start pack. A link to a file someone else keeps
+  fresh no longer passes for a fresh state file.
 
 - **`agents disconnect` removes a hooks file aisquare created and left empty** (SMOKE13 N2).
   Disconnect left `{}` (3 bytes) in the `hooks.json` that connect had made in a Codex home

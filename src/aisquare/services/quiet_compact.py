@@ -155,11 +155,19 @@ def _reader(session: TeamSession | None) -> AgentTranscript | None:
     return adapter.transcript_reader if adapter is not None else None
 
 
-def _state_age(path: Path) -> datetime | None:
+def _state_age(project_id: str) -> datetime | str:
+    """When ``project_id``'s manager last wrote its state file, from the descriptor
+    ``paths.read_manager_state`` read it through; else why there is none to go by: a link, a
+    FIFO or anything but a regular file of a bounded size there is not its state, and a link
+    to a file someone else keeps fresh would have passed for a fresh one (#78 reopen)."""
+    state = paths.manager_state_file(project_id)
     try:
-        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-    except OSError:
-        return None
+        read = paths.read_manager_state(project_id)
+    except FileNotFoundError:
+        return f"it has no state file at {state}"
+    except OSError as exc:
+        return f"its state file at {state} was not read ({exc.strerror or type(exc).__name__})"
+    return datetime.fromtimestamp(read.info.st_mtime, tz=UTC)
 
 
 def _last_wake(store: ContextStore, session: TeamSession, cursor: int) -> datetime | None:
@@ -214,10 +222,9 @@ def refusal(
         minutes=settings.quiet_compact_cooldown
     ):
         return f"it was compacted {int((now - mark.typed_at).total_seconds() // 60)} min ago"
-    state = paths.manager_state_file(agent.project_id)
-    written = _state_age(state)
-    if written is None:
-        return f"it has no state file at {state}"
+    written = _state_age(agent.project_id)
+    if isinstance(written, str):
+        return written
     if now - written > timedelta(minutes=settings.quiet_compact_state_max_age):
         return f"its state file is {int((now - written).total_seconds() // 60)} min old"
     woken = _last_wake(store, session, cursor)

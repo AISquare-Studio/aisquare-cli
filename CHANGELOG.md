@@ -75,17 +75,17 @@ adapter.**
   spawn, restart or switch onto a slot aisquare made installs and trusts the hooks there before
   anything is stopped or started, or refuses saying why: a hop onto a slot with none started
   the agent blind, its session never on the board. Codex's own home, which aisquare did not
-  make, is never written at a launch: where `agents disconnect` left it without hooks, the
-  launch is refused before anything is stopped, naming `aisquare agents connect codex`. A
-  Claude Code spawn, restart or switch writes nothing in its home and refuses nothing new, as
-  before: its hooks come with aisquare's plugin and its launch. A hand-over's mark leaves a
-  session that ended ended, where it brought one back to the board as a live teammate for
-  good. Every fleet Codex window runs `--no-daemon`: its `-c` overrides keep Codex off its
-  shared background server anyway, and asked, 0.166.0 shows no "requires embedded mode"
-  warning in the pane. The bulk dialog's Tab goes from *Managers only* to Confirm to Cancel,
-  and a focused Confirm shows Cancel's band. Its list stays out of Tab, and ↑ ↓, PgUp, PgDn,
-  Home and End scroll it from any of the three, so the agents past its twentieth row are read
-  by keyboard too.
+  make, is never written at a launch: where it is not connected, never or since
+  `agents disconnect`, the launch is refused before anything is stopped, naming
+  `aisquare agents connect codex`. A Claude Code spawn, restart or switch writes nothing in its
+  home and refuses nothing new, as before: its hooks come with aisquare's plugin and its
+  launch. A hand-over's mark leaves a session that ended ended, where it brought one back to
+  the board as a live teammate for good. Every fleet Codex window runs `--no-daemon`: its `-c`
+  overrides keep Codex off its shared background server anyway, and asked, 0.166.0 shows no
+  "requires embedded mode" warning in the pane. The bulk dialog's Tab goes from *Managers
+  only* to Confirm to Cancel, and a focused Confirm shows Cancel's band. Its list stays out of
+  Tab, and ↑ ↓, PgUp, PgDn, Home and End scroll it from any of the three, so the agents past
+  its twentieth row are read by keyboard too.
 - What each Claude Code feature does on Codex, as observed in eleven live smoke
   tests (SMOKE8 on 0.8.2's personas, captain, Spawn dialog, info line, hand-off and
   `--all` on Codex 0.164.0 and 0.162.1; the last, SMOKE11, 13/13 on Codex 0.164.0

@@ -762,7 +762,7 @@ adapter.**
   (`asq exec -- grep $'\xff' f`), but for a positional of the command's own filled from
   there (`launch -- $'\xff'` names the role); `exec`'s report keeps it escaped, and a
   fleet spawn's agent arguments are recorded, and so run, escaped, as a restart replays
-  them.
+  them, and its receipt says so.
   The sandbox writes three paths in the store: its launch's broker inbox, its
   launch's `reports/` (`asq exec`, above), and a manager's own state directory (below).
   So nothing that a replay,

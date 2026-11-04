@@ -393,38 +393,97 @@ def test_a_claude_code_spawn_into_the_server_ssh_started_is_refused_from_anywher
     assert claude.pane_id in tmux.facts and tmux.options == {}, "the Mac's server: unmarked"
 
 
+def _row_now(project: Any, agent_id: str) -> tuple[object, object]:
+    """Whether the store has ended the row ``agent_id``, and by whom: what a refusal before the
+    stop leaves as it was."""
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        [now] = [r for r in store.fleet_agents(project.id) if r.id == agent_id]
+    return now.ended_at, now.ended_by
+
+
+@pytest.mark.parametrize("at", ["ssh", "the-mac"])
 def test_a_restart_into_the_server_ssh_started_refuses_before_it_records_the_dead_row(
     tmux: Any,
     claude_on_path: Path,
     codex_on_path: Path,
     project: Any,
     monkeypatch: pytest.MonkeyPatch,
+    at: str,
 ) -> None:
     """``restart`` refuses all that does not depend on the stop before anything is stopped or
-    recorded. A Claude Code row whose Mac server exited, restarted from SSH while a Codex
-    spawn there started the next server, would join a server it cannot read its login in:
-    refused first, with the row as it was."""
-    from aisquare.core.store import store_session
-
+    recorded. A Claude Code row whose Mac server exited, restarted while a Codex spawn from
+    SSH started the next server, would join a server it cannot read its login in, from SSH
+    and from the Mac alike (every pane of it is in the SSH login's session): refused first,
+    with the row as it was. At the Mac the check is still asked of the marked server; main's
+    ``if not remote: return`` recorded the row ``died`` and only the replacement's spawn
+    refused (tester of #56, seq 10312)."""
     agent = fleet_service.spawn(project, "coder").agent  # at the Mac
     tmux.kill_server()  # the Mac's server exited
     monkeypatch.setattr(login_session, "remote_session", lambda: True)
     fleet_service.spawn(project, "coder", agent="codex", worktree=False)  # SSH starts the next
-
-    def row() -> tuple[object, object]:
-        with store_session() as store:
-            [now] = [r for r in store.fleet_agents(project.id) if r.id == agent.id]
-        return now.ended_at, now.ended_by
-
-    before = (row(), list(tmux.typed), len(tmux.spawned))
+    monkeypatch.setattr(login_session, "remote_session", lambda: at == "ssh")
+    before = (_row_now(project, agent.id), list(tmux.typed), len(tmux.spawned))
 
     with pytest.raises(fleet_service.FleetError) as refused:
         fleet_service.restart(project, agent.label)
 
-    assert (row(), list(tmux.typed), len(tmux.spawned)) == before, "nothing recorded or started"
+    assert (_row_now(project, agent.id), list(tmux.typed), len(tmux.spawned)) == before, (
+        "nothing recorded or started"
+    )
     assert str(refused.value).startswith(
         f"cannot restart {agent.label!r}: not started: {fleet_service.SSH_STARTED_REFUSAL}"
     ), str(refused.value)
+
+
+@pytest.mark.parametrize("at", ["ssh", "the-mac"])
+def test_a_take_over_onto_claude_code_in_the_server_ssh_started_refuses_before_the_stop(
+    tmux: Any,
+    claude_on_path: Path,
+    codex_on_path: Path,
+    project: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    at: str,
+) -> None:
+    """A take-over is asked of the agent it starts on (``to_agent``), not the row's: a Codex
+    row in the server an SSH login started, taken over by Claude Code, would put Claude Code
+    in a pane that cannot read its Keychain login. Refused before the stop, from SSH and from
+    the Mac, with the Codex row as it was (tester of #56, seq 10312: asked of the row's own
+    agent, the stop ran and recorded it first)."""
+    _no_server(tmux, monkeypatch)
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    monkeypatch.setattr(login_session, "remote_session", lambda: at == "ssh")
+    before = (_row_now(project, agent.id), list(tmux.typed), len(tmux.spawned))
+
+    with pytest.raises(fleet_service.FleetError) as refused:
+        fleet_service.restart(project, agent.label, fresh=True, to_agent="claude-code")
+
+    assert fleet_service.SSH_STARTED_REFUSAL in str(refused.value), str(refused.value)
+    assert (_row_now(project, agent.id), list(tmux.typed), len(tmux.spawned)) == before, (
+        "nothing stopped, recorded or started"
+    )
+
+
+def test_a_take_over_onto_codex_from_ssh_starts_the_server_and_marks_it(
+    tmux: Any,
+    claude_on_path: Path,
+    codex_on_path: Path,
+    project: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other way round: a Claude Code row whose Mac server exited, taken over by Codex from
+    SSH, starts the server for Codex, whose login is a file, and marks it as an SSH login's.
+    Asked of the row's own agent it was refused for Claude Code's Keychain (tester of #56)."""
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent  # at the Mac
+    tmux.kill_server()
+    monkeypatch.setattr(login_session, "remote_session", lambda: True)
+
+    receipt = fleet_service.restart(project, agent.label, fresh=True, to_agent="codex")
+
+    assert receipt.started.agent == "codex" and tmux.running, "the server started, for Codex"
+    assert receipt.started.pane_id in tmux.facts
+    assert tmux.options == {fleet_service.SSH_STARTED_OPTION: "1"}, "marked as SSH's"
 
 
 def test_a_sign_in_window_asks_the_agent_of_its_slot(

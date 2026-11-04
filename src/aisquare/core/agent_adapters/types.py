@@ -2218,8 +2218,10 @@ class AgentAccounts(Protocol):
     def refresh_args(self) -> tuple[str, ...]:
         """Arguments to the agent's binary that renew a slot's stale token quietly and wait for
         the answer: no terminal, no turn, no request to a model. They run headless, in the
-        slot's session environment, when a usage read finds its token expired or refused
-        (``services.claude_accounts._refresh_stale``). The row reads ``token_refreshing`` while
+        slot's session environment, when a usage read sent with its token (:attr:`network_usage`)
+        finds the token expired or refused (``services.claude_accounts._refresh_stale``, which
+        claims the refresh for the login the reading belongs to, :meth:`login_fingerprint` for
+        an agent other than Claude Code). The row reads ``token_refreshing`` while
         they run, then the login is read again. One retry follows a minute later, and only
         then is a log-in asked for. Claude Code's are ``mcp get`` of a server no one can
         have.

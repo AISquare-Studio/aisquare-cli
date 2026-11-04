@@ -232,6 +232,36 @@ def test_a_refresh_that_does_not_take_keeps_the_last_reading_and_retries_after_a
     assert _row(work) is None
 
 
+def test_a_round_that_runs_no_refresh_reads_the_login_no_second_time(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#56 (tester, seq 10312): a refresh is claimed for the login the stale reading was read
+    with, through the read of the last few seconds (``core.credentials``' memo, the reading's
+    own cache key), as before the refresh became an accounts slot. Read afresh, it cost a
+    second read of the Keychain item per stale slot every round, and named another token
+    than the one the reading went stale on. While the refresh waits for its retry, a round
+    reads the login once, from the memo."""
+    work = _expired()
+    claude = FakeClaude(monkeypatch, False)
+    first = service.read_usage([work], now=NOW, fetch=_Usage({}))[work.slot]
+    assert claude.runs == [work.slot] and first.cause is UsageCause.token_refreshing
+    reads: list[bool] = []
+    stored = core.stored_login
+
+    def counted(account: ClaudeAccount, *, fresh: bool = False) -> core.StoredLogin:
+        reads.append(fresh)
+        return stored(account, fresh=fresh)
+
+    monkeypatch.setattr(core, "stored_login", counted)
+    _new_process()
+
+    waiting = service.read_usage([work], now=NOW + timedelta(seconds=30), fetch=_Usage({}))
+
+    assert waiting[work.slot].cause is UsageCause.token_refreshing, "no run: its retry waits"
+    assert claude.runs == [work.slot]
+    assert reads and True not in reads, f"a fresh read of the login in a round with no run: {reads}"
+
+
 def test_a_rejected_tokens_retry_is_made_by_the_pages_next_tick_not_five_minutes_on(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

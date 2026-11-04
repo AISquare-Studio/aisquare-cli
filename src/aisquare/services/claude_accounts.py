@@ -2359,8 +2359,8 @@ def usage_backoffs(
 #
 # At most one refresh runs per account, whichever process reads: a slot's row
 # (`_TOKEN_REFRESH_KEY`), claimed compare-and-set, says it runs, waits for its retry, or
-# gave up — for the token it is about (the slot's `login_fingerprint`), so the next token
-# the agent writes starts afresh.
+# gave up — for the token it is about (`_token_fingerprint`, the stale reading's own key), so
+# the next token the agent writes starts afresh.
 
 TOKEN_REFRESH_TIMEOUT_SECONDS = 60.0
 """How long a refresh may run: Claude Code's own token request gives up at 30 s."""
@@ -2515,7 +2515,7 @@ def _refresh_stale(
     in :func:`read_usage`'s one session after the round.
 
     Per slot, by its row (:class:`TokenRefresh`), claimed compare-and-set in one store
-    session for the token its accounts slot fingerprints (``login_fingerprint``): the first
+    session for the login the stale reading belongs to (:func:`_token_fingerprint`): the first
     read of a stale token runs the refresh; a read while it runs, or before its retry is
     due, starts none and answers :func:`_refreshing_usage`; the first read at or after it
     runs the retry; after that, the stale reading as before. The refreshes run at once, one
@@ -2541,10 +2541,11 @@ def _refresh_stale(
     moment = now or _now()
     tokens: dict[int, str] = {}
     for account in refreshed:
-        try:
-            token = login_fingerprint(account)  # the stale login, as its accounts slot says
-        except LoginUnreadable:
-            continue  # the store would not say: no token to claim a refresh for
+        # The login the stale reading belongs to, as the reading's own cache key reads it: for
+        # Claude Code the token it was read with, through the Keychain read of the last few
+        # seconds (no second read of the item per round); for another agent its accounts
+        # slot's `login_fingerprint`. None when the store would not say: no claim then.
+        token = _token_fingerprint(account)
         if token is not None:
             tokens[account.slot] = token
     claimed: dict[int, tuple[TokenRefresh | None, TokenRefresh]] = {}

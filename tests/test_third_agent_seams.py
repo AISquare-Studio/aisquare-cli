@@ -514,9 +514,11 @@ def test_from_ssh_it_starts_the_fleets_server_as_its_keychain_login_declares(
 
 
 class _RefreshedQuietly(GeminiShapedAccounts):
-    """Its accounts, as an agent whose usage is read with a token that expires
-    (``oauth_creds.json``'s ``expiry_date``) and which renews it quietly with ``gemini auth
-    refresh`` (``refresh_args``)."""
+    """Its accounts, as an agent whose usage is read with a token that expires (a request,
+    ``network_usage``, keyed to ``oauth_creds.json``, whose ``expiry_date`` it checks) and
+    which renews it quietly with ``gemini auth refresh`` (``refresh_args``)."""
+
+    network_usage = True
 
     def refresh_args(self) -> tuple[str, ...]:
         return ("auth", "refresh")

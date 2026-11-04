@@ -683,6 +683,52 @@ def test_its_keychain_login_is_read_through_claude_codes_memo_on_the_tick(
         unregister(adapter.id)
 
 
+def test_each_slots_keychain_login_is_remembered_by_its_own_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r37 finding 7, the memo's key (#70's reopen, seq 10546): the memo keeps one answer per
+    Keychain item, and each slot names its own (``keychain_item``). So a second slot signed
+    in to another login is read as its own, on the rows, the cache's key and the row each
+    slot writes, one read per item. Keyed by the store and Keychain account alone, the
+    second slot was served the first's remembered fingerprint, and its readings were filed
+    under the first slot's login."""
+    monkeypatch.setattr(accounts_core, "keychain_platform", lambda: True)  # the Mac's rows
+    adapter = GeminiShapedAdapter()
+    slot_answers = _Fingerprinted()
+    adapter.accounts = slot_answers
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        one, two = _signed_in_slot(adapter), _signed_in_slot(adapter)
+        for name, text in json.loads((FIXTURES / f"{adapter.id}.json").read_text("utf-8"))[
+            "accounts"
+        ]["relogin"].items():
+            (two.config_dir / name).write_text(text, encoding="utf-8")  # another login
+        for slot in (one, two):
+            _quotas_till_tomorrow(slot)
+        logins = {slot.slot: slot_answers.login_fingerprint(slot) for slot in (one, two)}
+        assert None not in logins.values() and len(set(logins.values())) == 2, logins
+        slot_answers.reads = 0
+
+        items = {slot.slot: accounts_core.item_login(slot).token for slot in (one, two)}
+        keys = {slot.slot: accounts_service._token_fingerprint(slot) for slot in (one, two)}
+        accounts_service.cached_usage_with_trends([one, two])
+
+        assert items == logins, "each slot's login is its own item's, not the first's memo"
+        assert keys == logins, "each slot's readings are cached under its own login"
+        assert {
+            key: accounts_service.SeenLogin.load(value) for key, value in _login_rows().items()
+        } == {
+            f"usage-login:gemini-shaped-oauth-{slot.slot}\t{accounts_core.keychain_account()}": (
+                accounts_service.SeenLogin(token=logins[slot.slot])
+            )
+            for slot in (one, two)
+        }, "each slot's row says its own login"
+        assert slot_answers.reads == 2, "one read per item; every later look is its memo"
+    finally:
+        unregister(adapter.id)
+
+
 def _now() -> Any:
     from datetime import UTC, datetime
 

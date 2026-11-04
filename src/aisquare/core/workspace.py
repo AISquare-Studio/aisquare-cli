@@ -320,11 +320,25 @@ def real_project_root(start: Path) -> Path | None:
         if root is None:
             return None
         root = root.resolve()
-        if root == Path.home().resolve() or root == Path(root.anchor):
+        if same_directory(root, Path.home().resolve()) or root == Path(root.anchor):
             return None
     except (OSError, RuntimeError):
         return None
     return root
+
+
+def same_directory(one: Path, other: Path) -> bool:
+    """Whether ``one`` and ``other`` are one directory: equal as paths, or the same file
+    (``os.path.samefile``: device and inode). On a volume that folds case (macOS's, by
+    default) a home spelt in another case than the disk's (``HOME=/users/me``) resolves to a
+    path unequal to the one git names (``/Users/me``), and the home was a project root again
+    (review r39 of #113, 1b). ``False`` when either cannot be asked."""
+    if one == other:
+        return True
+    try:
+        return os.path.samefile(one, other)
+    except OSError:
+        return False
 
 
 def project_tree(start: Path) -> Path | None:

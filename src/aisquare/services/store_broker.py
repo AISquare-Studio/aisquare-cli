@@ -1354,7 +1354,11 @@ def _project_root(found: Path) -> bool:
     made the whole home the tree of a launch in a folder of it that is no checkout,
     ``~/.codex`` and ``~/.ssh`` in it: ``--detail-file`` and ``--artifact`` read them, past a
     ``deny_read`` of the sandbox's (review r39 of #113, finding 1). A launch in the home
-    itself still has it for its tree, as its own directory."""
+    itself still has it for its tree, as its own directory. Compared as directories
+    (``workspace.same_directory``), not as spellings: a ``HOME`` in another case than the
+    disk's, on a volume that folds case, made the home a root again (r39 reopen, 1b)."""
+    from aisquare.core.workspace import same_directory
+
     there = _resolved(found)
     if there == Path(there.anchor):
         return False
@@ -1362,7 +1366,7 @@ def _project_root(found: Path) -> bool:
         home = _resolved(Path.home())
     except RuntimeError:  # no home to be told: a filesystem root is still refused
         return True
-    return not home.is_relative_to(there)
+    return not any(same_directory(there, above) for above in (home, *home.parents))
 
 
 def _identity_of(root: Path) -> str:

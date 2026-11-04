@@ -26,6 +26,7 @@ import pytest
 
 from aisquare.core import launch_seal
 from aisquare.core.store import store_session
+from aisquare.core.workspace import real_project_root
 from aisquare.models import LaunchSpec, TeamSession
 from aisquare.services import store_broker
 from aisquare.services import team as team_service
@@ -115,6 +116,26 @@ def test_a_root_above_the_home_is_no_tree_either(
     monkeypatch.setenv("HOME", str(home))
 
     assert _roots(home / "scratch") == ((home / "scratch").resolve(),)
+
+
+def test_a_home_spelt_in_another_case_is_the_home_still(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a volume that folds case (macOS's by default), ``HOME=…/HOME`` names the directory
+    git calls ``…/home``. Compared as paths after ``resolve``, which keeps the case it was
+    given, the two differed, and the home was a root again, in ``launch_scope`` and in
+    ``workspace.real_project_root`` alike (r39 reopen, 1b). Mutants (paths compared, not
+    directories, in either): each dies."""
+    home = _a_home(tmp_path, monkeypatch)
+    (home / "scratch").mkdir()
+    spelt = home.with_name(home.name.swapcase())
+    if not spelt.exists():
+        pytest.skip("this volume does not fold case: no other spelling of the home is it")
+    monkeypatch.setenv("HOME", str(spelt))
+    assert Path.home().resolve() != home.resolve(), "the spelling survives resolve"
+
+    assert _roots(home / "scratch") == ((home / "scratch").resolve(),)
+    assert real_project_root(home / "scratch") is None
 
 
 def test_a_filesystem_root_is_no_tree_even_with_no_home_to_be_told(

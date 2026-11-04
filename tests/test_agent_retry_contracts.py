@@ -817,6 +817,98 @@ def test_the_receivers_token_is_in_the_launch_environment_never_on_a_command_lin
             child.wait(timeout=10)
 
 
+def _launch_with_its_receiver(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started_as: Callable[[list[str]], list[str]],
+) -> tuple[Any, Mock, list[subprocess.Popen[bytes]]]:
+    """``aisquare launch coder --agent codex``, its receiver child started from the argv
+    ``started_as`` makes of its own: what the launch said, its exec, and those children."""
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    children: list[subprocess.Popen[bytes]] = []
+    popen = subprocess.Popen
+
+    def receiver(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        if "--ready" not in argv:
+            return popen(argv, **kwargs)
+        child = popen(started_as(argv), **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", receiver)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    return runner.invoke(app, ["launch", "coder", "--agent", "codex"]), execute, children
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Native receiver is POSIX/WSL only")
+def test_a_receiver_slower_than_two_seconds_to_start_still_traces_its_launch(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shipping: None,
+) -> None:
+    """A receiver is a fresh interpreter. On a busy runner it took longer than the 2 s the
+    launch waited for it, and the launch went on with no telemetry for its whole life (CI
+    41836127711, py3.12-captain-off shard 1, task #79). Started 3 s late here, it is waited
+    for: the launch waits for its ready file, up to ``native_telemetry.START_S``."""
+    result, execute, children = _launch_with_its_receiver(
+        runner,
+        tmp_path,
+        monkeypatch,
+        lambda argv: ["/bin/sh", "-c", 'sleep 3; exec "$@"', "sh", *argv],
+    )
+    try:
+        assert result.exit_code == 0, result.output
+        assert "native telemetry enabled" in result.output, result.output
+        _, _, env = execute.call_args.args
+        assert env[native_telemetry.HEADERS_ENV].startswith("Authorization=Bearer%20")
+    finally:
+        for child in children:
+            child.send_signal(signal.SIGINT)  # its own cleanup: the ready file and its folder
+            child.wait(timeout=10)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Native receiver is POSIX/WSL only")
+@pytest.mark.parametrize(
+    ("started_as", "said"),
+    [
+        (["/bin/sh", "-c", "exit 3"], "its local receiver exited (code 3) before it was ready"),
+        (["/bin/sh", "-c", "exec sleep 30"], "its local receiver was not ready in 0.5 s"),
+    ],
+    ids=["exits", "hangs"],
+)
+def test_a_receiver_that_does_not_start_is_named_and_its_launch_goes_on_untraced(
+    started_as: list[str],
+    said: str,
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shipping: None,
+) -> None:
+    """What a user sees when the receiver does not start: the agent is launched all the
+    same, with no exporter and no token, and the launch says on stderr why it has no native
+    telemetry. A receiver that exits is not waited for; one that hangs is waited for
+    ``START_S`` (0.5 s here), then stopped."""
+    monkeypatch.setattr(native_telemetry, "START_S", 0.5)
+    result, execute, children = _launch_with_its_receiver(
+        runner, tmp_path, monkeypatch, lambda argv: list(started_as)
+    )
+    try:
+        assert result.exit_code == 0, result.output
+        assert f"Codex launched without native telemetry: {said}" in result.output, result.output
+        _, argv, env = execute.call_args.args
+        assert native_telemetry.HEADERS_ENV not in env
+        assert not any("otel.exporter" in arg for arg in argv), argv
+        assert [child.poll() is not None for child in children] == [True], "none left running"
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="Native receiver is POSIX/WSL only")
 def test_the_receivers_header_is_kept_out_of_the_tools_shells_with_the_operators_patterns(
     runner: CliRunner,

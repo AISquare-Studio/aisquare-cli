@@ -864,7 +864,12 @@ adapter.**
   launch runs on, or your administrator set in `/etc/codex/managed_config.toml`,
   is kept and AISquare stands down. So is your own value of that
   variable, or your own `-c shell_environment_policy…`, and native tracing is
-  then off for the launch.
+  then off for the launch. A launch waits up to 15 s for its receiver to start.
+  The wait ends as soon as the receiver is ready, or has exited, so it costs nothing
+  but on a hung one. A receiver that does not start costs the launch its tracing,
+  never the launch itself, which says why on stderr: `Codex launched without native
+  telemetry: its local receiver was not ready in 15 s` (or `… exited (code N)
+  before it was ready`).
 - `aisquare upgrade` re-connects Codex's hooks in every connected Codex home and
   Codex account home, and says when Codex asks for them to be reviewed again;
   `aisquare uninstall` takes them out and names each Codex MCP server and plugin

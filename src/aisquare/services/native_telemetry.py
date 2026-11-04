@@ -40,6 +40,15 @@ from aisquare.core.agent_sessions import NATIVE_METADATA_TTL as NATIVE_METADATA_
 from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
+START_S = 15.0
+"""How long a launch waits for its receiver to publish its port and token (``ready``)
+before it goes on without native telemetry. The wait ends the moment the file is there or
+the receiver has exited, so this bound is paid only by a receiver that hangs. A receiver is
+a fresh interpreter that imports aisquare and binds a port: 0.13 s on an idle Mac and 0.4 s
+with its CPU three times oversubscribed. A busy CI runner took longer than the 2 s this used
+to be, so a launch lost its telemetry for its whole life (CI 41836127711, task #79), and a
+loaded machine, or a first start after an install that compiles the modules, would lose it
+the same way."""
 HEADERS_ENV = "OTEL_EXPORTER_OTLP_LOGS_HEADERS"
 """OTLP's headers variable for the logs exporter, where the receiver's ``Authorization``
 rides: a process's environment is its owner's to read (``/proc/<pid>/environ``), its
@@ -374,11 +383,16 @@ def start_receiver(
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + START_S
         while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
             time.sleep(0.025)
         if not ready.exists():
-            raise RuntimeError("local telemetry receiver did not start")
+            ended = child.poll()
+            raise RuntimeError(
+                f"its local receiver exited (code {ended}) before it was ready"
+                if ended is not None
+                else f"its local receiver was not ready in {START_S:g} s"
+            )
         state = json.loads(ready.read_text())
         # Native exporter does asynchronous delivery. No model routing or auth changes.
         endpoint = f"http://127.0.0.1:{state['port']}/v1/logs"

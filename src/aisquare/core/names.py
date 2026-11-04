@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 from typing import Literal
 
 NameFlaw = Literal["control", "undecodable", "invisible"]
@@ -88,6 +89,29 @@ def name_flaw(text: str) -> NameFlaw | None:
         return "undecodable"
     if any(_hidden(text, at) for at in range(len(text))):
         return "invisible"
+    return None
+
+
+def undecodable_argument(argv: Sequence[str]) -> str | None:
+    """Why ``argv`` is refused whole when one of its arguments holds half of a character (a
+    lone surrogate: how Python passes a byte of the command line that is not UTF-8,
+    ``$'\\xff'``), which no store, log or board can write; ``None`` when each is text. The
+    argument is named by its place and shown with the byte escaped (``x\\udcff``), cut to
+    200 characters. Asked of every command's argv where the CLI parses it
+    (``cli.global_flags.GlobalFlagsGroup``) and where a sandbox's broker takes it
+    (``services.store_broker.Broker.answer``): a ref, a label or free text holding one was a
+    traceback or the codec's own words in each command that met it (review r39 of #113,
+    finding 6, reopened)."""
+    for at, argument in enumerate(argv, start=1):
+        try:
+            argument.encode("utf-8")
+        except UnicodeEncodeError:
+            shown = argument.encode("utf-8", "backslashreplace").decode("utf-8")
+            shown = shown if len(shown) <= 200 else f"{shown[:199]}…"
+            return (
+                f"argument {at} ({shown}) holds a byte that is not UTF-8: aisquare takes its "
+                "arguments as UTF-8 text, and reads, runs or stores nothing for this command"
+            )
     return None
 
 

@@ -179,6 +179,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aisquare.core import paths, selfcli
+from aisquare.core.names import undecodable_argument
 
 _log = logging.getLogger(__name__)
 
@@ -1475,6 +1476,11 @@ class Broker:
         why = vet(argv)
         if why is not None:
             return self._refuse(refusal_kind(argv), why)
+        # The CLI refuses it too (`cli.global_flags`), but only once a command is started
+        # for it: refused here, it is logged as the broker's own, and nothing is run.
+        undecodable = undecodable_argument(argv)
+        if undecodable is not None:
+            return self._refuse("command", undecodable)
         cwd = request.get("cwd")
         if not isinstance(cwd, str) or not Path(cwd).is_absolute():
             return self._refuse(

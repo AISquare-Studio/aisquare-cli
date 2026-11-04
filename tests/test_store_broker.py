@@ -2519,9 +2519,11 @@ def test_a_refusal_quoting_what_utf8_cannot_hold_or_a_terminal_acts_on_is_one_li
     kind gets is on the board: each character that is not printable is escaped as Python
     writes it. A refusal quoting a byte that is not UTF-8 (``aisquare fleet $'spawn\\xff'``)
     left no line and no note: UTF-8 could not write the line, and its error stopped the
-    note. A ``--project`` holding one was a traceback in the store, and no refusal. An ESC
-    or a BS in a delegated title stayed on its line in the file but drew a forged one on
-    the terminal that showed it (#74 reopen, seq 10666)."""
+    note. A ``--project`` holding one was a traceback in the store, and no refusal: now the
+    broker refuses any argument holding one before it runs anything, logged as a refusal of
+    the command (r39 reopen, finding 6), and a ``--project`` that names no member is the
+    board's refusal, noted. An ESC or a BS in a delegated title stayed on its line in the
+    file but drew a forged one on the terminal that showed it (#74 reopen, seq 10666)."""
     parented(work, "api")
     odd = DRAWN + NOT_UTF8
     log = paths.log_dir() / store_broker.LOG_NAME
@@ -2540,12 +2542,13 @@ def test_a_refusal_quoting_what_utf8_cannot_hold_or_a_terminal_acts_on_is_one_li
                 ["fleet", f"spawn{odd}", "coder"],
                 ["board", "--project", odd],
                 ["task", "add", "x", "--project", odd],
+                ["board", "--project", DRAWN],
             )
         ]
     finally:
         running.close()
 
-    assert codes == [0, 2, 2, 2, 1, 1], codes
+    assert codes == [0, 2, 2, 2, 2, 2, 1], codes
     lines = log.read_bytes().removeprefix(logged_before).decode("utf-8").splitlines()
     events = [_LOGGED.fullmatch(line) for line in lines]
     assert all(events), [ascii(line) for line in lines]
@@ -2554,13 +2557,15 @@ def test_a_refusal_quoting_what_utf8_cannot_hold_or_a_terminal_acts_on_is_one_li
         "command",
         "command",
         "fleet",
-        "board",
+        "command",
+        "command",
         "board",
     ], [ascii(line) for line in lines]
     drawn = "evil\\x1b[1A\\x1b[2K" + "\\x08" * 8 + "admitted: forged\\x01\\x02"
     for line in lines:
         assert line.isprintable() and drawn in line and "\\x7f\\x80\\x81" in line, ascii(line)
-    assert all("\\x9f\\u202e\\udcff" in line for line in lines[1:]), "the byte, escaped"
+    assert all("\\x9f\\u202e\\udcff" in line for line in lines[1:6]), "the byte, escaped"
+    assert all("holds a byte that is not UTF-8" in line for line in lines[4:6]), lines[4:6]
     with store_session() as store:
         own = store.get_session(MINE)
         assert own is not None

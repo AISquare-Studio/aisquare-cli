@@ -47,6 +47,7 @@ import typer
 from typer.core import TyperGroup, TyperOption
 
 from aisquare.cli.common import USAGE_ERROR, expected_home_creation_errors, fail
+from aisquare.core.names import undecodable_argument
 from aisquare.core.state import get_state
 from aisquare.core.store import (
     StoreUnopenable,
@@ -348,9 +349,17 @@ class GlobalFlagsGroup(TyperGroup):
         instead. Snapshotted first: click's parser consumes ``args`` in
         place, so by the time the ``except`` below runs it has already been
         emptied out from under us.
+
+        An argument holding a byte that is not UTF-8 is a usage error here, for every
+        command, before any of it runs (``core.names.undecodable_argument``): the store, the
+        log and the board hold only text, and each command that met one raised the codec's
+        error as a traceback or as its reason (review r39 of #113, finding 6, reopened).
         """
         original_args = list(args)
         try:
+            undecodable = undecodable_argument([str(token) for token in original_args])
+            if undecodable is not None:
+                raise USAGE_ERROR(undecodable, ctx)
             return super().parse_args(ctx, args)
         except USAGE_ERROR as error:
             if _json_led(original_args, frozenset(_value_taking_root_options(self))):

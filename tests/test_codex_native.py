@@ -2401,6 +2401,29 @@ def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothi
                 and lines[-1].startswith("? for shortcuts")
             )
 
+        def pointed_at(option: str) -> bool:
+            """Slot A's dialog points at ``option``: its line opens with the pointer, U+203A
+            (``2. Quit`` here; ``2. Back to Agent Command Center`` with no hooks)."""
+            pointer = "\u203a"
+            lines = [line.strip() for line in screen("0", human).splitlines()]
+            return any(
+                line.startswith(pointer) and line[1:].strip().startswith(option) for line in lines
+            )
+
+        def answered(key: str, option: str) -> None:
+            """Press ``key`` on slot A's dialog until it points at ``option``: pressed again
+            while it does not, read every 0.1 s for up to 1 s after each press."""
+            deadline = time.monotonic() + 30
+            while not pointed_at(option):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"Codex's dialog never answered {key}:\n{screen('0', human)}"
+                    )
+                subprocess.run(["tmux", "-L", human, "send-keys", "-t", "0", key], check=True)
+                pressed = time.monotonic()
+                while not pointed_at(option) and time.monotonic() - pressed < 1:
+                    time.sleep(0.1)
+
         try:
             # Slot A: the human's yes, in Codex's own dialog.
             subprocess.run(
@@ -2426,6 +2449,14 @@ def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothi
                 "Codex's question on slot A",
                 lambda: screen("0", human),
             )
+            # Codex 0.164.0 draws its dialog before the dialog reads keys: an Enter sent at
+            # its first sight was lost, the dialog stayed, and no trust was written (the Codex
+            # native leg of CI 41828194627 at 36ebb6aa; here, 1 in 12 with no load, task #79).
+            # So the yes waits for the dialog to answer a key that changes nothing: Down points
+            # it at "2." and Up back at "1.", and neither wraps, so a press it did take and one
+            # pressed again leave it pointing where it was told. Then the Enter, which it reads.
+            answered("Down", "2. ")
+            answered("Up", "1. Trust and continue")
             subprocess.run(["tmux", "-L", human, "send-keys", "-t", "0", "Enter"], check=True)
             until(
                 lambda: codex_sharing.read_trust(given.config_dir) == {root: True},

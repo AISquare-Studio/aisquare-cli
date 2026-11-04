@@ -32,14 +32,14 @@ from aisquare.models import FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import store_broker
 from aisquare.services import team as team_service
 
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="a launch's broker is POSIX's")
-
 LAUNCH = "11111111-2222-3333-4444-555555555555"
 
 
 @pytest.fixture
 def board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ProjectInfo:
     """A board in a git checkout, the launch's directory; no broker process is started."""
+    if os.name != "posix":
+        pytest.skip("a launch's broker is POSIX's")
     work = tmp_path / "repo"
     work.mkdir()
     subprocess.run(["git", "init", "-q", str(work)], check=True)
@@ -256,3 +256,32 @@ def test_a_launch_with_no_sandbox_of_the_stores_makes_and_grants_nothing_of_it(
     argv = ["claude", "--permission-mode", "auto"]
     env = {"AISQUARE_LAUNCH_ID": LAUNCH, "AISQUARE_ROLE": "manager"}
     assert store_broker.start_for_launch(env, get_adapter("claude-code"), argv) == (argv, "")
+
+
+def test_the_state_dir_is_made_below_the_store_or_refused_on_every_platform(
+    tmp_path: Path,
+) -> None:
+    """``_make_below`` on each platform (Windows asks each name, POSIX walks descriptors):
+    the missing names are made, a name that is not a directory is refused and kept, and so is
+    a link where this machine can make one, its target given nothing."""
+    from tests.fsperms import can_symlink
+
+    root = tmp_path / "home"
+    root.mkdir()
+    store_broker._make_below(root, ("projects", "prj_a", "manager"))
+    assert (root / "projects" / "prj_a" / "manager").is_dir()
+    store_broker._make_below(root, ("projects", "prj_a", "manager"))  # there: nothing to do
+
+    (root / "projects" / "prj_b").write_text("mine", encoding="utf-8")
+    with pytest.raises(OSError):
+        store_broker._make_below(root, ("projects", "prj_b", "manager"))
+    assert (root / "projects" / "prj_b").read_text(encoding="utf-8") == "mine"
+
+    if not can_symlink():
+        return
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "projects" / "prj_c").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        store_broker._make_below(root, ("projects", "prj_c", "manager"))
+    assert list(outside.iterdir()) == []

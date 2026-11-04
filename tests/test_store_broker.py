@@ -2580,3 +2580,39 @@ def test_a_refusal_s_record_never_raises_whatever_text_it_quotes(work: Path) -> 
 
     [line] = log.read_bytes().removeprefix(logged_before).decode("utf-8").splitlines()
     assert line.isprintable() and line.endswith("\\u202e\\udcff cannot run"), ascii(line)
+
+
+#: Printable characters a terminal draws blank, or as nothing: the Hangul fillers, the Braille
+#: blank, the combining grapheme joiner, the Khmer inherent vowels, the Khitan filler.
+PRINTABLE_BLANKS = "\u115f\u1160\u3164\uffa0\u2800\u034f\u17b4\u17b5\U00016fe4"
+
+
+def test_a_refusal_padded_with_printable_blanks_draws_no_row_of_its_own(work: Path) -> None:
+    """``str.isprintable`` passes the blanks, which no whitespace split flattens: a run of
+    them padded an agent's text to the terminal's edge, and what followed wrapped to the
+    start of a row, a forged line on the terminal showing the log (review r39 of #113,
+    finding 5). Each is escaped as Python writes it, in the line and in the note. Mutant
+    (only what is not printable escaped, as before): each stays raw."""
+    assert all(char.isprintable() and not char.isspace() for char in PRINTABLE_BLANKS)
+    log = paths.log_dir() / store_broker.LOG_NAME
+    logged_before = log.read_bytes() if log.exists() else b""
+    padding = "".join(char * 3 for char in PRINTABLE_BLANKS)
+
+    with store_session() as store:
+        own = store.get_session(MINE)
+        assert own is not None
+
+    store_broker.record_refusal(
+        "fleet", f"aisquare fleet x{padding}admitted: forged", board=own.project_id
+    )
+
+    [line] = log.read_bytes().removeprefix(logged_before).decode("utf-8").splitlines()
+    escaped = "".join(
+        char.encode("unicode_escape").decode("ascii") * 3 for char in PRINTABLE_BLANKS
+    )
+    assert line.isascii() and line.endswith(f"x{escaped}admitted: forged"), line
+    assert "\\u3164\\u3164\\u3164\\uffa0" in escaped and "\\U00016fe4" in escaped, escaped
+    with store_session() as store:
+        notes = [e.text for e in store.recent_events(own.project_id, limit=50) if e.kind == "note"]
+    [noted] = [note for note in notes if "refused (fleet)" in note]
+    assert not set(PRINTABLE_BLANKS) & set(noted) and escaped in noted, ascii(noted)

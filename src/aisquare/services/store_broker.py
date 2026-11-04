@@ -851,14 +851,26 @@ def _log_text(text: str) -> str:
     reads as the broker's own (mutant T19 of #71's tester). An ESC or a BS drew one on the
     terminal that shows the log, and a lone surrogate, which is how a shell passes a byte
     that is not UTF-8 (``fleet $'spawn\\xff'``), stopped both the line and the refusal's note,
-    as UTF-8 cannot write it (#74 reopen, seq 10666)."""
+    as UTF-8 cannot write it (#74 reopen, seq 10666). A blank that is printable
+    (:data:`_BLANKS`) is escaped too."""
     flat = " ".join(text.split())
-    if flat.isprintable():
+    if flat.isprintable() and _BLANKS.isdisjoint(flat):
         return flat
     return "".join(
-        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        char
+        if char.isprintable() and char not in _BLANKS
+        else char.encode("unicode_escape").decode("ascii")
         for char in flat
     )
+
+
+#: What ``str.isprintable`` passes that a terminal draws as blank, or as nothing, and that no
+#: whitespace split flattens: the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), the
+#: Braille blank (U+2800) and the marks that draw nothing (U+034F, U+17B4, U+17B5, U+16FE4).
+#: A run of them in an agent's text pads its log line to the terminal's edge, and the text
+#: after them wraps to the start of a row as if it were a line of its own (review r39 of
+#: #113, finding 5), so :func:`_log_text` escapes them as it does what is not printable.
+_BLANKS = frozenset("\u034f\u115f\u1160\u17b4\u17b5\u2800\u3164\uffa0\U00016fe4")
 
 
 def _who(agent: str) -> str:

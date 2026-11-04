@@ -324,8 +324,9 @@ adapter.**
   and `similar` (the reads; `code index` writes and stays out) and `aisquare brief …` run
   through its launch's broker, with the paths they name held to the launch's tree. `asq exec`
   runs in the sandbox, not through the broker (which runs outside it and would run the agent's
-  command unsandboxed), and saves its report in the launch's own `reports/`, the one other
-  place in the store its sandbox may write; the broker seals the report when the run ends, and
+  command unsandboxed), and saves its report in the launch's own `reports/`, which its
+  sandbox may write, as it does its broker inbox (and a manager its own state directory);
+  the broker seals the report when the run ends, and
   `brief evidence --report` adopts it into the home once it checks it: sealed and unchanged,
   owner-only, nothing in it but a report's files and no link or pipe, its directory and
   checkout inside the launch's tree and its board the launch's. `task done` is gated at the
@@ -746,10 +747,15 @@ adapter.**
   a fleet operation or an unsigned request is put on its board once per launch and kind.
   Each is one line of `store-broker.log` whatever the agent's text in it holds: a line
   break is a space, and any other character that is not printable is escaped (`\x1b`,
-  `\u202e`), so its text forges no line in the file or on a terminal showing it. A
-  byte that is not UTF-8 is escaped too (`fleet $'spawn\xff'` logs `spawn\udcff`).
-  The sandbox writes one path in the store, its launch's broker
-  inbox (a manager's also its own state directory, below). So nothing that a replay,
+  `\u202e`), and so is a blank that is (`\u3164`, `\u2800`, the Hangul fillers and the
+  Braille blank, which padded a line to wrap as a row of its own), so its text forges
+  no line in the file or on a terminal showing it. A byte that is not UTF-8 is escaped
+  too (`fleet $'spawn\xff'` logs `spawn\udcff`), and a ref holding one, run anywhere
+  (`task claim tsk_$'\xff'`, `--as`, `team show`, `board --project`), names nothing,
+  never a traceback.
+  The sandbox writes three paths in the store: its launch's broker inbox, its
+  launch's `reports/` (`asq exec`, above), and a manager's own state directory (below).
+  So nothing that a replay,
   a kill, a typed line or paste, a launch, a model or account choice or a worktree
   removal the fleet makes reads can have been written from inside a sandbox. A
   sandboxed agent is trusted to the extent of the

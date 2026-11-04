@@ -42,8 +42,9 @@ sandbox's seccomp filter refuses ``connect`` on every unix socket (EPERM: a path
 read-only mount and on a writable one, an abstract one), so no socket can carry a request.
 A file can, in a directory the profile makes writable, and a FIFO can, opened for writing
 on a read-only path too. So each launch has its own directory ``<home>/broker/<launch>/``
-(:func:`launch_dir`): ``in/``, the one path in the store that launch's sandbox may write
-(``AgentAdapter.broker_access`` names it in that launch's profile and no other), where the
+(:func:`launch_dir`): ``in/``, the one path of it that launch's sandbox may write, beside its
+``reports/`` and a manager's own state directory (``AgentAdapter.broker_access`` names it in
+that launch's profile and no other), where the
 CLI puts a request; ``bell``, a FIFO it writes a byte to; and ``out/``, read-only to the
 sandbox, where the broker answers. No command on the whitelist reads its stdin, so none
 is forwarded: the broker's command reads ``/dev/null``.

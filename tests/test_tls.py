@@ -558,6 +558,14 @@ def test_a_stalled_handshake_holds_up_no_other_thread(https_server: _Server) -> 
             tls.handshake("127.0.0.1", port=port, timeout=timeout)
         took[name] = time.monotonic() - began
 
+    # One handshake first, untimed: a process's first verification can be slow on its own.
+    # On CI's Windows runner, in a shard where this was the first verification in its
+    # worker, both handshakes ended together 8 to 10 s in, the stalled one long past its
+    # 3 s timeout (run 41888119902, three attempts): no thread waiting on another's
+    # handshake, which is what this asks. Warmed, a shared context still holds the answered
+    # handshake up behind the stalled one (the mutant: one context for the process).
+    with contextlib.suppress(OSError):
+        tls.handshake("127.0.0.1", port=answering, timeout=30.0)
     try:
         stalled = threading.Thread(target=shake, args=("stalled", silent.getsockname()[1], 3.0))
         stalled.start()

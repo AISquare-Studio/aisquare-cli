@@ -373,3 +373,34 @@ def test_a_codex_hand_over_onto_its_disconnected_plain_home_is_refused_before_th
     with store_session() as store:
         row = store.get_fleet_agent(agent.id)
     assert row is not None and row.ended_at is None, "still running where it was"
+
+
+def test_a_codex_take_over_restart_onto_its_disconnected_plain_home_is_refused_before_the_stop(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Tester t69 on #69: ``restart --account 0`` of a Codex agent running on a slot moves it
+    onto ``~/.codex``, which the user disconnected. The restart's own gate for the account it
+    moves to refuses that before the stop, nothing written there: without it the pane was
+    killed, and only the replacement's spawn refused."""
+    here = _slot("here@example.com")
+    plain = _disconnected_plain_codex_home()
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, account=str(here.slot)
+    ).agent
+    _bound(project, agent, here, "codex-thread-here")
+    before = _files(plain)
+    slot = core.default_account(agent="codex").slot
+    assert slot == 0
+
+    with pytest.raises(fleet_service.FleetError) as refused:
+        fleet_service.restart(project, agent.label, account=str(slot))
+
+    _refused_for_its_home(str(refused.value), plain, "nothing was stopped")
+    assert _files(plain) == before, "nothing written in the user's home"
+    assert agent.pane_id not in tmux.killed
+    assert not [typed for typed in tmux.typed if typed[0] == agent.pane_id], "no /exit typed"
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.ended_at is None, "still running where it was"

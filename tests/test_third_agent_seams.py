@@ -22,6 +22,7 @@ import json
 import os
 import re
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1358,17 +1359,18 @@ def test_its_negative_plain_slot_is_named_by_its_number_wherever_a_slot_is(
 
 # --- its hooks before a launch, by what it declares (review r37 of #113, finding 2) ----------
 
+#: A settings file of the user's, in each home the hook tests make: kept byte for byte where
+#: nothing may be written.
+THEIRS = b'{\n  "general": {"vimMode": true}\n}\n'
 
-@pytest.mark.parametrize("in_its_home", [False, True], ids=["hooks-with-its-launch", "home-only"])
-def test_a_spawn_installs_its_hooks_first_only_where_they_are_its_homes_and_aisquare_made_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, in_its_home: bool
-) -> None:
-    """``capabilities.hooks_before_launch`` decides it, never the agent's name. Declared, its
-    hooks are installed in a slot aisquare made (in the config dir its accounts read there,
-    ``.gemini``) before its window starts, and a spawn onto its own home, the user's, where
-    they are not is refused before any window, naming the connect command, the home written
-    nothing. Not declared, as Claude Code, neither home is read or written, and both spawns
-    go ahead."""
+
+@contextmanager
+def _a_fleet_running_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, in_its_home: bool
+) -> Iterator[tuple[AgentAdapter, Any, Any]]:
+    """The Gemini-shaped agent registered declaring ``hooks_before_launch`` as ``in_its_home``,
+    its binary and Claude Code's on ``PATH``, the fleet on a fake tmux: the agent, the fake and
+    a project, coders in its root."""
     from aisquare.core.agent_adapters.types import AgentCapabilities
     from aisquare.core.config import FleetRoleSettings, load_config, save_config
     from aisquare.core.orchestrator import team_project
@@ -1389,18 +1391,53 @@ def test_a_spawn_installs_its_hooks_first_only_where_they_are_its_homes_and_aisq
         config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
         save_config(config)
         bin_dir = tmp_path / "bin"
-        fakebin.executable_fake(bin_dir, adapter.binary, windows="set /p line=", posix="read line")
+        for binary in (adapter.binary, "claude"):
+            fakebin.executable_fake(bin_dir, binary, windows="set /p line=", posix="read line")
         fakebin.prepend_to_path(bin_dir, monkeypatch)
         tmux = FakeTmux()
         monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
-        project = team_project(tmp_path)
-        theirs = b'{\n  "general": {"vimMode": true}\n}\n'
-        slot = accounts_core.create_account(adapter.id)
+        yield adapter, tmux, team_project(tmp_path)
+    finally:
+        unregister(adapter.id)
+
+
+def _slot_of(adapter: AgentAdapter) -> ClaudeAccount:
+    """A slot aisquare made for it, the user's settings in the config dir its accounts read
+    there (``.gemini``), no hooks."""
+    slot = accounts_core.create_account(adapter.id)
+    made = accounts_core.agent_config_dir(slot)
+    made.mkdir(parents=True, exist_ok=True)
+    (made / adapter.settings_name).write_bytes(THEIRS)
+    return slot
+
+
+def _its_own_home(adapter: AgentAdapter) -> Path:
+    """Its own config dir, the user's (``~/.gemini``), their settings in it, not connected."""
+    own = _home(adapter)
+    (own / adapter.settings_name).write_bytes(THEIRS)
+    return own
+
+
+@pytest.mark.parametrize("in_its_home", [False, True], ids=["hooks-with-its-launch", "home-only"])
+def test_a_spawn_installs_its_hooks_first_only_where_they_are_its_homes_and_aisquare_made_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, in_its_home: bool
+) -> None:
+    """``capabilities.hooks_before_launch`` decides it, never the agent's name. Declared, its
+    hooks are installed in a slot aisquare made (in the config dir its accounts read there,
+    ``.gemini``) before its window starts, and a spawn onto its own home, the user's, where
+    they are not is refused before any window, naming the connect command, the home written
+    nothing. Not declared, as Claude Code, neither home is read or written, and both spawns
+    go ahead."""
+    from aisquare.services import fleet as fleet_service
+
+    with _a_fleet_running_it(tmp_path, monkeypatch, in_its_home=in_its_home) as (
+        adapter,
+        tmux,
+        project,
+    ):
+        slot = _slot_of(adapter)
         made = accounts_core.agent_config_dir(slot)
-        own = _home(adapter)
-        for home in (made, own):
-            home.mkdir(parents=True, exist_ok=True)
-            (home / adapter.settings_name).write_bytes(theirs)
+        own = _its_own_home(adapter)
 
         on_slot = fleet_service.spawn(project, "coder", agent=adapter.id, account=str(slot.slot))
 
@@ -1414,7 +1451,7 @@ def test_a_spawn_installs_its_hooks_first_only_where_they_are_its_homes_and_aisq
             ]
             assert not (slot.config_dir / adapter.settings_name).exists(), "its config dir's"
         else:
-            assert (made / adapter.settings_name).read_bytes() == theirs
+            assert (made / adapter.settings_name).read_bytes() == THEIRS
         windows = len(tmux.spawned)
         if not in_its_home:
             fleet_service.spawn(project, "coder", agent=adapter.id)
@@ -1426,9 +1463,79 @@ def test_a_spawn_installs_its_hooks_first_only_where_they_are_its_homes_and_aisq
             assert f"hooks are not installed in {own}, a home of yours" in said, said
             assert f"`aisquare agents connect {adapter.id} --config-dir {own}`" in said, said
             assert len(tmux.spawned) == windows, "no window"
-        assert (own / adapter.settings_name).read_bytes() == theirs, "the user's home unwritten"
-    finally:
-        unregister(adapter.id)
+        assert (own / adapter.settings_name).read_bytes() == THEIRS, "the user's home unwritten"
+
+
+@pytest.mark.parametrize("hand_over", ["switch", "take-over-restart", "crossing"])
+def test_a_hand_over_onto_another_slot_installs_its_hooks_in_the_config_dir_read_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hand_over: str
+) -> None:
+    """Tester t69 on #69: each hand-over's own gate before its stop (a switch's, through the
+    replay's refusals; a restart's onto another account, ``restart --account``; and a Claude
+    Code agent's switch onto it, the crossing's) is handed the config dir its accounts read in
+    the slot it moves to, ``<slot>/.gemini``, never the slot's home. Handed the home, each
+    wrote a stray ``<slot>/settings.json`` the agent never reads, and started it blind."""
+    from aisquare.services import fleet as fleet_service
+
+    with _a_fleet_running_it(tmp_path, monkeypatch, in_its_home=True) as (adapter, _, project):
+        here, there = _slot_of(adapter), _slot_of(adapter)
+        made = accounts_core.agent_config_dir(there)
+        if hand_over == "crossing":
+            claude = fleet_service.spawn(project, "coder", worktree=False).agent
+            receipt = fleet_service.switch(
+                project, claude.label, to=str(there.slot), to_agent=adapter.id
+            )
+        else:
+            agent = fleet_service.spawn(
+                project, "coder", agent=adapter.id, account=str(here.slot)
+            ).agent
+            assert agent_core.hooks_installed(adapter.id, accounts_core.agent_config_dir(here))
+            if hand_over == "switch":
+                receipt = fleet_service.switch(project, agent.label, to=str(there.slot))
+            else:
+                receipt = fleet_service.restart(project, agent.label, account=str(there.slot))
+
+        assert receipt.started.account_slot == there.slot
+        assert agent_core.hooks_installed(adapter.id, made), "in the config dir it reads"
+        assert not (there.config_dir / adapter.settings_name).exists(), "nothing beside it"
+        assert f"{adapter.label}'s hooks were not installed in {made}" in " ".join(receipt.notes)
+
+
+def test_a_take_over_restart_onto_its_own_unconnected_home_is_refused_before_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tester t69 on #69: ``restart --account <its plain slot>`` of an agent running on a slot
+    moves it onto the user's own home, where its hooks are not. The restart's own gate for the
+    account it moves to refuses that before the stop: the agent runs on, its window unkilled
+    and nothing typed, and the home keeps the user's bytes. Without that gate the pane was
+    killed and only the replacement's spawn refused."""
+    from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
+
+    with _a_fleet_running_it(tmp_path, monkeypatch, in_its_home=True) as (
+        adapter,
+        tmux,
+        project,
+    ):
+        slot = _slot_of(adapter)
+        own = _its_own_home(adapter)
+        plain = accounts_core.default_account(agent=adapter.id)
+        agent = fleet_service.spawn(
+            project, "coder", agent=adapter.id, account=str(slot.slot)
+        ).agent
+
+        with pytest.raises(fleet_service.FleetError) as refused:
+            fleet_service.restart(project, agent.label, account=str(plain.slot))
+
+        said = str(refused.value)
+        assert f"hooks are not installed in {own}, a home of yours" in said, said
+        assert "nothing was stopped" in said, said
+        assert (own / adapter.settings_name).read_bytes() == THEIRS
+        assert agent.pane_id not in tmux.killed
+        assert not [typed for typed in tmux.typed if typed[0] == agent.pane_id], "no /exit"
+        with store_session() as store:
+            row = store.get_fleet_agent(agent.id)
+        assert row is not None and row.ended_at is None, "still running where it was"
 
 
 # --- the files a new agent touches ---------------------------------------------------------

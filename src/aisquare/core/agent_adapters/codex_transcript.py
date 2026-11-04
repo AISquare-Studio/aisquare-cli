@@ -1249,7 +1249,11 @@ def _said_rows(text: str, width: int) -> list[str]:
 #   (:func:`_script_asks_first`). A fourth limit, of a script's: an Esc while another command
 #   of one that asks to leave the sandbox runs reads as a refusal too. A patch beside other
 #   calls asks nothing of the script: inside the workspace a patch applies unasked, and an Esc
-#   while the rest ran is the likelier.
+#   while the rest ran is the likelier. A fifth, of a script's words (:data:`_SCRIPT_WORDS`):
+#   a regular expression literal holding a quote, a backtick, ``//`` or ``/*`` is read as
+#   opening a string, template or comment, and the words after it that it swallows are not
+#   read, so an escalation there refused reads as an interrupt, and a patch whose companion
+#   call is swallowed asks first.
 # - **An edit** is each file an ``event_msg`` ``item_completed`` ``FileChange`` names, by its
 #   absolute path, once the patch applied (status ``completed``). A patch refused, or whose
 #   verification failed, writes none; one that could not be written a ``failed`` one, the file
@@ -1427,10 +1431,19 @@ that holds those words says nothing.
 
 One left open ends where JavaScript would stop reading it: a string at its line's end, a
 template or a ``/*`` comment at the script's, a lone backslash last included. Each literal and
-comment is then matched once, in one pass, and read past; a script that leaves one open
-cannot run, so the words it swallows ask nothing. Before, each opener that never closed was
-scanned to the end and given up on, and the next one scanned it again: 30 KB of ``/* `` or
-of ``\\"`` took a second and more (r37 finding 12 of #113), on text the model writes."""
+comment is then matched once, in one pass, and read past. Before, each opener that never
+closed was scanned to the end and given up on, and the next one scanned it again: 30 KB of
+``/* `` or of ``\\"`` took a second and more (r37 finding 12 of #113), on text the model
+writes.
+
+A limit: a regular expression literal is not read as one (telling it from a division takes
+a parse of the JavaScript), so a quote, a backtick, ``//`` or ``/*`` inside it opens what
+JavaScript never sees open: ``s.replace(/`/g, "")`` or ``/^\\/*/`` to the script's end (or
+the next backtick or ``*/``), ``/'/`` or ``/https?:\\/\\//`` to its line's. The words it
+swallows are not read: an escalation after it asks nothing, so that script refused at its
+approval reads as an interrupt; a tool called after it is not counted, so a patch it rides
+with reads as the one tool, and an Esc while the rest ran as a refusal. Only a script that
+truly leaves one open cannot run, its swallowed words asking nothing."""
 
 
 def _script_asks_first(script: str) -> bool:

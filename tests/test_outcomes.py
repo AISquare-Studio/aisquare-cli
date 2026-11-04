@@ -1390,6 +1390,17 @@ _PATCH = 'await tools.apply_patch("*** Begin Patch\\n*** Add File: /w/a\\n+a\\n*
         (f"tools.exec_command({{cmd:'ls'}}); 'left open {_ESCALATED}", False),
         ('x = "a string its line ends\n' + _PATCH, True),
         (f"tools.exec_command({{cmd:'x', {_ESCALATED}}}); 'a lone backslash last\\", True),
+        # The limit _SCRIPT_WORDS names (#70's reopen, seq 10546): a regular expression
+        # literal is not read as one, so one holding an opener swallows what follows, though
+        # the script runs. Should regex literals be read, these flip, and the limit goes.
+        ('s = t.replace(/`/g, "");\n' + f'tools.exec_command({{cmd:"x", {_ESCALATED}}});', False),
+        (
+            's = t.replace(/^\\/*/, "");\n' + f'tools.exec_command({{cmd:"x", {_ESCALATED}}});',
+            False,
+        ),
+        (f's = t.replace(/\'/g, ""); tools.exec_command({{cmd:"x", {_ESCALATED}}});', False),
+        (f's = t.replace(/a/g, ""); tools.exec_command({{cmd:"x", {_ESCALATED}}});', True),
+        (f'{_PATCH} s.replace(/`/g, ""); tools.exec_command({{cmd:"pytest"}});', True),
     ],
 )
 def test_a_code_mode_script_asks_first_by_its_own_fields_never_by_a_commands_words(

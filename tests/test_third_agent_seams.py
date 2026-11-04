@@ -1415,14 +1415,15 @@ def _a_fleet_running_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, in_its_home: bool
 ) -> Iterator[tuple[AgentAdapter, Any, Any]]:
     """The Gemini-shaped agent registered declaring ``hooks_before_launch`` as ``in_its_home``,
-    its binary and Claude Code's on ``PATH``, the fleet on a fake tmux: the agent, the fake and
-    a project, coders in its root."""
+    its binary and Claude Code's on ``PATH``, the fleet on a fake tmux and a fake clock (each
+    start taken as come, as the fleet suite's own fixtures take it): the agent, the fake tmux
+    and a project, coders in its root."""
     from aisquare.core.agent_adapters.types import AgentCapabilities
     from aisquare.core.config import FleetRoleSettings, load_config, save_config
     from aisquare.core.orchestrator import team_project
     from aisquare.services import fleet as fleet_service
     from tests import fakebin
-    from tests.test_fleet_service import FakeTmux
+    from tests.test_fleet_service import FakeClock, FakeTmux
 
     class Kind(GeminiShapedAdapter):
         capabilities: AgentCapabilities = replace(
@@ -1442,6 +1443,10 @@ def _a_fleet_running_it(
         fakebin.prepend_to_path(bin_dir, monkeypatch)
         tmux = FakeTmux()
         monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+        clock = FakeClock()
+        monkeypatch.setattr(fleet_service, "_sleep", clock.sleep)
+        monkeypatch.setattr(fleet_service, "_monotonic", clock.monotonic)
+        monkeypatch.setattr(fleet_service, "_started_since", lambda session_id, launched: True)
         yield adapter, tmux, team_project(tmp_path)
     finally:
         unregister(adapter.id)

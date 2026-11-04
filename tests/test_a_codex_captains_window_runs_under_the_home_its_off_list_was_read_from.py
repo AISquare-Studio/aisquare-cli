@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from aisquare.core import agents as agent_core
 from aisquare.core.agent_adapters import codex_config
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.services.captain import brain
@@ -57,6 +58,7 @@ def test_a_server_only_the_spawners_home_names_is_switched_off_where_the_window_
     (spawners / "config.toml").write_text(
         '[mcp_servers.linear]\ncommand = "/opt/linear"\n', encoding="utf-8"
     )
+    agent_core.install_hooks("codex", spawners)  # connected: a launch writes no home of the user's
     monkeypatch.setenv("CODEX_HOME", str(spawners))
     monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
     monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")

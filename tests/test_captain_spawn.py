@@ -20,6 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import agents as agent_core
 from aisquare.core import paths
 from aisquare.core.agent_adapters import codex_config, register, unregister
 from aisquare.core.agent_adapters.codex import TOOL_FEATURES
@@ -297,6 +298,7 @@ def test_a_codex_captain_launches_confined_as_codex_spells_it(
     (codex_home / "config.toml").write_text(
         '[mcp_servers.mine]\ncommand = "/opt/mine"\n', encoding="utf-8"
     )
+    agent_core.install_hooks("codex", codex_home)  # connected: no home of the user's is written
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
     monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")

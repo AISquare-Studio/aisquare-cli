@@ -18,6 +18,7 @@ from typer.main import get_command
 
 from aisquare.cli.app import app
 from aisquare.core import agent_adapters, launch_seal, paths
+from aisquare.core import agents as agent_core
 from aisquare.core.agent_adapters import codex_config
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import TEAM_HUB_ENV_VAR
@@ -68,6 +69,10 @@ def captain_on_its_agent(
     fakebin.prepend_to_path(bin_dir, monkeypatch)
     home = tmp_path / "agent-home"
     home.mkdir()
+    if adapter.capabilities.hooks_before_launch:
+        # Connected, as `agents connect` leaves it: a launch writes no home of the user's, and
+        # refuses one without the hooks it needs there (review r37 of #113, finding 2).
+        agent_core.install_hooks(agent, home)
     monkeypatch.setenv(adapter.home_env, str(home))
     monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
     monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")

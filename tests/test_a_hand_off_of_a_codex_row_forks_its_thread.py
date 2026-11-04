@@ -20,6 +20,7 @@ from typing import Literal
 import pytest
 from typer.testing import CliRunner
 
+from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.models import ProjectInfo, TeamTask
 from aisquare.services import claude_accounts as service
@@ -191,6 +192,7 @@ def test_a_take_over_of_a_slot_run_codex_row_onto_this_shells_home_starts_fresh(
     ).agent
     plain = tmp_path / "plain-codex-home"
     plain.mkdir()
+    agent_core.install_hooks("codex", plain)  # connected: a launch writes no home of the user's
     monkeypatch.setenv("CODEX_HOME", str(plain))
     codex = Codex(agent, project, slot.config_dir, tmux, monkeypatch)
     _started(codex)
@@ -223,6 +225,7 @@ def test_a_hand_off_of_a_plain_codex_row_onto_this_shells_home_keeps_its_thread(
     plain = accounts_core.default_account(agent="codex")
     assert plain.slot == 0
     plain.config_dir.mkdir(parents=True, exist_ok=True)
+    agent_core.install_hooks("codex", plain.config_dir)  # connected, as `agents connect` leaves it
     agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False, account="0").agent
     assert agent.account_slot == 0
     codex = Codex(agent, project, plain.config_dir, tmux, monkeypatch)

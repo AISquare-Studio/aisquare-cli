@@ -36,6 +36,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.cli.ui.views.app_settings import launch_line
+from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import harness, launch_seal, procs, prompt_origin
 from aisquare.core.agent_adapters import codex_config, get_adapter
@@ -193,7 +194,10 @@ def codex_agent(
     home = tmp_path / "codex-home"
     home.mkdir()
     # The plain Codex home, as the shell the agent was spawned from names it: a home
-    # `codex queue` runs under has to be one of Codex's own (`fleet._native_home`).
+    # `codex queue` runs under has to be one of Codex's own (`fleet._native_home`). Connected,
+    # as `agents connect codex` leaves it: a launch never writes a home the user owns, and
+    # refuses one without aisquare's hooks (review r37 of #113, finding 2).
+    agent_core.install_hooks("codex", home)
     monkeypatch.setenv("CODEX_HOME", str(home))
     return Codex(agent, project, home, tmux, monkeypatch), task
 

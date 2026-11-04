@@ -30,6 +30,7 @@ from typing import Any
 
 import pytest
 
+from aisquare.core import agents as agent_core
 from aisquare.core import paths
 from aisquare.core.agent_adapters import register, unregister
 from aisquare.core.config import load_config, save_config
@@ -298,6 +299,7 @@ def live(
     monkeypatch.setattr(fleet_service, "nudge_manager", lambda *a, **k: False)
     home = tmp_path / "codex-home"
     home.mkdir()
+    agent_core.install_hooks("codex", home)  # connected: a launch writes no home of the user's
     monkeypatch.setenv("CODEX_HOME", str(home))
     return LiveQuietManager(project, codex_pane, home, monkeypatch)
 

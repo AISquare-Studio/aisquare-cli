@@ -892,11 +892,16 @@ class HookPlace(NamedTuple):
 @dataclass(frozen=True)
 class HookTrustLeft:
     """The records of aisquare's trust its agent still holds in a home once aisquare tried to
-    take them back (:meth:`AgentHookTrust.trust_left`): the agent's file, and the record of
-    each hook in it, which what disconnects or uninstalls says."""
+    take them back (:meth:`AgentHookTrust.trust_left`): the agent's file, the record of each
+    hook in it, and the agent's own name for one such record, which what disconnects or
+    uninstalls says in the agent's terms (``core.agents.hook_trust_left_note``; review r38 of
+    #113, finding 3)."""
 
     file: Path
     tables: tuple[str, ...]
+    """Each record, as the agent's file names it (``--json``'s ``trust_left.tables``)."""
+    record: str
+    """The agent's own name for one record, singular (Codex's: ``[hooks.state] table``)."""
 
 
 class AgentHookTrust(Protocol):

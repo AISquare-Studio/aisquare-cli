@@ -2887,3 +2887,58 @@ def test_connect_asks_an_agent_that_trusts_hooks_to_record_its_own_trust(
         assert asked[-1][2] == [], "every record taken back"
     finally:
         unregister(adapter.id)
+
+
+def test_the_trust_a_disconnect_left_is_named_in_the_agent_s_own_terms(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r38 of #113, finding 3: the note ``agents disconnect`` and uninstall give of the
+    trust records an agent's file kept (``core.agents.hook_trust_left_note``) is agent-neutral
+    code, and it said Codex's ``[hooks.state] table(s)`` of every agent. An agent whose record
+    is a JSON key is told of its keys, in the name its ``HookTrustLeft.record`` gives one; the
+    ``--json`` still lists each record under ``tables``."""
+    from aisquare.core.agent_adapters.types import AgentCapabilities, HookTrustLeft
+
+    kept = ("aisquare.SessionStart", "aisquare.Stop")
+
+    class Record:
+        def record_trust(
+            self, home: Path, settings_path: Path, settings: Any, written: Any
+        ) -> list[str]:
+            return []
+
+        def trust_in_force(self, home: Path, settings_path: Path, settings: Any) -> bool:
+            return False
+
+        def trust_left(self, home: Path) -> HookTrustLeft:
+            return HookTrustLeft(home / "trust.json", kept, record="`trusted` key")
+
+    class Trusting(GeminiShapedAdapter):
+        capabilities: AgentCapabilities = replace(
+            GeminiShapedAdapter.capabilities, requires_hook_trust=True
+        )
+        hook_trust = Record()
+
+    adapter = Trusting()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        home = _home(adapter)
+        args = ["agents", "connect", adapter.id, "--config-dir", str(home)]
+        assert runner.invoke(app, args).exit_code == 0
+        gone = runner.invoke(app, ["agents", "disconnect", adapter.id, "--config-dir", str(home)])
+        assert gone.exit_code == 0, gone.output
+        note = " ".join(gone.stderr.split())
+        assert f"{home / 'trust.json'} still holds the trust aisquare recorded" in note, note
+        assert f"2 `trusted` key(s), {', '.join(kept)}" in note, note
+        assert "[hooks.state]" not in note and "table" not in note, note
+
+        assert runner.invoke(app, args).exit_code == 0
+        said = runner.invoke(
+            app, ["--json", "agents", "disconnect", adapter.id, "--config-dir", str(home)]
+        )
+        assert said.exit_code == 0, said.output
+        payload = json.loads(said.stdout.strip().splitlines()[-1])
+        assert payload["trust_left"] == {"file": str(home / "trust.json"), "tables": list(kept)}
+    finally:
+        unregister(adapter.id)

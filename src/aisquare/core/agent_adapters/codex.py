@@ -658,7 +658,10 @@ class CodexHookTrust:
             found = codex_config.trust_left(home)
         except Exception:
             return None
-        return HookTrustLeft(*found) if found is not None else None
+        if found is None:
+            return None
+        file, tables = found
+        return HookTrustLeft(file, tables, record="[hooks.state] table")
 
 
 def _hooks_file_spellings(settings_path: Path) -> list[str]:

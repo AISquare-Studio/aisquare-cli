@@ -758,14 +758,15 @@ def hook_trust_left(name: str, config_dir: Path | None = None) -> HookTrustLeft 
 
 def hook_trust_left_note(left: HookTrustLeft) -> str:
     """What ``agents disconnect`` and uninstall say of ``left``: the file and each record of
-    aisquare's in it, and why they stayed (r37, finding 8)."""
+    aisquare's in it, in the agent's own name for one (``HookTrustLeft.record``; review r38
+    of #113, finding 3), and why they stayed (r37, finding 8)."""
     why = (
         "it is read-only to you" if not os.access(left.file, os.W_OK) else "it could not be edited"
     )
     shown = ", ".join(left.tables)
     return (
         f"{left.file} still holds the trust aisquare recorded for its hooks, as {why}: "
-        f"{len(left.tables)} [hooks.state] table(s), {shown} — they trust hooks of aisquare's "
+        f"{len(left.tables)} {left.record}(s), {shown} — they trust hooks of aisquare's "
         "that are gone; remove them there by hand"
     )
 

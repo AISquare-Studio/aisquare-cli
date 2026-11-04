@@ -204,7 +204,10 @@ adapter.**
   agent none, as on main). Over SSH a launch, a Claude Code one too, takes the Mac's readings
   over the line as floors, and with no live figure the least full of them, where main takes the
   default (the manager's ruling, 2026-11-03, on this line's floor rule of 2026-10-26). On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask
-  the item of a slot whose agent keeps its login in the Keychain (`keychain_login`) alone.
+  the item a slot's accounts slot names (`AgentAccounts.keychain_item`; Claude Code's is the
+  item it always was, byte for byte), so a slot whose login is a file, or in an item its agent
+  names none for, has no row, and a third agent whose login is in its own item is read, said
+  over SSH and removed on that item.
   - **Through the adapter**, tested on Codex: a pause exits a Codex agent through its own exit
     command and parks its claims on its thread, and a resume brings the thread back (`codex …
     resume <id>`) with the pause's carry-on line, or starts it fresh with its claims when no
@@ -250,8 +253,9 @@ adapter.**
   - **Not Codex's** (N-A): usage over SSH from what the Mac recorded is Claude Code's login in
     the Keychain (a Codex slot's login is its own file, its usage read off its rollouts); the
     quiet refresh of a stale token runs the agent's own command, its accounts slot's
-    `refresh_args()` (Claude Code's `mcp get`), and Codex declares none, as it renews its own
-    `auth.json` and its slot never reads stale; the prompt log's filter of Claude Code's own
+    `refresh_args()` (Claude Code's `mcp get`), whether its usage is a request or read off its
+    home, with the agent that refreshes named in the row's fix too, and Codex declares none, as
+    it renews its own `auth.json` and its slot never reads stale; the prompt log's filter of Claude Code's own
     blocks (Codex's hook hands the typed prompt alone); usage sharing's opt-out (sharing is
     Claude Code's); and the asq-only items: the instance registry and gate, the upgrade and
     uninstall refusal, the highlight and the fade, buttons that work on appear and the

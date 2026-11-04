@@ -662,6 +662,9 @@ class GeminiShapedAccounts:
     memory: SharedMemory | None = None
     trust = GeminiShapedTrust()
 
+    def keychain_item(self, account: ClaudeAccount) -> str | None:
+        return None  # no Keychain item: oauth_creds.json is its login
+
     def sign_in_args(self) -> tuple[str, ...]:
         return ()  # no login subcommand: its TUI signs in on its first run in the slot
 

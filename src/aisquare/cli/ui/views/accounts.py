@@ -627,12 +627,16 @@ def wait_said(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
 
 
 def kept_tooltip(
-    usage: ClaudeUsage | None, *, slot: int | None = None, now: datetime | None = None
+    usage: ClaudeUsage | None,
+    *,
+    slot: int | None = None,
+    now: datetime | None = None,
+    agent: str | None = None,
 ) -> str | None:
     """``reading from 12m ago · rate-limited until 14:32 — logging in again does not clear
     it``: why the session cell shows an older figure, or ``None`` for a live one. Then, on
-    its own line, the failed try's fix (``kept_fix_line``), as the ``!`` says it for a row
-    with nothing kept."""
+    its own line, the failed try's fix (``kept_fix_line``, in the slot's ``agent``'s words),
+    as the ``!`` says it for a row with nothing kept."""
     if usage is None or kept_age(usage, now=now) is None or usage.fetched_at is None:
         return None
     age = accounts_service.describe_age(usage.fetched_at, now=now)
@@ -640,7 +644,7 @@ def kept_tooltip(
         age += f", {accounts_service.VIA_THE_MAC}"
     why = wait_said(usage, now=now) or usage.last_failed_reason
     said = f"reading from {age} · {why}"
-    fix = accounts_service.kept_fix_line(usage, slot=slot)
+    fix = accounts_service.kept_fix_line(usage, slot=slot, agent=agent)
     return said if fix is None else f"{said}\n{fix}"
 
 
@@ -1292,7 +1296,8 @@ class AccountRow(Vertical, can_focus=True):
             return f"{text.plain}{disabled} — double-click (or Enter / F2) to rename"
         if key == "session":
             lines = [text.plain] if text.plain else []
-            if (kept := kept_tooltip(self.usage, slot=self.slot)) is not None:
+            kept = kept_tooltip(self.usage, slot=self.slot, agent=self.status.account.agent)
+            if kept is not None:
                 lines.append(kept)  # why the bar is an older reading (F1 of #400)
             if (via := via_tooltip(self.usage)) is not None:
                 lines.append(via)  # whose reading it is, when this asq could not take it

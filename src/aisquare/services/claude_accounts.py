@@ -1217,8 +1217,9 @@ def forget_arrangement(slot: int, account: ClaudeAccount | None = None) -> None:
         store.set_ui_state(_TOKEN_REFRESH_KEY.format(slot=slot), None)  # and a token's refresh
         # And the login last seen in its Keychain item: the next occupant's is its own.
         gone = account if account is not None else core.find_account(slot)
-        if gone is not None and core.has_stored_login(gone):  # another agent's: no such item
-            store.set_ui_state(_seen_key(gone), None)
+        seen = _seen_key(gone) if gone is not None else None
+        if seen is not None:  # one whose login is in no item it names has no such row
+            store.set_ui_state(seen, None)
 
 
 # --- usage ------------------------------------------------------------------------------
@@ -1277,6 +1278,15 @@ def _refresh_token(agent: str | None = None) -> str:
     )
 
 
+def _refreshing(agent: str | None = None) -> str:
+    """What to do while ``agent``'s quiet refresh of a slot's stale token runs (Claude Code's
+    when ``None``): nothing yet, it is the agent's own (``AgentAccounts.refresh_args``)."""
+    return (
+        f"none needed yet, {core.agent_label(agent or core.AGENT)} refreshes the token "
+        "{at}(Log in is offered if that fails)"
+    )
+
+
 _LOG_IN = _log_in()
 _REFRESH_TOKEN = _refresh_token()
 _SIGN_IN_FIXES: dict[UsageCause, Callable[[str | None], str]] = {
@@ -1284,6 +1294,7 @@ _SIGN_IN_FIXES: dict[UsageCause, Callable[[str | None], str]] = {
     UsageCause.token_missing: _log_in,
     UsageCause.token_expired: _refresh_token,
     UsageCause.token_rejected: _refresh_token,
+    UsageCause.token_refreshing: _refreshing,
 }
 """The causes whose fix names the agent: its sign-in, its token refresh (:func:`usage_fix`)."""
 _THEN_REFRESH = "then ↻ Refresh usage (or --refresh)"
@@ -1293,9 +1304,7 @@ USAGE_FIXES: dict[UsageCause, str | None] = {
     UsageCause.token_missing: _LOG_IN,
     UsageCause.token_expired: _REFRESH_TOKEN,
     UsageCause.token_rejected: _REFRESH_TOKEN,
-    UsageCause.token_refreshing: (
-        "none needed yet, Claude Code refreshes the token {at}(Log in is offered if that fails)"
-    ),
+    UsageCause.token_refreshing: _refreshing(),
     UsageCause.keychain_locked: (
         f"unlock the login keychain (Keychain Access, or log out and back in), {_THEN_REFRESH}"
     ),
@@ -1376,14 +1385,22 @@ def fix_line(reading: ClaudeUsage) -> str:
     return f"fix: {reading.fix}" if reading.fix else NO_FIX
 
 
-def kept_fix_line(reading: ClaudeUsage, *, slot: int | None = None) -> str | None:
+def kept_fix_line(
+    reading: ClaudeUsage, *, slot: int | None = None, agent: str | None = None
+) -> str | None:
     """``fix: point SSL_CERT_FILE …``: the fix for the failed try a kept reading stands in
-    for (:attr:`~ClaudeUsage.last_failed_cause`, :data:`USAGE_FIXES`), or :data:`NO_FIX`;
-    ``None`` for a live reading, or a kept one recorded before the cause was."""
+    for (:attr:`~ClaudeUsage.last_failed_cause`, :data:`USAGE_FIXES`, in the words of the
+    slot's ``agent``: a stale token being refreshed names the agent refreshing it), or
+    :data:`NO_FIX`; ``None`` for a live reading, or a kept one recorded before the cause was."""
     cause = reading.last_failed_cause
     if not reading.available or reading.last_failed_reason is None or cause is None:
         return None
-    fix = usage_fix(cause, slot=slot, until=reading.rate_limited_until or reading.refresh_retry_at)
+    fix = usage_fix(
+        cause,
+        slot=slot,
+        until=reading.rate_limited_until or reading.refresh_retry_at,
+        agent=agent,
+    )
     return f"fix: {fix}" if fix else NO_FIX
 
 
@@ -1641,11 +1658,11 @@ def _record_sample(
     if (
         token is not None
         and core.keychain_platform()
-        and core.has_stored_login(account)  # another agent's login is no Keychain item
+        and core.has_stored_login(account)  # one whose login is in no item it names: no row
         and not _noted_lately(account, token)
     ):
         # Read here: the login an SSH session into the Mac shows readings for (`_logins`).
-        seen = _seen_in(core.stored_login(account))
+        seen = _seen_in(core.item_login(account))
         if seen is not None and seen.token == token:
             _note_login(store, account, seen)
     families = None
@@ -1737,11 +1754,12 @@ def _token_fingerprint(account: ClaudeAccount, now: datetime | None = None) -> s
 
 _LOGIN_KEY = "usage-login:{item}"
 """The ``ui_state`` row that says which login a Keychain item holds, as a process that could
-read it saw last (:class:`SeenLogin`, :func:`_logins`). Keyed by the item, never the slot:
-which item a slot number names depends on the environment (the plain claude's is
-``plain_environment``'s, and ``CLAUDE_SECURESTORAGE_CONFIG_DIR`` names another for every
-slot), so two processes with different ones each said their own login in one slot row,
-and a locked one was served the other's figure (review of #461, item 1)."""
+read it saw last (:class:`SeenLogin`, :func:`_logins`). Keyed by the item, as the slot's agent
+names it (``core.keychain_item``), never the slot: which item a slot number names depends on
+the environment (the plain claude's is ``plain_environment``'s, and
+``CLAUDE_SECURESTORAGE_CONFIG_DIR`` names another for every slot), so two processes with
+different ones each said their own login in one slot row, and a locked one was served the
+other's figure (review of #461, item 1)."""
 LOGIN_NOTE_SECONDS = 60.0
 """How long a login this process said in a row goes unsaid again while it reads the same:
 the Mac's asq looks at every slot on its two-second tick. Another login read is said at once."""
@@ -1788,30 +1806,37 @@ class SeenLogin:
             return None  # a row this version cannot read says nothing: nothing is served
 
 
-def _seen_key(account: ClaudeAccount) -> str:
-    """The row (:data:`_LOGIN_KEY`) of the Keychain item ``account``'s login is read from here."""
-    return _LOGIN_KEY.format(item=f"{core.keychain_service(account)}\t{core.keychain_account()}")
+def _seen_key(account: ClaudeAccount) -> str | None:
+    """The row (:data:`_LOGIN_KEY`) of the Keychain item ``account``'s login is read from here,
+    the one its agent's accounts slot names (``core.keychain_item``: Claude Code's
+    ``core.keychain_service``); ``None`` for a slot whose login is in no item it names."""
+    item = core.keychain_item(account)
+    if item is None:
+        return None
+    return _LOGIN_KEY.format(item=f"{item}\t{core.keychain_account()}")
 
 
-def _memo_key(account: ClaudeAccount) -> tuple[str, str]:
-    return str(paths.db_path()), _seen_key(account)
+def _memo_key(account: ClaudeAccount, key: str | None = None) -> tuple[str, str] | None:
+    """Where this process remembers ``account``'s row (``key``, :func:`_seen_key`'s), by store."""
+    key = _seen_key(account) if key is None else key
+    return None if key is None else (str(paths.db_path()), key)
 
 
-def _seen_in(login: core.StoredLogin) -> SeenLogin | None:
+def _seen_in(login: core.ItemLogin) -> SeenLogin | None:
     """The login ``login`` read as a row says it; ``None`` when the store would not say."""
     if login.unreadable is not None:
         return None
-    creds = login.credentials
-    if creds is None:
-        return SeenLogin(token=None)
-    return SeenLogin(token=_login_digest(creds), expires_at=creds.expires_at)
+    return SeenLogin(token=login.token, expires_at=login.expires_at)
 
 
 def _noted_lately(account: ClaudeAccount, token: str | None) -> bool:
     """Whether this process said ``token`` in ``account``'s row in the last
     :data:`LOGIN_NOTE_SECONDS`."""
+    memo = _memo_key(account)
+    if memo is None:
+        return False
     with _NOTED_LOCK:
-        noted = _NOTED.get(_memo_key(account))
+        noted = _NOTED.get(memo)
     return (
         noted is not None
         and noted[0] == token
@@ -1830,10 +1855,13 @@ def _note_login(store: ContextStore, account: ClaudeAccount, seen: SeenLogin) ->
     said only when the row ends up holding it: a write that lost the race to another login
     is looked at again next time (review of #461, item 4)."""
     key = _seen_key(account)
+    memo = _memo_key(account, key)
+    if key is None or memo is None:
+        return  # its login is in no item it names: no row says it
     raw = store.ui_state(key)
     held = SeenLogin.load(raw)
     if held is not None and held.token != seen.token:
-        fresh = _seen_in(core.stored_login(account, fresh=True))
+        fresh = _seen_in(core.item_login(account, fresh=True))
         if fresh is None:
             return
         seen = fresh
@@ -1844,7 +1872,7 @@ def _note_login(store: ContextStore, account: ClaudeAccount, seen: SeenLogin) ->
         if won is None or won.token != seen.token:
             return
     with _NOTED_LOCK:
-        _NOTED[_memo_key(account)] = (seen.token, time.monotonic())
+        _NOTED[memo] = (seen.token, time.monotonic())
 
 
 @dataclass
@@ -1884,9 +1912,13 @@ class _Logins:
             _note_login(store, account, seen)
         rows = {}
         for account in self.locked:
-            rows[account.slot] = held = SeenLogin.load(store.ui_state(_seen_key(account)))
+            key = _seen_key(account)
+            memo = _memo_key(account, key)
+            if key is None or memo is None:
+                continue  # never locked: `_logins` locks only a slot that names its item
+            rows[account.slot] = held = SeenLogin.load(store.ui_state(key))
             with _NOTED_LOCK:
-                _ROWS[_memo_key(account)] = (held, time.monotonic())
+                _ROWS[memo] = (held, time.monotonic())
         self._take(rows)
 
     def settle_from_memory(self) -> bool:
@@ -1898,7 +1930,8 @@ class _Logins:
         moment = time.monotonic()
         with _NOTED_LOCK:
             for account in self.locked:
-                remembered = _ROWS.get(_memo_key(account))
+                memo = _memo_key(account)
+                remembered = _ROWS.get(memo) if memo is not None else None
                 if remembered is None or not 0 <= moment - remembered[1] < LOGIN_ROW_SECONDS:
                     return False
                 rows[account.slot] = remembered[0]
@@ -1944,14 +1977,17 @@ def _logins(accounts: Sequence[ClaudeAccount], now: datetime, *, say: bool = Tru
     say = say and core.keychain_platform()
     for account in accounts:
         if not core.has_stored_login(account):
-            # Another agent's login is no Keychain item: never locked here nor said in a row,
-            # and its readings are served for the fingerprint its accounts slot gives
-            # (`_token_fingerprint`; none for one read off its own home, never cached).
+            # A login in no Keychain item its agent names (Codex's is a file): never locked
+            # here nor said in a row, and its readings are served for the fingerprint its
+            # accounts slot gives (`_token_fingerprint`; none for one read off its own home,
+            # never cached).
             token = _token_fingerprint(account, now)
             if token is not None:
                 tokens[account.slot] = token
             continue
-        login = core.stored_login(account)
+        # The item its accounts slot names (`core.keychain_item`), read as the agent reads it:
+        # Claude Code's token and expiry, another agent's `login_fingerprint`.
+        login = core.item_login(account)
         if login.problem == "locked":
             locked.append(account)
             continue
@@ -1960,11 +1996,12 @@ def _logins(accounts: Sequence[ClaudeAccount], now: datetime, *, say: bool = Tru
             continue
         if say and not _noted_lately(account, read.token):
             seen.append((account, read))
-        creds = login.credentials
-        if creds is not None and not creds.expired(now):
-            tokens[account.slot] = _login_digest(creds)
-        elif creds is not None:
-            stale[account.slot] = _login_digest(creds)
+        if read.token is None or not core.kind(account.agent).network_usage:
+            continue  # no login; or readings off its own home, never served from the cache
+        if not read.expired(now):
+            tokens[account.slot] = read.token
+        else:
+            stale[account.slot] = read.token
     return _Logins(now=now, tokens=tokens, seen=seen, locked=locked, stale=stale)
 
 
@@ -2359,8 +2396,9 @@ def usage_backoffs(
 #
 # At most one refresh runs per account, whichever process reads: a slot's row
 # (`_TOKEN_REFRESH_KEY`), claimed compare-and-set, says it runs, waits for its retry, or
-# gave up — for the token it is about (`_token_fingerprint`, the stale reading's own key), so
-# the next token the agent writes starts afresh.
+# gave up — for the token it is about (`_stale_login`: the stale reading's own key, or the
+# slot's `login_fingerprint` for an agent whose readings have none), so the next token the
+# agent writes starts afresh.
 
 TOKEN_REFRESH_TIMEOUT_SECONDS = 60.0
 """How long a refresh may run: Claude Code's own token request gives up at 30 s."""
@@ -2439,7 +2477,8 @@ def _refreshing_usage(
 ) -> ClaudeUsage:
     """What a read answers while a stale token is being refreshed: no live reading, and not a
     log-in either (``needs_login`` False), so the row shows its last good reading, aged. The
-    agent that refreshes it is named (``Claude Code is refreshing it``)."""
+    agent that refreshes it is named, in the reason (``Claude Code is refreshing it``) and in
+    the fix (:func:`_refreshing`)."""
     said = stale.reason or _EXPIRED
     agent = core.agent_label(account.agent)
     slot = account.slot
@@ -2451,7 +2490,11 @@ def _refreshing_usage(
             f"{retry_at.astimezone().strftime('%H:%M')}"
         )
     return unreadable_usage(
-        UsageCause.token_refreshing, reason, slot=slot, refresh_retry_at=retry_at
+        UsageCause.token_refreshing,
+        reason,
+        slot=slot,
+        agent=account.agent,
+        refresh_retry_at=retry_at,
     )
 
 
@@ -2502,6 +2545,25 @@ RefreshRows = dict[int, tuple[str, str | None]]
 """What :func:`_refresh_stale` leaves to write: slot → (its claim, what its row becomes)."""
 
 
+def _stale_login(account: ClaudeAccount) -> str | None:
+    """The login a stale reading of ``account`` belongs to, which its quiet refresh is claimed
+    for (:func:`_refresh_stale`): as the reading's own cache key reads it
+    (:func:`_token_fingerprint`), for Claude Code the token it was read with, through the
+    Keychain read of the last few seconds (no second read of the item per round). For an
+    agent whose usage is read off its own home (``network_usage`` False), whose readings have
+    no cache key, the fingerprint its accounts slot answers (``login_fingerprint``), so its
+    ``refresh_args`` run as a request-reading agent's do. ``None`` when no login is stored or
+    the store would not say: no claim then, and nothing is run."""
+    token = _token_fingerprint(account)
+    accounts = core.kind(account.agent)
+    if token is not None or accounts.network_usage:
+        return token
+    try:
+        return accounts.login_fingerprint(account)
+    except core.LoginUnreadable:
+        return None
+
+
 def _refresh_stale(
     accounts: Sequence[ClaudeAccount],
     readings: dict[int, ClaudeUsage],
@@ -2515,7 +2577,7 @@ def _refresh_stale(
     in :func:`read_usage`'s one session after the round.
 
     Per slot, by its row (:class:`TokenRefresh`), claimed compare-and-set in one store
-    session for the login the stale reading belongs to (:func:`_token_fingerprint`): the first
+    session for the login the stale reading belongs to (:func:`_stale_login`): the first
     read of a stale token runs the refresh; a read while it runs, or before its retry is
     due, starts none and answers :func:`_refreshing_usage`; the first read at or after it
     runs the retry; after that, the stale reading as before. The refreshes run at once, one
@@ -2541,11 +2603,7 @@ def _refresh_stale(
     moment = now or _now()
     tokens: dict[int, str] = {}
     for account in refreshed:
-        # The login the stale reading belongs to, as the reading's own cache key reads it: for
-        # Claude Code the token it was read with, through the Keychain read of the last few
-        # seconds (no second read of the item per round); for another agent its accounts
-        # slot's `login_fingerprint`. None when the store would not say: no claim then.
-        token = _token_fingerprint(account)
+        token = _stale_login(account)
         if token is not None:
             tokens[account.slot] = token
     claimed: dict[int, tuple[TokenRefresh | None, TokenRefresh]] = {}
@@ -2668,9 +2726,10 @@ def read_usage(
         backoffs = _read_backoffs(store, [account.slot for account in accounts])
         if core.keychain_platform():
             for account in accounts:
-                if not core.has_stored_login(account):
-                    continue  # another agent's login is no Keychain item, said in no row
-                if (row := SeenLogin.load(store.ui_state(_seen_key(account)))) is not None:
+                key = _seen_key(account)
+                if key is None:
+                    continue  # its login is in no Keychain item its agent names: no row
+                if (row := SeenLogin.load(store.ui_state(key))) is not None:
                     rows[account.slot] = row
     logins: dict[int, str | None] = {}
 

@@ -540,6 +540,9 @@ class FakeAccounts:
     memory: SharedMemory | None = FakeMemory()
     trust = FakeTrust()
 
+    def keychain_item(self, account: ClaudeAccount) -> str | None:
+        return None  # no Keychain item: its login is a file in its home
+
     def sign_in_args(self) -> tuple[str, ...]:
         return ("auth",)
 

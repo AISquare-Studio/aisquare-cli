@@ -585,6 +585,7 @@ def test_a_login_remembered_from_before_is_not_written_over_a_newer_one(
     [two] = _slots(asqs, 1)
     _mac_reads(asqs, [two], NOW - timedelta(minutes=2), s2=40.0)  # A remembers tok-2
     key = service._seen_key(two)
+    assert key is not None, "a Claude Code slot's login is in the item it names"
     asqs.login(two, "tok-2-new")
     newer = service.SeenLogin(
         token=service._login_digest(_creds("tok-2-new")), expires_at=NOW + timedelta(hours=7)
@@ -765,7 +766,7 @@ def test_a_login_whose_write_lost_the_race_is_not_taken_as_said(asqs: TwoAsqs) -
             self.rows[key] = service.SeenLogin(token="someone else's").dump()
             return False
 
-    seen = service._seen_in(core.stored_login(two))
+    seen = service._seen_in(core.item_login(two))
     assert seen is not None and seen.token is not None
     service._note_login(Raced(), two, seen)  # type: ignore[arg-type]
 

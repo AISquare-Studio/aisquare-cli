@@ -497,8 +497,6 @@ def test_from_ssh_it_starts_the_fleets_server_as_its_keychain_login_declares(
         monkeypatch.setattr(login_session, "remote_session", lambda: True)  # an SSH login
         project = team_project(tmp_path)
 
-        # And the same fact is the gate of its slots' Keychain rows (row 5).
-        assert accounts_core.has_stored_login(accounts_core.create_account(adapter.id)) is keychain
         if keychain:
             with pytest.raises(fleet_service.FleetError, match="start asq on the Mac first"):
                 fleet_service.spawn(project, "coder", agent=adapter.id)
@@ -511,6 +509,146 @@ def test_from_ssh_it_starts_the_fleets_server_as_its_keychain_login_declares(
         assert second.pane_id in tmux.facts, "it joins the server an SSH login started"
     finally:
         unregister(adapter.id)
+
+
+class _InItsOwnItem(GeminiShapedAccounts):
+    """Its accounts, as an agent whose login is a Keychain item it names itself, one per
+    slot, and whose usage is a request (``network_usage``) keyed by that login's fingerprint.
+    ``locked`` stands for this process's Keychain being locked, as an SSH login's is: its
+    login and its usage then read nothing, and it says why in its own words."""
+
+    keychain_login = True
+    network_usage = True
+
+    def __init__(self) -> None:
+        self.locked = False
+        self.asked: list[int] = []
+
+    def keychain_item(self, account: ClaudeAccount) -> str | None:
+        return f"gemini-shaped-oauth-{account.slot}"
+
+    def login_fingerprint(self, account: ClaudeAccount) -> str | None:
+        if self.locked:
+            raise accounts_core.LoginUnreadable("its Keychain is locked", problem="locked")
+        return super().login_fingerprint(account)
+
+    def usage(
+        self, account: ClaudeAccount, *, now: Any, fetch: object, fresh: bool = False
+    ) -> ClaudeUsage:
+        from aisquare.models import UsageCause
+
+        if self.locked:
+            return ClaudeUsage(
+                available=False,
+                reason="its Keychain is locked",
+                cause=UsageCause.keychain_locked_ssh,
+            )
+        self.asked.append(account.slot)
+        reading = super().usage(account, now=now, fetch=fetch, fresh=fresh)
+        return reading.model_copy(update={"fetched_at": None})  # taken now, as a request is
+
+
+class _InNoItem(_InItsOwnItem):
+    """The same, declaring its login in the Keychain but naming no item for it."""
+
+    def keychain_item(self, account: ClaudeAccount) -> str | None:
+        return None
+
+
+@pytest.mark.parametrize("item", [True, False], ids=["its-own-item", "no-item-named"])
+def test_its_keychain_rows_are_on_the_item_its_accounts_name(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, item: bool
+) -> None:
+    """r36 finding 2: an agent whose login is in the Keychain (``keychain_login``) has its
+    slots' Keychain rows on the item its accounts slot names (``keychain_item``), never on
+    Claude Code's, whose name is hashed from a ``CLAUDE_CONFIG_DIR`` its launch has none of
+    (the KeyError of seq 10355). On the Mac, ``read_usage`` and the cached read take its
+    reading, and the row on its own item says the login it holds (its
+    ``login_fingerprint``). In an SSH login, where its Keychain is locked, the cached read
+    serves the Mac's reading for that login, marked; and ``accounts remove`` drops the row.
+    An agent that names no item has no row, and is read as one whose login is a file."""
+    monkeypatch.setattr(accounts_core, "keychain_platform", lambda: True)  # the Mac's rows
+    adapter = GeminiShapedAdapter()
+    slot_answers = _InItsOwnItem() if item else _InNoItem()
+    adapter.accounts = slot_answers
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        slot = _signed_in_slot(adapter)
+        _quotas_till_tomorrow(slot)
+        fingerprint = slot_answers.login_fingerprint(slot)
+        assert fingerprint is not None
+        row = f"usage-login:gemini-shaped-oauth-{slot.slot}\t{accounts_core.keychain_account()}"
+
+        read = accounts_service.read_usage([slot])[slot.slot]
+        tick = accounts_service.cached_usage_with_trends([slot])[slot.slot][0]
+
+        assert read.available and tick.available, (read.reason, tick.reason)
+        rows = _login_rows()
+        if not item:
+            assert rows == {}, "it names no item: no row says its login"
+            assert accounts_service._logins([slot], tick.fetched_at or _now()).tokens == {
+                slot.slot: fingerprint
+            }, "its readings are served for its fingerprint, as a file login's are"
+            return
+        assert list(rows) == [row], "its own item's row, and no Claude Code item's"
+        assert accounts_service.SeenLogin.load(rows[row]) == accounts_service.SeenLogin(
+            token=fingerprint
+        )
+
+        slot_answers.locked = True  # an SSH login into the Mac: its Keychain is locked here
+        with accounts_service._NOTED_LOCK:
+            accounts_service._ROWS.clear()
+        served = accounts_service.cached_usage_with_trends([slot])[slot.slot][0]
+
+        assert served.available and served.recorded_elsewhere, served.reason
+        assert served.limiting is not None and served.limiting.used_percent == 70.0
+        assert slot_answers.asked == [slot.slot], "one request: the Mac's, which both served"
+
+        removed = runner.invoke(app, ["accounts", "remove", str(slot.slot)])
+
+        assert removed.exit_code == 0, removed.output
+        assert _login_rows() == {}, "the removed slot's row is dropped"
+    finally:
+        unregister(adapter.id)
+
+
+def _now() -> Any:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC)
+
+
+def _quotas_till_tomorrow(slot: ClaudeAccount) -> None:
+    """Its quotas recorded in ``slot``: flash 10 %, pro 70 %, each resetting tomorrow."""
+    from datetime import timedelta
+
+    tomorrow = (_now() + timedelta(days=1)).isoformat()
+    (slot.config_dir / ".gemini" / "quota.json").write_text(
+        json.dumps(
+            {
+                "models": {
+                    model: {"used_percent": used, "resets_at": tomorrow}
+                    for model, used in {"gemini-2.5-flash": 10, "gemini-2.5-pro": 70}.items()
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _login_rows() -> dict[str, str]:
+    """Every ``usage-login:`` row the store holds, by its key."""
+    import sqlite3
+
+    from aisquare.core import paths
+
+    raw = sqlite3.connect(str(paths.db_path()))
+    try:
+        found = raw.execute("SELECT key, value FROM ui_state WHERE key LIKE 'usage-login:%'")
+        return {str(key): str(value) for key, value in found}
+    finally:
+        raw.close()
 
 
 class _RefreshedQuietly(GeminiShapedAccounts):
@@ -538,6 +676,13 @@ class _RefreshedQuietly(GeminiShapedAccounts):
         return super().usage(account, now=now, fetch=fetch, fresh=fresh)
 
 
+class _RefreshedOffline(_RefreshedQuietly):
+    """The same accounts, reading its usage off its home (``network_usage`` False): its
+    readings have no cache key, and its refresh is claimed for its ``login_fingerprint``."""
+
+    network_usage = False
+
+
 class _NoRefresh(_RefreshedQuietly):
     """The same accounts, declaring no quiet refresh: what every agent's slot is by default."""
 
@@ -549,22 +694,35 @@ _REAL_REFRESH_COMMAND = accounts_service._token_refresh_command
 """The real one, before ``conftest.no_token_refresh`` stubs it per test."""
 
 
-@pytest.mark.parametrize("declared", [True, False], ids=["refresh-args", "none-declared"])
+@pytest.mark.parametrize(
+    "accounts",
+    [_RefreshedQuietly, _RefreshedOffline, _NoRefresh],
+    ids=["refresh-args", "refresh-args-usage-offline", "none-declared"],
+)
 def test_its_stale_token_is_refreshed_quietly_by_the_command_its_accounts_declare(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accounts: type[_RefreshedQuietly]
 ) -> None:
     """SCOPE #113 092 row 35: a slot whose token went stale is refreshed by its own agent's
     command, its accounts slot's ``refresh_args`` run headless in the slot, and read again.
     The first run does not take, and the row reads ``token_refreshing`` with its retry a
-    minute on, naming the agent. The retry takes, and the slot reads its windows. An agent
-    that declares no refresh runs nothing, and its stale token reads as it is."""
+    minute on, naming the agent in its reason and, r36 finding 6, in its fix, on the row
+    and on the kept figure the Accounts page and ``accounts`` show behind it, with no other
+    agent's name. The retry takes, and the slot reads its windows. r36 finding 8: an agent
+    whose usage is read off its home (no ``network_usage``) is refreshed the same way, its
+    refresh claimed for its ``login_fingerprint``. An agent that declares no refresh runs
+    nothing, and its stale token reads as it is."""
     from datetime import UTC, datetime, timedelta
 
+    from rich.text import Text
+
+    from aisquare.cli import accounts as accounts_cli
+    from aisquare.cli.ui.views.accounts import AccountRow
     from aisquare.models import UsageCause
     from tests import fakebin
 
+    declared = accounts is not _NoRefresh
     adapter = GeminiShapedAdapter()
-    adapter.accounts = _RefreshedQuietly() if declared else _NoRefresh()
+    adapter.accounts = accounts()
     monkeypatch.delenv(adapter.home_env, raising=False)
     register(adapter)
     try:
@@ -574,7 +732,8 @@ def test_its_stale_token_is_refreshed_quietly_by_the_command_its_accounts_declar
         slot = _signed_in_slot(adapter)
         creds = slot.config_dir / ".gemini" / "oauth_creds.json"
         now = datetime.now(UTC)
-        hour = int(timedelta(hours=1).total_seconds() * 1000)
+        hour_td = timedelta(hours=1)
+        hour = int(hour_td.total_seconds() * 1000)
         tomorrow = (now + timedelta(days=1)).isoformat()
         (slot.config_dir / ".gemini" / "quota.json").write_text(
             json.dumps(
@@ -616,6 +775,26 @@ def test_its_stale_token_is_refreshed_quietly_by_the_command_its_accounts_declar
         assert first.cause is UsageCause.token_refreshing and not first.needs_login
         assert first.refresh_retry_at is not None
         assert "Gemini-shaped's refresh did not take" in (first.reason or ""), first.reason
+        clock = first.refresh_retry_at.astimezone().strftime("%H:%M")
+        fix = (
+            f"none needed yet, Gemini-shaped refreshes the token at {clock} "
+            "(Log in is offered if that fails)"
+        )
+        assert first.fix == fix
+        # The figure the row keeps behind it, as the Accounts page and `accounts` show it.
+        good = ClaudeUsage(available=True, session_percent=40.0, fetched_at=now - 2 * hour_td)
+        kept = accounts_service._preferred(good, first.model_copy(update={"fetched_at": now}))
+        assert kept is not None and kept.last_failed_cause is UsageCause.token_refreshing
+        status = accounts_service.describe(slot)
+        status.usage = kept
+        row = AccountRow(status)  # its session cell's hover, unmounted: the row's own words
+        row.usage = kept
+        said = [
+            row._cell_tooltip("session", Text("40%")) or "",
+            *(line.plain for line in accounts_cli._kept_lines([status])),
+        ]
+        assert len(said) == 2 and all(f"fix: {fix}" in line for line in said), said
+        assert not any("Claude Code" in line or "Codex" in line for line in [*said, fix]), said
 
         again = accounts_service.read_usage([slot], now=first.refresh_retry_at)[slot.slot]
 

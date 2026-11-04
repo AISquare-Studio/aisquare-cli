@@ -625,6 +625,9 @@ class CodexAccounts:
         # What it shares is its adapter's to say (``agent_adapters.codex_shared``), handed in.
         self.share_parts = share_parts
 
+    def keychain_item(self, account: ClaudeAccount) -> str | None:
+        return None  # no Keychain item: auth.json is its login
+
     def sign_in_args(self) -> tuple[str, ...]:
         # Codex's own browser (or device-code) sign-in; it writes auth.json and exits.
         return ("login",)

@@ -2229,20 +2229,39 @@ class AgentAccounts(Protocol):
     SSH login's security session can read. A fleet tmux server started from an SSH login on
     macOS, and every pane it opens, is in that session (``core.login_session``). So an SSH
     login starts no server for it, and it is never opened in a server an SSH login started
-    (``services.fleet._refuse_a_server_from_ssh``, #20). Its slots' Keychain rows are read and
-    said (``core.claude_accounts.has_stored_login``). ``False`` for an agent whose login is a
-    file in its home (Codex's ``auth.json``): it starts the server from SSH, and that server
-    is marked as one an SSH login started."""
+    (``services.fleet._refuse_a_server_from_ssh``, #20). Which item a slot's login is in is
+    :meth:`keychain_item`'s, asked only when this is ``True``. ``False`` for an agent whose
+    login is a file in its home (Codex's ``auth.json``): it starts the server from SSH, and
+    that server is marked as one an SSH login started."""
+
+    def keychain_item(self, account: ClaudeAccount) -> str | None:
+        """The service name of the login Keychain item ``account``'s login is kept in on macOS,
+        as the agent itself names it, for an agent of :attr:`keychain_login`: Claude Code's
+        ``Claude Code-credentials``, with ``-`` and eight hex digits of the config dir's hash
+        after it for a slot of its own (``core.claude_accounts.keychain_service``). It keys
+        the row in which a process that can read the item says the login it holds
+        (:meth:`login_fingerprint`; Claude Code's token and expiry), which a process whose
+        Keychain is locked, an SSH login's, serves the Mac's readings for
+        (``services.claude_accounts._logins``), and a removed slot's row is dropped by it. A
+        locked read is a ``LoginUnreadable`` whose ``problem`` is ``"locked"``.
+
+        ``None`` for an agent that names no item, and is never asked for one whose
+        login is no Keychain item: its slots have no row, and their readings are served
+        for its fingerprint as a file login's are. Never raises."""
+        ...
 
     def refresh_args(self) -> tuple[str, ...]:
         """Arguments to the agent's binary that renew a slot's stale token quietly and wait for
         the answer: no terminal, no turn, no request to a model. They run headless, in the
-        slot's session environment, when a usage read sent with its token (:attr:`network_usage`)
-        finds the token expired or refused (``services.claude_accounts._refresh_stale``, which
-        claims the refresh for the login the reading belongs to, :meth:`login_fingerprint` for
-        an agent other than Claude Code). The row reads ``token_refreshing`` while
-        they run, then the login is read again. One retry follows a minute later, and only
-        then is a log-in asked for. Claude Code's are ``mcp get`` of a server no one can
+        slot's session environment, when a usage read finds the token expired or refused
+        (``token_expired``, ``token_rejected``), whether that read is a request
+        (:attr:`network_usage`) or read off the slot's home
+        (``services.claude_accounts._refresh_stale``). The refresh is claimed for the login
+        the stale reading belongs to: Claude Code's token, another agent's
+        :meth:`login_fingerprint`, so an agent that keeps no fingerprint (``None``) has none
+        run. The row reads ``token_refreshing`` while they run, naming the agent in its
+        reason and fix, then the login is read again. One retry follows a minute later, and
+        only then is a log-in asked for. Claude Code's are ``mcp get`` of a server no one can
         have.
 
         ``()`` for an agent that declares none, and whose stale token then reads as it is.
@@ -2337,8 +2356,8 @@ class AgentAccounts(Protocol):
         does not count as the new one at the first poll
         (``services.claude_accounts.sign_in_landed``). ``None`` when no usable login is
         stored. Read afresh. Raises ``core.claude_accounts.LoginUnreadable`` with the reason
-        when the store would not say (a locked Keychain): ``None`` there would let the
-        login already stored land."""
+        when the store would not say (a locked Keychain, its ``problem`` ``"locked"``):
+        ``None`` there would let the login already stored land."""
         ...
 
     @property

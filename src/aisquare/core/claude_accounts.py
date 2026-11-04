@@ -705,7 +705,14 @@ class StoredLogin:
 class LoginUnreadable(Exception):
     """The store an account's login is kept in would not say (a locked or refusing
     Keychain): raised by an accounts slot's ``login_fingerprint``
-    (``agent_adapters.types.AgentAccounts``), with the reason."""
+    (``agent_adapters.types.AgentAccounts``), with the reason, and the Keychain's kind of it
+    (``problem``) when the store is a Keychain item (``keychain_item``): a ``locked`` one
+    takes its login from the row a process that could read it said (``services.
+    claude_accounts._logins``)."""
+
+    def __init__(self, reason: str, *, problem: KeychainProblem | None = None) -> None:
+        super().__init__(reason)
+        self.problem = problem
 
 
 def login_digest(creds: ClaudeCredentials) -> str:
@@ -738,17 +745,62 @@ def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
     return StoredLogin(credentials_in(_read_json(credentials_path(account))))
 
 
-def has_stored_login(account: ClaudeAccount) -> bool:
-    """Whether ``account``'s login is kept in the login Keychain on macOS, as its agent's
-    accounts slot declares (``AgentAccounts.keychain_login``): Claude Code's, which
-    :func:`stored_login` reads there or in its credentials file. An agent whose login is a
-    file in its home (Codex's) keeps no Keychain item. No Keychain is ever locked for its
-    slot, and none of its rows says a login. ``False`` for an agent this install does not
-    know."""
+def keychain_item(account: ClaudeAccount) -> str | None:
+    """The login Keychain item ``account``'s login is kept in on macOS, as its agent's
+    accounts slot names it (``AgentAccounts.keychain_item``), which keys the row a process
+    that can read it says the login in (``services.claude_accounts._seen_key``): Claude
+    Code's is :func:`keychain_service`'s. ``None`` for an agent whose login is no Keychain
+    item (``keychain_login`` False: Codex's ``auth.json``), for one whose slot names none,
+    and for an agent this install does not know: no Keychain is locked for its slot then,
+    and no row says its login."""
     try:
-        return kind(account.agent).keychain_login
+        accounts = kind(account.agent)
     except ValueError:
-        return False
+        return None
+    return accounts.keychain_item(account) if accounts.keychain_login else None
+
+
+def has_stored_login(account: ClaudeAccount) -> bool:
+    """Whether ``account``'s login is kept in a Keychain item this install can name
+    (:func:`keychain_item`): its slot's Keychain rows are read and said."""
+    return keychain_item(account) is not None
+
+
+@dataclass(frozen=True)
+class ItemLogin:
+    """What a slot's Keychain item (:func:`keychain_item`) held, read here: its login's
+    fingerprint (``token``, :func:`login_digest` for Claude Code's; ``None``: no login stored)
+    and when it expires where that is known; or, with ``token`` ``None``, why the store would
+    not say (``unreadable``) and its kind (``problem``). Never the token itself."""
+
+    token: str | None = None
+    expires_at: datetime | None = None
+    unreadable: str | None = None
+    problem: KeychainProblem | None = None
+
+
+def item_login(account: ClaudeAccount, *, fresh: bool = False) -> ItemLogin:
+    """The login ``account``'s Keychain item holds, read here (:class:`ItemLogin`).
+
+    Claude Code's from :func:`stored_login` (its token's digest and expiry, through the
+    Keychain memo unless ``fresh``), as the rows always read it; another agent's by the
+    fingerprint its accounts slot answers (``AgentAccounts.login_fingerprint``, read afresh,
+    no expiry), a ``LoginUnreadable`` it raises being the store that would not say. Asked
+    only of a slot that names an item (:func:`keychain_item`)."""
+    if _claude_codes(account):
+        login = stored_login(account, fresh=fresh)
+        if login.unreadable is not None:
+            return ItemLogin(unreadable=login.unreadable, problem=login.problem)
+        creds = login.credentials
+        if creds is None:
+            return ItemLogin()
+        return ItemLogin(token=login_digest(creds), expires_at=creds.expires_at)
+    try:
+        return ItemLogin(token=kind(account.agent).login_fingerprint(account))
+    except LoginUnreadable as exc:
+        return ItemLogin(unreadable=str(exc), problem=exc.problem)
+    except ValueError:
+        return ItemLogin()
 
 
 def _claude_codes(account: ClaudeAccount) -> bool:
@@ -1826,6 +1878,9 @@ class ClaudeCodeAccounts:
         self.share_parts = share_parts
         self.memory = memory
 
+    def keychain_item(self, account: ClaudeAccount) -> str | None:
+        return keychain_service(account)  # hashed from the dir its launch is given
+
     def sign_in_args(self) -> tuple[str, ...]:
         # No non-interactive login: a first session in the slot runs Claude Code's own.
         return ()
@@ -1894,7 +1949,7 @@ class ClaudeCodeAccounts:
     def login_fingerprint(self, account: ClaudeAccount) -> str | None:
         login = stored_login(account, fresh=True)
         if login.unreadable is not None:
-            raise LoginUnreadable(login.unreadable)
+            raise LoginUnreadable(login.unreadable, problem=login.problem)
         return login_digest(login.credentials) if login.credentials is not None else None
 
     trust = ClaudeFolderTrust()

@@ -418,7 +418,9 @@ def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
         )
         if age and usage.recorded_elsewhere:
             age += f", {accounts_service.VIA_THE_MAC}"
-        fix = accounts_service.kept_fix_line(usage, slot=status.account.slot)
+        fix = accounts_service.kept_fix_line(
+            usage, slot=status.account.slot, agent=status.account.agent
+        )
         then = f"; {fix}" if fix is not None else ""
         lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}{then}", style="yellow"))
     return lines

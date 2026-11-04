@@ -217,6 +217,33 @@ def test_a_managed_slots_item_hashes_the_dir_its_launch_is_given(
     assert core.keychain_service(plain) == "Claude Code-credentials-d3ebdfac"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a macOS path")
+def test_its_accounts_slot_names_the_same_items_and_their_rows_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r36 finding 2: which item a slot's login is in is its accounts slot's to name
+    (``AgentAccounts.keychain_item``). Claude Code's names the items it always did, and the
+    row a process that can read one says its login in (``usage-login:``) is keyed as it
+    always was, byte for byte."""
+    monkeypatch.setenv("AISQUARE_HOME", "/Users/me/.aisquare")
+    monkeypatch.setenv("USER", "me")
+    for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    plain, slot = core.default_account(), core._managed(2)
+
+    assert (core.keychain_item(plain), core.keychain_item(slot)) == (
+        "Claude Code-credentials",
+        MANAGED_SLOT_2,
+    )
+    assert core.kind(core.AGENT).keychain_item(slot) == core.keychain_service(slot)
+    assert service._seen_key(plain) == "usage-login:Claude Code-credentials\tme"
+    assert service._seen_key(slot) == "usage-login:Claude Code-credentials-72ce35d7\tme"
+    # The variable every launch from here inherits names one item for both, as it does.
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/Users/me/shared")
+    for account in (plain, slot):
+        assert service._seen_key(account) == "usage-login:Claude Code-credentials-f4c6087d\tme"
+
+
 def test_securestorage_names_every_accounts_item_as_claude_code_does(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

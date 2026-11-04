@@ -578,11 +578,7 @@ def read_below(root: Path, names: Sequence[str], limit: int) -> ReadBelow:
 
     Raises ``FileNotFoundError`` when nothing is there, and :class:`NotReadBelow`, saying
     why, for everything else it refuses; any other ``OSError`` as the system raised it."""
-    for name in names:
-        if name in ("", ".", "..") or "/" in name or os.sep in name or (os.altsep or "/") in name:
-            raise NotReadBelow(errno.EINVAL, f"{name!r} is not one name below {root}")
-    if not names:
-        raise NotReadBelow(errno.EINVAL, f"no file named below {root}")
+    _one_name_each(root, names)
     if sys.platform == "win32":
         descriptor = _open_below_windows(root, names)
     else:
@@ -609,6 +605,43 @@ def read_below(root: Path, names: Sequence[str], limit: int) -> ReadBelow:
         os.close(descriptor)
 
 
+def stat_manager_state(project_id: str) -> os.stat_result:
+    """The ``lstat`` of ``project_id``'s manager's state file (:func:`stat_below`), for when
+    it was written: a link is not its state file, nor its target's age its age, and a FIFO
+    there is no file at all (#78 reopen). Raises as :func:`read_manager_state` does."""
+    return stat_below(aisquare_home(), ("projects", project_id, "manager", "state.md"))
+
+
+def stat_below(root: Path, names: Sequence[str]) -> os.stat_result:
+    """The ``lstat`` of ``root``/``names`` when it is a regular file, reached as
+    :func:`read_below` reaches it (each directory on the way from the one before, with no
+    link followed), the file itself never opened: a link, a FIFO, a directory or anything but
+    a regular file there is :class:`NotReadBelow`, nothing there ``FileNotFoundError``."""
+    _one_name_each(root, names)
+    if sys.platform == "win32":
+        info = _lstat_below_windows(root, names)
+    else:
+        parent = _dirs_below_posix(root, names[:-1])
+        try:
+            info = os.stat(names[-1], dir_fd=parent, follow_symlinks=False)
+        finally:
+            os.close(parent)
+    kind = _not_regular(info.st_mode)
+    if kind is not None:
+        raise NotReadBelow(errno.EINVAL, f"it is {kind}, not a regular file")
+    return info
+
+
+def _one_name_each(root: Path, names: Sequence[str]) -> None:
+    """Refuse (:class:`NotReadBelow`) no names, or a name that is not one component below
+    ``root``: empty, ``.``, ``..`` or holding a separator, which could climb out of it."""
+    if not names:
+        raise NotReadBelow(errno.EINVAL, f"no file named below {root}")
+    for name in names:
+        if name in ("", ".", "..") or "/" in name or os.sep in name or (os.altsep or "/") in name:
+            raise NotReadBelow(errno.EINVAL, f"{name!r} is not one name below {root}")
+
+
 def _not_regular(mode: int) -> str | None:
     """What a file of ``mode`` is when it is not a regular file, in words; ``None`` for one."""
     for test, said in (
@@ -625,18 +658,34 @@ def _not_regular(mode: int) -> str | None:
 
 
 def _open_below_posix(root: Path, names: Sequence[str]) -> int:
-    """A descriptor on ``root``/``names``, each name opened from the last with ``O_NOFOLLOW``."""
+    """A descriptor on the file ``root``/``names``: its directory by :func:`_dirs_below_posix`,
+    then the file from it with ``O_NOFOLLOW``, ``O_NONBLOCK`` and ``O_NOCTTY``."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    descend = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
     final = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
-    descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    parent = _dirs_below_posix(root, names[:-1])
     try:
-        for at, name in enumerate(names):
-            last = at == len(names) - 1
+        return os.open(names[-1], final, dir_fd=parent)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise NotReadBelow(exc.errno, f"{names[-1]} is a symbolic link") from None
+        raise
+    finally:
+        os.close(parent)
+
+
+def _dirs_below_posix(root: Path, dirs: Sequence[str]) -> int:
+    """A descriptor on the directory ``root``/``dirs``, each opened from the last with
+    ``O_NOFOLLOW``: a link or a name that is not a directory on the way is
+    :class:`NotReadBelow`."""
+    directory = getattr(os, "O_DIRECTORY", 0)
+    descend = os.O_RDONLY | directory | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(root, os.O_RDONLY | directory)
+    try:
+        for name in dirs:
             try:
-                deeper = os.open(name, final if last else descend, dir_fd=descriptor)
+                deeper = os.open(name, descend, dir_fd=descriptor)
             except OSError as exc:
-                if exc.errno == errno.ELOOP or (not last and exc.errno == errno.ENOTDIR):
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                     what = "a symbolic link" if exc.errno == errno.ELOOP else "not a directory"
                     raise NotReadBelow(exc.errno, f"{name} on the way is {what}") from None
                 raise
@@ -648,17 +697,25 @@ def _open_below_posix(root: Path, names: Sequence[str]) -> int:
         raise
 
 
-def _open_below_windows(root: Path, names: Sequence[str]) -> int:
-    """A descriptor on ``root``/``names``, each name ``lstat``-ed first: a link or a junction
-    refused (Windows has no ``O_NOFOLLOW`` and no descriptor walk)."""
+def _lstat_below_windows(root: Path, names: Sequence[str]) -> os.stat_result:
+    """The ``lstat`` of ``root``/``names``, each name ``lstat``-ed in turn: a link or a
+    junction anywhere refused (Windows has no ``O_NOFOLLOW`` and no descriptor walk)."""
     here = root
+    found = os.lstat(root)
     for name in names:
         here = here / name
         found = os.lstat(here)
         reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
         if stat.S_ISLNK(found.st_mode) or getattr(found, "st_file_attributes", 0) & reparse:
             raise NotReadBelow(errno.ELOOP, f"{name} on the way is a link or a junction")
-    return os.open(here, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    return found
+
+
+def _open_below_windows(root: Path, names: Sequence[str]) -> int:
+    """A descriptor on ``root``/``names`` once :func:`_lstat_below_windows` found no link
+    or junction on the way."""
+    _lstat_below_windows(root, names)
+    return os.open(root.joinpath(*names), os.O_RDONLY | getattr(os, "O_BINARY", 0))
 
 
 def credentials_path() -> Path:

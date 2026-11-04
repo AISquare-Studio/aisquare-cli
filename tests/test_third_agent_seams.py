@@ -180,6 +180,36 @@ def test_disconnect_takes_away_the_hook_file_connect_made_and_keeps_one_the_user
     assert json.loads(hooks.read_text(encoding="utf-8")) == {}, "theirs, emptied by them: kept"
 
 
+def test_disconnect_never_unlinks_a_link_where_the_hook_file_connect_made_was(
+    third: AgentAdapter, runner: CliRunner, tmp_path: Path
+) -> None:
+    """SMOKE13 N2's removal is of the file connect made, a regular file: one replaced since by
+    a link (to a file of the user's) keeps the link, whatever the agent, and the file it
+    leads to is written as any hook file is, its own entries kept. Mutant (the regular-file
+    check dropped, ``_plain_file``): the link is unlinked and dies here."""
+    from tests.fsperms import can_symlink
+
+    if not can_symlink():
+        pytest.skip("this machine makes no symbolic link")
+    made = _home(third)
+    hooks = made / third.settings_name
+    assert (
+        runner.invoke(app, ["agents", "connect", third.id, "--config-dir", str(made)]).exit_code
+        == 0
+    )
+    kept = tmp_path / "kept" / third.settings_name
+    kept.parent.mkdir()
+    kept.write_bytes(hooks.read_bytes())
+    hooks.unlink()
+    hooks.symlink_to(kept)
+
+    gone = runner.invoke(app, ["agents", "disconnect", third.id, "--config-dir", str(made)])
+
+    assert gone.exit_code == 0, gone.output
+    assert hooks.is_symlink(), "the link is the user's: kept"
+    assert kept.is_file() and agent_core.hook_commands(third.id, made) == []
+
+
 # --- uninstall -----------------------------------------------------------------------------
 
 

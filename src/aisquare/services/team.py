@@ -4473,8 +4473,8 @@ def _state_lines(project_id: str, now: datetime) -> list[str]:
     except OSError as exc:
         why = exc.strerror or type(exc).__name__
         return [
-            f"Resume: your state file {path} was not read ({why}): write it there again as a "
-            "plain file before you stop."
+            f"Resume: your state file {path} was not read ({why}): write it there again, a "
+            f"plain file of at most {harness.STATE_FILE_MAX:,} chars, before you stop."
         ]
     text = read.data.decode("utf-8", errors="replace").strip()
     written = datetime.fromtimestamp(read.info.st_mtime, tz=UTC)

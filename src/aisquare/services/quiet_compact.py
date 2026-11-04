@@ -156,18 +156,19 @@ def _reader(session: TeamSession | None) -> AgentTranscript | None:
 
 
 def _state_age(project_id: str) -> datetime | str:
-    """When ``project_id``'s manager last wrote its state file, from the descriptor
-    ``paths.read_manager_state`` read it through; else why there is none to go by: a link, a
-    FIFO or anything but a regular file of a bounded size there is not its state, and a link
-    to a file someone else keeps fresh would have passed for a fresh one (#78 reopen)."""
+    """When ``project_id``'s manager last wrote its state file, by its ``lstat``
+    (``paths.stat_manager_state``: below the home, no link followed, the file never opened);
+    else why there is none to go by. A link, a FIFO or anything but a regular file there is
+    not its state, and a link to a file someone else keeps fresh passed for a fresh one, by
+    a ``stat`` that followed it (#78 reopen)."""
     state = paths.manager_state_file(project_id)
     try:
-        read = paths.read_manager_state(project_id)
+        info = paths.stat_manager_state(project_id)
     except FileNotFoundError:
         return f"it has no state file at {state}"
     except OSError as exc:
         return f"its state file at {state} was not read ({exc.strerror or type(exc).__name__})"
-    return datetime.fromtimestamp(read.info.st_mtime, tz=UTC)
+    return datetime.fromtimestamp(info.st_mtime, tz=UTC)
 
 
 def _last_wake(store: ContextStore, session: TeamSession, cursor: int) -> datetime | None:

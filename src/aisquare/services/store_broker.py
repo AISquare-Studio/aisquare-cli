@@ -2126,14 +2126,20 @@ def start_for_launch(
     # The reports its `asq exec` saves: writable to every seat, as its inbox is, since a
     # reviewer's checks are reports too. The seals beside them are not.
     writable = (*writable, directory / REPORTS)
-    # A manager's own state directory, which its cycle tells it to keep: whatever the agent
-    # and its write scope, as a reviewer's reports are (SMOKE13, N1).
-    state, refused = own_state_dir(env, store, cwd)
-    if state is not None:
-        writable = (*writable, state)
     access = adapter.broker_access(
         argv, store, directory / INBOX, protect=protect, writable=writable
     )
+    # A manager's own state directory, which its cycle tells it to keep: whatever the agent
+    # and its write scope, as a reviewer's reports are (SMOKE13, N1); made only for a launch
+    # under the store's profile, the one that holds the store read-only.
+    refused = ""
+    if access is not None:
+        state, refused = own_state_dir(env, store, cwd)
+        if state is not None:
+            writable = (*writable, state)
+            access = adapter.broker_access(
+                argv, store, directory / INBOX, protect=protect, writable=writable
+            )
     # Whatever sandbox it runs in, the store's profile or a native one (finding 3).
     refuse_inside(access or argv, cwd, adapter, home, env.get("PATH"))
     final = adapter.sandbox_writes((access or argv)[1:], cwd, home)

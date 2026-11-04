@@ -285,3 +285,14 @@ def test_the_state_dir_is_made_below_the_store_or_refused_on_every_platform(
     with pytest.raises(OSError):
         store_broker._make_below(root, ("projects", "prj_c", "manager"))
     assert list(outside.iterdir()) == []
+
+
+def test_a_launch_with_no_store_profile_makes_no_state_dir(board: ProjectInfo) -> None:
+    """A Codex manager launched unsandboxed (``--sandbox danger-full-access``) writes its state
+    file itself: its launch is as it was, and makes no manager directory. Mutant (the grant's
+    directory made before the store's profile is asked): dies here."""
+    codex = get_adapter("codex")
+    argv = ["codex", "--sandbox", "danger-full-access"]
+    env = {"AISQUARE_LAUNCH_ID": LAUNCH, "AISQUARE_ROLE": "manager"}
+    assert store_broker.start_for_launch(env, codex, argv)[0] == argv
+    assert not (store_dir() / "projects" / board.id / "manager").exists()

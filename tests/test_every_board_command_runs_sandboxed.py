@@ -4,13 +4,15 @@
 A Codex agent's sandbox refused ``aisquare team show <seq>``, the pointer every cut update
 line ends with: the broker's whitelist lacked it, and store-broker.log held 6 refusals on
 real Codex 0.166.0. The commands are read here from the texts themselves, rendered by the
-code that writes them for a Codex session (its board and start pack, its role's cycle, its
-kickoff in every state, its update and wake lines, the watch line, its restart, resume,
-fork and hand-off lines, a brief's hint, the claim's own hint, the team commands' errors,
-and a parent manager's start pack with its group's briefing and the routed line a member's
-question sends it), never from a list kept beside them: a new pointer the broker refuses
-fails here. A parent manager's two lines also run as written through its broker, and do
-nothing else on a member's board (review r37 of #113, Q5).
+code that writes them for a session of every agent, each registered one and the synthetic
+third agents (its board and start pack, its role's cycle, its kickoff in every state, its
+update and wake lines, the watch line, its restart, resume, fork and hand-off lines, a
+brief's hint, the claim's own hint, the team commands' errors, and a parent manager's start
+pack with its group's briefing and the routed line a member's question sends it), never from
+a list kept beside them: a new pointer the broker refuses fails here, for whichever agent
+whose tools run sandboxed (``capabilities.sandboxes_tools``) it is told to (r37 finding 11
+of #113: the sweep rendered Codex's texts alone). A parent manager's two lines also run as
+written through its broker, and do nothing else on a member's board (review r37 of #113, Q5).
 """
 
 from __future__ import annotations
@@ -28,12 +30,16 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import harness, paths
+from aisquare.core.agent_adapters import adapters, register, unregister
+from aisquare.core.agent_adapters.types import AgentAdapter
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import briefs, store_broker, watch
 from aisquare.services import fleet as fleet_service
 from aisquare.services import parent as parent_service
 from aisquare.services import team as team_service
+from tests.fake_agent import FakeAgentAdapter
+from tests.gemini_shaped_agent import GeminiShapedAdapter
 from tests.test_store_broker import (  # noqa: F401 - the fixture, by name
     LAUNCH,
     MINE,
@@ -52,8 +58,45 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="the broker is POSIX'
 COMMAND = re.compile(r"(?<![\w-])(?:aisquare|asq)\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?")
 
 
+#: The synthetic third agents (tests/test_third_agent_seams.py's), registered for their sweep.
+SYNTHETIC: tuple[AgentAdapter, ...] = (FakeAgentAdapter(), GeminiShapedAdapter())
+#: Every agent the sweep renders the texts for: each registered one and each synthetic one.
+AGENTS: tuple[AgentAdapter, ...] = (*adapters(), *SYNTHETIC)
+
+
+@pytest.fixture(params=AGENTS, ids=lambda adapter: adapter.id)
+def each_agent(request: pytest.FixtureRequest) -> Iterator[AgentAdapter]:
+    """One agent, registered while its texts are rendered when it is a synthetic one."""
+    adapter: AgentAdapter = request.param
+    synthetic = adapter in SYNTHETIC
+    if synthetic:
+        register(adapter)
+    try:
+        yield adapter
+    finally:
+        if synthetic:
+            unregister(adapter.id)
+
+
+def test_the_sweep_renders_every_agents_texts_the_synthetic_ones_included() -> None:
+    """Both real agents' and both synthetic ones': two whose tools run sandboxed (Codex, the
+    fake agent), whose every command must run through the broker, and two whose tools do not
+    (Claude Code, the Gemini-shaped agent), which no broker stands in front of."""
+    sandboxed = {adapter.id: adapter.capabilities.sandboxes_tools for adapter in AGENTS}
+    assert sandboxed.items() >= {
+        ("codex", True),
+        (FakeAgentAdapter.id, True),
+        ("claude-code", False),
+        (GeminiShapedAdapter.id, False),
+    }, sandboxed
+
+
+def _as(agent: str, session: TeamSession, role: str) -> TeamSession:
+    return session.model_copy(update={"agent": agent, "role": role, "label": f"{role}-x"})
+
+
 def _codex(session: TeamSession, role: str) -> TeamSession:
-    return session.model_copy(update={"agent": "codex", "role": role, "label": f"{role}-x"})
+    return _as("codex", session, role)
 
 
 def _kickoffs(task: TeamTask, sid: str) -> Iterator[str]:
@@ -84,14 +127,16 @@ def _kickoffs(task: TeamTask, sid: str) -> Iterator[str]:
                 )
 
 
-def _fleet_lines(project: ProjectInfo, task: TeamTask, events: list[TeamEvent]) -> list[str]:
-    """A restart's, a resume's, a fork's and a hand-off's first lines."""
+def _fleet_lines(
+    project: ProjectInfo, task: TeamTask, events: list[TeamEvent], agent: str
+) -> list[str]:
+    """A restart's, a resume's, a fork's and a hand-off's first lines, for ``agent``'s row."""
     row = FleetAgent(
         id="agent-1",
         project_id=project.id,
         label="coder-x",
         role="coder",
-        agent="codex",
+        agent=agent,
         pane_id="%1",
         cwd=project.root,
         created_at=datetime.now(tz=UTC),
@@ -107,9 +152,9 @@ def _fleet_lines(project: ProjectInfo, task: TeamTask, events: list[TeamEvent]) 
     ]
 
 
-def _agent_texts(work: Path) -> dict[str, str]:  # noqa: F811
-    """Every text aisquare hands an agent, rendered for a Codex session, by where it comes
-    from."""
+def _agent_texts(work: Path, agent: str = "codex") -> dict[str, str]:  # noqa: F811
+    """Every text aisquare hands an agent, rendered for a session of ``agent``'s, by where it
+    comes from."""
     for n in range(team_service._BOARD_TASKS + 2):  # past what the board lists
         team_service.add_task(f"task {n}", role="coder", detail="its contract", cwd=work)
     long = team_service.add_note("a first line\nand the rest of it", session_ref=MINE, cwd=work)
@@ -123,7 +168,7 @@ def _agent_texts(work: Path) -> dict[str, str]:  # noqa: F811
         events = store.recent_events(project.id, limit=20)
         texts: dict[str, str] = {}
         for role in ("coder", "tester", "reviewer", "validator", "planner", "ui-tester"):
-            session = _codex(me, role)
+            session = _as(agent, me, role)
             assigned = team_service.Assignment(tasks[0], False, [], False)
             texts[f"board ({role})"] = team_service._render_board(
                 project,
@@ -138,7 +183,7 @@ def _agent_texts(work: Path) -> dict[str, str]:  # noqa: F811
             texts[f"cycle with no project ({role})"] = "\n".join(
                 team_service._role_cycle(session, None, tasks[0])
             )
-        manager = _codex(me, "manager")
+        manager = _as(agent, me, "manager")
         texts["manager's start pack"] = team_service._start_pack(
             store, project, manager, assigned=None, persona_note=None, fleet=project, cwd=work
         )
@@ -161,7 +206,7 @@ def _agent_texts(work: Path) -> dict[str, str]:  # noqa: F811
         [watch.WatchItem("i1", project.id, "p", "permission", "a dialog")],
         Path("/watch/p/20261103T000000Z.json"),
     )
-    texts["fleet lines"] = "\n".join(_fleet_lines(project, tasks[0], events))
+    texts["fleet lines"] = "\n".join(_fleet_lines(project, tasks[0], events, agent))
     texts["brief hints"] = briefs.record_hint(project.id, tasks[0].id, "B1") + briefs._MORE
     claimed = CliRunner().invoke(app, ["task", "claim", tasks[1].id, "--as", MINE[:8]])
     assert claimed.exit_code == 0, claimed.output
@@ -175,7 +220,7 @@ def _agent_texts(work: Path) -> dict[str, str]:  # noqa: F811
         )
     )
     assert long.seq is not None and f"aisquare team show {long.seq}" in texts["delta"]
-    texts.update(_parent_texts(work, project))
+    texts.update(_parent_texts(work, project, agent))
     return texts
 
 
@@ -206,9 +251,9 @@ def _routed_line(work: Path, member: ProjectInfo) -> TeamEvent:  # noqa: F811
     return next(event for event in events if event.kind == "routed")
 
 
-def _parent_texts(work: Path, project: ProjectInfo) -> dict[str, str]:  # noqa: F811
-    """A parent manager's own texts: its start pack, with its group's briefing (the
-    delegation verb), and the routed line a member's question puts on its board."""
+def _parent_texts(work: Path, project: ProjectInfo, agent: str) -> dict[str, str]:  # noqa: F811
+    """A parent manager's own texts, ``agent``'s: its start pack, with its group's briefing
+    (the delegation verb), and the routed line a member's question puts on its board."""
     [member] = parented(work, "api")
     routed = _routed_line(work, member)
     with store_session() as store:
@@ -217,7 +262,7 @@ def _parent_texts(work: Path, project: ProjectInfo) -> dict[str, str]:  # noqa: 
         pack = team_service._start_pack(
             store,
             project,
-            _codex(me, "manager"),
+            _as(agent, me, "manager"),
             assigned=None,
             persona_note=None,
             fleet=project,
@@ -228,26 +273,30 @@ def _parent_texts(work: Path, project: ProjectInfo) -> dict[str, str]:  # noqa: 
     return {"parent manager's start pack": pack, "routed line": routed.text}
 
 
-def test_every_command_aisquare_tells_a_codex_agent_to_run_runs_through_its_broker(
+def test_every_command_aisquare_tells_an_agent_to_run_runs_through_its_broker_if_sandboxed(
     work: Path,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    each_agent: AgentAdapter,
 ) -> None:
     """Each command the texts name is one the broker runs, or one the CLI runs in the
     sandbox itself (``store_broker.LOCAL``: ``asq exec``). A fleet operation (a manager's
     spawn, a cleanup's reap, the memory gate, the watcher a manager detaches) the broker
     never runs: a sandboxed agent asks for it to run outside its sandbox, which is what the
-    broker's refusal tells it (``store_broker.fleet_operation``)."""
+    broker's refusal tells it (``store_broker.fleet_operation``). Each agent's texts are
+    rendered for its own session (:data:`AGENTS`), and one whose tools run unsandboxed is told
+    exactly one command the broker refuses, the projects' list, which a sandboxed one is
+    told who can answer instead of."""
     monkeypatch.setattr(harness, "_test_gate_on", lambda: True)  # its line too
     found: dict[tuple[str, ...], str] = {}
     by_source: dict[str, set[tuple[str, ...]]] = {}
-    for source, text in _agent_texts(work).items():
+    for source, text in _agent_texts(work, each_agent.id).items():
         for match in COMMAND.finditer(text):
             words = [word for word in match.groups() if word]
             named = store_broker.command_path(words)
             assert not isinstance(named, str), (source, match.group(0))
             found.setdefault(named[0], source)
             by_source.setdefault(source, set()).add(named[0])
-    refused = []
+    refused = {}
     for path, source in sorted(found.items()):
         if path[0] in store_broker.LOCAL:
             continue
@@ -256,8 +305,11 @@ def test_every_command_aisquare_tells_a_codex_agent_to_run_runs_through_its_brok
             assert why is not None and "fleet operation" in why and "an approval" in why, path
             continue
         if why is not None:
-            refused.append(f"aisquare {' '.join(path)} (in the {source})")
-    assert refused == [], refused
+            refused[path] = f"aisquare {' '.join(path)} (in the {source})"
+    if each_agent.capabilities.sandboxes_tools:
+        assert refused == {}, list(refused.values())
+    else:  # its own texts, not a sandboxed agent's: no broker stands in front of it
+        assert list(refused) == [("project", "list")], list(refused.values())
     # The texts were read, every kind of pointer among them.
     assert {
         ("team", "show"),

@@ -348,15 +348,51 @@ GUARDED_THREAD = "01a1a450-987b-7000-8000-00000000c0d1"
 GUARDIAN_THREAD = "01a1a450-989d-7000-8000-0000000a0d1f"
 
 
+def _in(value: Any, cwd: Path) -> Any:
+    """``value`` with the recorded folder made ``cwd`` in every string of it, its keys too
+    (the files a patch names)."""
+    if isinstance(value, str):
+        return value.replace("/work/alpha", str(cwd))
+    if isinstance(value, list):
+        return [_in(item, cwd) for item in value]
+    if isinstance(value, dict):
+        return {_in(key, cwd): _in(item, cwd) for key, item in value.items()}
+    return value
+
+
 def _recorded(source: Path, home: Path, cwd: Path) -> Path:
-    """A recorded 0.166.0 rollout as Codex writes it in ``home``, run in ``cwd``."""
-    thread = json.loads(source.read_text(encoding="utf-8").splitlines()[0])["payload"]["id"]
+    """A recorded 0.166.0 rollout as Codex writes it in ``home``, run in ``cwd``: each line
+    moved as JSON and written by ``json.dumps``. Swapped into the text, a Windows ``cwd``'s
+    backslashes (``C:\\Users\\…``: ``\\U``, ``\\A``) made 6 of the reviewer's 16 lines no
+    JSON, every one naming its model among them (review r37 of #113, finding 3)."""
+    lines = source.read_text(encoding="utf-8").splitlines()
+    thread = json.loads(lines[0])["payload"]["id"]
     path = home / "sessions" / "2026" / "11" / "03" / f"rollout-2026-11-03T21-08-27-{thread}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        source.read_text(encoding="utf-8").replace("/work/alpha", str(cwd)), encoding="utf-8"
+        "".join(json.dumps(_in(json.loads(line), cwd)) + "\n" for line in lines),
+        encoding="utf-8",
     )
     return path
+
+
+@pytest.mark.parametrize("source", [GUARDED, GUARDIAN], ids=["session", "review"])
+def test_a_recorded_rollout_moved_into_a_windows_folder_is_still_one_json_record_a_line(
+    tmp_path: Path, source: Path
+) -> None:
+    """Review r37 of #113, finding 3, on every platform: a folder spelt as Windows spells one
+    (one name on POSIX) is moved into every line as a string, and each line still parses,
+    the reviewer's model kept."""
+    cwd = Path("C:\\Users\\Alpha\\work\\alpha")
+    moved = _recorded(source, tmp_path, cwd).read_text(encoding="utf-8").splitlines()
+
+    records = [json.loads(line) for line in moved]
+
+    assert len(records) == len(source.read_text(encoding="utf-8").splitlines())
+    assert all("/work/alpha" not in line for line in moved)
+    assert records[0]["payload"]["cwd"] == str(cwd), "its session_meta's folder"
+    if source == GUARDIAN:
+        assert "codex-auto-review" in json.dumps(records)
 
 
 def test_a_codex_reviewers_rollout_counts_once_in_the_session_it_reviewed_for(

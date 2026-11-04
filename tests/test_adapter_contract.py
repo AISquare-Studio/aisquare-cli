@@ -2511,8 +2511,12 @@ def test_an_agent_with_no_screen_still_runs_and_is_never_typed_into_on_its_scree
 
 def test_the_contract_names_every_member_of_the_protocol() -> None:
     """The ``core.agent_adapters`` package docstring, "Adding a terminal agent", names every
-    member of the adapter protocol's classes (an inline code span holds it), so a slot added is
-    a slot documented: the contract-vs-code check the lanes ran by hand, kept."""
+    public class of ``types.py`` and every public member of each (an inline code span holds
+    it), so a slot or a record added is one documented: the contract-vs-code check the lanes
+    ran by hand, kept. The classes are read off the module, never listed here: a hand-picked
+    set missed six records a third agent builds or raises (``HooksSwitch``,
+    ``PluginInstall``, ``AnswerKey``, ``NativeChoice``, ``OptionValue``, ``BadEffortError``;
+    GATE #84, finding 1)."""
     import ast
     import re
 
@@ -2524,33 +2528,14 @@ def test_the_contract_names_every_member_of_the_protocol() -> None:
     assert "## Adding a terminal agent" in guide, "the contract is the package docstring"
     spans = re.findall(r"`([^`\n]+)`", guide)
     named = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", " ".join(spans)))
-    classes = {
-        "AgentAdapter",
-        "AgentCapabilities",
-        "AgentScreen",
-        "AgentAccounts",
-        "AgentTranscript",
-        "TelemetryReader",
-        "AgentPlugin",
-        "FolderTrust",
-        "LaunchPart",
-        "PermissionArgs",
-        "SharedMemory",
-        "SharePart",
-        "SessionFlags",
-        "Vocabulary",
-        "PriceTable",
-        "UsageScan",
-        "FirstEdit",
-        "TurnChunk",
-        "TurnsScan",
-    }
-    defined = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
-    assert classes <= defined, f"no such class in types.py: {sorted(classes - defined)}"
+    classes = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and not node.name.startswith("_")
+    ]
+    assert "AgentAdapter" in {node.name for node in classes}, "the protocol is types.py's"
     missing = []
-    for node in tree.body:
-        if not (isinstance(node, ast.ClassDef) and node.name in classes):
-            continue
+    for node in classes:
         members = [node.name]
         for item in node.body:
             if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):

@@ -153,7 +153,9 @@ tells its agent's own process from a nested child, across a `/clear` or a `/resu
 `process_env` (the variable the agent sets in every process it starts, its hooks included,
 Claude Code's `CLAUDECODE`; `None` for Codex, which sets none of its own there: a tell or a
 spawn sent where it is set is the agent's, `core.prompt_origin.origin_sender`, as one sent
-from a `tool_shell_env` shell is),
+from a `tool_shell_env` shell is; stripped from every tmux client with `pid_env` and the
+tool-shell variables, `core.spawn.agent_identity_env_vars`, so no window of a server started
+inside the agent inherits it),
 `assigns_session_id` (AISquare names the session at launch) with its `session_flags`, a
 `SessionFlags` in the agent's own spelling (Claude Code's: `names` is `--session-id`, which
 takes the id a fresh start or a fork is handed, `minted(id)` those two arguments; `resumes`

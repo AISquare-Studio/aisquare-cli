@@ -22,6 +22,7 @@ import contextlib
 import itertools
 import os
 import re
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -2392,6 +2393,29 @@ def test_a_server_the_fleet_starts_holds_no_team_variable(
     names = {line.partition("=")[0] for line in held if "=" in line and not line.startswith("-")}
     assert not names & set(spawn.TEAM_ENV_VARS), held
     assert "AISQUARE_HOME=/tmp/asq-home-kept" in held
+
+
+@requires_tmux
+def test_a_server_started_inside_claude_code_hands_its_mark_to_no_pane(
+    live: TmuxServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Claude Code sets ``CLAUDECODE`` in every process it starts (its ``process_env``). A
+    fleet server started from its tool shell kept it, and a pane opened there, a Codex
+    agent's or a person's, sent every tell and spawn as an agent's
+    (``prompt_origin.origin_sender``; review r36 of #113, finding 9). Started through our
+    seam, the server holds none of it, and a pane on it is handed none."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    seen = tmp_path / "seen.txt"
+    probe = f'printf %s "${{CLAUDECODE-unset}}" > {shlex.quote(str(seen))}.tmp'
+    probe += f" && mv {shlex.quote(str(seen))}.tmp {shlex.quote(str(seen))}; exec sleep 30"
+
+    live.run("new-session", "-d", "-s", "probe", "sleep 30")
+    live.run("new-window", "-d", "-t", "probe", probe)
+
+    held = live.run("show-environment", "-g").splitlines()
+    assert not [line for line in held if line.startswith("CLAUDECODE=")], held
+    assert _wait(seen.exists), "the pane never ran"
+    assert seen.read_text(encoding="utf-8") == "unset"
 
 
 # --- [fleet] pane_clipboard and mouse on (#83's tmux residuals: #100, #101) ----------------

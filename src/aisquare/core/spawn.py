@@ -633,14 +633,16 @@ def agent_identity_env_vars() -> tuple[str, ...]:
     """Every registered agent's process-identity variables: the one it sets in its tools'
     shells alone (``AgentCapabilities.tool_shell_env``, Codex's ``CODEX_THREAD_ID``), the
     others those shells get for that one session or sandbox (``tool_shell_vars``: Codex's
-    ``CODEX_SESSION_ID``, ``CODEX_CI``, …) and the one it hands each hook its pid in
-    (``pid_env``, Claude Code's ``CLAUDE_PID``).
+    ``CODEX_SESSION_ID``, ``CODEX_CI``, …), the one it hands each hook its pid in
+    (``pid_env``, Claude Code's ``CLAUDE_PID``) and the one it sets in every process it
+    starts (``process_env``, Claude Code's ``CLAUDECODE``).
 
     Each says which agent process a shell is under. A tmux server started from inside an
     agent's tool shell pinned them for every window opened on it, and a ``codex`` started by
     hand in such a window took itself for that thread's nested child
-    (``core.agent_sessions.own_process``); ``aisquare launch`` clears them only for the
-    agent it starts."""
+    (``core.agent_sessions.own_process``), and every ``fleet tell`` or spawn sent from such a
+    window was an agent's (``core.prompt_origin.origin_sender``: review r36 of #113, finding
+    9); ``aisquare launch`` clears them only for the agent it starts."""
     from aisquare.core.agent_adapters import adapters
 
     named = (
@@ -649,6 +651,7 @@ def agent_identity_env_vars() -> tuple[str, ...]:
         for name in (
             adapter.capabilities.tool_shell_env,
             adapter.capabilities.pid_env,
+            adapter.capabilities.process_env,
             *adapter.capabilities.tool_shell_vars,
         )
         if name

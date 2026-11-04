@@ -2586,7 +2586,8 @@ def test_a_row_none_names_is_not_shared_where_any_table_records_an_unshared_agen
 
 
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
-    """No file at all: v1 to v47, the same shape as every cohort above reaches."""
+    """No file at all: v1 to v50 (``SCHEMA_VERSION``), the same shape as every cohort above
+    reaches."""
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 

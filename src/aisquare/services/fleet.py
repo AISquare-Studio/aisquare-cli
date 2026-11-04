@@ -11379,7 +11379,7 @@ def _stop_row(
             and window is not None
             and not window.dead
         ):
-            pane.type_line(_exit_command(place), command=True)
+            pane.type_line(exit_command_for(place), command=True)
             exited_here = True
             deadline = _monotonic() + grace
             dead_seen: float | None = None
@@ -14625,8 +14625,12 @@ def _within(path: Path, root: Path) -> bool:
     return inside == top or top in inside.parents
 
 
-def _exit_command(agent: FleetAgent) -> str:
-    """What ends ``agent``'s session from its prompt (``AgentAdapter.exit_command``)."""
+def exit_command_for(agent: FleetAgent) -> str:
+    """What ends ``agent``'s session from its prompt, the command :func:`stop` types into its
+    pane: its agent's ``AgentAdapter.exit_command``, and :data:`DEFAULT_AGENT`'s for an agent
+    this install does not know. Public so that what a screen says a stop types (the Stop
+    dialog, the agent view's Stop, a bulk stop or pause) is asked of this one place, and a
+    future agent's command is said truly everywhere (#113's 092 row 2, #60)."""
     adapter = recorded_adapter(agent.agent) or get_adapter(DEFAULT_AGENT)
     return adapter.exit_command
 

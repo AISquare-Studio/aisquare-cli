@@ -1135,7 +1135,7 @@ def test_the_fake_agent_runs_through_the_fleet_like_any_other(
         assert launched_env[store_broker.DIR_ENV] == str(broker)
 
     # The adapter's own exit command, typed by `fleet stop`.
-    assert fleet_service._exit_command(receipt.agent) == "/quit"
+    assert fleet_service.exit_command_for(receipt.agent) == "/quit"
     tmux.honours_exit = False
     fleet_service.stop(project, label, grace=0)
     assert (receipt.agent.pane_id, "literal", "/quit") in tmux.typed

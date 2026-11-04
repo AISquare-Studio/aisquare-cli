@@ -5932,6 +5932,39 @@ def test_stop_exits_gracefully_and_records_the_status(
     assert fleet_service.list_agents(project) == []
 
 
+def test_stop_types_into_an_agent_this_install_does_not_know_what_its_dialog_says(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#60 (tester of #58, seq 10298): for a row whose agent this install does not know, the
+    Stop dialog said "Its exit command" while ``stop`` typed the default agent's. Both ask
+    ``exit_command_for`` now, so what the dialog says is what ``stop`` types."""
+    from aisquare.cli.ui.stop import StopAgentScreen
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    unknown = "an-agent-this-install-does-not-know"
+    agent = _coder(project)
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord)
+    assert launch_seal.write(record.model_copy(update={"agent": unknown})) is None
+    with store_session() as store:  # the row's agent is no fact an upsert updates
+        assert isinstance(store, SqliteStore)
+        store._conn.execute("UPDATE fleet_agent SET agent = ? WHERE id = ?", (unknown, agent.id))
+        store._conn.commit()
+        found = store.get_fleet_agent(agent.id)
+    assert found is not None
+    agent = found
+    assert recorded_adapter(agent.agent) is None, "the premise: no adapter of this install's"
+    shown = FleetAgentStatus(agent=agent, state="waiting")
+    question = StopAgentScreen(project, shown).question().plain
+
+    fleet_service.stop(project, "coder-1")
+
+    [(pane, how, typed), *_] = tmux.typed
+    assert (pane, how) == (agent.pane_id, "literal"), tmux.typed
+    assert f"{typed}, then the window is killed after" in question, question
+    assert f"Force skips the {typed}." in question, question
+
+
 def test_stop_types_the_exit_and_its_enter_apart(
     tmux: FakeTmux,
     claude_on_path: Path,

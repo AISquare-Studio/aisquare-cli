@@ -54,7 +54,6 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.sidebar import ALIVE_STATES
 from aisquare.cli.ui.views.app_settings import UiSettingsChanged
-from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.config import UiSettings
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -197,13 +196,14 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         """
         return self.status.state in ALIVE_STATES
 
-    def exit_command(self) -> str | None:
-        """What the stop types to end this row's session: its agent's own
-        ``AgentAdapter.exit_command`` (Claude Code's and Codex's ``/exit``, another agent's
-        its own), the one ``fleet stop`` types; ``None`` for an agent this install does not
-        know, whose command the dialog does not guess."""
-        adapter = recorded_adapter(self.status.agent.agent)
-        return adapter.exit_command if adapter is not None else None
+    def exit_command(self) -> str:
+        """What the stop types to end this row's session — asked of the service, never
+        copied (``fleet_service.exit_command_for``, the very call ``fleet stop`` types): its
+        agent's own ``AgentAdapter.exit_command``, and for an agent this install does not
+        know the default agent's, which is what ``fleet stop`` types into it. The dialog
+        guessed nothing for that agent and said "Its exit command" while the stop typed the
+        default's (tester of #58, seq 10298)."""
+        return fleet_service.exit_command_for(self.status.agent)
 
     def question(self) -> Text:
         """The whole question as data — the label is the user's, brackets and all."""
@@ -232,11 +232,10 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         text.append(self.label, style="bold")
         text.append("?\n")
         command = self.exit_command()
-        typed = command if command is not None else "Its exit command"
         text.append(
-            f"{typed}, then the window is killed after {grace_seconds():g} s. ", style="dim"
+            f"{command}, then the window is killed after {grace_seconds():g} s. ", style="dim"
         )
-        text.append(f"Force skips the {command or 'exit command'}.", style="dim")
+        text.append(f"Force skips the {command}.", style="dim")
         if self.is_manager():
             text.append(
                 "\nThis is the project's manager; the agents it started keep running.",

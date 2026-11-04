@@ -688,7 +688,8 @@ adapter.**
   go, unchanged, through a broker its launch runs outside the sandbox, which runs
   only a whitelist of board and memory commands, only as the agent's own board
   sessions (the ones its own hooks registered), only in its own tree, on its own
-  board's tasks and in its own project's memory pool for writes and reads alike
+  board's tasks (and a parent manager's read of a member's board and its `task add`
+  there, below) and in its own project's memory pool for writes and reads alike
   (`inject`, `context list`/`search`/`preview`/`show` and `log` read that pool or
   the user pool, never another project's, past any `project switch` pin; writes
   never the user pool), and never a fleet
@@ -996,6 +997,22 @@ adapter.**
   not there reads "no session matches '<ref>'", with "has no session yet" for an agent whose
   first hook has not run. Under the broker, `--as` still acts only as the launch's own
   session.
+
+- **A Codex parent manager runs its group** (review r37 of #113, Q5). A parent manager acts
+  on two lines: a member's routed line ends `aisquare board --project <member>`, and its
+  briefing says `aisquare task add "…" --project <member> --origin <task>`. From Codex's
+  sandbox the store broker now runs both as written, and only for a member of a group its
+  board parents. That member must be one at the launch and still one now: the broker takes
+  the member list as it starts. The add is the parent manager's own session's, though the
+  line names none, and its event names the parent board (`meta`, in `team show` and `board
+  --json`). Each read and each add is an `admitted:` line in `store-broker.log`, beside the
+  broker's refusals. Nothing else on a member's board runs from the sandbox: no claim,
+  done, release or other task verb, no `task show`, no `--as` of its sessions (a note, a
+  signal) and no fleet operation. A project in none of its groups is refused without naming
+  that project's board. A member that joined after the launch is refused until the agent's
+  next launch, and one that has left since is refused; each refusal says why. Before, the
+  broker refused nothing here: `board --project` read any board on the machine, and a
+  delegation from the sandbox named no session.
 
 - **Ids made in one clock tick sort in the order they were made, and a turn's later notices
   keep their place after its first** (#29). `task add` in a loop, a Remote batch, or any

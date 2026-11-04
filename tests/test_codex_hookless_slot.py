@@ -10,13 +10,15 @@ window starts before anything is stopped or started, or refuses saying why; and 
 mark leaves an ended session ended. On the fleet's fake tmux, as ``test_codex_account_switch``.
 
 Only where the agent's hooks reach it from its home alone (``hooks_before_launch``, Codex's),
-and only into a slot aisquare made (review r37 of #113, finding 2): Codex's own home, after
-``agents disconnect``, is refused before anything is stopped, nothing written; and a Claude
-Code spawn, restart or switch writes nothing in its home and refuses nothing, as on main.
+and only into a slot aisquare made (review r37 of #113, finding 2): Codex's own home, where
+it is not connected (never, or since ``agents disconnect``; review r38, finding 6), is refused
+before anything is stopped, nothing written; and a Claude Code spawn, restart or switch
+writes nothing in its home and refuses nothing, as on main.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -299,19 +301,36 @@ def _disconnected_plain_codex_home() -> Path:
     return plain
 
 
+def _never_connected_plain_codex_home() -> Path:
+    """Codex's own home, signed in, which the user never connected: no hooks, no trust."""
+    plain = core.default_account(agent="codex").config_dir
+    plain.mkdir(parents=True, exist_ok=True)
+    _sign_in(plain, "mine@example.com")
+    assert core.managed_slot(plain, "codex") is None, "a home the user owns"
+    assert not agents.hooks_installed("codex", plain) and _trusted(plain) == 0
+    return plain
+
+
 def _refused_for_its_home(said: str, home: Path, nothing: str) -> None:
     assert f"Codex's hooks are not installed in {home}, a home of yours" in said, said
     assert f"{nothing}; `aisquare agents connect codex --config-dir {home}`" in said, said
 
 
+@pytest.mark.parametrize(
+    "plain_home",
+    [_disconnected_plain_codex_home, _never_connected_plain_codex_home],
+    ids=["since-disconnect", "never-connected"],
+)
 def test_a_codex_spawn_onto_its_disconnected_plain_home_is_refused_and_writes_nothing(
     tmux: FakeTmux,  # noqa: F811
     codex_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
+    plain_home: Callable[[], Path],
 ) -> None:
     """``agents disconnect codex`` is the user's choice: their own home is never written at a
-    launch, and the spawn is refused, naming the command that connects it again."""
-    plain = _disconnected_plain_codex_home()
+    launch, and the spawn is refused, naming the command that connects it again. So is a home
+    the user never connected (review r38 of #113, finding 6, ``hooks_before_launch``)."""
+    plain = plain_home()
     before = _files(plain)
 
     with pytest.raises(fleet_service.FleetError) as refused:

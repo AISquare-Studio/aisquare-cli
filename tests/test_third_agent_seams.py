@@ -596,8 +596,9 @@ def test_its_keychain_rows_are_on_the_item_its_accounts_name(
             token=fingerprint
         )
 
-        slot_answers.locked = True  # an SSH login into the Mac: its Keychain is locked here
-        with accounts_service._NOTED_LOCK:
+        slot_answers.locked = True  # an SSH login into the Mac: its Keychain is locked here,
+        accounts_core.forget_keychain_reads()  # and it is another process, with no reads of
+        with accounts_service._NOTED_LOCK:  # the Mac's remembered, nor the rows it read
             accounts_service._ROWS.clear()
         served = accounts_service.cached_usage_with_trends([slot])[slot.slot][0]
 
@@ -609,6 +610,67 @@ def test_its_keychain_rows_are_on_the_item_its_accounts_name(
 
         assert removed.exit_code == 0, removed.output
         assert _login_rows() == {}, "the removed slot's row is dropped"
+    finally:
+        unregister(adapter.id)
+
+
+class _Fingerprinted(_InItsOwnItem):
+    """:class:`_InItsOwnItem`, counting each time its ``login_fingerprint`` is asked: for a real
+    agent, a read of its Keychain item."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def login_fingerprint(self, account: ClaudeAccount) -> str | None:
+        self.reads += 1
+        return super().login_fingerprint(account)
+
+
+def test_its_keychain_login_is_read_through_claude_codes_memo_on_the_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """r37 finding 7: the rows' look at an agent whose login is a Keychain item it names
+    (``keychain_item``) asked its ``login_fingerprint`` on every tick (10 reads over 10 cached
+    ticks), where Claude Code's goes through the Keychain memo. It goes through that memo now,
+    by the item: one read per ``KEYCHAIN_MEMO_SECONDS``, a locked answer kept until a forced
+    refresh forgets it, and a ``fresh`` look asks again."""
+    monkeypatch.setattr(accounts_core, "keychain_platform", lambda: True)  # the Mac's rows
+    clock = [1000.0]
+    monkeypatch.setattr(accounts_core, "_monotonic", lambda: clock[0])
+    adapter = GeminiShapedAdapter()
+    slot_answers = _Fingerprinted()
+    adapter.accounts = slot_answers
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        slot = _signed_in_slot(adapter)
+        _quotas_till_tomorrow(slot)
+        assert accounts_service.read_usage([slot])[slot.slot].available
+        reads = [slot_answers.reads]
+
+        def ticks(count: int) -> None:
+            for _ in range(count):
+                accounts_service.cached_usage_with_trends([slot])
+            reads.append(slot_answers.reads)
+
+        ticks(10)
+        clock[0] += accounts_core.KEYCHAIN_MEMO_SECONDS - 0.5
+        ticks(1)
+        clock[0] += 0.5  # the read is KEYCHAIN_MEMO_SECONDS old: asked again
+        ticks(10)
+        slot_answers.locked = True
+        clock[0] += accounts_core.KEYCHAIN_MEMO_SECONDS
+        ticks(10)  # locked once, and kept: no unlock dialog per tick
+        clock[0] += 10 * accounts_core.KEYCHAIN_MEMO_SECONDS
+        ticks(1)
+        accounts_core.forget_keychain_reads()  # a forced refresh
+        ticks(1)
+        slot_answers.locked = False
+        accounts_core.item_login(slot, fresh=True)
+        reads.append(slot_answers.reads)
+
+        assert reads == [1, 1, 1, 2, 3, 3, 4, 5], reads
     finally:
         unregister(adapter.id)
 

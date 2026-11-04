@@ -1734,8 +1734,19 @@ def _token_fingerprint(account: ClaudeAccount, now: datetime | None = None) -> s
         return None if now is not None and creds.expired(now) else _login_digest(creds)
     if accounts.legacy_slots:
         return None  # Claude Code's with no token to send
+    return _slot_fingerprint(account)
+
+
+def _slot_fingerprint(account: ClaudeAccount) -> str | None:
+    """The fingerprint ``account``'s accounts slot answers (``login_fingerprint``); for one whose
+    login is a Keychain item it names, through the Keychain memo the rows read it by
+    (``core.item_login``), as Claude Code's token is read: asked afresh here, it was a second
+    read of the item per usage read (r37 finding 7 of #113). ``None`` when the store would
+    not say."""
+    if core.has_stored_login(account):
+        return core.item_login(account).token
     try:
-        return accounts.login_fingerprint(account)
+        return core.kind(account.agent).login_fingerprint(account)
     except core.LoginUnreadable:
         return None
 
@@ -2555,13 +2566,9 @@ def _stale_login(account: ClaudeAccount) -> str | None:
     ``refresh_args`` run as a request-reading agent's do. ``None`` when no login is stored or
     the store would not say: no claim then, and nothing is run."""
     token = _token_fingerprint(account)
-    accounts = core.kind(account.agent)
-    if token is not None or accounts.network_usage:
+    if token is not None or core.kind(account.agent).network_usage:
         return token
-    try:
-        return accounts.login_fingerprint(account)
-    except core.LoginUnreadable:
-        return None
+    return _slot_fingerprint(account)
 
 
 def _refresh_stale(

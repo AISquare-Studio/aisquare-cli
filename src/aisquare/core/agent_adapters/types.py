@@ -2445,7 +2445,12 @@ class AgentAccounts(Protocol):
         (``services.claude_accounts.sign_in_landed``). ``None`` when no usable login is
         stored. Read afresh. Raises ``core.claude_accounts.LoginUnreadable`` with the reason
         when the store would not say (a locked Keychain, its ``problem`` ``"locked"``):
-        ``None`` there would let the login already stored land."""
+        ``None`` there would let the login already stored land. For an agent of
+        :attr:`keychain_login`, the rows' look on every tick asks it through Claude Code's
+        Keychain memo, by :meth:`keychain_item` (``core.claude_accounts.item_login``): once
+        per ``KEYCHAIN_MEMO_SECONDS``, a refusal until the next forced refresh. Its row
+        carries no expiry, so a locked process serves that login's readings until the row
+        names another."""
         ...
 
     @property

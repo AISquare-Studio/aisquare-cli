@@ -80,11 +80,11 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import claude_sharing, paths, tls
@@ -784,9 +784,14 @@ def item_login(account: ClaudeAccount, *, fresh: bool = False) -> ItemLogin:
 
     Claude Code's from :func:`stored_login` (its token's digest and expiry, through the
     Keychain memo unless ``fresh``), as the rows always read it; another agent's by the
-    fingerprint its accounts slot answers (``AgentAccounts.login_fingerprint``, read afresh,
-    no expiry), a ``LoginUnreadable`` it raises being the store that would not say. Asked
-    only of a slot that names an item (:func:`keychain_item`)."""
+    fingerprint its accounts slot answers (``AgentAccounts.login_fingerprint``), a
+    ``LoginUnreadable`` it raises being the store that would not say. That fingerprint goes
+    through the same memo, by the item its slot names (:func:`keychain_item`), for this
+    store: asked once per :data:`KEYCHAIN_MEMO_SECONDS`, a refusal until
+    :func:`forget_keychain_reads`, unless ``fresh``. Before, it was asked on every two-second
+    tick of every slot, a Keychain read each (r37 finding 7 of #113). It carries no expiry:
+    the slot says none, so the row a locked process serves by holds none either. Asked only
+    of a slot that names an item."""
     if _claude_codes(account):
         login = stored_login(account, fresh=fresh)
         if login.unreadable is not None:
@@ -795,6 +800,20 @@ def item_login(account: ClaudeAccount, *, fresh: bool = False) -> ItemLogin:
         if creds is None:
             return ItemLogin()
         return ItemLogin(token=login_digest(creds), expires_at=creds.expires_at)
+    item = keychain_item(account)
+    if item is None:
+        return _fingerprinted(account)
+    return _remembered(
+        _ITEM_LOGINS,
+        _ITEM_ASKING,
+        (str(paths.db_path()), item, keychain_account()),
+        lambda: _fingerprinted(account),
+        fresh=fresh,
+    )
+
+
+def _fingerprinted(account: ClaudeAccount) -> ItemLogin:
+    """:func:`item_login` of another agent's slot, asked of it now."""
     try:
         return ItemLogin(token=kind(account.agent).login_fingerprint(account))
     except LoginUnreadable as exc:
@@ -981,15 +1000,23 @@ class KeychainRead:
     """The kind of :attr:`unreadable`, when it is set."""
 
 
-_KEYCHAIN_READS: dict[tuple[str, str], tuple[float, KeychainRead]] = {}
+_KEYCHAIN_READS: dict[tuple[str, ...], tuple[float, KeychainRead]] = {}
 """The last read of each (service, account), with when it was taken (``time.monotonic``)."""
 _KEYCHAIN_READS_LOCK = threading.Lock()
 _KEYCHAIN_GENERATION = [0]
 """Bumped by each :func:`forget_keychain_reads`: a read that began before one is not kept,
 or a refusal from before an unlock would stand after the refresh that asked again."""
-_KEYCHAIN_ASKING: dict[tuple[str, str], threading.Lock] = {}
+_KEYCHAIN_ASKING: dict[tuple[str, ...], threading.Lock] = {}
 """One lock per (service, account), held from the look at the memo to the keeping of the
 answer (:func:`read_keychain`); made under ``_KEYCHAIN_READS_LOCK``."""
+_ITEM_LOGINS: dict[tuple[str, ...], tuple[float, ItemLogin]] = {}
+"""The last :func:`item_login` of another agent's Keychain item, by (store, item, account),
+with when it was taken: its slot's ``login_fingerprint``, kept as Claude Code's read is."""
+_ITEM_ASKING: dict[tuple[str, ...], threading.Lock] = {}
+""":data:`_KEYCHAIN_ASKING` for :data:`_ITEM_LOGINS`, apart from it: a slot that reads its
+item through :func:`read_keychain` takes that item's lock inside this one."""
+
+_Read = TypeVar("_Read", KeychainRead, ItemLogin)
 
 
 def _monotonic() -> float:
@@ -998,10 +1025,41 @@ def _monotonic() -> float:
 
 def forget_keychain_reads() -> None:
     """Drop every remembered Keychain read, so the next asks the Keychain: a forced refresh,
-    after someone unlocked the Keychain or allowed aisquare in at the row's word."""
+    after someone unlocked the Keychain or allowed aisquare in at the row's word. Another
+    agent's item logins (:func:`item_login`) are dropped with them."""
     with _KEYCHAIN_READS_LOCK:
         _KEYCHAIN_READS.clear()
+        _ITEM_LOGINS.clear()
         _KEYCHAIN_GENERATION[0] += 1
+
+
+def _remembered(
+    reads: dict[tuple[str, ...], tuple[float, _Read]],
+    asking: dict[tuple[str, ...], threading.Lock],
+    key: tuple[str, ...],
+    ask: Callable[[], _Read],
+    *,
+    fresh: bool,
+) -> _Read:
+    """``ask()``'s answer for ``key``, through ``reads``: the last one while it is under
+    :data:`KEYCHAIN_MEMO_SECONDS` old, a refusal (``unreadable``) until
+    :func:`forget_keychain_reads`, unless ``fresh``; else asked, under ``key``'s own lock in
+    ``asking``, and kept unless a forget came meanwhile (:func:`read_keychain`)."""
+    with _KEYCHAIN_READS_LOCK:
+        lock = asking.setdefault(key, threading.Lock())
+    with lock:
+        with _KEYCHAIN_READS_LOCK:
+            remembered = None if fresh else reads.get(key)
+            generation = _KEYCHAIN_GENERATION[0]
+        if remembered is not None:
+            taken, read = remembered
+            if read.unreadable is not None or 0 <= _monotonic() - taken < KEYCHAIN_MEMO_SECONDS:
+                return read
+        read = ask()
+        with _KEYCHAIN_READS_LOCK:
+            if _KEYCHAIN_GENERATION[0] == generation:
+                reads[key] = (_monotonic(), read)
+        return read
 
 
 def read_keychain(service: str, account: str, *, fresh: bool = False) -> KeychainRead:
@@ -1024,22 +1082,13 @@ def read_keychain(service: str, account: str, *, fresh: bool = False) -> Keychai
     and a user with a locked login Keychain got its unlock dialog twice at startup (r24 1).
     A ``fresh`` read still asks, after the one in flight; the reads of other items go on.
     """
-    key = (service, account)
-    with _KEYCHAIN_READS_LOCK:
-        asking = _KEYCHAIN_ASKING.setdefault(key, threading.Lock())
-    with asking:
-        with _KEYCHAIN_READS_LOCK:
-            remembered = None if fresh else _KEYCHAIN_READS.get(key)
-            generation = _KEYCHAIN_GENERATION[0]
-        if remembered is not None:
-            taken, read = remembered
-            if read.unreadable is not None or 0 <= _monotonic() - taken < KEYCHAIN_MEMO_SECONDS:
-                return read
-        read = _ask_keychain(service, account)
-        with _KEYCHAIN_READS_LOCK:
-            if _KEYCHAIN_GENERATION[0] == generation:
-                _KEYCHAIN_READS[key] = (_monotonic(), read)
-        return read
+    return _remembered(
+        _KEYCHAIN_READS,
+        _KEYCHAIN_ASKING,
+        (service, account),
+        lambda: _ask_keychain(service, account),
+        fresh=fresh,
+    )
 
 
 def _ask_keychain(service: str, account: str) -> KeychainRead:

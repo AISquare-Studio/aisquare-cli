@@ -603,7 +603,10 @@ def _session_named(store: ContextStore, ref: str) -> TeamSession:
 
     A ref that is both a label and the prefix of another session's id is ambiguous
     (:class:`AmbiguousIdError`), never one of the two picked; one that is neither raises
-    :class:`NoSuchSession`, as does a label whose agent has bound no session yet."""
+    :class:`NoSuchSession`, as does a label whose agent has bound no session yet, and one
+    UTF-8 cannot hold, which the store cannot be asked (review r39 of #113, finding 6)."""
+    if not _utf8(ref):
+        raise NoSuchSession(ref)
     ambiguous = False
     try:
         by_id = store.get_session(ref)
@@ -778,11 +781,13 @@ def find_task(store: ContextStore, ref: str, board_id: str | Callable[[], str]) 
     would close whichever task's id happens to end in ``12``, here or on another
     project's board (review of #261, M1). No real ref needs it: old board lines showed
     eight-character tails, which :data:`TASK_NUMBER_REF` never matches. Anything else is
-    the id lookup it always was: a full id, a prefix, a tail.
+    the id lookup it always was: a full id, a prefix, a tail. A ref UTF-8 cannot hold (a
+    lone surrogate: a shell's byte that is not UTF-8, ``tsk_$'\\xff'``) names no task, and
+    the store cannot be asked it: a traceback before (review r39 of #113, finding 6).
     """
     number = task_number_of(ref)
     if number is None:
-        return store.get_task(ref)
+        return store.get_task(ref) if _utf8(ref) else None
     board = board_id() if callable(board_id) else board_id
     task = store.task_by_number(board, number)
     if task is None:
@@ -1435,7 +1440,10 @@ def verify_receipt(
             seq = int(receipt)
         except ValueError:
             seq = None
-        event = store.get_event_by_seq(seq) if seq is not None else store.find_event_by_id(receipt)
+        if seq is not None:
+            event = store.get_event_by_seq(seq)
+        else:  # an id UTF-8 cannot hold names no event, and the store cannot be asked it
+            event = store.find_event_by_id(receipt) if _utf8(receipt) else None
         if event is None:
             return VerifyResult(event=None, board_id=board.id, board_name=board.name)
         if event.project_id != board.id:
@@ -2189,7 +2197,10 @@ def _delegated_board(store: ContextStore, ref: str, parent: _Board) -> _Board:
     from aisquare.services.store_broker import own_board
 
     own = own_board()
-    found = [_brokered_member(store, ref, own)] if own is not None else store.find_projects(ref)
+    if own is not None:
+        found = [_brokered_member(store, ref, own)]
+    else:  # a ref UTF-8 cannot hold names no project, and the store cannot be asked it
+        found = store.find_projects(ref) if _utf8(ref) else []
     if len(found) != 1:
         raise ValueError(
             f"--project {ref}: {'no such project' if not found else 'more than one project'}"

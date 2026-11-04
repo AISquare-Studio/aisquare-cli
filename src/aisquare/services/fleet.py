@@ -1758,10 +1758,17 @@ def is_git_project(root: Path) -> bool:
 
 
 def resolve_project(ref: str | None = None, *, cwd: Path | None = None) -> ProjectInfo:
-    """A project by id prefix, directory name or codename — or the active one for ``cwd``."""
+    """A project by id prefix, directory name or codename — or the active one for ``cwd``.
+    A ref UTF-8 cannot hold (a lone surrogate: a shell's byte that is not UTF-8) names none,
+    and the store cannot be asked it: ``board --project`` was a traceback (review r39 of
+    #113, finding 6)."""
     with store_session() as store:
         if ref is None:
             return active_project(store, cwd)
+        try:
+            ref.encode("utf-8")
+        except UnicodeEncodeError:
+            return only_project(ref, [])
         return only_project(ref, store.find_projects(ref))
 
 

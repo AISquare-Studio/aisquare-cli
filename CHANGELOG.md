@@ -726,9 +726,10 @@ adapter.**
   `\u202e`), so its text forges no line in the file or on a terminal showing it. A
   byte that is not UTF-8 is escaped too (`fleet $'spawn\xff'` logs `spawn\udcff`).
   The sandbox writes one path in the store, its launch's broker
-  inbox. So nothing that a replay, a kill, a typed line or paste, a launch, a model
-  or account choice or a worktree removal the fleet makes reads can have been
-  written from inside a sandbox. A sandboxed agent is trusted to the extent of the
+  inbox (a manager's also its own state directory, below). So nothing that a replay,
+  a kill, a typed line or paste, a launch, a model or account choice or a worktree
+  removal the fleet makes reads can have been written from inside a sandbox. A
+  sandboxed agent is trusted to the extent of the
   tree it may write, as a Claude Code agent is: what the user's own tools run from
   it (git hooks in the tree and git config the repository includes from it, a
   project venv, a subdirectory's settings, what `aisquare project onboard` packs it
@@ -1029,6 +1030,25 @@ adapter.**
   whole, and a session that is not there reads "no session matches '<ref>'", with "has no
   session yet" for an agent whose first hook has not run. Under the broker, `--as` still
   acts only as the launch's own session.
+
+- **A sandboxed manager rewrites its own state file without asking** (SMOKE13 N1, measured
+  on Codex 0.166.0 and 0.164.0). A manager's cycle tells it to keep
+  `~/.aisquare/projects/<id>/manager/state.md`, and a Codex launch held the whole store
+  read-only. So each rewrite was an escalation: three reviews by Codex's automatic reviewer
+  in one short run, each of them paid for in tokens, and a question for the human under a
+  mode that asks. A parent manager told not to escalate could not write the file at all.
+  A launch now gives write access to that one directory for the project the cycle names
+  (its fleet row's, else its board's), made before the agent starts. Nothing else in the
+  store becomes writable. A link or a non-directory on the way is refused and named, and
+  the agent then asks as before. A launch decides it from the role, for any agent that
+  sandboxes its tools, and every other seat gets nothing. A Claude Code manager already
+  wrote the file freely.
+
+- **`agents disconnect` removes a hooks file aisquare created and left empty** (SMOKE13 N2).
+  Disconnect left `{}` (3 bytes) in the `hooks.json` that connect had made in a Codex home
+  with none. Connect now records a hooks file it creates, and disconnect or uninstall
+  removes it when nothing is left in it, for every agent's hooks file. A file you had
+  before, or one you have written in since, keeps your own entries.
 
 - **A Codex parent manager runs its group** (review r37 of #113, Q5). A parent manager acts
   on two lines: a member's routed line ends `aisquare board --project <member>`, and its

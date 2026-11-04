@@ -59,9 +59,16 @@ adapter.**
   (`agents connect`, `accounts add`, `init --agent codex`, an upgrade's refresh) it records
   their trust where Codex's own *Trust all and continue* does, a `[hooks.state."<hooks.json>:
   <event>:<group>:<handler>"]` table of `trusted_hash` in that home's `config.toml`, with Codex's
-  own hash of each hook (`AgentAdapter.trust_hooks`, held to what both versions wrote): no other
-  hook's trust is touched, an upgrade's new definition has its hash replaced in place beside the
-  human's `enabled`, and a `config.toml` it cannot edit is left as it is, Codex then asking. A
+  own hash of each hook (`AgentAdapter.hook_trust`, held to what both versions wrote), for the
+  handlers that install wrote, at the places it wrote them, and no other: a hook that merely
+  reads like aisquare's is neither stamped nor trusted, and Codex still asks about it. Its
+  group keeps its place among the human's, a record the human made is never written over,
+  `agents disconnect` and uninstall take back exactly the tables aisquare wrote (it keeps a
+  record of them beside `config.toml`), an upgrade's new definition has its hash replaced in
+  place beside the human's `enabled`, and `config.toml` is written as a hooks file is (a file
+  this user may not write refused, a hard-linked one written in place); one it cannot edit is
+  left as it is, Codex then asking. Connect and the doctor say `trusted` then, and send nobody
+  to `/hooks`. A
   spawn, restart or switch installs the hooks where the agent's window starts before anything
   is stopped or started, or refuses saying why: a hop onto a slot with none started the agent
   blind, its session never on the board. A hand-over's mark leaves a session that ended ended,

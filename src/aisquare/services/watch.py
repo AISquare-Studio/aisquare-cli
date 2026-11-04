@@ -37,6 +37,7 @@ import contextlib
 import json
 import os
 import signal
+import stat
 import subprocess
 import time
 from collections import Counter
@@ -738,21 +739,27 @@ def _own_detail_file(path: Path, own: frozenset[str]) -> Path:
         f"{path} is not a watch detail file of this agent's project: a command from its "
         "sandbox reads only the ones its own watch lines name"
     )
-    try:
-        resolved = path.expanduser().resolve(strict=True)
-        root = watch_dir().resolve(strict=True)
-    except (OSError, RuntimeError):
-        # refused as one that is there: "no such file" told the sandbox what lies at a path
-        # outside its tree (review r38 of #113, finding 1)
-        raise refused from None
-    if (
-        resolved.parent.parent != root
-        or resolved.suffix != ".json"
-        or not resolved.is_file()
-        or _project_of(resolved) not in own
-    ):
+    # Taken as written, never resolved: resolving a path looks at the whole way, and a link out
+    # of the tree with a `..` back said whether what it names is there; "no such file" said as
+    # much of any path (review r38 of #113, finding 1). Only a name in the watch directory, as
+    # the watch line spells it or as it resolves, is looked at, and a link there is no file.
+    named = path.expanduser()
+    if not named.is_absolute() or os.pardir in named.parts or os.curdir in named.parts:
         raise refused
-    return resolved
+    directory = watch_dir()
+    try:
+        homes = {directory, directory.resolve(strict=True)}
+    except (OSError, RuntimeError):
+        raise refused from None
+    if named.parent.parent not in homes or named.suffix != ".json":
+        raise refused
+    try:
+        status = os.lstat(named)
+    except OSError:
+        raise refused from None
+    if not stat.S_ISREG(status.st_mode) or _project_of(named) not in own:
+        raise refused
+    return named
 
 
 def kinds(items: Iterable[WatchItem]) -> dict[str, int]:

@@ -23,6 +23,7 @@ import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -67,8 +68,8 @@ def _swapped_after_the_check(monkeypatch: pytest.MonkeyPatch, swap: Callable[[],
     real_open = store_broker.open_in_tree
     opening = [False]
 
-    def placed(path: Path, roots: Sequence[Path]) -> tuple[Path, Path] | str:
-        found = real_placed(path, roots)
+    def placed(path: Path, roots: Sequence[Path], *rest: Any) -> tuple[Path, Path] | str:
+        found = real_placed(path, roots, *rest)
         if opening[0]:
             opening[0] = False
             swap()

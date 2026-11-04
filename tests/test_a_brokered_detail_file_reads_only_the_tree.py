@@ -295,17 +295,17 @@ def test_an_unbrokered_add_reads_any_file_as_it_always_did(setting: Setting, mem
 
 # --- reopened: a `..` the walk climbed out of the tree (review r38 of #113, finding 1) --------
 #
-# On 3.11 and 3.12 ``Path.resolve`` raises on a link loop, and the placement fell back to the
-# path as written, `..` and all: ``is_relative_to`` is lexical, so ``<tree>/A/../../outside/x``
-# was in the tree. With ``A`` a link (into the tree, onto a loop) while it was resolved and a
-# directory while it was walked, the walk's `..` climbed out of the tree and read the file there
-# (O_NOFOLLOW stops a link, never a `..`). Three guards, each pinned and each killed alone:
-# the placement never falls back (``_real``); ``read_in_tree`` hands the walk the strictly
-# resolved path and refuses one that no longer resolves; the walk refuses a `..` or `.` whoever
-# placed it.
+# On 3.11 and 3.12 ``Path.resolve`` raised on a link loop, and the placement fell back to the
+# path as written, `..` and all: ``<tree>/A/../../outside/x`` was in the tree by name, and with
+# ``A`` a link while it was resolved and a directory while it was walked, the walk's `..` climbed
+# out (O_NOFOLLOW stops a link, never a `..`). Round 2: ``Path.resolve`` looks at the whole way,
+# outside the tree too, so a link out of the tree and a `..` back in said whether what the link
+# names is there; and the tree's root was opened following links, so a sandbox that may rename
+# the root (a project under /tmp) put a link to an outside directory in its place. A path is now
+# resolved in the tree alone (``_resolve``: name by name, below a root opened by ``_open_root``),
+# and the walk refuses a `..` whoever placed the path.
 
-#: The two ways the attack is refused: placed nowhere (3.11, 3.12), or placed and then not
-#: resolved (3.13, whose ``resolve`` goes on past a loop by the name).
+#: An in-tree loop's refusal; every other way out is refused in the outside words.
 UNRESOLVED = "cannot be resolved"
 
 
@@ -327,7 +327,7 @@ def _loop_layout(tree: Path, outside: Path) -> tuple[Path, Path, Path]:
 @pytest.fixture
 def in_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """``tree/`` (a broker's launch's) and ``outside/auth.json`` beside it, in the environment
-    of a command that broker runs, from the tree."""
+    of a command that broker runs, from the tree; no root identities recorded."""
     tree = (tmp_path / "tree").resolve()
     tree.mkdir()
     outside = tree.parent / "outside" / "auth.json"
@@ -335,12 +335,13 @@ def in_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path
     outside.write_text(FOREIGN, encoding="utf-8")
     monkeypatch.setenv(store_broker.CALLER_ENV, "1")
     monkeypatch.setenv(store_broker.ROOTS_ENV, str(tree))
+    monkeypatch.delenv(store_broker.ROOT_IDS_ENV, raising=False)
     monkeypatch.chdir(tree)
     return tree, outside
 
 
 def _swapping_on_the_walk(monkeypatch: pytest.MonkeyPatch, link: Path, directory: Path) -> None:
-    """The sandbox wins the race: as the walk below the tree's root opens ``link``'s name, the
+    """The sandbox wins the race: as a walk below the tree's root opens ``link``'s name, the
     link is gone and the directory is there in its place."""
     real_open = os.open
     swapped = [False]
@@ -355,128 +356,298 @@ def _swapping_on_the_walk(monkeypatch: pytest.MonkeyPatch, link: Path, directory
     monkeypatch.setattr(os, "open", hooked)
 
 
-def test_a_path_that_does_not_resolve_is_placed_nowhere(
+def _lexical(tree: Path) -> Callable[..., tuple[Path, Path]]:
+    """A placement by name alone, as the old fallback placed a path: in ``tree`` as written."""
+
+    def placed(path: Path, roots: object, *rest: object) -> tuple[Path, Path]:
+        return tree, path.absolute()
+
+    return placed
+
+
+def test_a_path_is_resolved_in_the_tree_name_by_name_never_by_path_resolve(
     in_tree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Guard 1, the placement (``_placed``, ``outside_tree``, ``Scope.holds``): where
-    ``resolve`` raises, or leaves a `..`, the path is in no tree, never the path as written.
-    ``resolve`` is made to do each here, as 3.11 and 3.12 do on a loop, whatever runs this."""
-    tree, outside = in_tree
-    _, _, named = _loop_layout(tree, outside)
-    real_resolve = Path.resolve
-    scope = store_broker.Scope("b", "p", (tree,))
-    for answer in ("raise", "dotdot"):
-
-        def resolve(self: Path, strict: bool = False, answer: str = answer) -> Path:
-            if "/A/../" not in str(self):
-                return real_resolve(self, strict=strict)
-            if answer == "raise":
-                raise RuntimeError(f"Symlink loop from {self}")
-            return self.absolute()
-
-        monkeypatch.setattr(Path, "resolve", resolve)
-        assert store_broker._real(named) is None, answer
-        assert store_broker._placed(named, [tree]) == (
-            f"{named} is outside this agent's tree: its broker reads only there"
-        ), answer
-        assert store_broker.outside_tree(named) is not None, answer
-        assert not scope.holds(named), answer
-    monkeypatch.setattr(Path, "resolve", real_resolve)
-    placed = store_broker._placed(named, [tree])
-    # unpatched: refused (3.11, 3.12), or placed where the kernel resolves it now (3.13)
-    assert isinstance(placed, str) or os.pardir not in placed[1].parts, placed
-
-
-def test_the_walk_is_handed_the_path_resolved_with_no_link_and_no_dotdot(
-    in_tree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Guard 2, ``read_in_tree``: ``open_in_tree`` walks the strictly resolved path, never the
-    name as given, through a `..` or a link in the tree alike."""
+    """The resolver: a `..` and a link of the tree are walked as the kernel would, to a path with
+    neither; ``Path.resolve`` and ``os.path.realpath``, which look at the whole way, outside the
+    tree too, are never asked."""
     tree, _ = in_tree
     (tree / "sub").mkdir()
     (tree / "deep" / "x").mkdir(parents=True)
     (tree / "brief.md").write_text("objective: one\n", encoding="utf-8")
     (tree / "deep" / "brief.md").write_text("objective: two\n", encoding="utf-8")
     (tree / "L").symlink_to(tree / "deep" / "x")
-    walked: list[Path] = []
-    real_open = store_broker.open_in_tree
+    (tree / "R").symlink_to("deep/x")
 
-    def spy(path: Path, environ: Mapping[str, str] | None = None) -> int | None:
-        walked.append(path)
-        return real_open(path, environ)
+    def asked(*args: object, **kwargs: object) -> Path:
+        raise AssertionError("resolved by the whole way")
 
-    monkeypatch.setattr(store_broker, "open_in_tree", spy)
-    one = store_broker.read_in_tree(Path("sub/../brief.md"), 100)
-    two = store_broker.read_in_tree(tree / "L" / ".." / "brief.md", 100)
-    assert (one, two) == (b"objective: one\n", b"objective: two\n")
-    assert walked == [tree / "brief.md", tree / "deep" / "brief.md"], walked
+    monkeypatch.setattr(Path, "resolve", asked)
+    monkeypatch.setattr(os.path, "realpath", asked)
+    for named, there in (
+        (tree / "sub" / ".." / "brief.md", tree / "brief.md"),
+        (tree / "L" / ".." / "brief.md", tree / "deep" / "brief.md"),
+        (tree / "R" / ".." / "brief.md", tree / "deep" / "brief.md"),
+        (tree / "missing" / "x.md", tree / "missing" / "x.md"),
+    ):
+        assert store_broker._placed(named, [tree]) == (tree, there), named
+    assert store_broker.read_in_tree(Path("L/../brief.md"), 100) == b"objective: two\n"
 
 
-def test_a_path_placed_in_the_tree_that_no_longer_resolves_is_refused_not_read(
+def test_a_link_out_of_the_tree_is_refused_alike_whatever_it_names_and_a_loop_in_it_is_told(
+    in_tree: tuple[Path, Path],
+) -> None:
+    """A link whose target leaves the tree is refused before the target is looked at, so the
+    refusal is one whatever the target is; a loop of the tree's own says so."""
+    tree, outside = in_tree
+    out = outside.parent
+    (out / "adir").mkdir()
+    (out / "loop").symlink_to(out / "loop")
+    (tree / "f.md").write_text("objective: in tree\n", encoding="utf-8")
+    refusals = set()
+    for n, target in enumerate(
+        (outside, out / "adir", out / "nothing", out / "loop", Path("../outside/adir"))
+    ):
+        (tree / f"l{n}").symlink_to(target)
+        named = tree / f"l{n}" / ".." / ".." / tree.name / "f.md"
+        said = store_broker._placed(named, [tree])
+        assert isinstance(said, str), (target, said)
+        refusals.add(said.replace(str(named), "<path>"))
+    assert refusals == {"<path> is outside this agent's tree: its broker reads only there"}
+    (tree / "self").symlink_to(tree / "self")
+    with pytest.raises(store_broker.OutOfScope, match=UNRESOLVED):
+        store_broker.read_in_tree(tree / "self", 100)
+
+
+def test_a_link_swapped_in_mid_resolution_leads_nowhere_out(
     in_tree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Guard 2, ``read_in_tree``: placed by the old lexical rule (as a race placed it, or 3.13
-    by a loop's name), a path whose strict resolution meets a loop is refused, and no `..` of
-    it is walked."""
+    """The reopen's attack on the resolver itself: ``A`` a directory as it is looked at, swapped
+    for the link as it is opened (and the other way). Each name is looked at and opened below the
+    directory above it, with no link followed: refused, or read in the tree, never outside."""
     tree, outside = in_tree
     link, directory, named = _loop_layout(tree, outside)
-
-    def lexical(path: Path, roots: object) -> tuple[Path, Path]:
-        return tree, path.absolute()
-
-    monkeypatch.setattr(store_broker, "_placed", lexical)
     _swapping_on_the_walk(monkeypatch, link, directory)
-    with pytest.raises(store_broker.OutOfScope, match=UNRESOLVED):
+    with pytest.raises(store_broker.OutOfScope) as refused:
         store_broker.read_in_tree(named, store_broker.MAX_DETAIL_FILE)
+    assert OUTSIDE in str(refused.value) or UNRESOLVED in str(refused.value), refused.value
 
 
 def test_the_walk_climbs_no_dotdot_whoever_placed_the_path(
     in_tree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Guard 3, ``open_in_tree``: a `..` that a placement let through, as the old fallback did,
-    is refused before the walk, which O_NOFOLLOW would have let climb above the tree's root."""
+    """``open_in_tree``: a `..` that a placement let through, as the old fallback did, is
+    refused before the walk, which O_NOFOLLOW would have let climb above the tree's root."""
     tree, outside = in_tree
     (tree / "A").mkdir()
-    named = Path(f"{tree}/A/../../{outside.relative_to(tree.parent)}")
+    monkeypatch.setattr(store_broker, "_placed", _lexical(tree))
+    for named in (
+        Path(f"{tree}/A/../../{outside.relative_to(tree.parent)}"),
+        Path(f"{tree}/A/./../../{outside.relative_to(tree.parent)}"),
+    ):
+        with pytest.raises(store_broker.OutOfScope, match="is outside this agent's tree"):
+            store_broker.open_in_tree(named)
 
-    def lexical(path: Path, roots: object) -> tuple[Path, Path]:
-        return tree, path.absolute()
 
-    monkeypatch.setattr(store_broker, "_placed", lexical)
-    with pytest.raises(store_broker.OutOfScope, match="is outside this agent's tree"):
-        store_broker.open_in_tree(named)
-    with pytest.raises(store_broker.OutOfScope, match="is outside this agent's tree"):
-        store_broker.open_in_tree(Path(f"{tree}/A/./../../{outside.relative_to(tree.parent)}"))
+def _brokered_env(setting: Setting) -> dict[str, str]:
+    """The environment the broker gives the command it runs (``Broker.answer``)."""
+    scope = setting.broker.scope()
+    return {
+        store_broker.CALLER_ENV: "1",
+        store_broker.BOARD_ENV: scope.board,
+        store_broker.POOL_ENV: scope.pool,
+        store_broker.MEMBERS_ENV: ",".join(scope.members),
+        store_broker.ROOTS_ENV: os.pathsep.join(str(root) for root in scope.roots),
+        store_broker.ROOT_IDS_ENV: ",".join(scope.identities),
+    }
+
+
+def _refused_in_process(setting: Setting, argv: list[str], member: bool) -> tuple[int, str]:
+    """``task add`` run as the broker runs it (its environment), here: the status and output."""
+    if member:
+        argv = [*argv, "--project", "api"]
+    result = CliRunner().invoke(app, argv, env=_brokered_env(setting))
+    return result.exit_code, result.output
 
 
 @BOARDS
 def test_a_link_swapped_for_a_directory_mid_walk_never_leads_out(
     setting: Setting, member: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The reopen's attack, deterministic: the command as the broker runs it (its environment),
-    with ``A`` swapped for a directory as the walk opens it. Refused, on the board the add names
-    and the other alike, with none of the file."""
+    """The reopen's attack, deterministic: the command as the broker runs it, with ``A``
+    swapped for a directory as the walk opens it. Refused, on the board the add names and the
+    other alike, with none of the file."""
     link, directory, named = _loop_layout(setting.work, setting.outside)
-    scope = setting.broker.scope()
-    env = {
-        store_broker.CALLER_ENV: "1",
-        store_broker.BOARD_ENV: scope.board,
-        store_broker.POOL_ENV: scope.pool,
-        store_broker.MEMBERS_ENV: ",".join(scope.members),
-        store_broker.ROOTS_ENV: os.pathsep.join(str(root) for root in scope.roots),
-    }
-    argv = ["task", "add", "escape", "--detail-file", str(named)]
-    if member:
-        argv += ["--project", "api"]
     _swapping_on_the_walk(monkeypatch, link, directory)
-    result = CliRunner().invoke(app, argv, env=env)
-    said = result.output
-    assert result.exit_code == 1, said
-    assert OUTSIDE in said or UNRESOLVED in said, said
+    code, said = _refused_in_process(
+        setting, ["task", "add", "escape", "--detail-file", str(named)], member
+    )
+    assert code == 1 and (OUTSIDE in said or UNRESOLVED in said), said
     assert FOREIGN not in said, said
     with store_session() as store:
         for board in _boards(setting):
             assert store.team_tasks(board) == [], board
+
+
+# --- round 2: the tree's root, swapped (review r38 of #113, finding 1, round 2) -----------
+
+
+def _swapping_the_root(
+    monkeypatch: pytest.MonkeyPatch, root: Path, swap: Callable[[], None]
+) -> None:
+    """The sandbox wins the race on the root: as the root is about to be opened (by its walk from
+    ``/``, or whole), ``swap()`` puts something else in its place."""
+    real_open = os.open
+    swapped = [False]
+
+    def hooked(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if (
+            not swapped[0]
+            and kwargs.get("dir_fd") is None
+            and str(path) in (root.anchor, str(root))
+        ):
+            swapped[0] = True
+            swap()
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", hooked)
+
+
+def _link_for(root: Path, outside: Path) -> Callable[[], None]:
+    """The root renamed away and a link to the outside directory in its place."""
+
+    def swap() -> None:
+        root.rename(root.with_name(root.name + ".real"))
+        root.symlink_to(outside.parent, target_is_directory=True)
+
+    return swap
+
+
+def _directory_for(root: Path) -> Callable[[], None]:
+    """The root renamed away and another directory, holding the outside's file, in its place."""
+    decoy = root.with_name(root.name + ".decoy")
+    decoy.mkdir()
+    (decoy / "auth.json").write_text(FOREIGN, encoding="utf-8")
+
+    def swap() -> None:
+        root.rename(root.with_name(root.name + ".real"))
+        decoy.rename(root)
+
+    return swap
+
+
+def _restore(root: Path) -> None:
+    """The root back, whatever is in its place."""
+    real = root.with_name(root.name + ".real")
+    if not real.exists():
+        return
+    if root.is_symlink():
+        root.unlink()
+    elif root.is_dir():
+        root.rename(root.with_name(root.name + ".was"))
+    real.rename(root)
+
+
+def test_a_root_swapped_for_a_link_is_not_walked_into(
+    in_tree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard: the root is opened by a walk from ``/`` with no link followed (``_open_root``),
+    so a link put in its place leads nowhere, with no identity to go by (none recorded here)."""
+    tree, outside = in_tree
+    (tree / "auth.json").write_text("objective: in the tree\n", encoding="utf-8")
+    _swapping_the_root(monkeypatch, tree, _link_for(tree, outside))
+    try:
+        with pytest.raises(store_broker.OutOfScope, match="is outside this agent's tree"):
+            store_broker.read_in_tree(tree / "auth.json", store_broker.MAX_DETAIL_FILE)
+    finally:
+        _restore(tree)
+
+
+def test_a_root_swapped_for_another_directory_is_not_the_brokers(
+    in_tree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard: a directory moved into the root's place is no link; it is refused by what the root
+    was when the broker took its scope (its device and inode, :data:`ROOT_IDS_ENV`)."""
+    tree, _ = in_tree
+    (tree / "auth.json").write_text("objective: in the tree\n", encoding="utf-8")
+    status = os.stat(tree)
+    monkeypatch.setenv(store_broker.ROOT_IDS_ENV, f"{status.st_dev}-{status.st_ino}")
+    assert store_broker.read_in_tree(tree / "auth.json", 100) == b"objective: in the tree\n"
+    _swapping_the_root(monkeypatch, tree, _directory_for(tree))
+    try:
+        with pytest.raises(store_broker.OutOfScope, match="is outside this agent's tree"):
+            store_broker.read_in_tree(tree / "auth.json", store_broker.MAX_DETAIL_FILE)
+    finally:
+        _restore(tree)
+
+
+@BOARDS
+def test_a_root_swapped_as_it_is_opened_is_refused_on_either_board(
+    setting: Setting, member: bool
+) -> None:
+    """The tester's probe, as the broker runs the command: the root swapped for a link to the
+    outside directory, then for another directory, as it is opened. Refused each time, with
+    none of the file and no task."""
+    root = setting.work
+    (root / "auth.json").write_text("objective: in the tree\n", encoding="utf-8")
+    for swap in (_link_for(root, setting.outside), _directory_for(root)):
+        with pytest.MonkeyPatch.context() as patch:
+            _swapping_the_root(patch, root, swap)
+            try:
+                code, said = _refused_in_process(
+                    setting,
+                    ["task", "add", "root", "--detail-file", str(root / "auth.json")],
+                    member,
+                )
+            finally:
+                _restore(root)
+        assert code == 1 and OUTSIDE in said and FOREIGN not in said, said
+    with store_session() as store:
+        for board in _boards(setting):
+            assert store.team_tasks(board) == [], board
+
+
+@BOARDS
+def test_a_root_another_directory_took_is_refused_through_the_broker(
+    setting: Setting, member: bool
+) -> None:
+    """Through ``Broker.answer``: the root's identity is recorded as the broker settles, so a
+    directory moved into the root's place before the request is refused as the request's own
+    directory already, and the command never runs in it."""
+    root = setting.work
+    _directory_for(root)()
+    try:
+        answer = setting.add(root / "auth.json", member=member)
+    finally:
+        _restore(root)
+    said = f"{answer['stdout']}{answer['stderr']}"
+    assert answer["code"] not in (0, None) and "outside this agent's tree" in said, answer
+    assert FOREIGN not in said, said
+    with store_session() as store:
+        for board in _boards(setting):
+            assert store.team_tasks(board) == [], board
+
+
+def test_the_broker_hands_its_command_what_each_root_was_at_its_start(
+    setting: Setting, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identities the command checks its root by (``_open_root``) are the broker's, taken as
+    it settled, one per root of its tree and in the same order."""
+    handed: list[Mapping[str, str]] = []
+
+    def run(argv: list[str], cwd: str, env: Mapping[str, str]) -> dict[str, object]:
+        handed.append(dict(env))
+        return {"code": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(setting.broker, "_run", run)
+    _answer(setting.broker, _request(["board"], setting.work, rid=f"{999:032x}"))
+    [env] = handed
+    roots = env[store_broker.ROOTS_ENV].split(os.pathsep)
+    ids = env[store_broker.ROOT_IDS_ENV].split(",")
+    assert len(roots) == len(ids) and roots, env
+    for root, identity in zip(roots, ids, strict=True):
+        status = os.stat(root)
+        assert identity == f"{status.st_dev}-{status.st_ino}", (root, identity)
 
 
 #: Swaps two names atomically, over and over: macOS's ``renamex_np(RENAME_SWAP)``, Linux's
@@ -494,39 +665,39 @@ while True:
 """
 
 
-def _can_swap(tmp_path: Path) -> bool:
-    """Whether this system swaps two names atomically (the race needs it)."""
+def _swap_once(a: Path, b: Path) -> bool:
+    """``a`` and ``b`` swapped atomically, once; whether this system could."""
     import ctypes
 
-    one, two = tmp_path / "swap-one", tmp_path / "swap-two"
-    one.mkdir()
-    two.symlink_to(one)
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         if sys.platform == "darwin":
-            done = libc.renamex_np(bytes(one), bytes(two), 2)
+            done = libc.renamex_np(bytes(a), bytes(b), 2)
         else:
-            done = libc.renameat2(-100, bytes(one), -100, bytes(two), 2)
+            done = libc.renameat2(-100, bytes(a), -100, bytes(b), 2)
     except (AttributeError, OSError):
         return False
-    return done == 0 and one.is_symlink()
+    return bool(done == 0)
 
 
-#: Bounds of the race through the real broker: the tester's leaks came at attempts 1 to 47.
+def _can_swap(tmp_path: Path) -> bool:
+    """Whether this system swaps two names atomically (the races need it)."""
+    one, two = tmp_path / "swap-one", tmp_path / "swap-two"
+    one.mkdir()
+    two.symlink_to(one)
+    return _swap_once(one, two) and one.is_symlink()
+
+
+#: Bounds of each race through the real broker: the round-1 leaks came at attempts 1 to 47.
 RACE_TRIES, RACE_SECONDS = 50, 30.0
 
 
-@BOARDS
-def test_the_swap_raced_through_the_broker_never_leads_out(
-    setting: Setting, member: bool, tmp_path: Path
-) -> None:
-    """The reopen's attack as the sandbox runs it: a process of its own swaps ``A`` with a
-    directory while the add is asked again and again through ``Broker.answer``. Every answer is
-    a refusal, and neither board holds a byte of the file, for as many tries as the bounds give."""
-    if not _can_swap(tmp_path):
-        pytest.skip("no atomic swap of two names here (renamex_np, renameat2)")
-    link, directory, named = _loop_layout(setting.work, setting.outside)
-    swapper = subprocess.Popen([sys.executable, "-c", SWAPPER, str(link), str(directory)])
+def _raced(
+    setting: Setting, a: Path, b: Path, named: Path, member: bool
+) -> list[dict[str, object]]:
+    """``task add --detail-file <named>`` asked again and again through ``Broker.answer`` while a
+    process of the sandbox's own swaps ``a`` and ``b``; the answers."""
+    swapper = subprocess.Popen([sys.executable, "-c", SWAPPER, str(a), str(b)])
     answers: list[dict[str, object]] = []
     deadline = time.monotonic() + RACE_SECONDS
     try:
@@ -535,10 +706,105 @@ def test_the_swap_raced_through_the_broker_never_leads_out(
     finally:
         swapper.terminate()
         swapper.wait(10)
+    return answers
+
+
+def _nothing_leaked(setting: Setting, answers: list[dict[str, object]]) -> None:
     assert answers, "the race asked nothing"
     for answer in answers:
-        said = f"{answer['stdout']}{answer['stderr']}"
-        assert answer["code"] not in (0, None) and FOREIGN not in said, answer
+        assert FOREIGN not in f"{answer['stdout']}{answer['stderr']}", answer
     with store_session() as store:
         for board in _boards(setting):
-            assert store.team_tasks(board) == [], board
+            details = [task.detail or "" for task in store.team_tasks(board)]
+            assert not any(FOREIGN in detail for detail in details), board
+
+
+@BOARDS
+def test_the_swap_raced_through_the_broker_never_leads_out(
+    setting: Setting, member: bool, tmp_path: Path
+) -> None:
+    """Round 1's attack as the sandbox runs it: ``A`` swapped with a directory while the add is
+    asked again and again. Every answer is a refusal, and neither board holds a byte."""
+    if not _can_swap(tmp_path):
+        pytest.skip("no atomic swap of two names here (renamex_np, renameat2)")
+    link, directory, named = _loop_layout(setting.work, setting.outside)
+    answers = _raced(setting, link, directory, named, member)
+    for answer in answers:
+        assert answer["code"] not in (0, None), answer
+    _nothing_leaked(setting, answers)
+
+
+@BOARDS
+def test_the_root_swapped_for_a_link_raced_through_the_broker_never_leads_out(
+    setting: Setting, member: bool, tmp_path: Path
+) -> None:
+    """Round 2's attack as the sandbox runs it: the tree's root swapped with a link to the
+    outside directory while ``<root>/auth.json`` is asked for again and again. Some adds read the
+    tree's own file, most are refused; none reads the outside's."""
+    if not _can_swap(tmp_path):
+        pytest.skip("no atomic swap of two names here (renamex_np, renameat2)")
+    root = setting.work
+    (root / "auth.json").write_text("objective: decoy in the tree\n", encoding="utf-8")
+    swap = root.with_name("rootswap")
+    swap.symlink_to(setting.outside.parent, target_is_directory=True)
+    try:
+        answers = _raced(setting, root, swap, root / "auth.json", member)
+    finally:
+        if root.is_symlink():  # the tree a directory again
+            _swap_once(root, swap)
+    assert root.is_dir() and not root.is_symlink()
+    _nothing_leaked(setting, answers)
+
+
+# --- round 2: a link out and a `..` back in tells nothing --------------------------------------
+
+
+@BOARDS
+def test_a_link_out_and_back_in_says_nothing_of_what_it_names(
+    setting: Setting, member: bool
+) -> None:
+    """``<tree>/l/../../<tree's name>/f.md``, ``l`` a link to ``X`` outside the tree: refused the
+    same whatever ``X`` is (a file, a directory, nothing, under a locked directory, a link). The
+    old resolution followed ``l`` and climbed back, adding the task when ``X`` was there."""
+    w = setting.work
+    out = setting.outside.parent
+    (w / "f.md").write_text("objective: in tree\n", encoding="utf-8")
+    (out / "locked" / "x").mkdir(parents=True)
+    (out / "locked").chmod(0)
+    (out / "adir").mkdir()
+    (w.parent / "deep" / "er").mkdir(parents=True)
+    (out / "alink").symlink_to(w.parent / "deep" / "er")
+    probes = (setting.outside, out / "adir", out / "nothing", out / "locked" / "x", out / "alink")
+    seen: dict[str, tuple[object, str]] = {}
+    try:
+        for n, target in enumerate(probes):
+            link = w / f"l{n}"
+            link.symlink_to(target)
+            named = f"{link}/../../{w.name}/f.md"
+            answer = setting.add(named, member=member, title=f"o{n}")
+            text = f"{answer['stdout']}{answer['stderr']}".replace(named, "<path>")
+            seen[str(target)] = (answer["code"], " ".join(text.split()))
+            (paths.log_dir() / store_broker.LOG_NAME).unlink(missing_ok=True)
+    finally:
+        (out / "locked").chmod(0o755)
+    assert len(set(seen.values())) == 1, seen
+    [(code, text)] = set(seen.values())
+    assert code == 1 and OUTSIDE in text, seen
+
+
+def test_a_directory_outside_the_tree_is_refused_as_a_cwd_whatever_lies_there(
+    setting: Setting, tmp_path: Path
+) -> None:
+    """The request's own directory is placed in the tree before anything is asked of it: one
+    outside is refused in the same words whether it is a directory, nothing or a file (asked
+    first, "not one the broker can run in" told which)."""
+    out = setting.outside.parent
+    (out / "adir").mkdir()
+    seen = set()
+    for n, cwd in enumerate((out / "adir", out / "nothing", setting.outside)):
+        answer = _answer(setting.broker, _request(["board"], cwd, rid=f"{n + 900:032x}"))
+        text = f"{answer['stdout']}{answer['stderr']}".replace(str(cwd), "<cwd>")
+        seen.add((answer["code"], " ".join(text.split())))
+    assert len(seen) == 1, seen
+    [(code, text)] = seen
+    assert code not in (0, None) and "outside this agent's tree" in text, seen

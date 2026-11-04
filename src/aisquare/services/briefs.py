@@ -175,25 +175,29 @@ def _read_artifact(path: Path) -> _Artifact:
     """The artifact named on the command line. A regular file, and at most
     :data:`MAX_ARTIFACT_BYTES`: a FIFO or a device would block or never end the read."""
     named = path.expanduser()
-    # Placed before it is resolved: resolving says whether something is there, and a path
-    # outside the tree is refused alike whatever is (review r38 of #113, finding 1).
-    outside = store_broker.outside_tree(named if named.is_absolute() else Path.cwd() / named)
-    if outside is not None:
-        raise store_broker.OutOfScope(outside, kind="path")
-    try:
-        resolved = named.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"artifact {path} cannot be read ({exc})") from None
+    absolute = named if named.is_absolute() else Path.cwd() / named
     # A command an agent's broker runs reads as the user, outside the sandbox, and keeps a
-    # copy in the store: only a file of the launch's own tree. Checked on the descriptor it
-    # is read from, opened below the tree with no link followed: a name checked and then
-    # opened again was swapped for a link in between (`store_broker.open_in_tree`).
-    descriptor = store_broker.open_in_tree(resolved)
+    # copy in the store: only a file of the launch's own tree, resolved there with nothing
+    # outside it looked at, so a refusal says the same whatever lies outside (review r38 of
+    # #113, finding 1), and read from the descriptor opened below the tree with no link
+    # followed: a name checked and then opened again was swapped for a link in between
+    # (`store_broker.open_in_tree`).
+    try:
+        descriptor = store_broker.open_in_tree(absolute)
+    except store_broker.OutOfScope:
+        raise
+    except OSError as exc:  # a name of the tree that is not there
+        raise ValueError(f"artifact {path} cannot be read ({exc.strerror})") from None
     if descriptor is None:
+        try:
+            resolved = named.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"artifact {path} cannot be read ({exc})") from None
         if not resolved.is_file():
             raise ValueError(f"artifact {path} is not a regular file")
         handle = resolved.open("rb")
     else:
+        resolved = store_broker.resolved_in_tree(absolute) or absolute
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):  # a directory, a FIFO swapped in
             os.close(descriptor)
             raise ValueError(f"artifact {path} is not a regular file")
@@ -705,10 +709,14 @@ def _checkout_of(path: Path, brief: WorkBrief, project_root: Path | None) -> Pat
             + (f" ({project_root})" if project_root else "")
             + ": name the project's directory or one of its worktrees"
         )
-        try:
-            resolved = path.expanduser().resolve(strict=True)
-        except (OSError, RuntimeError):
-            raise not_ours from None
+        named = path.expanduser()
+        # resolved in the launch's tree alone, nothing outside it looked at: a link out of the
+        # tree and a `..` back in said whether what the link names is there (round 2)
+        resolved = store_broker.resolved_in_tree(
+            named if named.is_absolute() else Path.cwd() / named
+        )
+        if resolved is None:
+            raise not_ours
         try:
             if resolved.is_dir() and _is_checkout(resolved, brief, project_root):
                 return resolved

@@ -210,6 +210,13 @@ SEALS_ENV = "AISQUARE_BROKERED_SEALS"
 ROOTS_ENV = "AISQUARE_BROKERED_ROOTS"
 """The launch's tree (its directories, ``os.pathsep``-joined), in the environment of the
 command a broker runs: the command refuses to run anywhere else (:func:`check_cwd`)."""
+ROOT_IDS_ENV = "AISQUARE_BROKERED_ROOT_IDS"
+"""What each directory of the launch's tree (:data:`ROOTS_ENV`, in its order) was when the
+broker took its scope (:meth:`Broker.settle`): ``<st_dev>-<st_ino>``, comma-joined, empty for
+one that was no directory then. A root that is another directory now is refused
+(:func:`_open_root`): a sandbox that may write a root's parent (a project under ``/tmp``) could
+rename the root away and put another directory, or a link to one, in its place (review r38 of
+#113, finding 1, round 2)."""
 MEMBERS_ENV = "AISQUARE_BROKERED_MEMBERS"
 """The member projects (ids, comma-joined) of the groups the launch's board parented when the
 launch started (:meth:`Broker.settle`), in the environment of the command a broker runs: a
@@ -467,12 +474,8 @@ def _tree_roots(source: Mapping[str, str]) -> list[Path] | None:
 def _real(path: Path) -> Path | None:
     """``path`` as the kernel resolves it, links and ``..`` gone; ``None`` where that cannot
     be said: a link loop on its way (``Path.resolve`` raises on 3.11 and 3.12), or a result
-    that still holds a ``..`` or ``.`` (3.13 goes on past a loop by the name as written).
-
-    Never the path as written, which :func:`_resolved` falls back to: ``is_relative_to`` is
-    lexical, so ``<tree>/A/../../x`` was taken for a place in the tree, and with ``A`` a link
-    while it was resolved and a directory while it was walked, the walk climbed out of the tree
-    and read the file there (review r38 of #113, finding 1, reopened)."""
+    that still holds a ``..`` or ``.``. For the launch's own directories (:func:`launch_scope`),
+    never a path a request names: that is resolved in the tree alone (:func:`_placed`)."""
     try:
         there = path.resolve()
     except (OSError, RuntimeError):
@@ -482,25 +485,163 @@ def _real(path: Path) -> Path | None:
     return there
 
 
-def _placed(path: Path, roots: Sequence[Path]) -> tuple[Path, Path] | str:
-    """``path`` as the kernel resolves it (:func:`_real`) and the root of the tree it is in,
-    or why it is in none. A relative path is no place: it is read from the directory of
-    whoever reads it (a report's ``cwd`` or ``source_root`` of ``""`` or ``sub`` was the
-    broker's own directory, which is in the tree: review r24 of #113, finding 7). A path that
-    cannot be resolved is refused as one outside the tree is, in the same words: what is
-    outside is no business of the sandbox's, a link loop there included."""
+#: How a directory on the way to, or in, the launch's tree is opened: to look below it, no more
+#: (Linux's ``O_PATH``, macOS's ``O_SEARCH``): a directory the user may search and not list is
+#: on the way to many a project.
+_SEARCH = getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0) or os.O_RDONLY
+#: The links one path may run through before it is taken for a loop (Linux's MAXSYMLINKS).
+_MAX_LINKS = 40
+
+
+def _root_identities(source: Mapping[str, str]) -> dict[Path, str] | None:
+    """Each root of the launch's tree and what it was at the broker's start
+    (:data:`ROOT_IDS_ENV`); ``None`` where no broker recorded them."""
+    roots = _tree_roots(source)
+    recorded = source.get(ROOT_IDS_ENV)
+    if roots is None or recorded is None:
+        return None
+    found = recorded.split(",")
+    return {root: (found[n] if n < len(found) else "") for n, root in enumerate(roots)}
+
+
+def _identity(status: os.stat_result) -> str:
+    return f"{status.st_dev}-{status.st_ino}"
+
+
+def _open_root(root: Path, identities: Mapping[Path, str] | None) -> int:
+    """A descriptor on the directory ``root`` (a resolved path), opened by a walk from ``/``
+    with no link followed, and the directory the broker found there at its start when it
+    recorded one (``identities``). :class:`OSError` otherwise.
+
+    ``os.open(root)`` followed a link at the root or at any directory above it: a sandbox that
+    may rename its tree's root (a project under ``/tmp``) put a link to an outside directory in
+    its place, and the walk below the root read there (review r38 of #113, finding 1, round 2).
+    A directory moved into its place is no link: its identity is not the root's."""
+    if sys.platform == "win32":
+        raise OSError(errno.ENOTSUP, "a broker runs on POSIX")
+    descriptor = os.open(root.anchor, _SEARCH | os.O_DIRECTORY)
+    try:
+        for name in root.parts[1:]:
+            deeper = os.open(name, _SEARCH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = deeper
+        status = os.fstat(descriptor)
+        if not stat.S_ISDIR(status.st_mode):  # O_PATH opens a link it was not to follow
+            raise OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(root))
+        if identities is not None and identities.get(root) != _identity(status):
+            raise OSError(errno.ESTALE, "not the directory its broker found there", str(root))
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _resolve(
+    named: Path, roots: Sequence[Path], identities: Mapping[Path, str] | None, shown: Path
+) -> tuple[Path, Path] | str:
+    """``named`` (absolute) resolved in the launch's tree, and the root it is in; else why not:
+    in the outside words, or that it loops.
+
+    Never by ``Path.resolve``, which looks at the whole way, outside the tree too: with ``l`` a
+    link out of the tree, ``<tree>/l/../../<tree's name>/f.md`` followed ``l``, climbed back,
+    and said by its answer whether what ``l`` names outside is there (review r38 of #113,
+    finding 1, round 2). Here nothing outside the tree is looked at:
+
+    - the way to a root is taken by the root's own spelling (the roots are resolved): a name
+      that leads anywhere else is refused before it is looked at, and so is a ``..`` that
+      leads out; the root is entered by :func:`_open_root`;
+    - in the tree each name is looked at relative to the directory above it (``lstat``,
+      ``readlink`` on a descriptor), so a way swapped for a link meanwhile is not followed; a
+      link is read and its target walked as the rest of the path is, so one whose target
+      leaves the tree is refused before the target is looked at;
+    - below a name that is not there, or not a directory, nothing is looked at: the rest is
+      taken as written, a ``..`` popping it.
+
+    What it returns holds no link and no ``..``."""
+    outside = f"{shown} is outside this agent's tree: its broker reads only there"
+    if sys.platform == "win32":
+        return outside
+    position = Path(named.anchor)
+    pending = list(named.parts[1:])
+    held: list[int] = []  # the directories open from position's root down to position
+    missing = 0  # names below the last one found, taken as written
+    links = 0
+    try:
+        while pending:
+            name = pending.pop(0)
+            if name in ("", os.curdir):
+                continue
+            if name == os.pardir:
+                position = position.parent
+                if missing:
+                    missing -= 1
+                elif held:
+                    os.close(held.pop())
+                continue
+            ahead = position / name
+            if missing:
+                position, missing = ahead, missing + 1
+                continue
+            if not held:  # on the way to a root: by its spelling, nothing looked at
+                if not any(root == ahead or root.is_relative_to(ahead) for root in roots):
+                    return outside
+                if ahead in roots:
+                    held.append(_open_root(ahead, identities))
+                position = ahead
+                continue
+            try:
+                status = os.lstat(name, dir_fd=held[-1])
+            except OSError:
+                position, missing = ahead, 1
+                continue
+            if stat.S_ISLNK(status.st_mode):
+                links += 1
+                if links > _MAX_LINKS:
+                    return _unresolved(shown)
+                target = Path(os.readlink(name, dir_fd=held[-1]))
+                if target.is_absolute():
+                    while held:
+                        os.close(held.pop())
+                    position = Path(target.anchor)
+                    pending[:0] = list(target.parts[1:])
+                else:
+                    pending[:0] = list(target.parts)
+                continue
+            if stat.S_ISDIR(status.st_mode):
+                held.append(
+                    os.open(name, _SEARCH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1])
+                )
+                position = ahead
+                continue
+            position, missing = ahead, 1  # a file: nothing is below it
+    except OSError:  # a root that is not the broker's, a way swapped for a link meanwhile
+        return outside
+    finally:
+        for descriptor in held:
+            os.close(descriptor)
+    for root in roots:
+        if position == root or position.is_relative_to(root):
+            return root, position
+    return outside
+
+
+def _placed(
+    path: Path, roots: Sequence[Path], identities: Mapping[Path, str] | None = None
+) -> tuple[Path, Path] | str:
+    """``path`` resolved in the launch's tree (:func:`_resolve`) and the root it is in, or why
+    it is in none. A relative path is no place: it is read from the directory of whoever reads
+    it (a report's ``cwd`` or ``source_root`` of ``""`` or ``sub`` was the broker's own
+    directory, which is in the tree: review r24 of #113, finding 7). ``identities``: what the
+    roots were at the broker's start, by default as its command's environment says."""
     named = path.expanduser()
     if not named.is_absolute():
         return (
             f"{path} is not an absolute path: its broker reads only a place in this agent's "
             "tree that the path itself names"
         )
-    there = _real(named)
-    if there is not None:
-        for root in roots:
-            if there == root or there.is_relative_to(root):
-                return root, there
-    return f"{path} is outside this agent's tree: its broker reads only there"
+    if identities is None:
+        identities = _root_identities(os.environ)
+    return _resolve(named, roots, identities, path)
 
 
 def outside_tree(path: Path, environ: Mapping[str, str] | None = None) -> str | None:
@@ -512,11 +653,24 @@ def outside_tree(path: Path, environ: Mapping[str, str] | None = None) -> str | 
     sandbox reads. A directory beside the tree that begins with its name (``<tree>-evil``)
     is not in it: the comparison is by path components. ``None`` for any command that is not
     brokered."""
-    roots = _tree_roots(os.environ if environ is None else environ)
+    source = os.environ if environ is None else environ
+    roots = _tree_roots(source)
     if roots is None:
         return None
-    placed = _placed(path, roots)
+    placed = _placed(path, roots, _root_identities(source))
     return placed if isinstance(placed, str) else None
+
+
+def resolved_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> Path | None:
+    """``path`` resolved in the launch's tree (:func:`_placed`: nothing outside it looked at),
+    or ``None`` when it is in none, for a command a broker runs; ``None`` for any other too,
+    which asks this of none."""
+    source = os.environ if environ is None else environ
+    roots = _tree_roots(source)
+    if roots is None:
+        return None
+    placed = _placed(path, roots, _root_identities(source))
+    return None if isinstance(placed, str) else placed[1]
 
 
 def open_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> int | None:
@@ -532,26 +686,29 @@ def open_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> int | 
     each: the descriptor is a file of the tree, and the bytes are read from it. A file with
     a second name (a hard link in the tree to a file outside it) is not told from a file of
     the tree: the module docstring says so."""
-    roots = _tree_roots(os.environ if environ is None else environ)
+    source = os.environ if environ is None else environ
+    roots = _tree_roots(source)
     if roots is None:
         return None
-    placed = _placed(path, roots)
+    identities = _root_identities(source)
+    placed = _placed(path, roots, identities)
     if isinstance(placed, str):
         raise OutOfScope(placed, kind="path")
     if sys.platform == "win32":
         raise OutOfScope(f"{path} cannot be read safely here: a broker runs on POSIX", kind="path")
+    outside = f"{path} is outside this agent's tree: its broker reads only there"
     root, there = placed
     names = there.relative_to(root).parts
     if any(name in (os.pardir, os.curdir) for name in names):
         # O_NOFOLLOW stops a link, never a `..`: walked, it climbs out of the tree, whatever
         # the path was placed by (review r38 of #113, finding 1, reopened)
-        raise OutOfScope(
-            f"{path} is outside this agent's tree: its broker reads only there", kind="path"
-        )
-    walk = os.O_RDONLY | os.O_NOFOLLOW
-    descriptor = -1
+        raise OutOfScope(outside, kind="path")
     try:
-        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        descriptor = _open_root(root, identities)
+    except OSError:  # its root is a link now, or another directory than the broker's
+        raise OutOfScope(outside, kind="path") from None
+    walk = os.O_RDONLY | os.O_NOFOLLOW
+    try:
         for name in names[:-1]:
             deeper = os.open(name, walk | os.O_DIRECTORY, dir_fd=descriptor)
             os.close(descriptor)
@@ -562,8 +719,9 @@ def open_in_tree(path: Path, environ: Mapping[str, str] | None = None) -> int | 
             descriptor = deeper
         return descriptor
     except OSError as exc:
-        if descriptor >= 0:
-            os.close(descriptor)
+        os.close(descriptor)
+        if exc.errno == errno.ENOENT:  # a name of the tree that is not there
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path)) from None
         raise OutOfScope(
             f"{path} cannot be opened below this agent's tree ({exc.strerror}): a way in "
             "that was a directory is a link now",
@@ -588,12 +746,11 @@ def read_in_tree(path: Path, limit: int, environ: Mapping[str, str] | None = Non
     so the refusal tells the sandbox nothing of a place it may not read; one in the tree that
     names nothing is :class:`FileNotFoundError`, as for an unbrokered read.
 
-    What :func:`open_in_tree` walks is the path resolved strictly, after it was placed: no link
+    What :func:`open_in_tree` walks is the path resolved in the tree (:func:`_resolve`): no link
     and no ``..`` in it, so a directory of the way swapped for a link, or a link for a
-    directory, is met by the walk and refused, never followed or climbed out of. One that no
-    longer resolves (a link loop) is refused, never read by the name as written: a ``..`` after
-    a link that became a directory led the walk out of the tree (review r38 of #113, finding 1,
-    reopened)."""
+    directory, is met by the walk and refused, never followed or climbed out of; one that loops
+    is refused, never read by the name as written (review r38 of #113, finding 1, reopened);
+    and the tree's root is the directory the broker found there (:func:`_open_root`)."""
     source = os.environ if environ is None else environ
     roots = _tree_roots(source)
     if roots is None:
@@ -601,20 +758,7 @@ def read_in_tree(path: Path, limit: int, environ: Mapping[str, str] | None = Non
     named = path.expanduser()
     if not named.is_absolute():
         named = Path(os.getcwd()) / named
-    placed = _placed(named, roots)
-    if isinstance(placed, str):
-        raise OutOfScope(placed, kind="path")
-    try:  # the path walked below the tree's root is this, with no link and no `..` in it
-        real = named.resolve(strict=True)
-    except FileNotFoundError:
-        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path)) from None
-    except RuntimeError:  # a link loop, on 3.11 and 3.12
-        raise OutOfScope(_unresolved(path), kind="path") from None
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise OutOfScope(_unresolved(path), kind="path") from None
-        raise  # as an unbrokered read says it (a directory of the tree it may not search)
-    descriptor = open_in_tree(real, source)
+    descriptor = open_in_tree(named, source)
     if descriptor is None:  # not brokered after all: never, the tree was read above
         return None
     over = f"{path} is over {limit} bytes: its broker reads a file no larger"
@@ -1125,14 +1269,24 @@ class Scope:
     pool: str
     roots: tuple[Path, ...]
     members: tuple[str, ...] = ()
+    #: What each of ``roots`` was as the scope was taken (:data:`ROOT_IDS_ENV`).
+    identities: tuple[str, ...] = ()
+
+    def identity_map(self) -> dict[Path, str] | None:
+        """``identities`` by root; ``None`` for a scope that recorded none."""
+        if not self.identities:
+            return None
+        return dict(zip(self.roots, self.identities, strict=False))
+
+    def place(self, cwd: Path) -> Path | str:
+        """``cwd`` resolved in the launch's tree (:func:`_placed`: nothing outside it looked
+        at, so a refusal says the same whatever lies there), or why it is in none."""
+        placed = _placed(cwd, self.roots, self.identity_map())
+        return placed if isinstance(placed, str) else placed[1]
 
     def holds(self, cwd: Path) -> bool:
-        """Whether ``cwd`` is in the launch's tree, as the kernel resolves it (:func:`_real`:
-        never the path as written, ``..`` and all)."""
-        resolved = _real(cwd)
-        if resolved is None:
-            return False
-        return any(resolved == root or resolved.is_relative_to(root) for root in self.roots)
+        """Whether ``cwd`` is in the launch's tree (:meth:`place`)."""
+        return not isinstance(self.place(cwd), str)
 
 
 def _resolved(path: Path) -> Path:
@@ -1172,7 +1326,17 @@ def launch_scope(cwd: Path, environ: Mapping[str, str]) -> Scope:
             roots += [Path(record.project_root), Path(record.cwd)]
     board = team_project(cwd).id
     pool = current_project(cwd).id
-    return Scope(board, pool, tuple(dict.fromkeys(_resolved(root) for root in roots)))
+    real = tuple(dict.fromkeys(found for found in (_real(root) for root in roots) if found))
+    return Scope(board, pool, real, identities=tuple(_identity_of(root) for root in real))
+
+
+def _identity_of(root: Path) -> str:
+    """What the directory ``root`` is now (:data:`ROOT_IDS_ENV`); empty for no directory."""
+    try:
+        status = os.lstat(root)
+    except OSError:
+        return ""
+    return _identity(status) if stat.S_ISDIR(status.st_mode) else ""
 
 
 class Broker:
@@ -1192,7 +1356,7 @@ class Broker:
         self.environ = {
             key: value
             for key, value in environ.items()
-            if key not in (DIR_ENV, NONCE_ENV, REPORTS_ENV, SEALS_ENV)
+            if key not in (DIR_ENV, NONCE_ENV, REPORTS_ENV, SEALS_ENV, ROOT_IDS_ENV)
         }
         self.environ[CALLER_ENV] = "1"
         self._scope = scope
@@ -1278,7 +1442,7 @@ class Broker:
         if why is not None:
             return self._refuse(refusal_kind(argv), why)
         cwd = request.get("cwd")
-        if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+        if not isinstance(cwd, str) or not Path(cwd).is_absolute():
             return self._refuse(
                 "request", "the command's directory is not one the broker can run in"
             )
@@ -1286,7 +1450,10 @@ class Broker:
             scope = self.scope()
         except Exception as exc:
             return self._refuse("request", f"this agent's board could not be resolved ({exc})")
-        if not scope.holds(Path(cwd)):
+        # Placed before anything is asked of it: a directory outside the tree is refused alike
+        # whatever lies there (asked first, "not one the broker can run in" told what did).
+        here = scope.place(Path(cwd))
+        if isinstance(here, str):
             named = command_path(argv)
             reads = not isinstance(named, str) and named[0] in READS
             return self._refuse(
@@ -1294,18 +1461,25 @@ class Broker:
                 f"{cwd} is outside this agent's tree: its broker runs commands only in its "
                 "own checkout or its project's directory",
             )
+        if not here.is_dir():
+            return self._refuse(
+                "request", "the command's directory is not one the broker can run in"
+            )
         env = dict(self.environ)
         env[BOARD_ENV], env[POOL_ENV] = scope.board, scope.pool
         env[MEMBERS_ENV] = ",".join(scope.members)
         env[ROOTS_ENV] = os.pathsep.join(str(root) for root in scope.roots)
+        if scope.identities:  # a scope handed in whole (a test's) recorded none
+            env[ROOT_IDS_ENV] = ",".join(scope.identities)
         env[REPORTS_ENV] = str(self.directory / REPORTS)
         env[SEALS_ENV] = str(self.directory / SEALS)
         columns = request.get("columns")
         if isinstance(columns, int) and 20 <= columns <= 1000:
             env["COLUMNS"] = str(columns)
-        # The directory checked, never the request's spelling of it, and checked again by
-        # the command itself where it runs (:func:`check_cwd`; review r11, finding 11).
-        return self._run(argv, str(_resolved(Path(cwd))), env)
+        # The directory as it was placed in the tree, never the request's spelling of it, and
+        # checked again by the command itself where it runs (:func:`check_cwd`; review r11,
+        # finding 11).
+        return self._run(argv, str(here), env)
 
     def _run(self, argv: list[str], cwd: str, env: Mapping[str, str]) -> dict[str, object]:
         """``aisquare <argv>`` in ``cwd``, its output capped (:data:`MAX_OUTPUT`) and a cut

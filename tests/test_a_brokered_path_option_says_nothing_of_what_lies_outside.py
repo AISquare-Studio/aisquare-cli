@@ -119,3 +119,38 @@ def test_unbrokered_the_path_is_checked_as_it_always_was(
     result = CliRunner().invoke(app, _argv(option, brief, task, unreadable))
     assert result.exit_code == 2, result.output
     assert "is not readable" in " ".join(result.output.split()), result.output
+
+
+@pytest.mark.parametrize(
+    "option", ["evidence --artifact", "finding --artifact", "check --source-root"]
+)
+def test_a_link_out_and_back_in_says_nothing_of_what_it_names(
+    work: Path,  # noqa: F811
+    tmp_path: Path,
+    option: str,
+) -> None:
+    """``<tree>/l/../../<tree's name>[/f.md]``, ``l`` a link to ``X`` outside the tree: refused
+    the same whatever ``X`` is (review r38 of #113, finding 1, round 2). Resolved whole, the way
+    followed ``l`` and climbed back: recorded, or checked, when ``X`` was there, and "cannot be
+    read" or "not a checkout" when it was not."""
+    brief, task = _linked()
+    broker = _broker(tmp_path)
+    out = tmp_path / "outside"
+    out.mkdir()
+    (out / "auth.json").write_text(FOREIGN, encoding="utf-8")
+    (out / "adir").mkdir()
+    (work / "f.md").write_text("in tree", encoding="utf-8")
+    tail = f"{work.name}/f.md" if "artifact" in option else work.name
+    _, why = OPTIONS[option]
+    seen: dict[str, tuple[object, str]] = {}
+    for n, target in enumerate((out / "auth.json", out / "adir", out / "nothing")):
+        link = work / f"l{n}"
+        link.symlink_to(target)
+        named = Path(f"{link}/../../{tail}")
+        argv = _argv(option, brief, task, named)
+        answer = _answer(broker, _request(argv, work, rid=f"{n + 100:032x}"))
+        text = f"{answer['stdout']}{answer['stderr']}".replace(str(named), "<path>")
+        seen[target.name] = (answer["code"], " ".join(text.split()))
+    assert len(set(seen.values())) == 1, seen
+    [(code, text)] = set(seen.values())
+    assert code not in (0, None) and why in text, seen

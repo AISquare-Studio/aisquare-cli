@@ -714,20 +714,28 @@ adapter.**
   read there only from the launch's own tree: `task add --detail-file`, on its own
   board or a member's, reads a regular file of the tree of at most 1 MB (as much as
   `--detail` may carry inline), as `brief evidence --artifact` reads one. The path is
-  resolved first, and the file is opened below the tree's root along that resolved path,
-  with no link followed and no `..` climbed; a path that does not resolve (a link loop on
-  its way) is refused, never opened by its name as written. A path outside the tree, a
-  link out of it, a FIFO, a device or a larger file is refused, saying why and none of
-  the file. So the broker, which reads as the user outside the sandbox, puts no file
-  outside the agent's tree on the board, and a sandbox's `deny_read` of a path outside
-  the tree (`~/.codex`) holds. One of a path inside the tree does not: the broker reads
-  any regular file of the tree the user may, and a hard link in the tree to a file
-  outside it is not told from the tree's own. A path option of those commands
-  (`--detail-file`, `--artifact`, `brief check --source-root`, `watch show <path>`) is
-  taken as given there, not checked by the user's `stat` first, and each command
-  refuses a path outside the tree in the same words whatever lies there: nothing, a
-  directory, a file the user may not read or a link (`--source-root` names the path as
-  given, not where a link leads). Every refusal it or a
+  resolved in the tree alone, one name at a time below the tree's root, with nothing
+  outside the tree looked at: a link whose target leaves the tree, and a `..` that does,
+  are refused before they are followed, and a link loop of the tree's own is refused. The
+  file is then opened along that path, with no link followed and no `..` climbed, below
+  the tree's root, which is opened by a walk from `/` with no link followed and must be
+  the directory the broker found there when it started (a sandbox that may rename the
+  root, a project under `/tmp`, could put a link or another directory in its place). The
+  request's own directory is placed the same way before anything is asked of it. A path
+  outside the tree, a link out of it, a FIFO, a device or a larger file is refused,
+  saying why and none of the file. So the broker, which reads as the user outside the
+  sandbox, puts no file outside the agent's tree on the board, and a sandbox's
+  `deny_read` of a path outside the tree (`~/.codex`) holds. One of a path inside the
+  tree does not: the broker reads any regular file of the tree the user may, and a hard
+  link in the tree to a file outside it is not told from the tree's own. A path option
+  of those commands (`--detail-file`, `--artifact`, `brief check --source-root`, `watch
+  show <path>`) is taken as given there, not checked by the user's `stat` first, and
+  each command refuses a path outside the tree in the same words whatever lies there:
+  nothing, a directory, a file the user may not read or a link, a link out of the tree
+  and a `..` back in included (`brief check --source-root` takes a checkout in the
+  agent's tree there, and names the path as given; `watch show` takes a detail file's
+  path as written).
+  Every refusal it or a
   command it runs makes is logged, and a forged identity, another board's task or pool,
   a fleet operation or an unsigned request is put on its board once per launch and kind.
   Each is one line of `store-broker.log` whatever the agent's text in it holds: a line

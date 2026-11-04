@@ -249,7 +249,9 @@ def test_a_delegated_task_shows_its_origin_routes_up_and_all_done_closes_the_loo
 ) -> None:
     """``task add --project <member> --origin <task>`` from the parent: both boards show the
     link; a child's done routes up; once every child is done, ``linked_all_done`` lands on
-    the parent's board for its manager to close the origin."""
+    the parent's board for its manager to close the origin. Its event on the member's board
+    names the parent board and the origin, outside a sandbox too (Claude Code's; a 0.9.2
+    event named neither, review r38 of #113, finding 7)."""
     origin, _ = team_service.add_task("ship auth", session_ref=HQ_MANAGER)
     api_task, _ = team_service.add_task(
         "auth API", session_ref=HQ_MANAGER, project="api", origin=str(origin.number)
@@ -258,6 +260,8 @@ def test_a_delegated_task_shows_its_origin_routes_up_and_all_done_closes_the_loo
         "auth UI", session_ref=HQ_MANAGER, project="web", origin=str(origin.number)
     )
     assert api_task.project_id == tree["api"].id and web_task.project_id == tree["web"].id
+    [made] = [e for e in _events(tree["api"], "task_added") if e.task_id == api_task.id]
+    assert made.meta == {"from": tree["hq"].id, "origin": origin.id}, made.meta
 
     with store_session() as store:
         hq_board = team_service.render_board(tree["hq"], [], store.team_tasks(tree["hq"].id), [])

@@ -1034,9 +1034,9 @@ adapter.**
   it shows), no `--as` of its sessions (a note, a signal) and no fleet operation. A project
   in none of its groups is refused without naming that project's board. A member that
   joined after the launch is refused until the agent's next launch, and one that has left
-  since is refused; each refusal says why. Before, the broker refused nothing here: `board
-  --project` read any board on the machine, and a delegation from the sandbox named no
-  session.
+  since is refused; each refusal says why. In 0.9.2 only a Claude Code parent manager ran
+  these two lines, outside any sandbox. It runs them as it did, and its delegation's event
+  now names the parent board too.
 
 - **Ids made in one clock tick sort in the order they were made, and a turn's later notices
   keep their place after its first** (#29). `task add` in a loop, a Remote batch, or any

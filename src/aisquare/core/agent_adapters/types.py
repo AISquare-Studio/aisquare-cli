@@ -1276,6 +1276,16 @@ class AgentTranscript(Protocol):
         :meth:`usage` is. Never raises."""
         ...
 
+    def related_files(self, file: Path) -> Sequence[Path]:
+        """The other files of the session whose transcript is ``file``, which what is read of
+        the session reads with it (:meth:`facts`, by ``services.transcript_facts``), in a
+        stable order: Claude Code's subagents' JSONL files, ``<session>/subagents/*.jsonl``
+        beside it. ``()`` for an agent that keeps a session in its one file (Codex's: a
+        subagent of its runs a thread, and writes a rollout, of its own). Lists a folder at
+        most, never reads a file: a week of sessions is asked. Never raises: a folder that
+        cannot be listed holds none."""
+        ...
+
     def facts(self, file: Path, start: int) -> tuple[Sequence[TranscriptFact], int]:
         """What the transcript ``file`` says of who steered its session, read from byte
         ``start`` (``0``: its start): each prompt that opened a turn, continuation, interrupt,
@@ -1284,12 +1294,18 @@ class AgentTranscript(Protocol):
         last (``services.transcript_facts``), and a gigabyte of them is read once: only the
         complete lines from ``start`` are read, the offset is past the last of them (a line
         still being written is read next time), or no further than a record whose fact a
-        later line decides (Codex's call at its approval), so no fact is found twice. A file
+        later line decides (Codex's call at its approval), so no fact is found twice.
+
+        **The file is append-only, one record per line.** An offset at or above ``start`` is
+        read as an append: the facts it gives are added to those found before. A file
         shorter than ``start`` was rewritten and is read from its start, the offset then
-        below ``start``. A file of a session's subagent (one under a ``subagents`` folder
-        beside the session's own, as Claude Code keeps them) adds its edits and denials
-        alone. ``((), start)`` for a file it cannot read, and for an agent whose transcript
-        says none of it. Never raises."""
+        below ``start``, which drops what was found before; so a reader of a format the agent
+        rewrites whole in place returns an offset below ``start`` each time it reads it again.
+
+        ``file`` may be one :meth:`related_files` names (a subagent's), which adds its edits
+        and denials alone: the reader tells its own from the session's. ``((), start)`` for a
+        file it cannot read, and for an agent whose transcript says none of it. Never
+        raises."""
         ...
 
 

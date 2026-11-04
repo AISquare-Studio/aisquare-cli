@@ -194,6 +194,9 @@ def _when(value: object) -> datetime | None:
 
 #: Its tools that edit a file (docs/tools): the first call of one ends exploration.
 EDIT_TOOLS = frozenset({"replace", "write_file"})
+#: The folder beside a session's log its sub-agents' logs are in (``<session>.agents/``): a
+#: synthetic shape, neither Claude Code's nor Codex's (``AgentTranscript.related_files``).
+SUBAGENT_LOGS = ".agents"
 
 
 def _count(tokens: Mapping[str, Any], key: str) -> int:
@@ -335,13 +338,25 @@ class GeminiShapedTranscript:
             day_of,
         )
 
+    def related_files(self, file: Path) -> list[Path]:
+        """Its sub-agents' logs, a shape of its own (neither Claude Code's
+        ``<session>/subagents/`` nor Codex's none): ``<session>.agents/*.log`` beside the
+        session's, by name."""
+        try:
+            folder = file.with_name(f"{file.stem}{SUBAGENT_LOGS}")
+            return sorted(path for path in folder.iterdir() if path.suffix == ".log")
+        except OSError:
+            return []
+
     def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
         """Who steered, in its own records (SCOPE #113 092 row 10): a ``user`` one a prompt, an
         ``info`` one the human stopping it, each call of :data:`EDIT_TOOLS` an edit of the
         ``file_path`` it names, and a call a later ``$patch`` says was ``cancelled`` (its
         permission dialog's No) a refusal, at that patch's ``timestamp``. Read on from
-        ``start`` a complete line at a time (``usage_tally.appended``)."""
+        ``start`` a complete line at a time (``usage_tally.appended``). A sub-agent's log
+        (:meth:`related_files`) adds its edits and refusals alone."""
         lines, consumed, restarted = appended(file, start)
+        main = not file.parent.name.endswith(SUBAGENT_LOGS)
         found: list[TranscriptFact] = []
         for raw in lines:
             record = parse_line(raw)
@@ -356,9 +371,9 @@ class GeminiShapedTranscript:
                     for call in _calls(patch)
                     if call.get("status") == "cancelled"
                 ]
-            elif kind == "user":
+            elif kind == "user" and main:
                 found.append(TranscriptFact(stamp, "p", "text"))
-            elif kind == "info":
+            elif kind == "info" and main:
                 found.append(TranscriptFact(stamp, "i"))
             elif kind == "gemini":
                 for call in _calls(record):

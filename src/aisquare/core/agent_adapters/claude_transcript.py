@@ -22,6 +22,7 @@ message, not its whole history.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
@@ -240,6 +241,11 @@ class ClaudeTranscript:
         from aisquare.core.agent_adapters import claude_usage
 
         return claude_usage.turns(file, state, day_of)
+
+    def related_files(self, file: Path) -> list[Path]:
+        """Its subagents' files: ``<session>/subagents/*.jsonl`` beside ``file``
+        (:func:`subagent_files`)."""
+        return subagent_files(file)
 
     def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
         """Main's ``services.transcript_facts`` reader, moved (:func:`read_fact_lines`); a
@@ -838,6 +844,19 @@ _FACT_STOP_FEEDBACK = "Stop hook feedback:"
 _SUBAGENTS = "subagents"
 """The folder beside a session's JSONL its subagents' files are in (``<session>/subagents/``):
 such a file adds its edits and denials alone."""
+
+
+def subagent_files(transcript: Path) -> list[Path]:
+    """The files of the subagents the session at ``transcript`` ran, by name: those under
+    ``<session>/subagents/`` (:data:`_SUBAGENTS`), listed by ``scandir`` (a thousand ``glob``
+    calls cost half a second, most of them of a folder that is not there). Moved from
+    ``services.transcript_facts``, which named Claude Code's layout for every agent (review
+    r36 of #113, finding 7)."""
+    try:
+        with os.scandir(transcript.with_suffix("") / _SUBAGENTS) as entries:
+            return sorted(Path(entry.path) for entry in entries if entry.name.endswith(".jsonl"))
+    except OSError:
+        return []
 
 
 def read_fact_lines(file: Path, start: int) -> tuple[list[TranscriptFact], int]:

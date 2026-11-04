@@ -808,6 +808,23 @@ def test_a_transcript_last_written_before_the_week_is_not_read(tmp_path: Path) -
     ], "only the subagent's file, written now, is read"
 
 
+def test_a_session_of_an_agent_this_install_does_not_know_is_read_by_no_reader(
+    tmp_path: Path,
+) -> None:
+    """A session row naming an agent with no adapter here (a plugin's not registered, a row a
+    newer install wrote) gives no facts: its transcript is skipped and nothing of it cached,
+    never read as the default agent's, whose reader finds a prompt, edits, an Esc and a denial
+    in this very file (review r36 of #113, finding 4). A session that recorded no agent is
+    still read as the default's: a transcript from before adapters."""
+    path = _session_file(tmp_path)
+
+    found = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "gemini-cli"})
+
+    assert found == {path: []}
+    assert not transcript_facts.facts_cache_path().exists(), "nothing of it was read"
+    assert transcript_facts.read_facts([path], since=_at(19, 0), agents={path: None})[path]
+
+
 def test_a_large_read_goes_through_a_pool_and_finds_the_same(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

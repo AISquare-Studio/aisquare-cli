@@ -18,9 +18,14 @@ its moment, read off each session's transcript by its agent's own reader
 - **edit**: a file an edit named: Claude Code's ``Edit``, ``Write``, ``MultiEdit`` or
   ``NotebookEdit`` (a subagent's included), Codex's ``apply_patch``.
 
-The reader is the one of the agent the session's rows recorded (``agents``), else of the agent
-whose transcript roots hold the file (``claude_accounts.transcript_home``), else the default
-agent's: a transcript from before adapters. An agent with no transcript reader gives none.
+The reader is the one of the agent the session's rows recorded (``agents``); for a session that
+recorded none, the one of the agent whose transcript roots hold the file
+(``claude_accounts.transcript_home``), else the default agent's: a transcript from before
+adapters. An agent with no transcript reader gives none, and so does a recorded agent this
+install does not know (a plugin's not registered here, a row a newer install wrote): its
+transcript is skipped, never read by another agent's reader. The session's files are its
+transcript and those its reader names with it (``AgentTranscript.related_files``: Claude Code's
+subagents').
 
 **Read once.** A week of transcripts on a busy machine is over a gigabyte, so they are read
 incrementally, as the usage sweep reads them: each file from the byte offset its reader reached
@@ -148,11 +153,13 @@ def read_facts(
     now: datetime | None = None,
     agents: Mapping[Path, str | None] | None = None,
 ) -> dict[Path, list[Fact]]:
-    """The facts of each of ``transcripts`` (a session's main file; its subagents' files are read
-    with it), oldest first, the cache brought up to date first, each read by the reader of its
-    agent (``agents``: the agent its session recorded, ``None`` or missing where none did). A
-    file the cache has not seen and that was last written before ``since`` is not read: it holds
-    nothing from ``since`` on."""
+    """The facts of each of ``transcripts`` (a session's main file, read with the files its
+    reader names with it: ``AgentTranscript.related_files``), oldest first, the cache brought up
+    to date first, each read by the reader of its agent (``agents``: the agent its session
+    recorded, ``None`` or missing where none did). A transcript no reader here reads
+    (:func:`_reader_agent`) is skipped: it gives no facts and is read by no other agent's
+    reader. A file the cache has not seen and that was last written before ``since`` is not
+    read: it holds nothing from ``since`` on."""
     when = now or datetime.now(UTC)
     cache = _load_facts_cache()
     recorded = agents or {}
@@ -163,8 +170,8 @@ def read_facts(
         keys = files.setdefault(transcript, [])
         agent = _reader_agent(transcript, recorded.get(transcript))
         if agent is None:
-            continue  # its agent reads no transcript: it says nothing of who steered
-        for path in _fact_files(transcript):
+            continue  # no reader of its agent here: it says nothing of who steered
+        for path in _fact_files(transcript, agent):
             key = str(path)
             keys.append(key)
             entry = cache.get(key)
@@ -206,15 +213,17 @@ def read_facts(
 
 
 def _reader_agent(transcript: Path, recorded: str | None) -> str | None:
-    """The agent whose transcript reader reads ``transcript``: the one its session recorded,
-    else the one whose transcript roots hold it, else the default agent (a transcript from
-    before adapters, as ``core.agent_adapters.recorded_adapter`` reads a missing agent).
-    ``None`` for one with no reader."""
+    """The agent whose transcript reader reads ``transcript``: the one its session recorded;
+    for a session that recorded none, the one whose transcript roots hold it, else the default
+    agent (a transcript from before adapters, as ``core.agent_adapters.recorded_adapter`` reads
+    a missing agent). ``None`` for one with no reader, and for a recorded agent this install
+    does not know: its file is no other agent's to read (review r36 of #113, finding 4)."""
     from aisquare.core import claude_accounts as accounts_core
     from aisquare.core.agent_adapters import recorded_adapter
 
-    adapter = recorded_adapter(recorded) if recorded else None
-    if adapter is None:
+    if recorded:
+        adapter = recorded_adapter(recorded)
+    else:
         home = accounts_core.transcript_home(transcript)
         adapter = recorded_adapter(home[0] if home is not None else None)
     if adapter is None or adapter.transcript_reader is None:
@@ -231,20 +240,22 @@ def _default_reader() -> str:
     return adapter.id if adapter is not None else ""
 
 
-def _fact_files(transcript: Path) -> list[Path]:
-    """The session's transcript and its subagents' files, transcript first: those under
-    ``<session>/subagents/``, where Claude Code keeps them (``core.usage.transcript_files``;
-    an agent that keeps none there reads its one file), by ``scandir`` (a thousand ``glob``
-    calls cost half a second, most of them of a folder that is not there)."""
-    files = [transcript]
-    with contextlib.suppress(OSError):
-        folder = transcript.with_suffix("") / "subagents"
-        files.extend(
-            sorted(
-                Path(entry.path) for entry in os.scandir(folder) if entry.name.endswith(".jsonl")
-            )
-        )
-    return files
+def _fact_files(transcript: Path, agent: str) -> list[Path]:
+    """The session's files, its transcript first, then those ``agent``'s reader names with it
+    (``AgentTranscript.related_files``: Claude Code's subagents', none of Codex's). Which files
+    are a session's is the agent's to say, never a layout's here (review r36 of #113, finding
+    7)."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent)
+    reader = adapter.transcript_reader if adapter is not None else None
+    if reader is None:
+        return [transcript]
+    try:
+        related = [Path(path) for path in reader.related_files(transcript)]
+    except Exception:  # a reader that broke its word: the session's own file still counts
+        related = []
+    return [transcript, *(path for path in related if path != transcript)]
 
 
 PARALLEL_BYTES = 192 * 1024 * 1024

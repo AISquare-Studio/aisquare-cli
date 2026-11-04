@@ -309,6 +309,11 @@ class CodexTranscript:
 
         return codex_usage.turns(file, state, day_of)
 
+    def related_files(self, file: Path) -> tuple[Path, ...]:
+        """None: a session is its one rollout, and a subagent of its runs a thread, with a
+        rollout of its own."""
+        return ()
+
     def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
         """Its rollout's prompts, Stop-hook continuations, interrupts, approvals refused and
         patches applied (:func:`_rollout_facts`)."""

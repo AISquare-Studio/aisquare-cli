@@ -1455,6 +1455,64 @@ def test_its_facts_read_by_a_pool_that_does_not_know_it_are_read_here(
     assert [[fact.kind for fact in found[path]] for path in paths] == [["i"], ["i"]]
 
 
+def test_a_sessions_other_files_are_the_ones_its_agents_reader_names(tmp_path: Path) -> None:
+    """Which files are a session's is its agent's to say (``AgentTranscript.related_files``),
+    never Claude Code's layout in shared code (review r36 of #113, finding 7): this agent keeps
+    its sub-agents' logs in ``<session>.agents/``, and their edit and refusal are its session's
+    (a sub-agent's task no prompt of the human's), while a ``<session>/subagents/`` folder
+    beside it, Claude Code's, is no file of its session. Claude Code's reader names that
+    folder's files, and Codex's names none."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.services import transcript_facts
+    from tests.gemini_shaped_agent import SUBAGENT_LOGS
+
+    def log(path: Path, *records: dict[str, Any]) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        return path
+
+    def at(minute: int) -> str:
+        return f"2026-10-27T09:{minute:02d}:00.000Z"
+
+    def edit(minute: int, call: str, file: str) -> dict[str, Any]:
+        made = {"id": call, "name": "write_file", "args": {"file_path": file}}
+        return {"type": "gemini", "timestamp": at(minute), "toolCalls": [made]}
+
+    session = log(tmp_path / "chat.jsonl", {"type": "user", "content": "go", "timestamp": at(0)})
+    helper = log(
+        tmp_path / f"chat{SUBAGENT_LOGS}" / "helper-1.log",
+        {"type": "user", "content": "the sub-agent's task", "timestamp": at(1)},
+        edit(2, "c1", "/w/sub.py"),
+        {"$patch": {"toolCalls": [{"id": "c2", "status": "cancelled"}]}, "timestamp": at(3)},
+        {"type": "info", "content": "stopped", "timestamp": at(4)},
+    )
+    claudes = log(tmp_path / "chat" / "subagents" / "agent-1.jsonl", edit(5, "c3", "/w/no.py"))
+    adapter = GeminiShapedAdapter()
+    reader = adapter.transcript_reader
+    assert reader is not None
+
+    register(adapter)
+    try:
+        assert reader.related_files(session) == [helper]
+        found = transcript_facts.read_facts(
+            [session], since=datetime(2026, 10, 19, tzinfo=UTC), agents={session: adapter.id}
+        )
+    finally:
+        unregister(adapter.id)
+
+    assert [(fact.kind, fact.detail) for fact in found[session]] == [
+        ("p", "text"),
+        ("e", "/w/sub.py"),
+        ("d", ""),
+    ]
+    claude, codex = get_adapter("claude-code"), get_adapter("codex")
+    assert claude.transcript_reader is not None and codex.transcript_reader is not None
+    assert claude.transcript_reader.related_files(session) == [claudes]
+    assert tuple(codex.transcript_reader.related_files(session)) == ()
+
+
 def test_an_agent_that_declares_no_compact_command_is_never_compacted_from_here(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

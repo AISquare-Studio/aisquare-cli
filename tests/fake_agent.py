@@ -258,6 +258,10 @@ class FakeTranscript:
             day_of,
         )
 
+    def related_files(self, file: Path) -> tuple[Path, ...]:
+        """None: a session is its one log."""
+        return ()
+
     def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
         """Each thing it ``heard`` a prompt, each ``halt`` the human stopping it."""
         lines, consumed, restarted = appended(file, start)

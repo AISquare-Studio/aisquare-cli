@@ -303,8 +303,10 @@ def test_team_show_runs_through_the_broker_for_its_own_board_alone(
     tmp_path: Path,
 ) -> None:
     """The pointer an update line ends with prints the event in full through the broker; an
-    event of another board is not shown, only said to be elsewhere, as ``team verify``
-    says it (both read the caller's board, and a brokered call's is its launch's)."""
+    event of another board is not shown, and neither it nor ``team verify`` names the board
+    it is on: walking the seqs, a sandboxed agent learnt every other board's name (r37
+    finding 10 of #113). Both read the caller's board, and a brokered call's is its
+    launch's. Run outside a sandbox, each still says which board holds it."""
     event = team_service.add_note(
         "the first line\nthe whole of the rest", session_ref=MINE, cwd=work
     )
@@ -316,13 +318,34 @@ def test_team_show_runs_through_the_broker_for_its_own_board_alone(
     assert shown["code"] == 0, shown
     assert "the whole of the rest" in str(shown["stdout"])
     assert bare["code"] == 0 and "the whole of the rest" in str(bare["stdout"]), bare
-    elsewhere = tmp_path / "elsewhere"
+    elsewhere = tmp_path / "zanzibar-board"
     elsewhere.mkdir()
     other = team_service.activate(elsewhere)
     theirs = team_service.add_note("another board's secret", project_id=other.id)
-    told = _answer(broker, _request(["team", "show", str(theirs.seq)], work, rid="2" * 32))
-    assert told["code"] != 0 and "another board's secret" not in str(told["stdout"]), told
-    assert "no event matches" in str(told["stderr"])
+    seq = str(theirs.seq)
+    told = {
+        tuple(argv): _answer(broker, _request(argv, work, rid=f"{n + 2}" * 32))
+        for n, argv in enumerate(
+            (
+                ["team", "show", seq],
+                ["team", "verify", seq],
+                ["--json", "team", "show", seq],
+                ["--json", "team", "verify", seq],
+            )
+        )
+    }
+    for argv, answer in told.items():
+        said = f"{answer['stdout']}{answer['stderr']}"
+        assert answer["code"] == 1 and "another board's secret" not in said, (argv, answer)
+        assert "zanzibar" not in said and "exists on board" not in said, (argv, answer)
+        if argv[0] == "--json":  # no hint: the board's name was the hint
+            assert json.loads(str(answer["stdout"])) == {"error": "not_found", "ref": seq}
+        else:
+            assert "no event matches" in said, (argv, answer)
+    for command in ("show", "verify"):
+        unbrokered = CliRunner().invoke(app, ["team", command, seq])
+        assert unbrokered.exit_code == 1, unbrokered.output
+        assert f"exists on board {elsewhere.name}" in " ".join(unbrokered.output.split())
 
 
 # --- watch show, its own project's alone ----------------------------------------------------

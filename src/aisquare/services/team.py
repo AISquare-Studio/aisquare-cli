@@ -1423,7 +1423,9 @@ def verify_receipt(
     two forms every ✓ receipt quotes. Board resolution follows attributed
     writes (#20): the session's registered board wins over cwd. A receipt
     that exists on a DIFFERENT board is an honest not-found here, with a
-    hint naming the board that actually holds it.
+    hint naming the board that actually holds it; for a command a sandboxed agent's
+    broker runs (:func:`brokered`), the not-found alone, as for no event at all: walking
+    the seqs, it learnt every other board's name (r37 finding 10 of #113).
     """
     _require_enabled()
     with store_session() as store:
@@ -1437,7 +1439,7 @@ def verify_receipt(
         if event is None:
             return VerifyResult(event=None, board_id=board.id, board_name=board.name)
         if event.project_id != board.id:
-            elsewhere = _board_of(store, event.project_id).name
+            elsewhere = None if brokered() else _board_of(store, event.project_id).name
             return VerifyResult(
                 event=None, board_id=board.id, board_name=board.name, elsewhere=elsewhere
             )
@@ -1464,7 +1466,8 @@ def show_event(
     """The event ``receipt`` names, in full: what an agent's one-line update points at.
 
     Found as :func:`verify_receipt` finds it — a seq or an event id, on the caller's
-    board — and a receipt on another board is refused the same way, naming that board.
+    board — and a receipt on another board is refused the same way, naming that board
+    (never through a sandboxed agent's broker).
     """
     _require_enabled()
     with store_session() as store:

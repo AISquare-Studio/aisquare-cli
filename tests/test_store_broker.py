@@ -2588,8 +2588,11 @@ def test_a_refusal_s_record_never_raises_whatever_text_it_quotes(work: Path) -> 
 
 
 #: Printable characters a terminal draws blank, or as nothing: the Hangul fillers, the Braille
-#: blank, the combining grapheme joiner, the Khmer inherent vowels, the Khitan filler.
-PRINTABLE_BLANKS = "\u115f\u1160\u3164\uffa0\u2800\u034f\u17b4\u17b5\U00016fe4"
+#: blank, the combining grapheme joiner, the Khmer inherent vowels, the Khitan filler, the
+#: musical null notehead and the Egyptian hieroglyph blanks (r39 reopen, 5b).
+PRINTABLE_BLANKS = (
+    "\u115f\u1160\u3164\uffa0\u2800\u034f\u17b4\u17b5\U00016fe4\U0001d159\U00013441\U00013442"
+)
 
 
 def test_a_refusal_padded_with_printable_blanks_draws_no_row_of_its_own(work: Path) -> None:

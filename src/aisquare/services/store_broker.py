@@ -868,11 +868,16 @@ def _log_text(text: str) -> str:
 
 #: What ``str.isprintable`` passes that a terminal draws as blank, or as nothing, and that no
 #: whitespace split flattens: the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), the
-#: Braille blank (U+2800) and the marks that draw nothing (U+034F, U+17B4, U+17B5, U+16FE4).
+#: Braille blank (U+2800), the musical null notehead (U+1D159), the Egyptian hieroglyph
+#: blanks (U+13441, U+13442) and the marks that draw nothing (U+034F, U+17B4, U+17B5,
+#: U+16FE4). Every printable character whose name says blank, filler, null, empty or space
+#: was read: the rest draw a glyph (U+2422, U+303F, the empty-set signs).
 #: A run of them in an agent's text pads its log line to the terminal's edge, and the text
 #: after them wraps to the start of a row as if it were a line of its own (review r39 of
 #: #113, finding 5), so :func:`_log_text` escapes them as it does what is not printable.
-_BLANKS = frozenset("\u034f\u115f\u1160\u17b4\u17b5\u2800\u3164\uffa0\U00016fe4")
+_BLANKS = frozenset(
+    "\u034f\u115f\u1160\u17b4\u17b5\u2800\u3164\uffa0\U00013441\U00013442\U00016fe4\U0001d159"
+)
 
 
 def _who(agent: str) -> str:

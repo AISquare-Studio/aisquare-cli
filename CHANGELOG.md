@@ -55,20 +55,21 @@ adapter.**
 - **An unattended Codex fleet asks nothing at its start** (SMOKE12 O1-O4, measured live on
   Codex 0.166.0 and 0.164.0). Both run a `hooks.json` hook only once it is trusted, and ask at
   their start, *Hooks need review*, which held the first manager and every agent a switch moved
-  onto a new Codex slot until a human answered. Once aisquare writes its hooks into a Codex home
-  (`agents connect`, `accounts add`, `init --agent codex`, an upgrade's refresh) it records
-  their trust where Codex's own *Trust all and continue* does, a `[hooks.state."<hooks.json>:
-  <event>:<group>:<handler>"]` table of `trusted_hash` in that home's `config.toml`, with Codex's
-  own hash of each hook (`AgentAdapter.hook_trust`, held to what both versions wrote), for the
-  handlers that install wrote, at the places it wrote them, and no other: a hook that merely
-  reads like aisquare's is neither stamped nor trusted, and Codex still asks about it. Its
-  group keeps its place among the human's, a record the human made is never written over,
-  `agents disconnect` and uninstall take back exactly the tables aisquare wrote (it keeps a
-  record of them beside `config.toml`), an upgrade's new definition has its hash replaced in
-  place beside the human's `enabled`, and `config.toml` is written as a hooks file is, as
-  bytes, each line its file's own line end on every platform (a file this user may not write
-  refused, a hard-linked one written in place); one it cannot edit is left as it is, Codex then
-  asking, and where a disconnect or uninstall cannot take the trust back it names the file and
+  onto a new Codex slot until a human answered. Once aisquare writes its hooks into a Codex
+  home (`agents connect`, `accounts add`, `init --agent codex`, an upgrade's refresh) it
+  records their trust where Codex's own *Trust all and continue* does, a
+  `[hooks.state."<hooks.json>: <event>:<group>:<handler>"]` table of `trusted_hash` in that
+  home's `config.toml`, with Codex's own hash of each hook (`AgentAdapter.hook_trust`, held
+  to what both versions wrote), for the handlers that install wrote, at the places it wrote
+  them, and no other: a hook that merely reads like aisquare's is neither stamped nor
+  trusted, and Codex still asks about it. Its group keeps its place among the human's, a
+  record the human made is never written over, `agents disconnect` and uninstall take back
+  exactly the tables aisquare wrote (it keeps a record of them beside `config.toml`), an
+  upgrade's new definition has its hash replaced in place beside the human's `enabled`, and
+  `config.toml` is written as a hooks file is, as bytes, each line its file's own line end
+  on every platform (a file this user may not write refused, a hard-linked one written in
+  place); one it cannot edit is left as it is, Codex then asking, and where a disconnect or
+  uninstall cannot take the trust back it names the file and
   each table, in its text and its `--json`. Connect and the doctor say `trusted` then, while
   each of aisquare's handlers is alone in its group, and send nobody to `/hooks`. A
   spawn, restart or switch installs the hooks where the agent's window starts before anything
@@ -77,8 +78,8 @@ adapter.**
   where it brought one back to the board as a live teammate for good. Every fleet Codex window
   runs `--no-daemon`: its `-c` overrides keep Codex off its shared background server anyway,
   and asked, 0.166.0 shows no "requires embedded mode" warning in the pane. The bulk dialog's
-  Tab goes from *Managers only* to Confirm to Cancel, and a focused Confirm shows Cancel's band.
-  Its list stays out of Tab, and ↑ ↓, PgUp, PgDn, Home and End scroll it from any of the
+  Tab goes from *Managers only* to Confirm to Cancel, and a focused Confirm shows Cancel's
+  band. Its list stays out of Tab, and ↑ ↓, PgUp, PgDn, Home and End scroll it from any of the
   three, so the agents past its twentieth row are read by keyboard too.
 - What each Claude Code feature does on Codex, as observed in eleven live smoke
   tests (SMOKE8 on 0.8.2's personas, captain, Spawn dialog, info line, hand-off and
@@ -120,13 +121,13 @@ adapter.**
     role's own `agent_args` that name the model or the effort run over the pick, and the
     receipt says each pick they overrule. A Codex spawn's own arguments win over its role's
     and its binding's, and each option is passed once, restarts included: before, a role's
-    `--model` beside the spawn's was passed twice, and Codex 0.164.0 refused it and exited. The Spawn dialog's *+ New account* signs in its
-    own agent and comes back on the new slot, with the Effort chosen even where only the
-    role's Codex takes it (`minimal`, `ultra`), and a Codex row's `!` hover names Codex's
-    sign-in (`aisquare accounts run <slot> login`).
-    `fleet adopt` takes a hand-started Codex thread as it takes a Claude Code session: each
-    agent's conversations, their folder and first prompt are read by its adapter
-    (`AgentTranscript.conversations`, `opening`), a process's arguments by
+    `--model` beside the spawn's was passed twice, and Codex 0.164.0 refused it and exited.
+    The Spawn dialog's *+ New account* signs in its own agent and comes back on the new
+    slot, with the Effort chosen even where only the role's Codex takes it (`minimal`,
+    `ultra`), and a Codex row's `!` hover names Codex's sign-in (`aisquare accounts run
+    <slot> login`). `fleet adopt` takes a hand-started Codex thread as it takes a Claude
+    Code session: each agent's conversations, their folder and first prompt are read by its
+    adapter (`AgentTranscript.conversations`, `opening`), a process's arguments by
     `AgentAdapter.adoptable` (`codex resume <id>`), and a `codex` started fresh holds the
     rollout it has open (`core.process_table`). Codex's managed app-server daemon, where a
     `codex` started with no arguments runs its thread and which keeps the rollout open for
@@ -169,15 +170,15 @@ adapter.**
     app-server, that it lets go
     by itself about 30 idle minutes after its TUI quit (measured), and that `aisquare
     accounts run <slot> app-server daemon stop` (Codex's own stop, on the thread's account)
-    stops it sooner. A process is Codex's by what it runs, never by a word in its arguments, so a
-    shell, tmux or another agent that mentions codex is never named, nor the daemon's
+    stops it sooner. A process is Codex's by what it runs, never by a word in its arguments,
+    so a shell, tmux or another agent that mentions codex is never named, nor the daemon's
     `pid-update-loop`, which holds nothing (`AgentTranscript.held_open`, `server_note`), and
     once the daemon lets go the adopted thread resumes. A fleet Codex row's thread is the
     fleet's from its first hook, its session in the row's own column as a Claude Code row's
     is from its spawn: `fleet adopt --list` leaves it out, and a stopped row's is refused
     ("restart that agent"), not adopted into a second row. The thread resumes on its own
-    Codex slot as `codex resume <id>`, the picker naming each row's agent, and `fleet adopt --list` too
-    when more than one agent is listed. A solo Codex session's own MCP
+    Codex slot as `codex resume <id>`, the picker naming each row's agent, and `fleet adopt
+    --list` too when more than one agent is listed. A solo Codex session's own MCP
     server writes as the session: its process is the one of the hook's ancestors that holds
     its rollout open (measured on 0.164.0), its hooks being handed no pid. `project fresh`
     and `fleet reap` remove the worktrees the launch records name, never a `cwd` rewritten in
@@ -209,12 +210,12 @@ adapter.**
     Codex agent marks done with no `--as` is its agent's, not yours at the shell), and a
     command a Codex agent runs (its `aisquare task done`, direct, through its broker, or in
     the tool shell of a `codex` started by hand, which each agent's own mark of its tools'
-    shells names) is not counted at all; a usage row recorded before agents were is given its session's or
-    its transcript's agent, again before each shared batch (a store a v47 build migrated
-    without it, a row an older build wrote), and one neither names is not shared where the
-    store holds another agent's. The doctor's `role bindings` row asks every agent's home
-    variable, `CODEX_HOME` too, with that agent's own connected test and `agents connect
-    <agent>` fix.
+    shells names) is not counted at all; a usage row recorded before agents were is given
+    its session's or its transcript's agent, again before each shared batch (a store a v47
+    build migrated without it, a row an older build wrote), and one neither names is not
+    shared where the store holds another agent's. The doctor's `role bindings` row asks
+    every agent's home variable, `CODEX_HOME` too, with that agent's own connected test and
+    `agents connect <agent>` fix.
   - **Claude Code's alone** (N-A): Remote Control (`AgentCapabilities.remote_control`: a launch
     that asks of Codex says so and starts it as it was, and the Spawn dialog shows the switch
     for Claude Code alone) and `asq-statusline` (Claude Code's `statusLine` setting; Codex's
@@ -236,12 +237,14 @@ adapter.**
   cap, auto admission and its burst, a hold's wake and `fleet capacity` count the rows the
   store has live (a paused agent's is ended), the captain's counted in its home project and
   left out only of the fleet-wide budget and `fleet capacity`, while a row the store ended
-  as its window runs keeps its label and its tree. Over SSH a launch, a Claude Code one too, takes the Mac's readings
-  over the line as floors, and with no live figure the least full of them, where main takes the
-  default (the manager's ruling, 2026-11-03, on this line's floor rule of 2026-10-26). On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask
-  the item a slot's accounts slot names (`AgentAccounts.keychain_item`; Claude Code's is the
-  item it always was, byte for byte), so a slot whose login is a file, or in an item its agent
-  names none for, has no row, and a third agent whose login is in its own item is read through
+  as its window runs keeps its label and its tree. Over SSH a launch, a Claude Code one too,
+  takes the Mac's readings over the line as floors, and with no live figure the least full
+  of them, where main takes the default (the manager's ruling, 2026-11-03, on this line's
+  floor rule of 2026-10-26). On macOS main's Keychain rows asked every slot's item, and a
+  Codex slot's raised: they ask the item a slot's accounts slot names
+  (`AgentAccounts.keychain_item`; Claude Code's is the item it always was, byte for byte),
+  so a slot whose login is a file, or in an item its agent names none for, has no row, and a
+  third agent whose login is in its own item is read through
   the Keychain memo Claude Code's is (once per ten seconds, not on every tick), said over SSH
   and removed on that item.
   - **Through the adapter**, tested on Codex: a pause exits a Codex agent through its own exit
@@ -258,48 +261,50 @@ adapter.**
     `fleet pause`'s help do, a bulk receipt's "its /quit was sent", and Remote's Stop sheet,
     from the `exit_command` each agent of `fleet ls --json` and each needs card now carries;
     a project rename renames the sessions its launch records name, by tmux's id, and its old
-    codename still finds it in every agent's `--project`; `fleet top` reads its spend off its rollout by its
-    own reader, and its processes as its pane's tree; a tell (typed, or queued to a busy Codex
-    by `codex queue`, whose marker a queue that failed takes back, and which waits for the turn
-    the queue starts however long the turn before it runs, while the agent in its pane runs,
-    up to a day), a spawn's first message, a wake and the upkeep line leave the marker its
-    `UserPromptSubmit` records as its turn's origin, and a command in a Codex tool shell is an
-    agent's, as one is wherever an agent's `AgentCapabilities.process_env` is set (Claude
-    Code's `CLAUDECODE`, which no tmux client hands a server it starts, so no pane there
-    inherits it; Codex sets none in its hooks, measured on 0.164.0); auto admission holds a
-    Codex coder on a busy machine and
+    codename still finds it in every agent's `--project`; `fleet top` reads its spend off
+    its rollout by its own reader, and its processes as its pane's tree; a tell (typed, or
+    queued to a busy Codex by `codex queue`, whose marker a queue that failed takes back,
+    and which waits for the turn the queue starts however long the turn before it runs,
+    while the agent in its pane runs, up to a day), a spawn's first message, a wake and the
+    upkeep line leave the marker its `UserPromptSubmit` records as its turn's origin, and a
+    command in a Codex tool shell is an agent's, as one is wherever an agent's
+    `AgentCapabilities.process_env` is set (Claude Code's `CLAUDECODE`, which no tmux client
+    hands a server it starts, so no pane there inherits it; Codex sets none in its hooks,
+    measured on 0.164.0); auto admission holds a Codex coder on a busy machine and
     never a Codex manager; the Accounts table with Codex rows still fits 160 columns, the agent
     mark inside the name's 12 cells; the live count, Active only, the "1 account" line and the
     real repository names count every agent's rows; `aisquare outcomes` reads who steered a
     Codex session off its rollout by its own reader (`AgentTranscript.facts`: a prompt, a Stop
     hook's continuation, an Esc, an approval refused, in a function call's arguments or in a
     code-mode `exec` script's, 0.166.0's every call on GPT-6.1-Sol, read in one pass with a
-    string, template or comment left open ending where JavaScript stops, where SMOKE12 read a refusal
-    as an interrupt, a patch applied; with the files its
+    string, template or comment left open ending where JavaScript stops, where SMOKE12 read
+    a refusal as an interrupt, a patch applied; with the files its
     reader names as the session's, `related_files`: Claude Code's subagents', none of Codex's;
     a session of an agent this install does not know read by no reader), so its week counts its
     files edited, interrupts and denials, and a turn from before origins were recorded has its
     origin inferred, as a Claude Code session's does. Main's hook launcher change (its pinned
-    release) is in the Codex plugin's copy too, and CI is main's with its Dependabot bumps, this
-    line's Codex native job and ambient Codex steps inside it. From an SSH login on macOS a Codex spawn starts the
-    fleet's tmux server and the agent in it: whether a server may be started there is the agent's
-    accounts fact `AgentAccounts.keychain_login` (Claude Code's login is in the Keychain, Codex's
-    `auth.json` is a file), and a server an SSH login started is marked, so no agent whose login is
-    in the Keychain is opened in it, from SSH or at the Mac (the sign-in window included, and a
+    release) is in the Codex plugin's copy too, and CI is main's with its Dependabot bumps,
+    this line's Codex native job and ambient Codex steps inside it. From an SSH login on
+    macOS a Codex spawn starts the fleet's tmux server and the agent in it: whether a server
+    may be started there is the agent's accounts fact `AgentAccounts.keychain_login` (Claude
+    Code's login is in the Keychain, Codex's `auth.json` is a file), and a server an SSH
+    login started is marked, so no agent whose login is in the Keychain is opened in it,
+    from SSH or at the Mac (the sign-in window included, and a
     restart, a take-over, a switch and the automatic hand-over onto such an agent, each refused
-    before it stops the agent it would replace). `tests/test_no_agent_literals.py`'s BASELINE is 109, as before the merge: its one new
-    line, `CLAUDECODE` in `core/prompt_origin.py`, is Claude Code's `process_env` now.
+    before it stops the agent it would replace). `tests/test_no_agent_literals.py`'s
+    BASELINE is 109, as before the merge: its one new line, `CLAUDECODE` in
+    `core/prompt_origin.py`, is Claude Code's `process_env` now.
   - **Not Codex's** (N-A): usage over SSH from what the Mac recorded is Claude Code's login in
     the Keychain (a Codex slot's login is its own file, its usage read off its rollouts); the
     quiet refresh of a stale token runs the agent's own command, its accounts slot's
     `refresh_args()` (Claude Code's `mcp get`), whether its usage is a request or read off its
     home, with the agent that refreshes named in the row's fix too, and Codex declares none, as
-    it renews its own `auth.json` and its slot never reads stale; the prompt log's filter of Claude Code's own
-    blocks (Codex's hook hands the typed prompt alone); usage sharing's opt-out (sharing is
-    Claude Code's); and the asq-only items: the instance registry and gate, the upgrade and
-    uninstall refusal, the highlight and the fade, buttons that work on appear and the
-    questions asked in place, the codename lookups, the Onboard ↻, the scroll of Usage &
-    stats, `task add`, a leading `--json` and `project fresh`.
+    it renews its own `auth.json` and its slot never reads stale; the prompt log's filter of
+    Claude Code's own blocks (Codex's hook hands the typed prompt alone); usage sharing's
+    opt-out (sharing is Claude Code's); and the asq-only items: the instance registry and
+    gate, the upgrade and uninstall refusal, the highlight and the fade, buttons that work
+    on appear and the questions asked in place, the codename lookups, the Onboard ↻, the
+    scroll of Usage & stats, `task add`, a leading `--json` and `project fresh`.
 - **No `docs/` pages for this line** (the owner, 2026-10-27, to match main's removal): the
   adapter contract (the protocol table and "Adding a terminal agent" with its file and fixture
   list) is the docstring of `aisquare.core.agent_adapters`, held to `types.py` by
@@ -437,8 +442,8 @@ adapter.**
   *Extra agent args*) keeps it on the agent whose model it is, by the names that agent claims
   (`AgentAdapter.claims_model`: Claude Code's ladders' families; Codex's `gpt-*`, `o<digit>*`,
   `codex-*`, the catalog 0.164.0 bundles and its price table: `fable` is Claude Code's,
-  `gpt-x`, `o3` and `gpt-5.4` Codex's), whose accounts alone are weighed, the first in the order
-  when none has room: weighed across agents, a Claude model went to a Codex account with
+  `gpt-x`, `o3` and `gpt-5.4` Codex's), whose accounts alone are weighed, the first in the
+  order when none has room: weighed across agents, a Claude model went to a Codex account with
   room and a Codex model to a Claude one, each failing every turn. A model no agent names
   stays on the agent the order puts first, and a refusal for an agent a model chose names
   the model. The dialog's *(role's: …)* names the agent its spawn runs, asked as the spawn
@@ -452,9 +457,9 @@ adapter.**
   *App settings ▸ Advanced*'s *user coding agent* is now the **fallback coding agent**:
   the agent when no account is usable (no one signed in, an API key, the accounts
   unreadable). `claude_accounts.choose_any` is the cross-agent pick a hand-over can ask.
-- **Main's reliability (#295) and token-diet (#296) trains reach Codex agents too.** A spawn's first message,
-  a `--task` kickoff included, goes on Codex's command line from the same file Claude
-  Code's does, never in the window's command, and Codex's `UserPromptSubmit`
+- **Main's reliability (#295) and token-diet (#296) trains reach Codex agents too.** A
+  spawn's first message, a `--task` kickoff included, goes on Codex's command line from the
+  same file Claude Code's does, never in the window's command, and Codex's `UserPromptSubmit`
   acknowledges it. One that never starts a turn reads `attention` with one `prompt_unsent`,
   as Claude Code's does, though Codex's `SessionStart` comes with its first prompt (and
   never, with its hooks untrusted), so its row has no board session for the listing to ask:
@@ -470,10 +475,10 @@ adapter.**
   agent may have run its task there and ended since, so a row alone in its folder is not
   taken by a prompt of other words either. A hung `lsof` is waited for once a moment, not on
   every listing, and a home with a non-ASCII name under `LC_ALL=C` is read back from
-  `lsof`'s escapes. The read is bounded for a listing: the day directories from the spawn on, the
-  rollouts begun after it, a megabyte at each end of one in this folder, kept against its
-  size and modification time, and the folder each rollout began in read once, so a busy
-  home costs a lookup per rollout (`AgentAdapter.first_prompts_since`).
+  `lsof`'s escapes. The read is bounded for a listing: the day directories from the spawn
+  on, the rollouts begun after it, a megabyte at each end of one in this folder, kept
+  against its size and modification time, and the folder each rollout began in read once, so
+  a busy home costs a lookup per rollout (`AgentAdapter.first_prompts_since`).
   A quiet `working` Codex row whose pane shows its empty prompt reads *idle (the board
   said working)*, by Codex's own screen. A note to a busy Codex agent reaches it through
   its `Stop`, as its next turn's prompt. Its usage limit (read off its rollout) leaves
@@ -514,17 +519,18 @@ adapter.**
   seeded on the first read with the fallback coding agent's accounts first and each
   agent's in the order it had (a build before v45 sharing the store keeps each agent's own
   order, and an account it adds is ranked last; once ranks exist the per-agent `position`
-  columns are no longer read, so a reorder that build makes is dropped, not merged). That keeps the agent of every launch the
-  order alone decided; it is not a promise for the settings the order now sits above:
-  `[agents] default = "codex"` with no usable Codex account but a signed-in Claude Code one,
-  `AISQUARE_CODING_AGENT` and a Codex-launched parent's family now give way to the order
-  (`--agent`, `team bind --agent` and the project's agent still pin). Machine defaults are folded into that order too (0.9.0's #406): a Claude Code
-  account or a Codex one an older build flagged the default moves to the top of its
-  agent's accounts in the one order, once, and the flag is cleared. A store a build of this
-  branch took to v43 before 0.9.0 was merged (these six steps as v38-v43) lacks 0.9.0's
-  parent-manager columns and `brief` table: its first open here adds them (the presence
-  pass), then runs the steps above its stamp, which add only what it lacks. One it took to
-  v40 or v41 before #295 was merged, or to v38 before #274 was, lacks the first-message
+  columns are no longer read, so a reorder that build makes is dropped, not merged). That
+  keeps the agent of every launch the order alone decided; it is not a promise for the
+  settings the order now sits above: `[agents] default = "codex"` with no usable Codex
+  account but a signed-in Claude Code one, `AISQUARE_CODING_AGENT` and a Codex-launched
+  parent's family now give way to the order (`--agent`, `team bind --agent` and the
+  project's agent still pin). Machine defaults are folded into that order too (0.9.0's
+  #406): a Claude Code account or a Codex one an older build flagged the default moves to
+  the top of its agent's accounts in the one order, once, and the flag is cleared. A store a
+  build of this branch took to v43 before 0.9.0 was merged (these six steps as v38-v43)
+  lacks 0.9.0's parent-manager columns and `brief` table: its first open here adds them (the
+  presence pass), then runs the steps above its stamp, which add only what it lacks. One it
+  took to v40 or v41 before #295 was merged, or to v38 before #274 was, lacks the first-message
   columns, the event actor, `ended_by` and the usage tables: its first open here adds them
   all, then goes on. Main at v39 (0.9.0) and every release before it open a v45 store as it
   is. A store a build of this branch stamped before 0.8.2 was merged (v33-v36 for these
@@ -599,9 +605,9 @@ adapter.**
     operator's line wins. The seam is the bound agent's whatever its binary is
     called: a wrapper bound as Claude Code gets Claude Code's flag, as it gets the
     adapter's other launch arguments. An agent whose adapter has no seam gets the
-    briefing alone, said in one dim line, as is a cache the launch cannot write. A Codex thread keeps the system prompt it
-    began with across `codex resume`, so a persona attached since reaches a
-    restarted Codex through the briefing.
+    briefing alone, said in one dim line, as is a cache the launch cannot write. A Codex
+    thread keeps the system prompt it began with across `codex resume`, so a persona
+    attached since reaches a restarted Codex through the briefing.
   - `persona export --skill --user|--project --agent <agent>` writes into that
     agent's first skill directory of the scope, by default the agent a launch here
     picks. Codex's are `~/.agents/skills`, which every Codex home reads, and
@@ -616,9 +622,9 @@ adapter.**
     `codex exec --ephemeral --skip-git-repo-check --sandbox read-only -c
     features.hooks=false --output-schema <file> -o <file> -`, with every tool
     feature, web search and the MCP servers its config names switched off (the
-    source is untrusted), and reads the draft from `-o`. The answer's schema is the strict form (every field
-    required, no other), which Codex's strict structured output needs. An agent
-    with no headless call is a reason for the ladder, which goes on to `api`.
+    source is untrusted), and reads the draft from `-o`. The answer's schema is the strict
+    form (every field required, no other), which Codex's strict structured output needs. An
+    agent with no headless call is a reason for the ladder, which goes on to `api`.
 - Terminal Codex integration through a shared coding-agent adapter registry:
   native hooks, memory, board identity, fleet launches, permissions, optional
   MCP and native telemetry. User/project defaults and role bindings support
@@ -977,10 +983,11 @@ adapter.**
   `launch-session:<launch>` (a fleet row's and a launch's binding to the session they run),
   `fleet-stopped:<agent>` (the mark of the stop that ended a row), `launch-refused:<agent>`
   (the launch record's refusal its board was last told), `nudge-owed:<project>` (a nudge a
-  board write in Codex's sandbox owed the manager) and `broker-refused:<project>:<launch>:<kind>`
-  (a store broker's refusal its board was told, once per launch and kind). Nothing else ever
-  expired a `first-prompt:`, `fleet-stopped:` or `launch-refused:` key. They go with their
-  rows, sessions and project now, and the plan counts each key once.
+  board write in Codex's sandbox owed the manager) and
+  `broker-refused:<project>:<launch>:<kind>` (a store broker's refusal its board was told,
+  once per launch and kind). Nothing else ever expired a `first-prompt:`, `fleet-stopped:`
+  or `launch-refused:` key. They go with their rows, sessions and project now, and the plan
+  counts each key once.
 
 - **A Codex agent runs every command the board tells it to, and its kickoff's claim works**
   (SMOKE12 F1, F4, on Codex 0.166.0). Its sandbox refused `aisquare team show <seq>`, the
@@ -988,23 +995,23 @@ adapter.**
   `aisquare watch show <path>`, the one a manager's watch line names. Both run through the
   broker now, each on the launch's own board or project alone: `watch show` reads only a
   detail file of the agent's own project, never another path, and `team show` or `team
-  verify` of another board's event says not-found without naming that board. The watcher itself (`watch`,
-  `--detach`, `--stop`) is refused as a fleet operation is, with the same advice: ask for it
-  to run outside the sandbox. A Codex session is no longer told to run
+  verify` of another board's event says not-found without naming that board. The watcher
+  itself (`watch`, `--detach`, `--stop`) is refused as a fleet operation is, with the same
+  advice: ask for it to run outside the sandbox. A Codex session is no longer told to run
   `aisquare project list` or `aisquare project group parent`, which list or set the whole
   machine's projects. A test renders every text aisquare hands an agent (its board,
   start pack, cycle, kickoffs, update and wake lines, the watch line, restart and hand-off
   lines, a brief's hint, the claim's hint and the team errors), for each agent registered and
   each synthetic one, and holds each command it names to the broker for each agent whose tools
-  run sandboxed, a third one's included. A Codex kickoff is built before its session exists, so it said
-  `task claim <id> --as <label>`, cut to 8 characters (`--as coder-01` for `coder-01m6j729`).
-  No label resolved, and the CLI reported the missing session as the task: "nothing matches
-  '<task id>'". Now `--as` takes a live fleet label of the caller's project (its own fleet
-  row's, else its directory's) as that agent's current session. A label that is also another
-  session's id prefix is ambiguous. The kickoff names the label whole, and a session that is
-  not there reads "no session matches '<ref>'", with "has no session yet" for an agent whose
-  first hook has not run. Under the broker, `--as` still acts only as the launch's own
-  session.
+  run sandboxed, a third one's included. A Codex kickoff is built before its session exists,
+  so it said `task claim <id> --as <label>`, cut to 8 characters (`--as coder-01` for
+  `coder-01m6j729`). No label resolved, and the CLI reported the missing session as the
+  task: "nothing matches '<task id>'". Now `--as` takes a live fleet label of the caller's
+  project (its own fleet row's, else its directory's) as that agent's current session. A
+  label that is also another session's id prefix is ambiguous. The kickoff names the label
+  whole, and a session that is not there reads "no session matches '<ref>'", with "has no
+  session yet" for an agent whose first hook has not run. Under the broker, `--as` still
+  acts only as the launch's own session.
 
 - **A Codex parent manager runs its group** (review r37 of #113, Q5). A parent manager acts
   on two lines: a member's routed line ends `aisquare board --project <member>`, and its
@@ -1072,12 +1079,12 @@ adapter.**
   forced read still asks, after the one in flight, and the reads of other items do not wait.
   After one `ps` or `lsof` runs out its 5 s, no pane's tool is run for 30 s (K panes with a row
   pending paid K timeouts a listing), and a tool that cannot be killed (an `lsof` stuck on a
-  dead mount ignores `SIGKILL`, and `subprocess.run` waits for it for good) is left behind after
-  2 s more, four at most, instead of holding the listing. The installer's check for the Chrome
-  DevTools MCP on Codex reads `[mcp_servers…]` tables only: Codex's config also holds
-  `[projects."/path"]` trust tables, and a checkout of the package's own repository read as
-  already registered, so nothing was registered. asq's tick, which asks tmux about the whole
-  fleet once, is held to the answers of the separate questions it replaced.
+  dead mount ignores `SIGKILL`, and `subprocess.run` waits for it for good) is left behind
+  after 2 s more, four at most, instead of holding the listing. The installer's check for
+  the Chrome DevTools MCP on Codex reads `[mcp_servers…]` tables only: Codex's config also
+  holds `[projects."/path"]` trust tables, and a checkout of the package's own repository
+  read as already registered, so nothing was registered. asq's tick, which asks tmux about
+  the whole fleet once, is held to the answers of the separate questions it replaced.
 
 - **A sandboxed agent's `--artifact` is read from the file that was checked, and a report's
   relative paths are refused** (r24 of #113, findings 6 and 7). `brief evidence|finding

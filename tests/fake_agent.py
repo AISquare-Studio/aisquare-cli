@@ -156,7 +156,10 @@ class FakeTranscript:
     comes before the calls it makes, a line of its own: ``billed`` (``model``, ``fresh``,
     ``reused`` and ``out`` tokens under the reply's ``id``), written again, whole, as a
     reply grows; ``brief`` is what aisquare's hooks handed it (its ``text``). A ``run`` it
-    leaves working past its turn is ``behind`` (under the run's ``id``) until its ``back``."""
+    leaves working past its turn is ``behind`` (under the run's ``id``) until its ``back``.
+    A helper thread it runs for a session keeps a log of its own beside the session's, whose
+    first record is ``helper`` (the session's id ``of``): a shape of its own, neither Claude
+    Code's subagent folder nor Codex's ``session_meta``."""
 
     speaker = "fake"
 
@@ -261,6 +264,13 @@ class FakeTranscript:
     def related_files(self, file: Path) -> tuple[Path, ...]:
         """None: a session is its one log."""
         return ()
+
+    def parent_session(self, file: Path) -> str | None:
+        """The session a helper thread's log names in its first record (``helper``)."""
+        for record in head_records(file):
+            parent = record.get("of")
+            return parent if record.get("kind") == "helper" and isinstance(parent, str) else None
+        return None
 
     def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
         """Each thing it ``heard`` a prompt, each ``halt`` the human stopping it."""

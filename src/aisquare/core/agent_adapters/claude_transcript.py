@@ -247,6 +247,11 @@ class ClaudeTranscript:
         (:func:`subagent_files`)."""
         return subagent_files(file)
 
+    def parent_session(self, file: Path) -> str | None:
+        """None: its subagents' files are under ``<session>/subagents/``, which
+        :meth:`conversations` never lists and its usage reads with the session's own."""
+        return None
+
     def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
         """Main's ``services.transcript_facts`` reader, moved (:func:`read_fact_lines`); a
         file under ``<session>/subagents/`` is a subagent's."""

@@ -348,6 +348,11 @@ class GeminiShapedTranscript:
         except OSError:
             return []
 
+    def parent_session(self, file: Path) -> str | None:
+        """None: its sub-agents' logs are read with the session's (:meth:`related_files`), and
+        :meth:`conversations` lists none."""
+        return None
+
     def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
         """Who steered, in its own records (SCOPE #113 092 row 10): a ``user`` one a prompt, an
         ``info`` one the human stopping it, each call of :data:`EDIT_TOOLS` an edit of the

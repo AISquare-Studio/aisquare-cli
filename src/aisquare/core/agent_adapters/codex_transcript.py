@@ -311,8 +311,12 @@ class CodexTranscript:
 
     def related_files(self, file: Path) -> tuple[Path, ...]:
         """None: a session is its one rollout, and a subagent of its runs a thread, with a
-        rollout of its own."""
+        rollout of its own (:meth:`parent_session`)."""
         return ()
+
+    def parent_session(self, file: Path) -> str | None:
+        """The thread a subagent's rollout names as its parent (:func:`_subagent_parent`)."""
+        return _subagent_parent(file)
 
     def facts(self, file: Path, start: int) -> tuple[list[TranscriptFact], int]:
         """Its rollout's prompts, Stop-hook continuations, interrupts, approvals refused and
@@ -322,6 +326,38 @@ class CodexTranscript:
 
 _ROLLOUT_NAME = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)\.jsonl$")
 """A rollout's name: the local time its session began, then its thread id."""
+_META_HEAD = 16384
+"""How much of a rollout's start :func:`_subagent_parent` reads. Its first line is its
+``session_meta`` (20 KB on 0.166.0), whose own keys (``id``, ``parent_thread_id``, ``source``,
+``thread_source``) come in its first 700 bytes, after ``cwd`` and ``runtime_workspace_roots``
+and before its ``base_instructions``."""
+_RAW_SUBAGENT = re.compile(rb'"source"\s*:\s*\{\s*"subagent"\s*:')
+_RAW_PARENT = re.compile(rb'"parent_thread_id"\s*:\s*"([^"\\]{1,128})"')
+
+
+def _subagent_parent(file: Path) -> str | None:
+    """The thread whose subagent wrote the rollout ``file``: the ``parent_thread_id`` its
+    ``session_meta`` names, its ``source`` ``{"subagent": …}``. Measured on 0.166.0 (SMOKE12
+    F2): ``--approve-for-me``'s reviewer runs a thread beside each session it reviews for,
+    ``{"subagent": {"other": "guardian"}}``, ``thread_source`` ``guardian_review``, its
+    ``user`` messages the session's review requests and its ``token_usage_record`` lines
+    naming the session as theirs (``session_id``); a session resumed gets another. Read off
+    the first line in its first :data:`_META_HEAD` bytes, by the record's own keys alone (a
+    quote inside a string is escaped, so no text quoted in one matches them). ``None`` for a
+    session's own rollout, and for one that cannot be read."""
+    try:
+        with file.open("rb") as handle:
+            head = handle.read(_META_HEAD)
+    except OSError:
+        return None
+    line = head.split(b"\n", 1)[0]
+    kind = _RAW_TYPE.search(line)
+    if kind is None or kind.group(1) != b"session_meta" or not _RAW_SUBAGENT.search(line):
+        return None
+    parent = _RAW_PARENT.search(line)
+    return parent.group(1).decode("utf-8", "replace") if parent is not None else None
+
+
 _APP_SERVER = "app-server"
 _DAEMON = "daemon"
 _MANAGED_DAEMON = "--managed-daemon"

@@ -1296,7 +1296,7 @@ def test_a_large_codex_rollout_is_read_once_and_then_from_where_it_got_to(
     assert appended < budget(0.5), f"a turn appended read in {appended:.2f} s"
 
 
-# --- Codex 0.166.0: code mode (SMOKE12 F3) ---------------------------------------------------
+# --- Codex 0.166.0: code mode, and its reviewer's rollouts (SMOKE12 F2, F3) ----------------------
 
 CODEX_CODE_MODE = CODEX_FACTS.with_name("codex-code-mode-0.166.0.jsonl")
 """Codex 0.166.0's own rollout (SMOKE12 item 8, sanitized: a fleet coder on GPT-6.1-Sol with
@@ -1314,6 +1314,16 @@ CODE_MODE_KINDS = [
     ("p", "text"),
     ("e", "/work/alpha/calc/__init__.py"),
 ]
+CODEX_GUARDED = CODEX_FACTS.with_name("codex-guardian-parent-0.166.0.jsonl")
+"""Codex 0.166.0's own rollout (SMOKE12 item 2, sanitized): a fleet coder run with
+``--approve-for-me``, its kickoff, a patch and a push outside its worktree asking to leave the
+sandbox, which the auto-reviewer allowed."""
+CODEX_GUARDIAN = CODEX_FACTS.with_name("codex-guardian-0.166.0.jsonl")
+"""That review's own rollout, beside the coder's: ``session_meta`` ``source`` ``{"subagent":
+{"other": "guardian"}}``, ``thread_source`` ``guardian_review``, ``parent_thread_id`` the coder's
+thread; its review request a ``user`` message, one ``token_usage_record``."""
+GUARDED_THREAD = "01a1a450-987b-7000-8000-00000000c0d1"
+GUARDIAN_THREAD = "01a1a450-989d-7000-8000-0000000a0d1f"
 
 
 def test_a_code_mode_script_refused_at_its_approval_is_a_denial_not_an_interrupt(
@@ -1384,6 +1394,76 @@ def test_a_code_mode_script_asks_first_by_its_own_fields_never_by_a_commands_wor
 
     call = {"type": "custom_tool_call", "name": "exec", "call_id": "c1", "input": script}
     assert codex_transcript._asks_first(call) is asks
+
+
+def _rollout_at(source: Path, home: Path, cwd: Path, swaps: dict[str, str]) -> Path:
+    """The recorded 0.166.0 rollout ``source`` as Codex writes it in ``home``, run in ``cwd``,
+    each of ``swaps`` made (a thread id another), moved to begin on Tuesday 27 Oct 12:00 IST
+    as :func:`_codex_rollout`'s is, the review rollouts by the same shift as their sessions'."""
+    lines = source.read_text(encoding="utf-8").splitlines()
+    first = datetime.fromisoformat(
+        json.loads(CODEX_GUARDED.read_text(encoding="utf-8").splitlines()[0])["timestamp"].replace(
+            "Z", "+00:00"
+        )
+    )
+    shift = _at(27, 12) - first
+    thread = json.loads(lines[0])["payload"]["id"]
+    named = swaps.get(thread, thread)
+    path = home / "sessions" / "2026" / "10" / "27" / f"rollout-2026-10-27T06-30-00-{named}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for line in lines:
+            record = json.loads(line)
+            moment = datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")) + shift
+            record["timestamp"] = moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            handle.write(json.dumps(_moved(record, {"/work/alpha": str(cwd), **swaps})) + "\n")
+    return path
+
+
+def test_a_codex_reviewers_rollouts_are_no_sessions_and_its_requests_no_ones_turns(
+    machine: Machine, codex_home: Path
+) -> None:
+    """SMOKE12 F2's acceptance: five Codex sessions run with ``--approve-for-me``, two of whom
+    asked its reviewer once, each review a rollout of its own beside its session's. The week
+    counts five sessions, the five kickoffs as their turns and no review request as anyone's,
+    and each review's tokens once, in its session. Before, each review was a session of its own
+    and its request a person's typed prompt: seven sessions and seven typed turns."""
+    from aisquare.core.agent_adapters import get_adapter
+
+    repo = machine.repo("alpha")
+    threads = [f"01a1a450-987b-7000-8000-0000000000{n:02d}" for n in range(5)]
+    sessions = [
+        _rollout_at(CODEX_GUARDED, codex_home, repo, {GUARDED_THREAD: thread}) for thread in threads
+    ]
+    reviews = [
+        _rollout_at(
+            CODEX_GUARDIAN,
+            codex_home,
+            repo,
+            {
+                GUARDED_THREAD: threads[n],
+                GUARDIAN_THREAD: f"01a1a450-989d-7000-8000-0000000a0d{n:02d}",
+            },
+        )
+        for n in (0, 3)
+    ]
+    reader = get_adapter("codex").transcript_reader
+    assert reader is not None
+    assert [reader.parent_session(path) for path in reviews] == [threads[0], threads[3]]
+
+    usage_stats.sweep(now=NOW, tz=IST)
+    result = _report(use_gh=False)
+
+    def tokens(path: Path) -> int:
+        scan = reader.usage(path, None)
+        assert scan is not None
+        return scan.delta.totals().total
+
+    d, effort = result.direction, result.effort
+    assert (d.sessions, effort.sessions) == (5, 5)
+    assert d.by_origin == {"human:typed": 5}, "the kickoffs alone: no review request is a turn"
+    assert d.inferred_turns == 5 and d.human_turns == 5
+    assert effort.tokens.total == sum(map(tokens, sessions)) + sum(map(tokens, reviews))
 
 
 # --- recording who started a turn --------------------------------------------------------------

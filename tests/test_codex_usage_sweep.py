@@ -16,6 +16,7 @@ sweep is ``tests/test_usage_stats.py``.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import timedelta
@@ -31,7 +32,7 @@ from aisquare.core import paths
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.store import SCHEMA_VERSION, store_session
 from aisquare.models import SessionUsage, UsageStats
-from aisquare.services import usage_share, usage_stats
+from aisquare.services import transcript_facts, usage_share, usage_stats
 from aisquare.services.agent_events import session_key
 from tests.projects import add_project
 from tests.test_codex_accounts import _sign_in
@@ -86,10 +87,10 @@ def _row(home: Path, thread: str) -> SessionUsage:
     return row
 
 
-def _stop(home: Path, rollout: Path, cwd: Path, turn: str) -> None:
+def _stop(home: Path, rollout: Path, cwd: Path, turn: str, thread: str = THREAD) -> None:
     """A Codex Stop in ``home``, as its hook hands it over."""
     payload = {
-        "session_id": THREAD,
+        "session_id": thread,
         "cwd": str(cwd),
         "transcript_path": str(rollout),
         "hook_event_name": "Stop",
@@ -332,6 +333,151 @@ def test_a_rollout_s_folder_is_the_one_its_session_meta_names(
 
     assert usage_stats.session_cwd(rollout) == repo
     assert usage_stats._head_cwd(rollout) is None
+
+
+# --- its reviewer's rollouts: a subagent's, counted in its session (SMOKE12 F2) --------------
+
+GUARDED = RECORDED.with_name("codex-guardian-parent-0.166.0.jsonl")
+"""Codex 0.166.0's own rollout (SMOKE12, sanitized): a fleet coder run with ``--approve-for-me``
+on GPT-6.1-Sol, whose push outside its worktree the auto-reviewer allowed."""
+GUARDIAN = RECORDED.with_name("codex-guardian-0.166.0.jsonl")
+"""That review's rollout, beside the coder's: ``session_meta`` ``source`` ``{"subagent":
+{"other": "guardian"}}``, ``thread_source`` ``guardian_review``, ``parent_thread_id`` the
+coder's thread, one review and its ``token_usage_record``."""
+GUARDED_THREAD = "01a1a450-987b-7000-8000-00000000c0d1"
+GUARDIAN_THREAD = "01a1a450-989d-7000-8000-0000000a0d1f"
+
+
+def _recorded(source: Path, home: Path, cwd: Path) -> Path:
+    """A recorded 0.166.0 rollout as Codex writes it in ``home``, run in ``cwd``."""
+    thread = json.loads(source.read_text(encoding="utf-8").splitlines()[0])["payload"]["id"]
+    path = home / "sessions" / "2026" / "11" / "03" / f"rollout-2026-11-03T21-08-27-{thread}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        source.read_text(encoding="utf-8").replace("/work/alpha", str(cwd)), encoding="utf-8"
+    )
+    return path
+
+
+def test_a_codex_reviewers_rollout_counts_once_in_the_session_it_reviewed_for(
+    machine: Machine, codex_home: Path
+) -> None:
+    """SMOKE12 F2: ``--approve-for-me`` runs its reviewer as a thread of its own, whose rollout
+    names the session it reviews for (``AgentTranscript.parent_session``). The session's Stop
+    records it; the sweep reads the review into the session's row, a turn of its own there,
+    never a session of its own: the review's tokens once, in the session (``codex-auto-review``,
+    its model), and neither a second sweep nor the session's next Stop counts them again.
+    Before, the sweep recorded the review as a second session."""
+    alpha = machine.repo("alpha")
+    add_project(alpha)
+    session = _recorded(GUARDED, codex_home, alpha)
+    review = _recorded(GUARDIAN, codex_home, alpha)
+    _stop(codex_home, session, alpha, "turn-1", GUARDED_THREAD)
+    hooked = _row(codex_home, GUARDED_THREAD)
+    assert hooked.total_tokens == _tokens(session)
+
+    report = usage_stats.sweep()
+
+    assert (report.transcripts, report.sessions_new, report.sessions_updated) == (2, 0, 1)
+    assert report.turns == 1, "the review, a turn of the session's"
+    with store_session() as store:
+        assert [row.session_id for row in store.session_usages()] == [hooked.session_id]
+        turns = store.turn_usages(hooked.session_id)
+    row = _row(codex_home, GUARDED_THREAD)
+    assert row.transcript_path == str(session), "the session's own transcript, still"
+    assert row.total_tokens == _tokens(session) + _tokens(review)
+    assert row.usage["models"]["codex-auto-review"]["requests"] == 1
+    assert [turn.source for turn in turns] == [None, "sweep"]
+
+    warmed = json.loads(transcript_facts.facts_cache_path().read_text(encoding="utf-8"))
+    assert str(session) in warmed["files"] and str(review) not in warmed["files"]
+
+    again = usage_stats.sweep()
+    _stop(codex_home, session, alpha, "turn-2", GUARDED_THREAD)
+    usage_stats.sweep()
+
+    assert (again.sessions_new, again.sessions_updated, again.turns) == (0, 0, 0)
+    assert _row(codex_home, GUARDED_THREAD).total_tokens == row.total_tokens
+
+
+def test_a_codex_review_a_sweep_before_recorded_as_a_session_is_counted_there_never_twice(
+    machine: Machine, codex_home: Path
+) -> None:
+    """A review a sweep before this fix recorded as a session of its own (its row naming its
+    rollout) keeps being read there: its tokens are never read again into its session's."""
+    alpha = machine.repo("alpha")
+    session = _recorded(GUARDED, codex_home, alpha)
+    review = _recorded(GUARDIAN, codex_home, alpha)
+    reader = CODEX.transcript_reader
+    assert reader is not None
+    scan = reader.usage(review, None)
+    assert scan is not None
+    alone = session_key(CODEX, codex_home, GUARDIAN_THREAD)
+    with store_session() as store:
+        recorded = store.record_usage(
+            SessionUsage(
+                session_id=alone,
+                project_id="prj_x",
+                transcript_path=str(review),
+                state=scan.state,
+                total_tokens=scan.delta.totals().total,
+                started_at=NOW,
+                updated_at=NOW,
+                agent="codex",
+            ),
+            None,
+            previous_state=None,
+        )
+    assert recorded
+
+    usage_stats.sweep()
+
+    assert _row(codex_home, GUARDED_THREAD).total_tokens == _tokens(session)
+    assert _row(codex_home, GUARDIAN_THREAD).total_tokens == _tokens(review)
+
+
+def test_a_rollout_is_a_subagents_by_its_session_meta_source_and_parent_alone(
+    tmp_path: Path,
+) -> None:
+    """``parent_session`` reads a rollout's ``session_meta``: a reviewer's names the thread it
+    reviews for; every session's own rollout recorded, 0.162.1's to 0.166.0's, names none, nor
+    does a ``parent_thread_id`` whose ``source`` is no subagent's, nor a file that is gone."""
+    reader = CODEX.transcript_reader
+    assert reader is not None
+    assert reader.parent_session(GUARDIAN) == GUARDED_THREAD
+    folder = RECORDED.parent
+    own = sorted(set(folder.glob("codex-*.jsonl")) - {GUARDIAN})
+    assert len(own) >= 9 and all(reader.parent_session(path) is None for path in own)
+    lines = GUARDIAN.read_text(encoding="utf-8").splitlines()
+    meta = json.loads(lines[0])
+    meta["payload"]["source"] = "cli"
+    named = tmp_path / "named.jsonl"
+    named.write_text("\n".join([json.dumps(meta), *lines[1:]]) + "\n", encoding="utf-8")
+    assert reader.parent_session(named) is None
+    assert reader.parent_session(tmp_path / "gone.jsonl") is None
+
+
+def test_a_codex_review_found_before_its_session_has_a_row_waits_for_it(
+    machine: Machine, codex_home: Path
+) -> None:
+    """Swept with no Stop before, the session is recorded first and its review read into it in
+    the same sweep, newer though the review's rollout is (listed first). A review whose session
+    has no row, its rollout gone, is read into none and is no session either."""
+    alpha = machine.repo("alpha")
+    session = _recorded(GUARDED, codex_home, alpha)
+    review = _recorded(GUARDIAN, codex_home, alpha)
+    os.utime(session, (1, 1))
+    orphan = review.with_name(review.name.replace(GUARDIAN_THREAD, OTHER))
+    orphan.write_text(
+        review.read_text(encoding="utf-8").replace(GUARDED_THREAD, THREAD), encoding="utf-8"
+    )
+
+    report = usage_stats.sweep()
+
+    assert (report.transcripts, report.sessions_new, report.turns) == (3, 1, 2)
+    assert _row(codex_home, GUARDED_THREAD).total_tokens == _tokens(session) + _tokens(review)
+    with store_session() as store:
+        assert len(store.session_usages()) == 1, "the orphan review is no session"
 
 
 # --- the opt-in usage share: Claude Code's alone ---------------------------------------------

@@ -1286,9 +1286,24 @@ class AgentTranscript(Protocol):
         the session reads with it (:meth:`facts`, by ``services.transcript_facts``), in a
         stable order: Claude Code's subagents' JSONL files, ``<session>/subagents/*.jsonl``
         beside it. ``()`` for an agent that keeps a session in its one file (Codex's: a
-        subagent of its runs a thread, and writes a rollout, of its own). Lists a folder at
+        subagent of its runs a thread, and writes a rollout, of its own, which names its
+        session: :meth:`parent_session`). Lists a folder at
         most, never reads a file: a week of sessions is asked. Never raises: a folder that
         cannot be listed holds none."""
+        ...
+
+    def parent_session(self, file: Path) -> str | None:
+        """The native id of the session whose subagent wrote ``file``, a transcript
+        :meth:`conversations` lists, when a subagent did: such a file is never a session of
+        its own, and the usage sweep counts what it holds under that session, as turns of an
+        agent's (``services.usage_stats``). Codex's: a rollout whose ``session_meta`` says
+        ``source`` ``{"subagent": …}`` and names its ``parent_thread_id`` (0.166.0's
+        ``--approve-for-me`` reviewer, ``thread_source`` ``guardian_review``). ``None`` for a
+        session's own transcript, and for an agent whose subagents' files no
+        :meth:`conversations` lists (Claude Code's, under ``<session>/subagents/``, read with
+        the session's: :meth:`related_files`). Reads the file's first few kilobytes at most:
+        every transcript of every home is asked at each sweep. Never raises: a file that
+        cannot be read is a session's own."""
         ...
 
     def facts(self, file: Path, start: int) -> tuple[Sequence[TranscriptFact], int]:

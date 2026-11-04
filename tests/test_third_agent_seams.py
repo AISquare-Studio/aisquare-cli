@@ -1692,6 +1692,64 @@ def test_a_sessions_other_files_are_the_ones_its_agents_reader_names(tmp_path: P
     assert tuple(codex.transcript_reader.related_files(session)) == ()
 
 
+def test_a_subagents_own_log_is_counted_in_its_session_by_its_readers_word_alone(
+    tmp_path: Path,
+) -> None:
+    """Whether a transcript is a subagent's, and whose, is its agent's to say
+    (``AgentTranscript.parent_session``), never Codex's ``session_meta`` in shared code (SMOKE12
+    F2): this agent's helper thread keeps a log of its own beside its session's, its first
+    record naming the session. The sweep lists both, reads the helper's into the session's
+    row, its tokens once there and its task no one's prompt: one session, one human turn."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.store import store_session
+    from aisquare.services import outcomes, usage_stats
+    from aisquare.services.agent_events import session_key
+
+    adapter = FakeAgentAdapter()
+    home = tmp_path / "fake-home"
+    (home / "threads").mkdir(parents=True)
+
+    def log(name: str, *records: dict[str, Any]) -> Path:
+        path = home / "threads" / f"{name}.log"
+        path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        return path
+
+    def billed(minute: int, reply: str, fresh: int) -> dict[str, Any]:
+        at = f"2026-10-27T09:{minute:02d}:00.000Z"
+        return {"timestamp": at, "kind": "billed", "id": reply, "model": "fake-1", "fresh": fresh}
+
+    def heard(minute: int, text: str) -> dict[str, Any]:
+        return {"timestamp": f"2026-10-27T09:{minute:02d}:00.000Z", "kind": "heard", "text": text}
+
+    log("main", heard(0, "go"), billed(1, "r1", 100))
+    helper = log(
+        "helper-1",
+        {"timestamp": "2026-10-27T09:02:00.000Z", "kind": "helper", "of": "main"},
+        heard(2, "the helper's task"),
+        billed(3, "r2", 40),
+    )
+    register(adapter)
+    try:
+        reader = adapter.transcript_reader
+        assert reader is not None and reader.parent_session(helper) == "main"
+        found = [usage_stats.Home(adapter.accounts.plain_slot, adapter.id, home)]
+        report = usage_stats.sweep(found_in=found, now=datetime(2026, 10, 29, tzinfo=UTC))
+        with store_session() as store:
+            rows = store.session_usages()
+        result = outcomes.week_report(
+            "2026-W44", now=datetime(2026, 10, 29, 12, 0, tzinfo=UTC), tz=UTC, use_gh=False
+        )
+    finally:
+        unregister(adapter.id)
+
+    assert (report.transcripts, report.sessions_new, report.turns) == (2, 1, 2)
+    assert [row.session_id for row in rows] == [session_key(adapter, home, "main")]
+    models = rows[0].usage["models"].values()
+    assert sum(model["input"] for model in models) == 140, "the helper's tokens, once"
+    assert (result.direction.sessions, result.direction.human_turns) == (1, 1)
+
+
 def test_an_agent_that_declares_no_compact_command_is_never_compacted_from_here(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

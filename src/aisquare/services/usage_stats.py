@@ -25,6 +25,14 @@ started from (``store.record_usage``). A session the hook counted to byte N is r
 sweep from byte N; a session read by both at once is counted by the one that wins the write,
 and the other reads the rest next time.
 
+**A subagent's transcript is its session's.** Claude Code writes a subagent's requests beside its
+session's transcript, and its reader reads them with the session's. Codex runs its
+``--approve-for-me`` reviewer as a thread of its own, with a rollout of its own, that names the
+session it reviews for (``AgentTranscript.parent_session``): the sweep reads such a file into
+that session's row, from the scan state the row keeps (each file's offset kept apart), so its
+tokens count once, under the session, as turns of an agent's, never a session of their own
+(SMOKE12 F2). It is read once the session has a row, a Stop's or the sweep's.
+
 **What is read.** :func:`stats` sums the turn rows of a range (``today``, ``7d``, ``30d``,
 ``lifetime``) into a :class:`~aisquare.models.UsageStats`, and :func:`daily_rollups` cuts the
 same rows into one :class:`~aisquare.models.DailyRollup` per local day, which is what the
@@ -173,6 +181,9 @@ class Transcript:
     path: Path
     slot: int | None
     agent: str
+    subagent: bool = False
+    """A subagent's file (``AgentTranscript.parent_session``): ``session_id`` is the session
+    it ran for, whose row the sweep reads it into, never a session of its own."""
 
 
 @dataclass(frozen=True)
@@ -230,7 +241,9 @@ def discover(found_in: Iterable[Home]) -> list[Transcript]:
     (``AgentTranscript.conversations``: Claude Code's ``projects/<folder>/<session>.jsonl``,
     Codex's ``sessions/YYYY/MM/DD/rollout-…-<thread>.jsonl``), newest first, each session once:
     a directory reached twice (a shared ``projects`` link, the default slot named by both the
-    variable and ``~/.claude``) is read once."""
+    variable and ``~/.claude``) is read once. A subagent's file (``AgentTranscript.
+    parent_session``: Codex's reviewer's rollout) is listed under the session it ran for,
+    marked ``subagent``: never a session of its own."""
     # Lazy: services.agent_events imports the hooks, which a sweep needs only for its key.
     from aisquare.core.agent_adapters import get_adapter
     from aisquare.services.agent_events import session_key
@@ -249,12 +262,18 @@ def discover(found_in: Iterable[Home]) -> list[Transcript]:
                 mtime = path.stat().st_mtime
             except (OSError, RuntimeError):
                 continue
-            session_id = session_key(adapter, home.config_dir, native)
-            if real in seen_files or session_id in seen_sessions:
+            if real in seen_files:
                 continue
+            parent = reader.parent_session(path)
+            session_id = session_key(adapter, home.config_dir, native if parent is None else parent)
+            if parent is None:
+                if session_id in seen_sessions:
+                    continue
+                seen_sessions.add(session_id)
             seen_files.add(real)
-            seen_sessions.add(session_id)
-            found.append((mtime, Transcript(session_id, path, home.slot, home.agent)))
+            found.append(
+                (mtime, Transcript(session_id, path, home.slot, home.agent, parent is not None))
+            )
     found.sort(key=lambda item: (-item[0], item[1].session_id))
     return [item[1] for item in found]
 
@@ -560,7 +579,8 @@ def _sweep(
     report = SweepReport()
     read = found_in if found_in is not None else homes()
     places = _Places(read)
-    found = discover(read)
+    # A subagent's file after the sessions: its session's row is written first.
+    found = sorted(discover(read), key=lambda transcript: transcript.subagent)
     report.transcripts = len(found)
     known = store.usage_transcripts()
     purged = purged_repos(store)
@@ -653,7 +673,12 @@ def _sweep_one(
     """Record what one transcript added since the session's row was last written, read by its
     agent's own reader (``AgentTranscript.turns``, from the state the session's Stop hook and
     the last sweep left). A session of a repository whose usage was purged (``purged``) is not
-    read at all, nor is one of an agent whose transcript holds no token record."""
+    read at all, nor is one of an agent whose transcript holds no token record.
+
+    A subagent's file (``Transcript.subagent``) is read into its session's row, on from the
+    state it keeps, its turns that session's: the row keeps its own transcript, and until it
+    is written nothing is read. One a row of its own recorded (``known``: a sweep's, before
+    subagents were told apart) keeps being counted there, never twice."""
     from aisquare.core.agent_adapters import recorded_adapter
 
     outcome = _Outcome()
@@ -665,7 +690,11 @@ def _sweep_one(
     session_id = known.get(str(found.path), found.session_id)
     existing = store.session_usage(session_id)
     transcript = found.path
-    if existing is not None and existing.transcript_path:
+    if found.subagent:
+        if existing is None:
+            outcome.unchanged = 1  # its session's row comes first
+            return outcome
+    elif existing is not None and existing.transcript_path:
         recorded = Path(existing.transcript_path)
         if recorded != transcript:
             if not recorded.exists():
@@ -722,7 +751,9 @@ def _sweep_one(
     session = SessionUsage(
         session_id=session_id,
         project_id=project_id,
-        transcript_path=str(transcript),
+        transcript_path=existing.transcript_path
+        if found.subagent and existing
+        else str(transcript),
         state=scanned.scan.state,
         usage={**total.to_dict(), "first_edit": scanned.scan.first_edit.as_dict()},
         turns=before + len(rows),
@@ -746,7 +777,8 @@ def _sweep_one(
     if not written:
         outcome.unchanged = 1  # a hook or another sweep won this one: the rest is read next time
         return outcome
-    known[str(transcript)] = session_id
+    if not found.subagent:
+        known[str(transcript)] = session_id
     outcome.turns = len(rows)
     if existing is None:
         outcome.new = 1

@@ -852,16 +852,24 @@ def test_a_receiver_slower_than_two_seconds_to_start_still_traces_its_launch(
     """A receiver is a fresh interpreter. On a busy runner it took longer than the 2 s the
     launch waited for it, and the launch went on with no telemetry for its whole life (CI
     41836127711, py3.12-captain-off shard 1, task #79). Started 3 s late here, it is waited
-    for: the launch waits for its ready file, up to ``native_telemetry.START_S``."""
+    for: the launch waits for its ready file, up to ``native_telemetry.START_S``, the
+    shipped bound (set to 2 s, this test fails). And the wait ends the moment the file is
+    there: the launch returns before the bound, where a loop that waited on the child alone
+    returns only at it, so it cost every traced launch the whole 15 s, and passed (seq
+    10887)."""
+    started = time.monotonic()
     result, execute, children = _launch_with_its_receiver(
         runner,
         tmp_path,
         monkeypatch,
         lambda argv: ["/bin/sh", "-c", 'sleep 3; exec "$@"', "sh", *argv],
     )
+    took = time.monotonic() - started
     try:
         assert result.exit_code == 0, result.output
         assert "native telemetry enabled" in result.output, result.output
+        bound = native_telemetry.START_S
+        assert took < bound, f"the launch sat out its {bound:g} s bound ({took:.1f} s)"
         _, _, env = execute.call_args.args
         assert env[native_telemetry.HEADERS_ENV].startswith("Authorization=Bearer%20")
     finally:
@@ -872,15 +880,20 @@ def test_a_receiver_slower_than_two_seconds_to_start_still_traces_its_launch(
 
 @pytest.mark.skipif(os.name != "posix", reason="Native receiver is POSIX/WSL only")
 @pytest.mark.parametrize(
-    ("started_as", "said"),
+    ("started_as", "start_s", "said"),
     [
-        (["/bin/sh", "-c", "exit 3"], "its local receiver exited (code 3) before it was ready"),
-        (["/bin/sh", "-c", "exec sleep 30"], "its local receiver was not ready in 0.5 s"),
+        (
+            ["/bin/sh", "-c", "exit 3"],
+            60.0,
+            "its local receiver exited (code 3) before it was ready",
+        ),
+        (["/bin/sh", "-c", "exec sleep 30"], 0.5, "its local receiver was not ready in 0.5 s"),
     ],
     ids=["exits", "hangs"],
 )
 def test_a_receiver_that_does_not_start_is_named_and_its_launch_goes_on_untraced(
     started_as: list[str],
+    start_s: float,
     said: str,
     runner: CliRunner,
     tmp_path: Path,
@@ -889,15 +902,20 @@ def test_a_receiver_that_does_not_start_is_named_and_its_launch_goes_on_untraced
 ) -> None:
     """What a user sees when the receiver does not start: the agent is launched all the
     same, with no exporter and no token, and the launch says on stderr why it has no native
-    telemetry. A receiver that exits is not waited for; one that hangs is waited for
+    telemetry. A receiver that exits is not waited for: with ``START_S`` at 60 s, the launch
+    returns inside 5 s (seq 10887: a loop that waited on the ready file alone sat out the
+    whole bound, and passed while the bound was 0.5 s). One that hangs is waited for
     ``START_S`` (0.5 s here), then stopped."""
-    monkeypatch.setattr(native_telemetry, "START_S", 0.5)
+    monkeypatch.setattr(native_telemetry, "START_S", start_s)
+    started = time.monotonic()
     result, execute, children = _launch_with_its_receiver(
         runner, tmp_path, monkeypatch, lambda argv: list(started_as)
     )
+    took = time.monotonic() - started
     try:
         assert result.exit_code == 0, result.output
         assert f"Codex launched without native telemetry: {said}" in result.output, result.output
+        assert took < 5, f"the launch waited {took:.1f} s of its {start_s:g} s bound"
         _, argv, env = execute.call_args.args
         assert native_telemetry.HEADERS_ENV not in env
         assert not any("otel.exporter" in arg for arg in argv), argv

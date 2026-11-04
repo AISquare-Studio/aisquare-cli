@@ -208,8 +208,8 @@ parents each (``services.team``; review r37 of #113, Q5): never a claim, a done,
 any other write there, nor a session of it (:data:`BOARD_ENV`)."""
 LOG_NAME = "store-broker.log"
 """The brokers' refusals, and what a parent manager's broker admitted on a member's board
-(:func:`record_admission`: a read, a task added), one line each, in the aisquare home's log
-directory."""
+(:func:`record_admission`: a read, a task added), one line each whatever text the agent
+chose (:func:`_one_line`), in the aisquare home's log directory."""
 #: The refusals put on the launch's board as well as logged, once per launch and kind: a
 #: session not its own, another board's task, another project's pool, a fleet operation
 #: (its signals included), a request not signed by its launch.
@@ -561,20 +561,40 @@ def record_admission(detail: str) -> None:
 
 def _log_line(kind: str, detail: str) -> tuple[str, str, str]:
     """Append one line of ``kind`` to the brokers' log, naming the launch and its agent;
-    returns those two and ``detail`` on one line. A log that cannot be written is skipped."""
+    returns those two and ``detail``, each as :func:`_one_line` writes it. A log that cannot
+    be written is skipped, whatever stops it. Never raises."""
     from datetime import UTC, datetime
 
-    launch = os.environ.get("AISQUARE_LAUNCH_ID", "").strip() or "?"
-    agent = os.environ.get("AISQUARE_FLEET_AGENT", "").strip()
-    flat = " ".join(detail.split())
+    launch = _one_line(os.environ.get("AISQUARE_LAUNCH_ID", "")) or "?"
+    agent = _one_line(os.environ.get("AISQUARE_FLEET_AGENT", ""))
+    flat = _one_line(detail)
     stamp = datetime.now(UTC).isoformat()
     line = f"{stamp} launch={launch} agent={agent or '-'} {kind}: {flat}\n"
-    with suppress(OSError):
+    with suppress(Exception):
         logs = paths.log_dir()
         logs.mkdir(parents=True, exist_ok=True)
         with open(logs / LOG_NAME, "a", encoding="utf-8") as handle:
             handle.write(line)
     return launch, agent, flat
+
+
+def _one_line(text: str) -> str:
+    """``text`` as one line of the brokers' log, which a terminal shows as written: each run
+    of whitespace one space (every line end ``str.splitlines`` splits at among them), and
+    each other character that is not printable escaped as Python writes it (``\\x1b``,
+    ``\\u202e``, ``\\udcff``). A line quotes what the agent chose in its sandbox: a title, a
+    ``--project``, a command or an option. A line break left in it writes a second line that
+    reads as the broker's own (mutant T19 of #71's tester). An ESC or a BS drew one on the
+    terminal that shows the log, and a lone surrogate, which is how a shell passes a byte
+    that is not UTF-8 (``fleet $'spawn\\xff'``), stopped both the line and the refusal's note,
+    as UTF-8 cannot write it (#74 reopen, seq 10666)."""
+    flat = " ".join(text.split())
+    if flat.isprintable():
+        return flat
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        for char in flat
+    )
 
 
 def _who(agent: str) -> str:

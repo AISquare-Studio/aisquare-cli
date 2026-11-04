@@ -2498,3 +2498,85 @@ def test_each_event_the_broker_logs_is_one_line_whatever_line_ends_its_agent_wro
     for line, said in zip(lines[:2], saids, strict=True):
         assert f"on api ({member.id})" in line and said in line, line
         assert f"from #{origin.number} {origin.id} as session {MINE}" in line, line
+
+
+#: What a terminal acts on or UTF-8 cannot hold, and no whitespace: every C0 and C1 control
+#: but NUL (refused before anything quotes it), DEL, a bidi override (U+202E).
+UNPRINTABLE = "".join(
+    chr(n) for n in (*range(1, 0x20), *range(0x7F, 0xA0)) if not chr(n).isspace()
+) + chr(0x202E)
+#: A title that draws a line of its own on the terminal that shows the log: up a line, the
+#: line wiped, the cursor walked back.
+DRAWN = "evil\x1b[1A\x1b[2K" + "\b" * 8 + "admitted: forged" + UNPRINTABLE
+#: How a shell passes a byte that is not UTF-8 (``$'\xff'``): a lone surrogate.
+NOT_UTF8 = chr(0xDCFF)
+
+
+def test_a_refusal_quoting_what_utf8_cannot_hold_or_a_terminal_acts_on_is_one_line_and_noted(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each event is one line whatever the agent's text holds, and the note a refusal of its
+    kind gets is on the board: each character that is not printable is escaped as Python
+    writes it. A refusal quoting a byte that is not UTF-8 (``aisquare fleet $'spawn\\xff'``)
+    left no line and no note: UTF-8 could not write the line, and its error stopped the
+    note. A ``--project`` holding one was a traceback in the store, and no refusal. An ESC
+    or a BS in a delegated title stayed on its line in the file but drew a forged one on
+    the terminal that showed it (#74 reopen, seq 10666)."""
+    parented(work, "api")
+    odd = DRAWN + NOT_UTF8
+    log = paths.log_dir() / store_broker.LOG_NAME
+    running = _a_launch_s_broker(work, monkeypatch, {})
+    try:
+        directory = next(running)
+        logged_before = log.read_bytes() if log.exists() else b""
+        # Asked as `forward` asks, which then prints the refusal to a stderr that escapes
+        # what UTF-8 cannot hold: pytest's capture would refuse to.
+        codes = [
+            store_broker.ask(directory, argv).get("code")
+            for argv in (
+                ["task", "add", DRAWN, "--project", "api"],
+                [odd],
+                [f"-{odd}", "board"],
+                ["fleet", f"spawn{odd}", "coder"],
+                ["board", "--project", odd],
+                ["task", "add", "x", "--project", odd],
+            )
+        ]
+    finally:
+        running.close()
+
+    assert codes == [0, 2, 2, 2, 1, 1], codes
+    lines = log.read_bytes().removeprefix(logged_before).decode("utf-8").splitlines()
+    events = [_LOGGED.fullmatch(line) for line in lines]
+    assert all(events), [ascii(line) for line in lines]
+    assert [e[2] for e in events if e] == [
+        "admitted",
+        "command",
+        "command",
+        "fleet",
+        "board",
+        "board",
+    ], [ascii(line) for line in lines]
+    drawn = "evil\\x1b[1A\\x1b[2K" + "\\x08" * 8 + "admitted: forged\\x01\\x02"
+    for line in lines:
+        assert line.isprintable() and drawn in line and "\\x7f\\x80\\x81" in line, ascii(line)
+    assert all("\\x9f\\u202e\\udcff" in line for line in lines[1:]), "the byte, escaped"
+    with store_session() as store:
+        own = store.get_session(MINE)
+        assert own is not None
+        notes = [e.text for e in store.recent_events(own.project_id, limit=50) if e.kind == "note"]
+    for kind in ("fleet", "board"):
+        [noted] = [note for note in notes if f"refused ({kind})" in note]
+        assert noted.isprintable() and drawn in noted, ascii(noted)
+
+
+def test_a_refusal_s_record_never_raises_whatever_text_it_quotes(work: Path) -> None:
+    """``record_refusal`` says it never raises, and its callers count on it: a detail UTF-8
+    cannot hold raised from it, and whatever the caller did next was lost (#74 reopen)."""
+    log = paths.log_dir() / store_broker.LOG_NAME
+    logged_before = log.read_bytes() if log.exists() else b""
+
+    store_broker.record_refusal("command", f"aisquare {DRAWN}{NOT_UTF8} cannot run")
+
+    [line] = log.read_bytes().removeprefix(logged_before).decode("utf-8").splitlines()
+    assert line.isprintable() and line.endswith("\\u202e\\udcff cannot run"), ascii(line)

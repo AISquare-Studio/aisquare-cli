@@ -2109,7 +2109,10 @@ def _brokered_member(store: ContextStore, ref: str, own: str) -> ProjectInfo:
     at_launch = own_members()
     now = {member.id for member in parent_service.members_parented_by(store, own)}
     looked_among = {own, *now, *at_launch}
-    found = [named for named in store.find_projects(ref) if named.id in looked_among]
+    # A ref UTF-8 cannot hold (a lone surrogate: a shell's byte that is not UTF-8) is no
+    # project's name, and the store cannot be asked it: refused as any stranger is (#74).
+    named = store.find_projects(ref) if _utf8(ref) else []
+    found = [project for project in named if project.id in looked_among]
     if len(found) > 1:
         raise AmbiguousIdError(ref)
     if not found:
@@ -2132,6 +2135,15 @@ def _brokered_member(store: ContextStore, ref: str, own: str) -> ProjectInfo:
         "launched; a command from its sandbox reads and delegates to the members it launched "
         "with alone, so to this one after its next launch (a restart)"
     )
+
+
+def _utf8(text: str) -> bool:
+    """Whether UTF-8 can hold ``text``: it has no lone surrogate."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _delegating_session(store: ContextStore, ref: str) -> TeamSession:

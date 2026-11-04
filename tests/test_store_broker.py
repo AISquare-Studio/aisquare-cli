@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from collections.abc import Generator, Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -2601,7 +2602,13 @@ def test_a_refusal_padded_with_printable_blanks_draws_no_row_of_its_own(work: Pa
     start of a row, a forged line on the terminal showing the log (review r39 of #113,
     finding 5). Each is escaped as Python writes it, in the line and in the note. Mutant
     (only what is not printable escaped, as before): each stays raw."""
-    assert all(char.isprintable() and not char.isspace() for char in PRINTABLE_BLANKS)
+    # Printable wherever this Python's Unicode has them: the Egyptian blanks came in Unicode 15
+    # (Python 3.12); 3.11 has them unassigned, which the log escapes as not printable.
+    assert not any(char.isspace() for char in PRINTABLE_BLANKS)
+    assert all(
+        char.isprintable() for char in PRINTABLE_BLANKS if unicodedata.category(char) != "Cn"
+    )
+    assert "\U0001d159".isprintable(), "the musical null notehead, on every Python"
     log = paths.log_dir() / store_broker.LOG_NAME
     logged_before = log.read_bytes() if log.exists() else b""
     padding = "".join(char * 3 for char in PRINTABLE_BLANKS)

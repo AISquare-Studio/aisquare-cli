@@ -757,7 +757,12 @@ adapter.**
   error in words (exit 2, `{"error": "usage"}` under `--json`) naming the argument, for
   a ref, a label or free text alike (`task claim tsk_$'\xff'`, `--as`, `fleet stop`,
   `team focus`, `note --to`), where each such command was a traceback or the codec's
-  own words.
+  own words. What follows the `--` of a command that hands it to another program
+  (`launch`, `fleet spawn`, `accounts run`, `exec`, `fleet gate`) goes on as given
+  (`asq exec -- grep $'\xff' f`), but for a positional of the command's own filled from
+  there (`launch -- $'\xff'` names the role); `exec`'s report keeps it escaped, and a
+  fleet spawn's agent arguments are recorded, and so run, escaped, as a restart replays
+  them.
   The sandbox writes three paths in the store: its launch's broker inbox, its
   launch's `reports/` (`asq exec`, above), and a manager's own state directory (below).
   So nothing that a replay,

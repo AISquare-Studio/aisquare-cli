@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -323,6 +324,39 @@ def test_settings_aliases_share_invalidation(tmp_path: Path) -> None:
         assert agents._read_settings(path) == updated
 
 
+RENAME_HOLDS_ITS_FILE = os.name == "nt"
+"""A rename leaves the renamed file held a while after its new name exists: Windows'
+(:func:`published`)."""
+
+
+def published(ready: Path, receiver: threading.Thread, seconds: float = 5) -> dict[str, Any]:
+    """The state an in-process ``native_telemetry.serve`` publishes in ``ready``, once a
+    reader can open it.
+
+    ``serve`` publishes by renaming its staging file onto ``ready``. On Windows that rename is
+    MoveFileExW, which renames through a handle it opened with DELETE access and closes
+    after, with the GIL released: the name is there, and ``exists()`` holds, while that handle
+    is open, and an ``open()`` meanwhile (the CRT's, which shares no delete) fails with
+    ``PermissionError`` (windows shard 4, CI 41828194627 at 36ebb6aa, task #79). POSIX's
+    rename leaves no handle, and the product's own reader (``start_receiver``) runs on POSIX
+    alone, so this is the test's thread racing the receiver's. The wait ends when the file
+    opens; a receiver that died, or never published, fails here and says so.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            state: dict[str, Any] = json.loads(ready.read_text(encoding="utf-8"))
+            return state
+        except FileNotFoundError:
+            pass
+        except PermissionError:
+            if not RENAME_HOLDS_ITS_FILE:
+                raise
+        assert receiver.is_alive(), f"the receiver ended before {ready.name} could be read"
+        assert time.monotonic() < deadline, f"{ready.name} was not readable in {seconds:g} s"
+        time.sleep(0.01)
+
+
 def test_receiver_requests_retry_for_partial_spool_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -353,11 +387,7 @@ def test_receiver_requests_retry_for_partial_spool_failure(
     )
     thread.start()
     try:
-        deadline = time.monotonic() + 3
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert ready.exists()
-        state = json.loads(ready.read_text())
+        state = published(ready, thread)
         request = urllib.request.Request(
             f"http://127.0.0.1:{state['port']}/v1/logs",
             data=json.dumps(_payload()).encode(),

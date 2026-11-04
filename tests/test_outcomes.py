@@ -879,9 +879,20 @@ def _codex_rollout(home: Path, cwd: Path, *, turns: int | None = None) -> Path:
                 break
             moment = datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")) + shift
             record["timestamp"] = moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-            text = json.dumps(record).replace("/work/alpha", str(cwd))
-            handle.write(text + "\n")
+            handle.write(json.dumps(_moved(record, cwd)) + "\n")
     return path
+
+
+def _moved(value: Any, cwd: Path) -> Any:
+    """``value`` with the recorded folder made ``cwd``, in its strings: never in the JSON's
+    text, where a Windows path's backslashes would be escapes."""
+    if isinstance(value, str):
+        return value.replace("/work/alpha", str(cwd))
+    if isinstance(value, list):
+        return [_moved(item, cwd) for item in value]
+    if isinstance(value, dict):
+        return {_moved(key, cwd): _moved(item, cwd) for key, item in value.items()}
+    return value
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "codex"])

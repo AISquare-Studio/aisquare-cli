@@ -163,7 +163,11 @@ takes the id a fresh start or a fork is handed, `minted(id)` those two arguments
 `--resume`/`-r`, `continues` `--continue`/`-c` and `forks` `--fork-session`, which the
 session planner reads as a choice the caller made and a fleet row's recorded arguments go
 without), `launch_inputs` (above),
-`requires_hook_trust`, `hook_names_home`, `strict_hooks_file`, `stop_reason_as_prompt`,
+`requires_hook_trust`, `hook_names_home`, `strict_hooks_file`, `hooks_before_launch` (its
+hooks reach it from its home alone, Codex's: a fleet spawn, restart or switch installs them,
+trusted, into a slot aisquare made, and refuses a home the user owns where they are not,
+before anything is stopped; without it a launch writes nothing in its home, Claude Code's),
+`stop_reason_as_prompt`,
 `limits_in_transcript` (no turn-failed event: the accounts slot's `limit_from_transcript` and `failed_turn` read it), `ambient_first_run`,
 `reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),
 `one_press_exits` (the keys, as the agent is sent them past `key_spellings`, that end it with

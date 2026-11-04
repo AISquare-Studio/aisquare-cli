@@ -279,6 +279,14 @@ class AgentCapabilities:
     strict_hooks_file: bool = False
     """A hooks file whose ``hooks`` is not an object of arrays is refused, never
     rewritten (Codex's ``hooks.json``); Claude Code's ``settings.json`` reads it as none."""
+    hooks_before_launch: bool = False
+    """aisquare's hooks reach the agent from its home alone (Codex's ``hooks.json``), so they
+    must be there before it starts: a fleet spawn, restart or switch installs them, and their
+    trust, into a slot aisquare made where they are not, and refuses a home the user owns
+    where they are not (the plain home after ``agents disconnect``), before anything is
+    stopped or started (``services.fleet._hooks_installed_first``; SMOKE12 O1 and review r37
+    of #113, finding 2). Without it a launch writes nothing in the agent's home and refuses
+    nothing for its hooks: Claude Code's come with aisquare's plugin and its launch."""
     stop_reason_as_prompt: bool = False
     """A Stop hook's ``block`` reason comes back as the next ``UserPromptSubmit`` (Codex),
     which is then recorded as a continuation, not as the human's prompt."""

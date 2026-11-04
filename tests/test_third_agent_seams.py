@@ -1356,6 +1356,81 @@ def test_its_negative_plain_slot_is_named_by_its_number_wherever_a_slot_is(
     assert launched.exit_code == 0, launched.output
 
 
+# --- its hooks before a launch, by what it declares (review r37 of #113, finding 2) ----------
+
+
+@pytest.mark.parametrize("in_its_home", [False, True], ids=["hooks-with-its-launch", "home-only"])
+def test_a_spawn_installs_its_hooks_first_only_where_they_are_its_homes_and_aisquare_made_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, in_its_home: bool
+) -> None:
+    """``capabilities.hooks_before_launch`` decides it, never the agent's name. Declared, its
+    hooks are installed in a slot aisquare made (in the config dir its accounts read there,
+    ``.gemini``) before its window starts, and a spawn onto its own home, the user's, where
+    they are not is refused before any window, naming the connect command, the home written
+    nothing. Not declared, as Claude Code, neither home is read or written, and both spawns
+    go ahead."""
+    from aisquare.core.agent_adapters.types import AgentCapabilities
+    from aisquare.core.config import FleetRoleSettings, load_config, save_config
+    from aisquare.core.orchestrator import team_project
+    from aisquare.services import fleet as fleet_service
+    from tests import fakebin
+    from tests.test_fleet_service import FakeTmux
+
+    class Kind(GeminiShapedAdapter):
+        capabilities: AgentCapabilities = replace(
+            GeminiShapedAdapter.capabilities, hooks_before_launch=in_its_home
+        )
+
+    adapter = Kind()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        config = load_config()
+        config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+        save_config(config)
+        bin_dir = tmp_path / "bin"
+        fakebin.executable_fake(bin_dir, adapter.binary, windows="set /p line=", posix="read line")
+        fakebin.prepend_to_path(bin_dir, monkeypatch)
+        tmux = FakeTmux()
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+        project = team_project(tmp_path)
+        theirs = b'{\n  "general": {"vimMode": true}\n}\n'
+        slot = accounts_core.create_account(adapter.id)
+        made = accounts_core.agent_config_dir(slot)
+        own = _home(adapter)
+        for home in (made, own):
+            home.mkdir(parents=True, exist_ok=True)
+            (home / adapter.settings_name).write_bytes(theirs)
+
+        on_slot = fleet_service.spawn(project, "coder", agent=adapter.id, account=str(slot.slot))
+
+        installed = agent_core.hooks_installed(adapter.id, made)
+        noted = [note for note in on_slot.notes if "hooks were not installed" in note]
+        assert installed is in_its_home and bool(noted) is in_its_home, on_slot.notes
+        if in_its_home:
+            assert noted == [
+                f"{adapter.label}'s hooks were not installed in {made} — installed them "
+                "before it started there"
+            ]
+            assert not (slot.config_dir / adapter.settings_name).exists(), "its config dir's"
+        else:
+            assert (made / adapter.settings_name).read_bytes() == theirs
+        windows = len(tmux.spawned)
+        if not in_its_home:
+            fleet_service.spawn(project, "coder", agent=adapter.id)
+            assert len(tmux.spawned) == windows + 1
+        else:
+            with pytest.raises(fleet_service.FleetError) as refused:
+                fleet_service.spawn(project, "coder", agent=adapter.id)
+            said = str(refused.value)
+            assert f"hooks are not installed in {own}, a home of yours" in said, said
+            assert f"`aisquare agents connect {adapter.id} --config-dir {own}`" in said, said
+            assert len(tmux.spawned) == windows, "no window"
+        assert (own / adapter.settings_name).read_bytes() == theirs, "the user's home unwritten"
+    finally:
+        unregister(adapter.id)
+
+
 # --- the files a new agent touches ---------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parents[1]

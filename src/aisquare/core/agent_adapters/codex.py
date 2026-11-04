@@ -743,6 +743,8 @@ class CodexAdapter:
         hookless_through=LAST_WITHOUT_HOOKS,
         hook_names_home=True,
         strict_hooks_file=True,
+        # Its hooks are its home's `hooks.json` alone: started without, it runs blind.
+        hooks_before_launch=True,
         stop_reason_as_prompt=True,
         limits_in_transcript=True,
         native_telemetry=True,

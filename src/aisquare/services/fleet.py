@@ -5566,11 +5566,16 @@ def spawn(
             home,
             _window_path(config, selected.profile.env),
         )
-    # Its hooks where its window starts, installed now where they are not: started with none,
-    # its session never reached the board (SMOKE12 O1 of #113).
+    # Its hooks where its window starts, for an agent whose hooks are its home's alone:
+    # installed now in a slot aisquare made where they are not, a home of the user's refused
+    # (started with none, its session never reached the board: SMOKE12 O1, r37 of #113).
     _hooks_installed_first(
         selected.adapter,
-        choice.account.config_dir if choice.account is not None else selected.config_dir,
+        (
+            claude_accounts_core.agent_config_dir(choice.account)
+            if choice.account is not None
+            else selected.config_dir
+        ),
         cwd or project.root,
         notes,
     )
@@ -14015,8 +14020,9 @@ def _refuse_a_cross_agent_start(
     asks a replay's: the binary the role resolves for that agent and whether it is
     installed, a sandbox that may
     write an aisquare its hooks or broker run (under ``home``, the account it starts on),
-    its hooks there, installed now where they are not (:func:`_hooks_installed_first`, its
-    note in ``notes``), a bound file it cannot read, a tree that is gone with no branch, a
+    its hooks there where its agent's are its home's alone, installed now in a slot aisquare
+    made where they are not (:func:`_hooks_installed_first`, its note in ``notes``), a bound
+    file it cannot read, a tree that is gone with no branch, a
     freed socket. The SSH
     rules of #20 for ``onto`` are its callers' to ask, after it, once for every agent they
     may start on (:func:`_refuse_a_server_start_from_ssh`): :func:`switch` and
@@ -14044,7 +14050,7 @@ def _refuse_a_cross_agent_start(
         )
     _hooks_installed_first(
         selected.adapter,
-        home or selected.config_dir,
+        _config_dir_in(selected.adapter, home) if home is not None else selected.config_dir,
         Path(record.cwd),
         notes,
         nothing="nothing was stopped",
@@ -14371,6 +14377,15 @@ def _window_path(
     return os.environ.get("PATH")
 
 
+def _config_dir_in(adapter: AgentAdapter, home: Path) -> Path:
+    """The config dir ``adapter``'s agent reads in ``home``, an account's home (its accounts'
+    ``config_dir``, as ``claude_accounts.agent_config_dir`` reads a slot's): where its hooks
+    are, which is the home itself for Claude Code and Codex. Handed the home, a hook install
+    for an agent whose variable names the folder its config dir is in wrote beside that
+    folder, where the agent never reads it (review r37 of #113, finding 2)."""
+    return adapter.accounts.config_dir(home) if adapter.accounts is not None else home
+
+
 def _hooks_installed_first(
     adapter: AgentAdapter,
     home: Path,
@@ -14380,9 +14395,11 @@ def _hooks_installed_first(
     nothing: str = "nothing was started",
 ) -> None:
     """aisquare's hooks in ``home``, the config dir the agent's window starts under, before
-    anything is started there, or stopped for it: installed now where they are not, and the
-    launch refused, saying why, where they cannot be (``nothing`` says what was left as it
-    was). Installed, the agent's record of their trust is made too where it keeps one
+    anything is started there, or stopped for it, for an agent whose hooks reach it from its
+    home alone (``AgentCapabilities.hooks_before_launch``, Codex's): installed now in a slot
+    aisquare made where they are not, and the launch refused, saying why, where they cannot
+    be, or where the home is one the user owns (``nothing`` says what was left as it was).
+    Installed, the agent's record of their trust is made too where it keeps one
     (``AgentAdapter.hook_trust``: Codex's ``[hooks.state]``), which ``install_hooks`` makes for
     the hooks it writes; where that record cannot be made, the agent asks at its start, and
     ``NEEDS YOU`` says so.
@@ -14390,16 +14407,29 @@ def _hooks_installed_first(
     A hop onto a Codex slot with no ``hooks.json`` (made by hand, past the install ``accounts
     add`` does) started an agent with no hook: no session registered, its claim stayed on the
     ended one, no board update reached it, and nothing said so (SMOKE12 O1 of #113). A home
-    whose own config switches every hook off (``agents.hooks_disabled``) is the operator's
-    choice, and is left to the doctor's row that names it. A config dir that is not there yet
-    is one the agent never ran in, with no login to start on unattended: its first start
-    makes it, at the agent's sign-in, and ``agents connect`` installs its hooks."""
-    if not adapter.capabilities.hooks or agent_core.hooks_disabled(adapter.id, home):
+    the user owns (the agent's plain home, or any other not under its slots) is never written
+    here: ``agents disconnect`` there is the user's choice, which ``agents connect`` undoes,
+    and the refusal names it (review r37 of #113, finding 2: a spawn silently connected
+    ``~/.claude`` again). An agent without the capability is started as it always was, its
+    home unread and unwritten: Claude Code's hooks come with aisquare's plugin and its
+    launch, and a ``settings.json`` it cannot parse refuses nothing. A home whose own config
+    switches every hook off (``agents.hooks_disabled``) is the operator's choice, and is left
+    to the doctor's row that names it. A config dir that is not there yet is one the agent
+    never ran in, with no login to start on unattended: its first start makes it, at the
+    agent's sign-in, and ``agents connect`` installs its hooks."""
+    if not adapter.capabilities.hooks or not adapter.capabilities.hooks_before_launch:
         return
-    if not home.is_dir():
+    if agent_core.hooks_disabled(adapter.id, home) or not home.is_dir():
         return
     if agent_core.connected(adapter.id, home, cwd=cwd):
         return
+    connect = f"`aisquare agents connect {adapter.id} --config-dir {home}` installs them"
+    if claude_accounts_core.managed_slot(home, adapter.id) is None:
+        raise FleetError(
+            f"{adapter.label}'s hooks are not installed in {home}, a home of yours that "
+            f"aisquare does not write at a launch: an agent started there would run blind, "
+            f"with no session on the board — {nothing}; {connect}"
+        )
     try:
         installed = agent_core.install_hooks(adapter.id, home)
     except Exception as exc:
@@ -14410,7 +14440,7 @@ def _hooks_installed_first(
         raise FleetError(
             f"{adapter.label}'s hooks are not installed in {home} and could not be ({reason}): "
             f"an agent started there would run blind, with no session on the board — "
-            f"{nothing}; `aisquare agents connect {adapter.id} --config-dir {home}` installs them"
+            f"{nothing}; {connect}"
         )
     if notes is not None:
         notes.append(
@@ -14600,9 +14630,10 @@ def _refuse_a_replay_that_cannot_start(
     :func:`spawn` passes them; a Codex effort that is no level name was refused there, after
     the stop, and the agent lost (tester-43d on #43 reopen 3).
 
-    Its hooks under that home are installed now where they are not, its note in ``notes``,
-    and a home they cannot be installed in refused (:func:`_hooks_installed_first`): a
-    switch onto a slot with no ``hooks.json`` started an agent blind (SMOKE12 O1 of #113).
+    Its hooks under that home, where its agent's are its home's alone, are installed now in a
+    slot aisquare made where they are not, its note in ``notes``, and a home they cannot be
+    installed in, or one the user owns, refused (:func:`_hooks_installed_first`): a switch
+    onto a slot with no ``hooks.json`` started an agent blind (SMOKE12 O1 of #113).
     And every other refusal :func:`spawn` gives before a window opens: a bound file it
     cannot read, and a socket path a running server lost (:func:`_refuse_a_freed_socket`).
     That one was asked only inside the spawn, after the stop had typed ``/exit``: an agent
@@ -14656,7 +14687,7 @@ def _refuse_a_replay_that_cannot_start(
         )
     _hooks_installed_first(
         selected.adapter,
-        account or selected.config_dir,
+        _config_dir_in(selected.adapter, account) if account is not None else selected.config_dir,
         Path(record.cwd),
         notes,
         nothing="nothing was stopped",
@@ -15120,7 +15151,7 @@ def restart(
                 # than the record's: its hooks there before anything is stopped (SMOKE12 O1).
                 _hooks_installed_first(
                     replays,
-                    choice.account.config_dir,
+                    claude_accounts_core.agent_config_dir(choice.account),
                     Path(record.cwd),
                     installed,
                     nothing="nothing was stopped",

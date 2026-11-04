@@ -8,6 +8,11 @@ brought that ended session back to the board as a live coder (``mark_handover`` 
 ``ended_at``), where it stayed. A spawn, restart or switch now installs the hooks where the
 window starts before anything is stopped or started, or refuses saying why; and a hand-over
 mark leaves an ended session ended. On the fleet's fake tmux, as ``test_codex_account_switch``.
+
+Only where the agent's hooks reach it from its home alone (``hooks_before_launch``, Codex's),
+and only into a slot aisquare made (review r37 of #113, finding 2): Codex's own home, after
+``agents disconnect``, is refused before anything is stopped, nothing written; and a Claude
+Code spawn, restart or switch writes nothing in its home and refuses nothing, as on main.
 """
 
 from __future__ import annotations
@@ -19,19 +24,22 @@ import pytest
 
 from aisquare.core import agents
 from aisquare.core import claude_accounts as core
-from aisquare.core.agent_adapters import codex_config
+from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo, TeamSession
+from aisquare.services import agents as agents_service
 from aisquare.services import fleet as fleet_service
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_codex_accounts import _sign_in
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
+    claude_on_path,
     clock,
     project,
     repo,
     tmux,
 )
+from tests.test_hand_off_across_agents import _claude_slots
 
 
 def _slot(email: str) -> ClaudeAccount:
@@ -223,3 +231,145 @@ def test_a_hand_over_mark_on_an_ended_session_marks_it_and_keeps_it_ended() -> N
         live = store.get_session("sess-live")
     assert marked is not None and marked.state == "switching" and marked.ended_at is not None
     assert live is not None and live.state == "switching" and live.ended_at is None
+
+
+# --- whose homes a launch writes (review r37 of #113, finding 2) -----------------------------
+
+
+def _files(home: Path) -> dict[str, bytes]:
+    """Every file under ``home``, by its path there, and its bytes."""
+    return {
+        str(path.relative_to(home)): path.read_bytes()
+        for path in sorted(home.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [b'{\n  "theme": "dark"\n}\n', b'{\n  "theme": "dark",\n}\n'],
+    ids=["unconnected", "unparsable"],
+)
+@pytest.mark.parametrize("where", ["plain-home", "slot"])
+def test_a_claude_code_spawn_restart_and_switch_write_nothing_in_its_home_and_refuse_nothing(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    settings: bytes,
+    where: str,
+) -> None:
+    """As on main: Claude Code's hooks come with aisquare's plugin and its launch
+    (``hooks_before_launch`` False), so a spawn, a restart and a switch onto a home where it
+    is not connected, the user's own after ``agents disconnect`` included, leave its
+    ``settings.json`` byte for byte, and one that is no JSON refuses none of them. Before,
+    each wrote aisquare's hooks into it, and the unparsable one refused the spawn."""
+    assert not get_adapter(core.AGENT).capabilities.hooks_before_launch
+    plain = core.default_account()
+    first, second = _claude_slots(monkeypatch, 10, 10)
+    start = plain if where == "plain-home" else first
+    homes = [plain.config_dir, first.config_dir, second.config_dir]
+    for home in homes:
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "settings.json").write_bytes(settings)
+        assert not agents.connected(core.AGENT, home)
+    before = {home: _files(home) for home in homes}
+
+    spawned = fleet_service.spawn(project, "coder", worktree=False, account=str(start.slot))
+    restarted = fleet_service.restart(project, spawned.agent.label)
+    switched = fleet_service.switch(project, spawned.agent.label, to=str(second.slot))
+
+    assert switched.started.account_slot == second.slot
+    for home in homes:
+        assert _files(home) == before[home], f"{home} written"
+    said = [*spawned.notes, *restarted.notes, *switched.notes]
+    assert not [note for note in said if "hooks were not installed" in note], said
+
+
+def _disconnected_plain_codex_home() -> Path:
+    """Codex's own home, signed in, its hooks connected and then disconnected by the user."""
+    plain = core.default_account(agent="codex").config_dir
+    plain.mkdir(parents=True, exist_ok=True)
+    _sign_in(plain, "mine@example.com")
+    assert core.managed_slot(plain, "codex") is None, "a home the user owns"
+    agents_service.connect("codex", plain)
+    assert agents.hooks_installed("codex", plain) and _trusted(plain) == 8
+    agents_service.disconnect("codex", plain)
+    assert not agents.connected("codex", plain, cwd=plain)
+    return plain
+
+
+def _refused_for_its_home(said: str, home: Path, nothing: str) -> None:
+    assert f"Codex's hooks are not installed in {home}, a home of yours" in said, said
+    assert f"{nothing}; `aisquare agents connect codex --config-dir {home}`" in said, said
+
+
+def test_a_codex_spawn_onto_its_disconnected_plain_home_is_refused_and_writes_nothing(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """``agents disconnect codex`` is the user's choice: their own home is never written at a
+    launch, and the spawn is refused, naming the command that connects it again."""
+    plain = _disconnected_plain_codex_home()
+    before = _files(plain)
+
+    with pytest.raises(fleet_service.FleetError) as refused:
+        fleet_service.spawn(
+            project,
+            "coder",
+            agent="codex",
+            worktree=False,
+            account=str(core.default_account(agent="codex").slot),
+        )
+
+    _refused_for_its_home(str(refused.value), plain, "nothing was started")
+    assert _files(plain) == before, "nothing written in the user's home"
+    assert tmux.spawned == [], "no window"
+    with store_session() as store:
+        assert store.live_fleet_agents() == []
+
+
+@pytest.mark.parametrize("verb", ["switch", "restart"])
+def test_a_codex_hand_over_onto_its_disconnected_plain_home_is_refused_before_the_stop(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    verb: str,
+) -> None:
+    """A switch onto the user's own disconnected home, and a restart of an agent that runs
+    there after the user disconnected it, are refused before anything is stopped: the agent
+    runs on, its window unkilled, and the home is left as the user left it."""
+    plain_account = core.default_account(agent="codex")
+    plain = plain_account.config_dir
+    if verb == "switch":
+        here = _slot("here@example.com")
+        plain = _disconnected_plain_codex_home()
+        agent = fleet_service.spawn(
+            project, "coder", agent="codex", worktree=False, account=str(here.slot)
+        ).agent
+        _bound(project, agent, here, "codex-thread-here")
+    else:
+        plain.mkdir(parents=True, exist_ok=True)
+        _sign_in(plain, "mine@example.com")
+        agents_service.connect("codex", plain)
+        agent = fleet_service.spawn(
+            project, "coder", agent="codex", worktree=False, account=str(plain_account.slot)
+        ).agent
+        _bound(project, agent, plain_account, "codex-thread-mine")
+        agents_service.disconnect("codex", plain)
+    before = _files(plain)
+
+    with pytest.raises(fleet_service.FleetError) as refused:
+        if verb == "switch":
+            fleet_service.switch(project, agent.label, to=str(plain_account.slot))
+        else:
+            fleet_service.restart(project, agent.label)
+
+    _refused_for_its_home(str(refused.value), plain, "nothing was stopped")
+    assert _files(plain) == before, "nothing written in the user's home"
+    assert agent.pane_id not in tmux.killed
+    assert not [typed for typed in tmux.typed if typed[0] == agent.pane_id], "no /exit typed"
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.ended_at is None, "still running where it was"

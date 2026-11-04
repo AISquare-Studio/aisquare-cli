@@ -219,6 +219,11 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     second click that reaches it before the dialog is painted is not a confirmation; one
     after it is, at once. ``project`` keeps it to that project's agents (a card's *Pause
     agents*), its title naming it.
+
+    Tab goes from the switch to Confirm to Cancel, and a focused button shows the one band
+    Cancel shows, Confirm's own colour or not. A focused Confirm drew its label orange on
+    a dark band, no focus to the eye, behind a tab stop the list made that drew nothing, so
+    a keyboard Resume took three tries (SMOKE12 O2 of #113).
     """
 
     CSS = """
@@ -238,6 +243,7 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     ConfirmBulk #bulk-list { height: auto; }
     ConfirmBulk #bulk-buttons { height: auto; margin-top: 1; align: right middle; }
     ConfirmBulk #bulk-buttons Button { margin-left: 2; }
+    ConfirmBulk #bulk-buttons Button:focus { color: $button-foreground; text-style: bold reverse; }
     """
     BINDINGS: ClassVar = [("escape", "cancel_bulk", "cancel")]
 
@@ -265,7 +271,11 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
             with Horizontal(id="bulk-switch-row"):
                 yield Switch(False, id="bulk-managers")
                 yield Label("Managers only")
-            with VerticalScroll(id="bulk-scroll"):
+            listing = VerticalScroll(id="bulk-scroll")
+            # Read, and scrolled by the wheel, never a stop of Tab's: it drew no focus, and
+            # an Enter there did nothing, between the switch and the buttons (SMOKE12 O2).
+            listing.can_focus = False
+            with listing:
                 yield Static(Text("reading the fleet…", style="dim"), id="bulk-list")
             with Horizontal(id="bulk-buttons"):
                 yield GuardedButton(

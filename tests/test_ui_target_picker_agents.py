@@ -23,6 +23,7 @@ from typing import Any, TypeVar
 import pytest
 from textual.app import App
 from textual.pilot import Pilot
+from textual.screen import Screen
 from textual.widgets import Button, Input, OptionList, Select
 
 from aisquare.cli.ui.attach import AttachTargetScreen, NewBindScreen, Target, args_hint
@@ -40,9 +41,10 @@ from aisquare.models import (
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
 from tests.test_captain_sidebar import until
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
+S = TypeVar("S", bound=Screen[Any])
 
 
 def _slot(slot: int, agent: str) -> ClaudeAccountStatus:
@@ -107,12 +109,32 @@ def prompts(picker: AttachTargetScreen) -> dict[str, str]:
     return {option.id or "": str(option.prompt).strip() for option in options}
 
 
-async def wait_for(pilot: Pilot[Any], kind: type[Any]) -> Any:
-    for _ in range(100):
-        if isinstance(pilot.app.screen, kind):
-            return pilot.app.screen
-        await pilot.pause(0.05)
-    raise AssertionError(f"{kind.__name__} never opened")
+async def wait_for(pilot: Pilot[Any], kind: type[S]) -> S:
+    """The screen of ``kind`` once it is up AND mounted whole, every Select's label in it.
+
+    ``app.screen`` is a pushed screen as soon as it is on the stack, and Textual mounts its
+    widgets in later turns of the loop. The New bind form came back half mounted, so a test
+    set ``#bind-agent`` before the Select had what it shows, and lost two ways (task #79):
+    on windows-latest the Select had no SelectCurrent yet, so its watcher posted no Changed
+    and the binary never followed (shard 8, CI 41826716083 at e1778119); on py3.12 the test
+    went on to its end at once and ``run_test`` tore down the form, whose ``#bind-account``
+    Select then mounted on a pruned SelectCurrent: ``NoMatches('#label')`` (shard 2, CI
+    41828194627 at 36ebb6aa). A screen is mounted after every widget in it is, and a Select
+    shows its value in its SelectCurrent's ``#label``: both are waited for here.
+    """
+
+    def mounted() -> bool:
+        screen = pilot.app.screen
+        return (
+            isinstance(screen, kind)
+            and screen.is_mounted
+            and all(select.query("#label") for select in screen.query(Select))
+        )
+
+    await settle_until_held(pilot.app, mounted, what=f"{kind.__name__} mounted", timeout=10)
+    screen = pilot.app.screen
+    assert isinstance(screen, kind)
+    return screen
 
 
 def test_the_picker_lists_codex_slots_and_reads_a_binds_codex_home(
@@ -235,9 +257,19 @@ def test_new_binds_binary_follows_the_agent_until_one_is_typed(project: ProjectI
     assert drive(project, scenario) == ["codex", "claude", "my-codex"]
 
 
-def test_new_binds_extra_args_example_is_the_agents_own_model_flag(project: ProjectInfo) -> None:
+def test_new_binds_extra_args_example_is_the_agents_own_model_flag(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """r20 of #113, N1's sibling: the New bind's Extra args read ``--model opus``, a Claude
-    Code model, with Codex picked. It is the bind's agent's own ``model_args``."""
+    Code model, with Codex picked. It is the bind's agent's own ``model_args``.
+
+    Both agents spell the flag ``--model``, so their examples read alike: the wait for
+    Codex's held before the pick was handled, and the test ended with the form half mounted
+    (task #79). Here Codex spells it ``-m``, its short flag, so the example is Codex's only
+    once the form has followed the pick."""
+    codex = get_adapter("codex")
+    monkeypatch.setattr(codex, "model_args", lambda model, effort: ["-m", model] if model else [])
+    assert args_hint("codex") != args_hint("claude-code")
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
         await pilot.click("#picker-new-bind")

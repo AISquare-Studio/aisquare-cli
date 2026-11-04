@@ -1482,23 +1482,26 @@ def test_a_hand_over_onto_another_slot_installs_its_hooks_in_the_config_dir_read
         made = accounts_core.agent_config_dir(there)
         if hand_over == "crossing":
             claude = fleet_service.spawn(project, "coder", worktree=False).agent
-            receipt = fleet_service.switch(
+            crossed = fleet_service.switch(
                 project, claude.label, to=str(there.slot), to_agent=adapter.id
             )
+            started, notes = crossed.started, list(crossed.notes)
         else:
             agent = fleet_service.spawn(
                 project, "coder", agent=adapter.id, account=str(here.slot)
             ).agent
             assert agent_core.hooks_installed(adapter.id, accounts_core.agent_config_dir(here))
             if hand_over == "switch":
-                receipt = fleet_service.switch(project, agent.label, to=str(there.slot))
+                switched = fleet_service.switch(project, agent.label, to=str(there.slot))
+                started, notes = switched.started, list(switched.notes)
             else:
-                receipt = fleet_service.restart(project, agent.label, account=str(there.slot))
+                restarted = fleet_service.restart(project, agent.label, account=str(there.slot))
+                started, notes = restarted.started, list(restarted.notes)
 
-        assert receipt.started.account_slot == there.slot
+        assert started.account_slot == there.slot
         assert agent_core.hooks_installed(adapter.id, made), "in the config dir it reads"
         assert not (there.config_dir / adapter.settings_name).exists(), "nothing beside it"
-        assert f"{adapter.label}'s hooks were not installed in {made}" in " ".join(receipt.notes)
+        assert f"{adapter.label}'s hooks were not installed in {made}" in " ".join(notes)
 
 
 def test_a_take_over_restart_onto_its_own_unconnected_home_is_refused_before_the_stop(

@@ -209,7 +209,7 @@ any other write there, nor a session of it (:data:`BOARD_ENV`)."""
 LOG_NAME = "store-broker.log"
 """The brokers' refusals, and what a parent manager's broker admitted on a member's board
 (:func:`record_admission`: a read, a task added), one line each whatever text the agent
-chose (:func:`_one_line`), in the aisquare home's log directory."""
+chose (:func:`_log_text`), in the aisquare home's log directory."""
 #: The refusals put on the launch's board as well as logged, once per launch and kind: a
 #: session not its own, another board's task, another project's pool, a fleet operation
 #: (its signals included), a request not signed by its launch.
@@ -561,13 +561,13 @@ def record_admission(detail: str) -> None:
 
 def _log_line(kind: str, detail: str) -> tuple[str, str, str]:
     """Append one line of ``kind`` to the brokers' log, naming the launch and its agent;
-    returns those two and ``detail``, each as :func:`_one_line` writes it. A log that cannot
+    returns those two and ``detail``, each as :func:`_log_text` writes it. A log that cannot
     be written is skipped, whatever stops it. Never raises."""
     from datetime import UTC, datetime
 
-    launch = _one_line(os.environ.get("AISQUARE_LAUNCH_ID", "")) or "?"
-    agent = _one_line(os.environ.get("AISQUARE_FLEET_AGENT", ""))
-    flat = _one_line(detail)
+    launch = _log_text(os.environ.get("AISQUARE_LAUNCH_ID", "")) or "?"
+    agent = _log_text(os.environ.get("AISQUARE_FLEET_AGENT", ""))
+    flat = _log_text(detail)
     stamp = datetime.now(UTC).isoformat()
     line = f"{stamp} launch={launch} agent={agent or '-'} {kind}: {flat}\n"
     with suppress(Exception):
@@ -578,7 +578,7 @@ def _log_line(kind: str, detail: str) -> tuple[str, str, str]:
     return launch, agent, flat
 
 
-def _one_line(text: str) -> str:
+def _log_text(text: str) -> str:
     """``text`` as one line of the brokers' log, which a terminal shows as written: each run
     of whitespace one space (every line end ``str.splitlines`` splits at among them), and
     each other character that is not printable escaped as Python writes it (``\\x1b``,

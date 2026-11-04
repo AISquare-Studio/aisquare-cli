@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from textual.containers import VerticalScroll
 from textual.geometry import Offset
 from textual.pilot import Pilot
 from textual.widgets import Button, Static, Switch
@@ -335,6 +336,65 @@ def test_escape_and_cancel_close_the_dialog_and_act_on_nobody(acted: Acted) -> N
 
     assert drive(go) == [True, True]
     assert acted.calls == []
+
+
+def test_the_keys_scroll_a_list_of_thirty_while_tab_still_skips_it(
+    tmp_path: Path, script: Script
+) -> None:
+    """r37 finding 6 of #113: the list left Tab's order (SMOKE12 O2), and twenty rows high it
+    then scrolled by the wheel alone, so a keyboard user confirmed agents past the twentieth
+    unread. The dialog takes the list's keys: ↑ ↓, PgUp PgDn, Home and End scroll it from
+    whichever of the switch and the buttons has the focus, and Tab still goes switch →
+    Confirm → Cancel."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    script["prj_a"] = [
+        status("prj_a", f"coder-{n}", "coder", "working", minute=n) for n in range(1, 31)
+    ]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[Any], list[str | None]]:
+        dialog = await _open(pilot, "stop")
+        app = _app(pilot)
+        listing = dialog.query_one("#bulk-scroll", VerticalScroll)
+        rows = _listed(dialog)
+        last = rows.index("  coder-30 · coder · ▶ working")
+        seen: list[Any] = [len(rows), listing.size.height, listing.max_scroll_y]
+
+        async def press(*keys: str) -> None:
+            await pilot.press(*keys)
+            await settle(app)
+            seen.append((keys, listing.scroll_y, app.focused.id if app.focused else None))
+
+        await press("end")
+        bottom = listing.scroll_y
+        seen.append(bottom <= last < bottom + listing.size.height)  # the thirtieth is read
+        await press("home")
+        await press("pagedown")
+        await press("pageup")
+        await press("tab")  # Cancel → the switch, and the keys still go to the list
+        await press("down")
+        await press("down")
+        await press("up")
+        await press("tab")  # → Confirm
+        await press("end")
+        return seen, [widget.id for widget in dialog.focus_chain]
+
+    seen, chain = drive(go)
+    count, height, most = seen[:3]
+    assert count == 31 and 0 < height < count and most == count - height, seen[:3]
+    assert seen[3:] == [
+        (("end",), most, "bulk-cancel"),
+        True,
+        (("home",), 0, "bulk-cancel"),
+        (("pagedown",), min(height, most), "bulk-cancel"),
+        (("pageup",), 0, "bulk-cancel"),
+        (("tab",), 0, "bulk-managers"),
+        (("down",), 1, "bulk-managers"),
+        (("down",), 2, "bulk-managers"),
+        (("up",), 1, "bulk-managers"),
+        (("tab",), 1, "bulk-confirm"),
+        (("end",), most, "bulk-confirm"),
+    ]
+    assert chain == ["bulk-managers", "bulk-confirm", "bulk-cancel"]
 
 
 def test_restart_all_takes_a_click_as_soon_as_the_hub_is_drawn(acted: Acted) -> None:

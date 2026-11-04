@@ -37,6 +37,7 @@ from typing import Any, ClassVar
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -224,6 +225,11 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     Cancel shows, Confirm's own colour or not. A focused Confirm drew its label orange on
     a dark band, no focus to the eye, behind a tab stop the list made that drew nothing, so
     a keyboard Resume took three tries (SMOKE12 O2 of #113).
+
+    The list's keys are the dialog's, whichever of the three has the focus: ↑ ↓, PgUp PgDn,
+    Home and End scroll it. Out of Tab's order and twenty rows high, a longer list scrolled
+    by the wheel alone, so a keyboard user (tmux over SSH) confirmed agents they could not
+    read (r37 finding 6 of #113).
     """
 
     CSS = """
@@ -245,7 +251,13 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     ConfirmBulk #bulk-buttons Button { margin-left: 2; }
     ConfirmBulk #bulk-buttons Button:focus { color: $button-foreground; text-style: bold reverse; }
     """
-    BINDINGS: ClassVar = [("escape", "cancel_bulk", "cancel")]
+    BINDINGS: ClassVar = [
+        ("escape", "cancel_bulk", "cancel"),
+        *(
+            Binding(key, f"scroll_list('{key}')", show=False)
+            for key in ("up", "down", "pageup", "pagedown", "home", "end")
+        ),
+    ]
 
     def __init__(
         self, action: fleet_service.BulkAction, project: ProjectInfo | None = None
@@ -272,8 +284,9 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
                 yield Switch(False, id="bulk-managers")
                 yield Label("Managers only")
             listing = VerticalScroll(id="bulk-scroll")
-            # Read, and scrolled by the wheel, never a stop of Tab's: it drew no focus, and
-            # an Enter there did nothing, between the switch and the buttons (SMOKE12 O2).
+            # Read, and scrolled by the wheel and the dialog's keys, never a stop of Tab's: it
+            # drew no focus, and an Enter there did nothing, between the switch and the
+            # buttons (SMOKE12 O2).
             listing.can_focus = False
             with listing:
                 yield Static(Text("reading the fleet…", style="dim"), id="bulk-list")
@@ -373,6 +386,19 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
 
     def action_cancel_bulk(self) -> None:
         self.dismiss(None)
+
+    def action_scroll_list(self, key: str) -> None:
+        """Scroll the list by ``key`` (a binding's), at once, with the focus left where it is."""
+        listing = self.query_one("#bulk-scroll", VerticalScroll)
+        scroll = {
+            "up": listing.scroll_up,
+            "down": listing.scroll_down,
+            "pageup": listing.scroll_page_up,
+            "pagedown": listing.scroll_page_down,
+            "home": listing.scroll_home,
+            "end": listing.scroll_end,
+        }[key]
+        scroll(animate=False)
 
 
 def named(receipt: fleet_service.BulkReceipt) -> str:

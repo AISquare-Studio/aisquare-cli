@@ -105,7 +105,7 @@ def test_init_connects_codex(
 ) -> None:
     """`init --agent codex`, which main's 0.8.0 refused ("can't connect Codex yet"), installs
     Codex's hooks into its home and records the connection, as `agents connect codex` does,
-    and says the one step left: trusting them in Codex's /hooks."""
+    and records Codex's trust of them, so it sends nobody to Codex's /hooks (SMOKE12 O3)."""
     home = tmp_path / "agenthome"
     (home / ".codex").mkdir(parents=True)
     (home / ".codex" / "AGENTS.md").write_text("# Prefs\nsmall commits\n", encoding="utf-8")
@@ -115,7 +115,8 @@ def test_init_connects_codex(
 
     assert result.exit_code == 0, result.output
     assert "Connected codex: hooks installed, imported 1 entries." in result.stdout
-    assert "open /hooks in Codex to review and trust them" in result.stdout
+    assert "trusted where Codex records a review's yes" in " ".join(result.stdout.split())
+    assert "/hooks" not in result.stdout
     hooks = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
     assert {"SessionStart", "UserPromptSubmit", "Stop"} <= set(hooks)
     listed = _json(runner.invoke(app, ["--json", "agents", "list"]).stdout)

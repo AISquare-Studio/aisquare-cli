@@ -112,6 +112,12 @@ def test_codex_installed_and_unconnected_offers_connect(codex_home: Path) -> Non
 
 
 def test_connected_codex_is_ready_with_its_trust_step_pending(codex_home: Path) -> None:
+    # Connect records Codex's trust of the hooks it writes (SMOKE12 O3): nothing pending.
+    _connect(codex_home)
+    recorded = first_run.probe_fleet(which=on_path("codex"))
+    assert recorded.connected and recorded.ready and not recorded.trust_pending
+    # Where that record cannot be written (a config.toml that is not TOML), Codex asks.
+    (codex_home / "config.toml").write_text("model = \n", encoding="utf-8")
     _connect(codex_home)
     pending = first_run.probe_fleet(which=on_path("codex"))
     assert pending.connected and pending.ready and pending.trust_pending
@@ -177,7 +183,8 @@ def test_the_hooks_are_read_in_the_home_of_the_account_the_manager_runs_on(
     (slot.config_dir / "config.toml").unlink()
     _connect(slot.config_dir)
     hooked = first_run.probe_fleet(which=on_path("codex"), sign_in=False)
-    assert hooked.home == slot.config_dir and hooked.connected and hooked.trust_pending
+    # Its trust recorded with the hooks (SMOKE12 O3): no step left for the human there.
+    assert hooked.home == slot.config_dir and hooked.connected and not hooked.trust_pending
     assert f"aisquare's hooks in {slot.config_dir}" in claude_text(hooked, platform="linux").plain
     # The machine default is rank 1 of the one order (0.9.0, #406): the signed-in slot is the
     # first usable Codex account, so the manager runs on it, whether the launch picks by

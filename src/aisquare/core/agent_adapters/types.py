@@ -869,7 +869,7 @@ class HooksSwitch:
 
 class HookTrustError(ValueError):
     """Why an agent's record of which hooks it trusts was left as it was
-    (:meth:`AgentHookTrust.record`): those hooks stay untrusted, and the agent asks."""
+    (:meth:`AgentHookTrust.record_trust`): those hooks stay untrusted, and the agent asks."""
 
 
 class HookPlace(NamedTuple):
@@ -892,7 +892,7 @@ class AgentHookTrust(Protocol):
     10437). It keeps a record of what it wrote, so it takes back exactly that and never
     touches a record of the human's."""
 
-    def record(
+    def record_trust(
         self,
         home: Path,
         settings_path: Path,
@@ -908,7 +908,7 @@ class AgentHookTrust(Protocol):
         :class:`HookTrustError` saying why the agent's file was left as it was."""
         ...
 
-    def recorded(self, home: Path, settings_path: Path, settings: Mapping[str, Any]) -> bool:
+    def trust_in_force(self, home: Path, settings_path: Path, settings: Mapping[str, Any]) -> bool:
         """Whether the last :meth:`record` named handlers that are still at their places in
         ``settings`` as they were, and the agent's record trusts every one of them: what
         ``core.agents.integration_readiness`` reads as ``trusted``. Read-only; never raises."""

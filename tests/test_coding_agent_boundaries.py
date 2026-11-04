@@ -376,8 +376,9 @@ def test_reconnect_preserves_context_headroom_and_bounds_other_hooks(tmp_path: P
             180 if hook.event in {"SessionStart", "UserPromptSubmit"} else hook.timeout
         )
     # Reconciliation preserves the edited context definition, which needs a
-    # fresh native observation; only an unchanged reconnect preserves it.
-    assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
+    # fresh native observation; only an unchanged reconnect preserves it. The reconnect
+    # records Codex's trust of what it wrote (SMOKE12 O3): trusted, not yet observed.
+    assert agents.integration_readiness("codex", tmp_path)[0] == "trusted"
     agents.observe_hooks("codex", tmp_path, agents.hook_fingerprint("codex", tmp_path))
     before, stamp = path.read_bytes(), path.stat().st_mtime_ns
     agents.install_hooks("codex", tmp_path)

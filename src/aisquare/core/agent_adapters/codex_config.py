@@ -532,7 +532,7 @@ def sync_hook_trust(home: Path, places: Sequence[TrustPlace]) -> list[str]:
             raise HookTrustError("its config.toml cannot take a [hooks.state] table") from None
         if _pruned(after) != _pruned(expected):
             raise HookTrustError("its config.toml would read otherwise with the trust recorded")
-        _write_config(config, text, made=not raw)
+        _write_hook_state(config, text, made=not raw)
     _write_record(home, {place.place: place.digest for place in places}, owned)
     return changed
 
@@ -558,6 +558,8 @@ def hook_trust_in_force(
             return False
         if digest is None or not isinstance(group, dict) or not isinstance(handler, dict):
             return False
+        if not set(group) <= {"matcher", "hooks"}:
+            return False  # not the group aisquare wrote: a key past what Codex hashes
         if hook_hash(event, group, handler) != digest:
             return False
         for file in spelt:
@@ -611,7 +613,7 @@ def _write_record(home: Path, places: Mapping[str, str | None], tables: Mapping[
         raise HookTrustError(f"its {TRUST_RECORD} could not be written ({exc})") from exc
 
 
-def _write_config(config: Path, text: str, *, made: bool) -> None:
+def _write_hook_state(config: Path, text: str, *, made: bool) -> None:
     """``text`` over ``config`` as ``core.agents`` writes a hooks file; owner-only if made."""
     from aisquare.core import agents, atomic
 

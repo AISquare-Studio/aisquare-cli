@@ -2522,13 +2522,15 @@ def test_connect_asks_an_agent_that_trusts_hooks_to_record_its_own_trust(
     aisquare's hooks are, once ``connect`` has written them: by where it wrote each, never by
     what a command looks like (the reopen, seq 10437), so a look-alike of the user's in an
     event it does not install is named to it by no place; ``disconnect`` asks it to take every
-    record back; and its readiness reads ``trusted`` off its own ``recorded``."""
+    record back; and its readiness reads ``trusted`` off its own ``trust_in_force``."""
     from aisquare.core.agent_adapters.types import AgentCapabilities, HookPlace
 
     asked: list[tuple[Path, Path, list[HookPlace], list[str]]] = []
 
     class Record:
-        def record(self, home: Path, settings_path: Path, settings: Any, written: Any) -> list[str]:
+        def record_trust(
+            self, home: Path, settings_path: Path, settings: Any, written: Any
+        ) -> list[str]:
             commands = [
                 settings["hooks"][at.event][at.group]["hooks"][at.handler]["command"]
                 for at in written
@@ -2536,7 +2538,7 @@ def test_connect_asks_an_agent_that_trusts_hooks_to_record_its_own_trust(
             asked.append((home, settings_path, list(written), commands))
             return ["recorded"]
 
-        def recorded(self, home: Path, settings_path: Path, settings: Any) -> bool:
+        def trust_in_force(self, home: Path, settings_path: Path, settings: Any) -> bool:
             return bool(asked and asked[-1][2])
 
     class Trusting(GeminiShapedAdapter):

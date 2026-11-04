@@ -614,7 +614,7 @@ class CodexHookTrust:
     (the plain home's launch, ``env -u CODEX_HOME``), where that is this file through a link.
     A handler whose hash is not known here is left to Codex's question (SMOKE12 O3)."""
 
-    def record(
+    def record_trust(
         self,
         home: Path,
         settings_path: Path,
@@ -644,7 +644,7 @@ class CodexHookTrust:
             )
         return codex_config.sync_hook_trust(home, places)
 
-    def recorded(self, home: Path, settings_path: Path, settings: Mapping[str, Any]) -> bool:
+    def trust_in_force(self, home: Path, settings_path: Path, settings: Mapping[str, Any]) -> bool:
         try:
             return codex_config.hook_trust_in_force(
                 home, settings, _hooks_file_spellings(settings_path)

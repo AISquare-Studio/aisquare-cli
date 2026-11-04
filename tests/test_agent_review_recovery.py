@@ -200,6 +200,12 @@ def test_unused_codex_home_is_advisory_but_selected_or_connected_homes_are_check
     agents.install_hooks("codex", home)
     agents.set_connected("codex", True, home)
     checks = [check for check in diagnostics._check_other_agents(tmp_path) if check.name == "codex"]
+    # Their trust recorded with them (SMOKE12 O3): an ok row, nothing for the human to do.
+    assert checks and all(check.status == CheckStatus.ok for check in checks), checks
+    assert any("trusted in" in check.detail for check in checks), checks
+    (home / "config.toml").write_text("model = \n", encoding="utf-8")  # a record it cannot make
+    agents.install_hooks("codex", home)
+    checks = [check for check in diagnostics._check_other_agents(tmp_path) if check.name == "codex"]
     # Current hooks wait for the user's trust in /hooks, which reconnecting does not give:
     # the fix is that step, not a Connect (legacy hooks without a definition marker keep
     # the reconnect, tests/test_agent_native_boundaries.py).
@@ -330,7 +336,8 @@ def test_observation_reuses_unchanged_settings_but_detects_an_edit(
     settings = json.loads(path.read_text())
     settings["hooks"]["Stop"][0]["matcher"] = "changed"
     path.write_text(json.dumps(settings))
-    assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
+    # Not observed any more; trusted still, as Codex reads no matcher for Stop (SMOKE12 O3).
+    assert agents.integration_readiness("codex", tmp_path)[0] == "trusted"
     agents.observe_hooks("codex", tmp_path, agents.hook_fingerprint("codex", tmp_path))
     assert agents.integration_readiness("codex", tmp_path)[0] == "observed"
 
@@ -534,7 +541,8 @@ def test_unwritable_observation_cache_does_not_block_native_lifecycle(
     with store_session() as store:
         assert store.get_session(agent_events.session_key(CODEX, home, "native"))
         assert store.recent_prompts(team_project().id)[0].text == "keep working"
-    assert agents.integration_readiness("codex", home)[0] == "unverified"
+    # Not observed (no definition ran); trusted, as its install recorded (SMOKE12 O3).
+    assert agents.integration_readiness("codex", home)[0] == "trusted"
 
 
 def test_native_metadata_expires_without_removing_active_launches_or_the_outbox() -> None:

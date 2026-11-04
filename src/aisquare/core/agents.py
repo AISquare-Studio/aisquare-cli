@@ -700,7 +700,7 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     if adapter.hook_trust is not None:
         with suppress(HookTrustError, OSError):
             # Its question is the human's answer where the record cannot be written (SMOKE12 O3).
-            adapter.hook_trust.record(
+            adapter.hook_trust.record_trust(
                 spec.home, spec.settings_path, settings, [place for place, _ in generated]
             )
     return True
@@ -720,8 +720,8 @@ def _placed(groups: list[Any]) -> int:
 
 def hook_trust_recorded(name: str, config_dir: Path | None = None) -> bool:
     """Whether the agent's own record trusts the hooks :func:`install_hooks` last wrote in
-    ``config_dir``, each still where and as it wrote it (``AgentHookTrust.recorded``); ``False``
-    for an agent that keeps no such record. Read-only; never raises."""
+    ``config_dir``, each still where and as it wrote it (``AgentHookTrust.trust_in_force``);
+    ``False`` for an agent that keeps no such record. Read-only; never raises."""
     adapter = _adapter(name)
     trust = adapter.hook_trust if adapter is not None else None
     spec = _spec(name, config_dir)
@@ -731,19 +731,19 @@ def hook_trust_recorded(name: str, config_dir: Path | None = None) -> bool:
         settings = _inspected_settings(spec.settings_path, strict=True)
     except AgentSettingsError:
         return False
-    return trust.recorded(spec.home, spec.settings_path, settings)
+    return trust.trust_in_force(spec.home, spec.settings_path, settings)
 
 
 def _take_back_trust(name: str, spec: AgentSpec, settings: Mapping[str, Any]) -> None:
     """The agent's records of aisquare's trust in ``spec``'s dir taken back, every one and
-    no record of the human's (``AgentHookTrust.record`` with none): ``agents disconnect`` and
+    no record of the human's (``AgentHookTrust.record_trust`` with none): ``agents disconnect`` and
     uninstall left all of them behind (SMOKE12 O3 reopen, seq 10437). Where they cannot be,
     they trust hooks of aisquare's that are gone, and the file is left as it was."""
     adapter = _adapter(name)
     if adapter is None or adapter.hook_trust is None or spec.settings_path is None:
         return
     with suppress(HookTrustError, OSError):
-        adapter.hook_trust.record(spec.home, spec.settings_path, settings, ())
+        adapter.hook_trust.record_trust(spec.home, spec.settings_path, settings, ())
 
 
 def remove_hooks(name: str, config_dir: Path | None = None) -> bool:

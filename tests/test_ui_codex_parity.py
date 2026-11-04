@@ -161,6 +161,8 @@ def test_a_partial_codex_install_names_what_is_missing_and_connect_fixes_it(
 def test_the_trust_row_names_its_step_and_offers_no_connect(
     codex_home: Path, tmp_path: Path
 ) -> None:
+    # Where Codex's trust cannot be recorded (a config.toml that is not TOML), Codex asks.
+    (codex_home / "config.toml").write_text("model = \n", encoding="utf-8")
     agents_service.connect("codex", codex_home)
     row = next(row for row in _codex_rows(tmp_path) if row.status is CheckStatus.warn)
     assert row.detail.startswith(f"Codex: unverified in {codex_home}")  # install.sh reads this
@@ -223,6 +225,13 @@ def test_doctor_json_carries_the_codex_rows(
 
     agents_service.connect("codex", codex_home)
     monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["--json", "doctor"])
+    rows = [row for row in json.loads(result.stdout) if row["name"] == "codex"]
+    # Its trust recorded with its hooks (SMOKE12 O3): an ok row install.sh does not stop at.
+    assert any(row["detail"].startswith("Codex: trusted in ") for row in rows), rows
+    assert all(row["status"] == "ok" for row in rows), rows
+    (codex_home / "config.toml").write_text("model = \n", encoding="utf-8")
+    agents_service.connect("codex", codex_home)
     result = CliRunner().invoke(app, ["--json", "doctor"])
     rows = [row for row in json.loads(result.stdout) if row["name"] == "codex"]
     assert any(row["detail"].startswith("Codex: unverified in ") for row in rows), rows

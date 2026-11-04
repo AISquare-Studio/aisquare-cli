@@ -320,8 +320,9 @@ def test_connect_respects_override_and_reports_native_trust(tmp_path: Path) -> N
     (directory / "AGENTS.md").write_text("wrong global instructions")
     (directory / "AGENTS.override.md").write_text("effective global instructions")
     receipt = connect("codex", directory)
-    assert receipt.imported == 1 and receipt.readiness == "unverified"
-    assert "/hooks" in receipt.detail
+    # Its trust is recorded with the hooks (SMOKE12 O3): nothing for the human to trust.
+    assert receipt.imported == 1 and receipt.readiness == "trusted"
+    assert "/hooks" not in receipt.detail and "trusted where Codex records" in receipt.detail
     with store_session() as store:
         assert [entry.text for entry in store.entries("user")] == ["effective global instructions"]
     agents.observe_hooks("codex", directory, agents.hook_fingerprint("codex", directory))

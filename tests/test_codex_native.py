@@ -153,7 +153,6 @@ def _sandbox_refused(binary: str, where: Path) -> str | None:
     return None
 
 
-@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
 def _warnings_shown(srv: Any, pane: str, shown: str) -> list[str]:
     """Each warning Codex's pane names in its footer (``⚠ N warning · f2 to view``), read one
     by one in its warnings panel, which F2 opens and Right pages; the panel closed after."""
@@ -187,6 +186,7 @@ def _a_hook_of_the_users(home: Path) -> None:
     path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
 
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
 def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     binary = shutil.which("codex")
     assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"

@@ -881,6 +881,16 @@ class HookPlace(NamedTuple):
     handler: int
 
 
+@dataclass(frozen=True)
+class HookTrustLeft:
+    """The records of aisquare's trust its agent still holds in a home once aisquare tried to
+    take them back (:meth:`AgentHookTrust.trust_left`): the agent's file, and the record of
+    each hook in it, which what disconnects or uninstalls says."""
+
+    file: Path
+    tables: tuple[str, ...]
+
+
 class AgentHookTrust(Protocol):
     """How an agent that runs a hook only once it is trusted (``capabilities.
     requires_hook_trust``) records that aisquare's own are: ``AgentAdapter.hook_trust``.
@@ -909,9 +919,17 @@ class AgentHookTrust(Protocol):
         ...
 
     def trust_in_force(self, home: Path, settings_path: Path, settings: Mapping[str, Any]) -> bool:
-        """Whether the last :meth:`record` named handlers that are still at their places in
-        ``settings`` as they were, and the agent's record trusts every one of them: what
+        """Whether the last :meth:`record_trust` named handlers that are still at their places
+        in ``settings`` as they were, each alone in its group (no handler beside it that the
+        record does not trust), and the agent's record trusts every one of them: what
         ``core.agents.integration_readiness`` reads as ``trusted``. Read-only; never raises."""
+        ...
+
+    def trust_left(self, home: Path) -> HookTrustLeft | None:
+        """The records aisquare made in config dir ``home`` that the agent's file still holds
+        as aisquare wrote them, ``None`` with none: what ``agents disconnect`` and uninstall
+        name where :meth:`record_trust` could not take them back (a read-only file), where
+        they had left them in silence (r37, finding 8). Read-only; never raises."""
         ...
 
 

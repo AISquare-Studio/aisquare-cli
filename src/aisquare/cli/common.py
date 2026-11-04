@@ -44,6 +44,7 @@ from aisquare.models import (
 )
 
 if TYPE_CHECKING:  # the ledger's model only, never loaded for another command
+    from aisquare.core.agent_adapters.types import HookTrustLeft
     from aisquare.services.token_ledger import SessionLedger
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
@@ -967,10 +968,17 @@ def _ms(value: int | None) -> str:
     return "—" if value is None else f"{value} ms"
 
 
-def emit_disconnected(name: str) -> None:
-    """Confirm an agent disconnection."""
+def emit_disconnected(name: str, *, trust_left: HookTrustLeft | None = None) -> None:
+    """Confirm an agent disconnection; with ``--json``, the records of aisquare's trust its
+    agent's file still holds, which the text says in a note (r37, finding 8)."""
     if get_state().json_output:
-        typer.echo(json.dumps({"disconnected": name}, separators=(",", ":")))
+        payload: dict[str, Any] = {"disconnected": name}
+        if trust_left is not None:
+            payload["trust_left"] = {
+                "file": str(trust_left.file),
+                "tables": list(trust_left.tables),
+            }
+        typer.echo(json.dumps(payload, separators=(",", ":")))
     else:
         stdout_console().print(f"✓ disconnected {name}")
 

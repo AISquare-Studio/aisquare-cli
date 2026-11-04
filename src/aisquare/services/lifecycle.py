@@ -2342,6 +2342,7 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
     if refusal is not None:
         raise refusal
     removals: list[HookRemoval] = []
+    trust_notes: list[tuple[Path, str]] = []
     for site in plan.hooks:
         try:
             agent_core.remove_hooks(site.agent, site.config_dir)
@@ -2350,6 +2351,12 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
             why = str(exc) or type(exc).__name__
             removals.append(HookRemoval(site.config_dir, False, why, agent=site.agent))
             continue
+        trusted = agent_core.hook_trust_left(site.agent, site.config_dir)
+        if trusted is not None:
+            # The agent's record of aisquare's trust, which went with the hooks: where it
+            # could not (a read-only config.toml), it stayed in silence (r37, finding 8). It
+            # trusts hooks that are gone, so it is said, and stops nothing.
+            trust_notes.append((site.config_dir, agent_core.hook_trust_left_note(trusted)))
         if left:
             why = f"{len(left)} aisquare hook(s) still there"
             removals.append(HookRemoval(site.config_dir, False, why, agent=site.agent))
@@ -2414,10 +2421,20 @@ def uninstall(plan: UninstallPlan) -> UninstallReport:
         purge_error=purge_error,
         answers_deleted=answers_deleted,
         plugin_answers_errors=tuple(answers_errors),
-        notes=tuple(
-            _uninstall_notes(plan, removals, purged=purged, answers_deleted=answers_deleted)
+        notes=(
+            *_uninstall_notes(plan, removals, purged=purged, answers_deleted=answers_deleted),
+            # A home the purge deleted took its config.toml, and what it held, with it.
+            *(note for where, note in trust_notes if not (purged and _inside(where, plan.home))),
         ),
     )
+
+
+def _inside(path: Path, home: Path) -> bool:
+    """Whether ``path`` is ``home`` or under it, each by its real path."""
+    try:
+        return Path(os.path.realpath(path)).is_relative_to(os.path.realpath(home))
+    except (OSError, ValueError):
+        return False
 
 
 def _delete_plugin_answers(answers: Path) -> str | None:

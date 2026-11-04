@@ -31,6 +31,7 @@ from aisquare.core.agent_adapters.types import (
     HookSpec,
     HooksSwitch,
     HookTrustError,
+    HookTrustLeft,
     InstallRoute,
     LastingInstall,
     LaunchPart,
@@ -651,6 +652,13 @@ class CodexHookTrust:
             )
         except Exception:
             return False
+
+    def trust_left(self, home: Path) -> HookTrustLeft | None:
+        try:
+            found = codex_config.trust_left(home)
+        except Exception:
+            return None
+        return HookTrustLeft(*found) if found is not None else None
 
 
 def _hooks_file_spellings(settings_path: Path) -> list[str]:

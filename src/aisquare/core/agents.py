@@ -38,6 +38,7 @@ from aisquare.core.agent_adapters.types import (
     HookSpec,
     HooksSwitch,
     HookTrustError,
+    HookTrustLeft,
     PluginInstall,
     hook_args,
 )
@@ -431,20 +432,27 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
     write_settings_text(path, text.encode("utf-8", errors="backslashreplace").decode("utf-8"))
 
 
-def write_settings_text(path: Path, body: str) -> None:
+def write_settings_text(path: Path, body: str | bytes) -> None:
     """``body`` over the agent's own file ``path`` as :func:`_write_settings` writes a hooks
     file: nothing written where it reads so already; replaced through a link; refused where
     this user may not write it; in place where a file renamed over it would not be the same
     file to everyone else (a second name, another owner or group, a mount point). Codex's
     ``config.toml`` is written so too, where aisquare records its trust of its hooks
     (``codex_config.sync_hook_trust``): a renamed one dropped a hard link's other name and
-    put a read-only file's trust in anyway (SMOKE12 O3 reopen, seq 10437)."""
+    put a read-only file's trust in anyway (SMOKE12 O3 reopen, seq 10437).
+
+    ``bytes`` land exactly as given, every platform alike; a ``str`` is text, each ``\n`` the
+    platform's line end. Given text, a ``config.toml`` with CRLF line ends came back with
+    ``\r\r\n`` on Windows, which is no TOML, and an LF one came back CRLF (r37, finding 1)."""
     snapshot = _SETTINGS_SNAPSHOT.get()
     if snapshot is not None:
         snapshot.pop(_dir_key(path), None)
     if _regular_settings(path) is not None:
         with suppress(OSError, UnicodeError):
-            if path.read_text(encoding="utf-8") == body:
+            if isinstance(body, bytes):
+                if path.read_bytes() == body:
+                    return
+            elif path.read_text(encoding="utf-8") == body:
                 return
     target = Path(os.path.realpath(path))
     there = os.path.exists(target)
@@ -467,7 +475,10 @@ def write_settings_text(path: Path, body: str) -> None:
             raise
         in_place = True  # renamed over, the file is a mount point and stays one
     if in_place:
-        target.write_text(body, encoding="utf-8")
+        if isinstance(body, bytes):
+            target.write_bytes(body)
+        else:
+            target.write_text(body, encoding="utf-8")
 
 
 def _as_it_was(target: Path, temporary: Path) -> bool:
@@ -732,6 +743,31 @@ def hook_trust_recorded(name: str, config_dir: Path | None = None) -> bool:
     except AgentSettingsError:
         return False
     return trust.trust_in_force(spec.home, spec.settings_path, settings)
+
+
+def hook_trust_left(name: str, config_dir: Path | None = None) -> HookTrustLeft | None:
+    """The records of aisquare's trust that ``name``'s file in ``config_dir`` still holds as
+    aisquare wrote them (``AgentHookTrust.trust_left``), ``None`` with none, or for an agent
+    that keeps no such record. Read-only; never raises."""
+    adapter = _adapter(name)
+    spec = _spec(name, config_dir)
+    if adapter is None or adapter.hook_trust is None or spec is None:
+        return None
+    return adapter.hook_trust.trust_left(spec.home)
+
+
+def hook_trust_left_note(left: HookTrustLeft) -> str:
+    """What ``agents disconnect`` and uninstall say of ``left``: the file and each record of
+    aisquare's in it, and why they stayed (r37, finding 8)."""
+    why = (
+        "it is read-only to you" if not os.access(left.file, os.W_OK) else "it could not be edited"
+    )
+    shown = ", ".join(left.tables)
+    return (
+        f"{left.file} still holds the trust aisquare recorded for its hooks, as {why}: "
+        f"{len(left.tables)} [hooks.state] table(s), {shown} — they trust hooks of aisquare's "
+        "that are gone; remove them there by hand"
+    )
 
 
 def _take_back_trust(name: str, spec: AgentSpec, settings: Mapping[str, Any]) -> None:

@@ -15,6 +15,7 @@ from aisquare.cli.common import (
     expected_config_write_errors,
     fail,
 )
+from aisquare.core import agents as agent_core
 from aisquare.core.agents import AgentSettingsError
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -98,7 +99,7 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
         fail(str(exc), error="agent_configuration", ref=name, detail=str(exc))
     for note in agents_service.disconnect_notes(name, config_dir, removed=removed):
         stderr_console().print(f"note: {note}")
-    emit_disconnected(name)
+    emit_disconnected(name, trust_left=agent_core.hook_trust_left(name, config_dir))
 
 
 @app.command("use")

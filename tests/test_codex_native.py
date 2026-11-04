@@ -154,6 +154,39 @@ def _sandbox_refused(binary: str, where: Path) -> str | None:
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def _warnings_shown(srv: Any, pane: str, shown: str) -> list[str]:
+    """Each warning Codex's pane names in its footer (``⚠ N warning · f2 to view``), read one
+    by one in its warnings panel, which F2 opens and Right pages; the panel closed after."""
+    count = re.search(r"⚠ (\d+) warning", shown)
+    if count is None:
+        return []
+    read: list[str] = []
+    srv.run("send-keys", "-t", pane, "F2")
+    for at in range(int(count.group(1))):
+        time.sleep(1)
+        panel = srv.run("capture-pane", "-p", "-t", pane)
+        lines = [line.strip() for line in panel.splitlines() if line.strip()]
+        head = next((n for n, line in enumerate(lines) if line.startswith("Warnings")), None)
+        read.append(" ".join(lines[head : head + 3]) if head is not None else panel)
+        if at + 1 < int(count.group(1)):
+            srv.run("send-keys", "-t", pane, "Right")
+    srv.run("send-keys", "-t", pane, "Escape")
+    time.sleep(1)
+    return read
+
+
+def _a_hook_of_the_users(home: Path) -> None:
+    """A hook of the user's own in ``home``'s hooks.json, beside aisquare's: one aisquare never
+    trusts (it records Codex's trust of the hooks it writes alone, SMOKE12 O3), so Codex opens
+    its "Hooks need review" dialog for it, as it opened it for every hook before."""
+    path = home / "hooks.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    settings["hooks"].setdefault("Stop", []).append(
+        {"hooks": [{"type": "command", "command": "/usr/bin/true"}]}
+    )
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
 def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     binary = shutil.which("codex")
     assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
@@ -671,10 +704,12 @@ def test_real_codex_panes_take_a_told_line_before_any_hook_and_the_managers_nudg
                 return row.session_id if row is not None else None
 
             until(lambda: bound() is not None, 20, "its first prompt bound the row", coder.pane_id)
-            # A Codex whose hooks are not trusted opens at the hook review, as quiet as its
+            # A Codex with a hook not trusted opens at the hook review, as quiet as its
             # prompt, which the listing reads off its screen as a dialog of its own
             # (attention, `fleet.AT_A_DIALOG`, since 57ea5994): an Enter there would answer
-            # it, so the line is a board note.
+            # it, so the line is a board note. aisquare's own hooks are trusted since
+            # SMOKE12 O3, so the one asked about is one of the user's.
+            _a_hook_of_the_users(native_home)
             untrusted = fleet.spawn(project, "coder", agent="codex", worktree=False).agent
 
             def at_the_review() -> bool:
@@ -2561,7 +2596,7 @@ def test_real_codex_on_a_slot_with_no_hooks_asks_no_hook_review_and_its_hooks_ru
             time.sleep(6)  # Codex draws a dialog of its own after its prompt (measured on 0.162.1)
             shown = screen(coder.pane_id)
             assert "Hooks need review" not in shown, shown
-            assert "embedded mode" not in shown and "⚠" not in shown, shown
+            assert "embedded mode" not in shown, shown
             until(
                 lambda: fleet.status_of(coder).state == "waiting",
                 40,
@@ -2586,6 +2621,17 @@ def test_real_codex_on_a_slot_with_no_hooks_asks_no_hook_review_and_its_hooks_ru
             until(
                 bound, 30, "the session its SessionStart hook bound", lambda: screen(coder.pane_id)
             )
+            # Each warning its footer names is read in its own panel (F2), once a turn has run:
+            # none may be the embedded-mode one `--no-daemon` keeps out. CI's 0.164.0 pane
+            # showed "⚠ 1 warning" at its start; the loopback model's missing metadata is one
+            # Codex says of `local-fixture` (measured on 0.166.0), Codex's own to say.
+            time.sleep(2)
+            shown = screen(coder.pane_id)
+            warnings = _warnings_shown(srv, coder.pane_id, shown)
+            assert all(said.startswith("Warnings") for said in warnings), (warnings, shown)
+            assert not [
+                said for said in warnings if "embedded mode" in said or "background server" in said
+            ], warnings
         finally:
             if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
                 srv.run("kill-server")
@@ -3805,6 +3851,8 @@ def test_real_codex_dialogs_no_hook_reports_are_cards_on_the_phone(
             agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
         )
         agents.install_hooks("codex", native_home)
+        # aisquare's own hooks are trusted since SMOKE12 O3: the review is for one of the user's.
+        _a_hook_of_the_users(native_home)
         config = load_config()
         config.fleet.tmux_socket = f"asq-codex-dialogs-{os.getpid()}"
         save_config(config)

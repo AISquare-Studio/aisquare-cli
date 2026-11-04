@@ -119,12 +119,13 @@ fi
 
 AGENT_FLAG=""
 [ "$SKIP_AGENT" = 1 ] && AGENT_FLAG="--no-agent"
-# What run 2 accepts as the whole amber set: nothing, and for the Codex cell the codex
-# row, whose detail is then checked to be the trust step and nothing else.
+# What run 2 accepts as the whole amber set: nothing, for the Codex cell too. Its codex row
+# was amber for the review in Codex's /hooks; since SMOKE12 O3 the install records Codex's
+# trust of the hooks it writes, where Codex's own "Trust all" does (config.toml's
+# [hooks.state]), so the row reads `trusted` and is ok, which is checked below (r37, 5).
 EXPECTED=""
 if [ "$AGENT" = codex ]; then
     AGENT_FLAG="--agent codex"
-    EXPECTED="codex"
 fi
 
 # ---------------------------------------------------------------------------
@@ -303,14 +304,15 @@ if [ "$amber" != "$EXPECTED" ]; then
     fail "expected exactly [$EXPECTED] amber, got [$amber]"
 fi
 if [ "$AGENT" = codex ]; then
-    # Amber for the review in Codex's /hooks, and for nothing else: hooks installed,
-    # never yet trusted, so never yet seen running.
+    # Ok, as `trusted`: its hooks installed and Codex's trust of them recorded with them, so
+    # nothing is left for the human to trust, and they are not yet seen running.
     codex_rows=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' | grep '"name": *"codex"' || true)
-    printf '%s\n' "$codex_rows" | grep -q '"detail": *"Codex: unverified in ' ||
-        fail "the codex row is amber for something other than the /hooks review: $codex_rows"
-    # And the summary names that step as the user's own, rather than as unexpected.
-    grep -q "codex — run codex (sign in if it asks), open /hooks and trust aisquare's hooks" \
-        "${TMPDIR:-/tmp}/run2.log" || fail "run 2's summary did not name the /hooks step"
+    printf '%s\n' "$codex_rows" | grep -q '"detail": *"Codex: trusted in ' ||
+        fail "the codex row does not say its hooks are trusted: $codex_rows"
+    # And run 2 sends nobody to /hooks for a trust already recorded.
+    if grep -q "open /hooks and trust aisquare's hooks" "${TMPDIR:-/tmp}/run2.log"; then
+        fail "run 2's summary still sends the user to /hooks"
+    fi
 fi
 head1 "ACCEPTANCE: 	 every check ok${EXPECTED:+ except $EXPECTED}"
 

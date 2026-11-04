@@ -2549,3 +2549,17 @@ def test_the_contract_names_every_member_of_the_protocol() -> None:
                 members.append(item.name)
         missing += [member for member in members if member not in named]
     assert not missing, f"name these in the core.agent_adapters package docstring: {missing}"
+
+
+def test_an_agent_records_its_hooks_trust_exactly_where_it_runs_them_only_once_trusted(
+    adapter: AgentAdapter,
+) -> None:
+    """r37, finding 13: ``hook_trust`` is how an agent records that aisquare's hooks are
+    trusted, and ``capabilities.requires_hook_trust`` says it runs a hook only once one is.
+    Each needs the other: with the flag and no slot, its hooks wait at its review on every
+    new home; with a slot and no flag, ``install_hooks`` records a trust nothing asks for."""
+    trust = adapter.hook_trust
+    assert (trust is not None) is adapter.capabilities.requires_hook_trust, adapter.id
+    if trust is not None:
+        for member in ("record_trust", "trust_in_force", "trust_left"):
+            assert callable(getattr(trust, member, None)), (adapter.id, member)

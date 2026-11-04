@@ -2902,10 +2902,10 @@ _actionable_fix() {
         # claude-code row this script did not expect is unexpected, exits 2, and
         # `summary` prints the doctor's own detail and fix for it (review of #257).
         codex)
-            # The one step this script leaves to the user on purpose: Codex runs hooks
-            # only once they are trusted, and nothing here may trust them for anyone
-            # (the doctor's wording). Only for rows that say exactly that ("unverified");
-            # any other amber codex row is unexpected, and the doctor has its fix.
+            # Codex runs hooks only once they are trusted. `agents connect` records that trust
+            # for the hooks it writes (the doctor's row then reads `trusted`, ok); this step is
+            # left to the user only where it could not (the row says "unverified"). Any other
+            # amber codex row is unexpected, and the doctor has its fix.
             if codex_awaits_trust_only; then
                 printf '%s' "run codex (sign in if it asks), open /hooks and trust aisquare's hooks"
             fi
@@ -3203,7 +3203,8 @@ Exit codes
 
 Not installed, on purpose: explainability tracing (off unless asked for), and
 any credential — `claude`, `codex` and `gh auth login` do their own. Codex runs
-aisquare's hooks once you trust them in its /hooks menu.
+aisquare's hooks once they are trusted: the install records that trust where Codex's own
+review does, and where it cannot, Codex asks at its start (or open its /hooks menu).
 USAGE
 }
 

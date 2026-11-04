@@ -489,6 +489,8 @@ def sync_hook_trust(home: Path, places: Sequence[TrustPlace]) -> list[str]:
     record = _read_record(home)
     owned = dict(record["tables"])
     wanted = {key: place.digest for place in places if place.digest for key in place.keys}
+    # The file's own line end for every line added: a CRLF file stays CRLF, an LF one LF.
+    nl = "\r\n" if "\r\n" in text else "\n"
     expected = copy.deepcopy(before)
     changed: list[str] = []
     for key, digest in wanted.items():
@@ -499,15 +501,15 @@ def sync_hook_trust(home: Path, places: Sequence[TrustPlace]) -> list[str]:
             )
         if entry is None:
             if text and not text.endswith("\n"):
-                text += "\n"
+                text += nl
             header = f"[hooks.state.{json.dumps(key, ensure_ascii=False)}]"
-            text += ("\n" if text else "") + f"{header}\ntrusted_hash = {json.dumps(digest)}\n"
+            text += (nl if text else "") + f"{header}{nl}trusted_hash = {json.dumps(digest)}{nl}"
             expected.setdefault("hooks", {}).setdefault("state", {})[key] = {"trusted_hash": digest}
         elif entry.get("trusted_hash") == digest:
             owned[key] = digest
             continue
         elif key in owned and entry.get("trusted_hash") == owned[key]:
-            text = _set_hash(text, ("hooks", "state", key), digest)
+            text = _set_hash(text, ("hooks", "state", key), digest, nl)
             expected["hooks"]["state"][key]["trusted_hash"] = digest
         else:
             owned.pop(key, None)  # the human's: their hook to review
@@ -532,7 +534,7 @@ def sync_hook_trust(home: Path, places: Sequence[TrustPlace]) -> list[str]:
             raise HookTrustError("its config.toml cannot take a [hooks.state] table") from None
         if _pruned(after) != _pruned(expected):
             raise HookTrustError("its config.toml would read otherwise with the trust recorded")
-        _write_hook_state(config, text, made=not raw)
+        _write_hook_state(config, text.encode("utf-8"), made=not raw)
     _write_record(home, {place.place: place.digest for place in places}, owned)
     return changed
 
@@ -541,8 +543,9 @@ def hook_trust_in_force(
     home: Path, settings: Mapping[str, Any], spelt: Sequence[Path | str]
 ) -> bool:
     """Whether the handlers aisquare last recorded (:data:`TRUST_RECORD`) are each still at
-    its place in ``settings`` with the hash it recorded, every one known, and ``home``'s
-    ``config.toml`` trusts each of them under every path in ``spelt``. Read-only."""
+    its place in ``settings`` with the hash it recorded, every one known and alone in its
+    group as aisquare wrote it, and ``home``'s ``config.toml`` trusts each of them under every
+    path in ``spelt``. Read-only."""
     record = _read_record(home)
     if not record["places"]:
         return False
@@ -560,6 +563,10 @@ def hook_trust_in_force(
             return False
         if not set(group) <= {"matcher", "hooks"}:
             return False  # not the group aisquare wrote: a key past what Codex hashes
+        if len(group["hooks"]) != 1:
+            # A handler put beside aisquare's in its group is no record's: Codex asks about it
+            # at its start, so this home's hooks are not all trusted (r37, finding 9).
+            return False
         if hook_hash(event, group, handler) != digest:
             return False
         for file in spelt:
@@ -570,6 +577,21 @@ def hook_trust_in_force(
             if state.get("trusted_hash") != digest:
                 return False
     return True
+
+
+def trust_left(home: Path) -> tuple[Path, tuple[str, ...]] | None:
+    """``home``'s ``config.toml`` and the tables :data:`TRUST_RECORD` says aisquare wrote that
+    it still holds with aisquare's hash, ``None`` with none. Read-only."""
+    record = _read_record(home)
+    if not record["tables"]:
+        return None
+    states = hook_states(home)
+    tables = tuple(
+        key
+        for key, digest in record["tables"].items()
+        if isinstance(states.get(key), dict) and states[key].get("trusted_hash") == digest
+    )
+    return (home / "config.toml", tables) if tables else None
 
 
 def _read_record(home: Path) -> dict[str, dict[str, Any]]:
@@ -613,15 +635,16 @@ def _write_record(home: Path, places: Mapping[str, str | None], tables: Mapping[
         raise HookTrustError(f"its {TRUST_RECORD} could not be written ({exc})") from exc
 
 
-def _write_hook_state(config: Path, text: str, *, made: bool) -> None:
-    """``text`` over ``config`` as ``core.agents`` writes a hooks file; owner-only if made."""
+def _write_hook_state(config: Path, body: bytes, *, made: bool) -> None:
+    """``body`` over ``config`` as ``core.agents`` writes a hooks file, the bytes as they are on
+    every platform (each line its file's own line end); owner-only where it is made."""
     from aisquare.core import agents, atomic
 
     try:
         if made and not config.exists():
-            atomic.write_replacing(config, text.encode("utf-8"), owner_only=True)
+            atomic.write_replacing(config, body, owner_only=True)
         else:
-            agents.write_settings_text(config, text)
+            agents.write_settings_text(config, body)
     except (OSError, ValueError) as exc:  # AgentSettingsError (not a regular file) is a ValueError
         raise HookTrustError(f"its config.toml could not be written ({exc})") from exc
 
@@ -691,16 +714,17 @@ def _hash_line(lines: list[str], start: int, end: int) -> int | None:
     return None
 
 
-def _set_hash(text: str, path: tuple[str, ...], digest: str) -> str:
+def _set_hash(text: str, path: tuple[str, ...], digest: str, nl: str = "\n") -> str:
     """``text`` with the ``trusted_hash`` of table ``path`` set to ``digest``: its line's value
-    replaced, what follows it kept, else a line put under the header."""
+    replaced, what follows it (a comment, its line end) kept, else a line put under the
+    header, ending in ``nl``, the file's own line end."""
     lines = text.splitlines(keepends=True)
     start, end = _table(lines, path)
     at = _hash_line(lines, start, end)
     if at is None:
         if not lines[start].endswith("\n"):
-            lines[start] += "\n"
-        lines.insert(start + 1, f"trusted_hash = {json.dumps(digest)}\n")
+            lines[start] += nl
+        lines.insert(start + 1, f"trusted_hash = {json.dumps(digest)}{nl}")
         return "".join(lines)
     match = _HASH_LINE.match(lines[at])
     if match is None:

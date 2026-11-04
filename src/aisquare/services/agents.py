@@ -171,6 +171,11 @@ def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool
             "no aisquare hooks found in that config dir — if you connected with "
             "--config-dir, disconnect with the same one"
         )
+    left = agent_core.hook_trust_left(name, config_dir)
+    if left is not None:
+        # The agent's record of aisquare's trust, which disconnect takes back with the hooks:
+        # where it could not, it stayed in silence (r37, finding 8).
+        notes.append(agent_core.hook_trust_left_note(left))
     return notes
 
 

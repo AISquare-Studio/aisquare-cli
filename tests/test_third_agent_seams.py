@@ -2541,6 +2541,9 @@ def test_connect_asks_an_agent_that_trusts_hooks_to_record_its_own_trust(
         def trust_in_force(self, home: Path, settings_path: Path, settings: Any) -> bool:
             return bool(asked and asked[-1][2])
 
+        def trust_left(self, home: Path) -> None:
+            return None
+
     class Trusting(GeminiShapedAdapter):
         capabilities: AgentCapabilities = replace(
             GeminiShapedAdapter.capabilities, requires_hook_trust=True

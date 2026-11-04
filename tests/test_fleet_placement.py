@@ -72,6 +72,11 @@ MADE: dict[str, dict[str, str]] = {
             "SSH login stops its agent (0.9.2's #20, `_refuse_a_server_start_from_ssh`); "
             "nothing named"
         ),
+        "switch": (
+            "today's socket, asked as `restart` asks it, for the agent the replacement runs, "
+            "before a switch or the automatic hand-over stops its agent (0.9.2's #20, "
+            "`_refuse_a_server_start_from_ssh`; review r36 of #113, finding 1); nothing named"
+        ),
     },
     "services/diagnostics.py": {
         "_check_tmux": "the default socket: is tmux installed, which version",

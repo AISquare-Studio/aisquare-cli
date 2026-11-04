@@ -2468,6 +2468,133 @@ def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothi
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_on_a_slot_with_no_hooks_asks_no_hook_review_and_its_hooks_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE12 O1, O3 and O4 of #113, on real Codex with only loopback and no hook-trust
+    bypass: a coder spawned onto a Codex slot with no ``hooks.json`` (a hand-made one, past
+    ``accounts add``) has its hooks installed and trusted first, so Codex 0.164.0 and 0.166.0
+    open no "Hooks need review" dialog, and its launch's ``--no-daemon`` leaves 0.166.0 no
+    "requires embedded mode" warning to show. A told line runs, and the session its own
+    ``SessionStart`` hook registered binds the row: its hooks ran."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    root = os.path.realpath(repo)
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            if not self.path.endswith("/responses"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            requests.append(json.loads(raw))
+            _answer(self, _message("ok"))
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        slot = accounts_core.create_account("codex")
+        (slot.config_dir / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(root)}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        assert not (slot.config_dir / "hooks.json").exists()
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-hookless-{os.getpid()}"
+        save_config(config)
+        project = team.activate(repo)
+        srv = fleet.server(config.fleet)
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, shown: Any) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{shown()}")
+                time.sleep(0.2)
+
+        try:
+            receipt = fleet.spawn(
+                project, "coder", agent="codex", worktree=True, account=str(slot.slot)
+            )
+            coder = receipt.agent
+            assert any("hooks were not installed" in note for note in receipt.notes), receipt
+            assert agents.hooks_installed("codex", slot.config_dir)
+            assert len(codex_config.hook_states(slot.config_dir)) == len(
+                get_adapter("codex").capabilities.hooks
+            )
+
+            def at_its_prompt() -> bool:
+                lines = [line.strip() for line in screen(coder.pane_id).splitlines() if line]
+                return any("? for shortcuts" in line for line in lines[-3:])
+
+            until(at_its_prompt, 60, "its prompt", lambda: screen(coder.pane_id))
+            time.sleep(6)  # Codex draws a dialog of its own after its prompt (measured on 0.162.1)
+            shown = screen(coder.pane_id)
+            assert "Hooks need review" not in shown, shown
+            assert "embedded mode" not in shown and "⚠" not in shown, shown
+            until(
+                lambda: fleet.status_of(coder).state == "waiting",
+                40,
+                "its row waiting",
+                lambda: screen(coder.pane_id),
+            )
+            told = fleet.tell(project, coder.label, "reply ok")
+            assert told.delivered, told
+            until(
+                lambda: any("reply ok" in _user_texts(request) for request in requests),
+                30,
+                "the told line ran",
+                lambda: screen(coder.pane_id),
+            )
+
+            def bound() -> bool:
+                with store_session() as store:
+                    row = store.get_fleet_agent(coder.id)
+                    session = store.get_session(row.session_id) if row and row.session_id else None
+                return session is not None and session.agent == "codex"
+
+            until(
+                bound, 30, "the session its SessionStart hook bound", lambda: screen(coder.pane_id)
+            )
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            server.shutdown()
+            thread.join(timeout=2)
+            _stop_app_servers(slot.config_dir)
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
 def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

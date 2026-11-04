@@ -5566,6 +5566,14 @@ def spawn(
             home,
             _window_path(config, selected.profile.env),
         )
+    # Its hooks where its window starts, installed now where they are not: started with none,
+    # its session never reached the board (SMOKE12 O1 of #113).
+    _hooks_installed_first(
+        selected.adapter,
+        choice.account.config_dir if choice.account is not None else selected.config_dir,
+        cwd or project.root,
+        notes,
+    )
     # The spawn goes ahead: the codename names its tmux session and its branch. A
     # directory with no live row, never seen or forgotten, is captured for it
     # (`ensure_codename`), not listed, and a worktree or a window that then cannot
@@ -13717,6 +13725,7 @@ def switch(
             onto,
             home=target.config_dir if target is not None else None,
             branch=agent.branch,
+            notes=notes,
         )
         fresh = True
         notes.append(_crossing_note(kind, onto))
@@ -13740,7 +13749,9 @@ def switch(
                 f"{claude_accounts_core.agent_label(kind)} cannot resume a thread under "
                 "another account's home — the replacement starts fresh with a hand-off prompt"
             )
-        _refuse_a_replay_that_cannot_start(project, record, target.config_dir, branch=agent.branch)
+        _refuse_a_replay_that_cannot_start(
+            project, record, target.config_dir, branch=agent.branch, notes=notes
+        )
     try:
         # The replacement's window opens in the fleet's server, which from SSH on macOS starts
         # for no agent whose login is in the Keychain, and which an SSH login started takes
@@ -13994,13 +14005,16 @@ def _refuse_a_cross_agent_start(
     home: Path | None,
     branch: str | None,
     role: str | None = None,
+    notes: list[str] | None = None,
 ) -> None:
     """Raise now what starting ``record``'s role (or ``role``) fresh on ``onto`` would
     refuse — BEFORE its agent is stopped, as :func:`_refuse_a_replay_that_cannot_start`
     asks a replay's: the binary the role resolves for that agent and whether it is
     installed, a sandbox that may
     write an aisquare its hooks or broker run (under ``home``, the account it starts on),
-    a bound file it cannot read, a tree that is gone with no branch, a freed socket. The SSH
+    its hooks there, installed now where they are not (:func:`_hooks_installed_first`, its
+    note in ``notes``), a bound file it cannot read, a tree that is gone with no branch, a
+    freed socket. The SSH
     rules of #20 for ``onto`` are its callers' to ask, after it, once for every agent they
     may start on (:func:`_refuse_a_server_start_from_ssh`): :func:`switch` and
     :func:`restart`."""
@@ -14025,6 +14039,13 @@ def _refuse_a_cross_agent_start(
             home or selected.config_dir,
             _window_path(None, selected.profile.env),
         )
+    _hooks_installed_first(
+        selected.adapter,
+        home or selected.config_dir,
+        Path(record.cwd),
+        notes,
+        nothing="nothing was stopped",
+    )
     _refuse_an_env_file_it_cannot_read(runs_as)
     tree = Path(record.cwd)
     if record.worktree and not tree.exists():
@@ -14347,6 +14368,56 @@ def _window_path(
     return os.environ.get("PATH")
 
 
+def _hooks_installed_first(
+    adapter: AgentAdapter,
+    home: Path,
+    cwd: Path,
+    notes: list[str] | None,
+    *,
+    nothing: str = "nothing was started",
+) -> None:
+    """aisquare's hooks in ``home``, the config dir the agent's window starts under, before
+    anything is started there, or stopped for it: installed now where they are not, and the
+    launch refused, saying why, where they cannot be (``nothing`` says what was left as it
+    was). Installed, the agent's record of their trust is made too where it keeps one
+    (``agents.trust_hooks``: Codex's ``[hooks.state]``), which ``install_hooks`` makes with
+    them; where that record cannot be made, the agent asks at its start, and ``NEEDS YOU``
+    says so.
+
+    A hop onto a Codex slot with no ``hooks.json`` (made by hand, past the install ``accounts
+    add`` does) started an agent with no hook: no session registered, its claim stayed on the
+    ended one, no board update reached it, and nothing said so (SMOKE12 O1 of #113). A home
+    whose own config switches every hook off (``agents.hooks_disabled``) is the operator's
+    choice, and is left to the doctor's row that names it. A config dir that is not there yet
+    is one the agent never ran in, with no login to start on unattended: its first start
+    makes it, at the agent's sign-in, and ``agents connect`` installs its hooks."""
+    if not adapter.capabilities.hooks or agent_core.hooks_disabled(adapter.id, home):
+        return
+    if not home.is_dir():
+        return
+    if agent_core.connected(adapter.id, home, cwd=cwd):
+        with suppress(Exception):
+            agent_core.trust_hooks(adapter.id, home)
+        return
+    try:
+        installed = agent_core.install_hooks(adapter.id, home)
+    except Exception as exc:
+        reason: object = exc
+    else:
+        reason = None if installed else "it has no hooks file there"
+    if reason is not None:
+        raise FleetError(
+            f"{adapter.label}'s hooks are not installed in {home} and could not be ({reason}): "
+            f"an agent started there would run blind, with no session on the board — "
+            f"{nothing}; `aisquare agents connect {adapter.id} --config-dir {home}` installs them"
+        )
+    if notes is not None:
+        notes.append(
+            f"{adapter.label}'s hooks were not installed in {home} — installed them before it "
+            "started there"
+        )
+
+
 def _refuse_an_install_the_sandbox_writes(
     argv: list[str],
     cwd: Path,
@@ -14496,6 +14567,7 @@ def _refuse_a_replay_that_cannot_start(
     permission_mode: str | None = None,
     branch: str | None = None,
     pick: model_memory.Pick | None = None,
+    notes: list[str] | None = None,
 ) -> None:
     """Raise now what replaying ``record`` would refuse — BEFORE its agent is stopped.
 
@@ -14527,6 +14599,9 @@ def _refuse_a_replay_that_cannot_start(
     :func:`spawn` passes them; a Codex effort that is no level name was refused there, after
     the stop, and the agent lost (tester-43d on #43 reopen 3).
 
+    Its hooks under that home are installed now where they are not, its note in ``notes``,
+    and a home they cannot be installed in refused (:func:`_hooks_installed_first`): a
+    switch onto a slot with no ``hooks.json`` started an agent blind (SMOKE12 O1 of #113).
     And every other refusal :func:`spawn` gives before a window opens: a bound file it
     cannot read, and a socket path a running server lost (:func:`_refuse_a_freed_socket`).
     That one was asked only inside the spawn, after the stop had typed ``/exit``: an agent
@@ -14557,6 +14632,7 @@ def _refuse_a_replay_that_cannot_start(
             _replay_slot(selected.adapter, record.spec, pick or model_memory.Pick())
         except ValueError as exc:
             raise FleetError(f"{exc} — nothing was stopped") from exc
+    account = home or (Path(record.account_home) if record.account_home else None)
     if selected.adapter.capabilities.sandboxes_tools:
         # The agent's arguments as its window's `launch` passes them: after the `--` of
         # the recorded command line (the extra ones, for a record from before there was one);
@@ -14570,7 +14646,6 @@ def _refuse_a_replay_that_cannot_start(
                 selected.adapter, record, record.label or "", permission_mode
             )
             native = [*given, *record.spec.extra_args]
-        account = home or (Path(record.account_home) if record.account_home else None)
         _refuse_an_install_the_sandbox_writes(
             [record.binary, *native],
             Path(record.cwd),
@@ -14578,6 +14653,13 @@ def _refuse_a_replay_that_cannot_start(
             account or selected.config_dir,
             _window_path(None, selected.profile.env),
         )
+    _hooks_installed_first(
+        selected.adapter,
+        account or selected.config_dir,
+        Path(record.cwd),
+        notes,
+        nothing="nothing was stopped",
+    )
     _refuse_an_env_file_it_cannot_read(record.role)
     tree = Path(record.cwd)
     if record.worktree and not tree.exists():
@@ -14977,6 +15059,7 @@ def restart(
     replays = recorded_adapter(record.agent)
     runs_as = role or record.role
     onto = _crossing_to(record, to_agent, label)
+    installed: list[str] = []  # the hooks installed before the stop (SMOKE12 O1), noted
     if onto is not None and permission_mode is not None:
         raise FleetError(
             f"cannot restart {label!r} onto {claude_accounts_core.agent_label(onto)} with a "
@@ -14998,6 +15081,7 @@ def restart(
                 permission_mode=permission_mode,
                 branch=agent.branch,
                 pick=model_memory.Pick(model, effort),
+                notes=installed,
             )
         else:
             # What else `spawn` asks of another role, and the take-over's own rule: it
@@ -15026,9 +15110,20 @@ def restart(
                 home=choice.account.config_dir if choice.account is not None else None,
                 branch=agent.branch,
                 role=runs_as,
+                notes=installed,
             )
         elif replays is None or replays.accounts is not None:
             choice = _replacement_account(account, slot, role=runs_as, project=project, whose=whose)
+            if replays is not None and choice.account is not None:
+                # The account it restarts on, which a take-over's `account` may make another
+                # than the record's: its hooks there before anything is stopped (SMOKE12 O1).
+                _hooks_installed_first(
+                    replays,
+                    choice.account.config_dir,
+                    Path(record.cwd),
+                    installed,
+                    nothing="nothing was stopped",
+                )
         # The replacement's spawn opens its window where no server may listen: from SSH on
         # macOS it would refuse to start one there for an agent whose login is in the
         # Keychain, or join one an SSH login started, so the restart refuses now, with the
@@ -15042,6 +15137,7 @@ def restart(
     # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
     # asks the same ladder and gives them itself.
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
+    notes += dict.fromkeys(installed)
     if onto is not None:
         fresh = True
         notes.append(_crossing_note(record.agent, onto))

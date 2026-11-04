@@ -3819,12 +3819,19 @@ class SqliteStore:
         is ``'switching'`` and was written after ``held_after``, which is the
         caller's rule (``fleet._handed_over``: after the row being moved was
         created, and within the grace). Then nothing is written and this returns
-        False. Otherwise it is the heartbeat :meth:`touch_session` is, with the
-        mark as its state, and returns True. A session row that is not there
-        returns False too, as there is nothing to mark.
+        False. Otherwise the mark is the state and ``last_seen_at`` is stamped,
+        and this returns True. A session row that is not there returns False too,
+        as there is nothing to mark.
+
+        A row that ENDED stays ended: the mark is no sign of life. It was the
+        heartbeat :meth:`touch_session` is, which clears ``ended_at``, so a switch
+        of an agent whose session had ended (its replacement started with no hooks
+        to register one) brought that session back to the board as a live
+        teammate, for good: the window it stopped fired no ``SessionEnd`` to end it
+        again (SMOKE12 O1 of #113).
         """
         cursor = self._conn.execute(
-            "UPDATE team_session SET state = 'switching', last_seen_at = ?, ended_at = NULL "
+            "UPDATE team_session SET state = 'switching', last_seen_at = ? "
             "WHERE id = ? AND NOT (state = 'switching' AND last_seen_at > ?)",
             (_now_iso(), session_id, held_after.astimezone(UTC).isoformat()),
         )

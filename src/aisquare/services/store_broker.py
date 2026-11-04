@@ -1304,30 +1304,51 @@ def launch_scope(cwd: Path, environ: Mapping[str, str]) -> Scope:
     its project's pool (``workspace.current_project``, never a ``project switch`` pin); and
     its tree: its checkout and its project's principal one, a fleet agent's launch record's
     directories too (``core.launch_seal``, read-only to the sandbox), so a hand launch in a
-    subdirectory may still run a call from its project's directory (finding 8)."""
+    subdirectory may still run a call from its project's directory (finding 8). The
+    launch's own directory is in its tree whatever it is, as its sandbox writes it; the home,
+    a directory above it or a filesystem root that git, a marker or a launch record's project
+    names is not (:func:`_project_root`)."""
     from aisquare.core import launch_seal
     from aisquare.core.orchestrator import team_project
     from aisquare.core.workspace import current_project, find_project_root, git_common_root
 
     roots: list[Path] = [cwd]
-    top = _tree_top(cwd)
-    if top is not None:
-        roots.append(top)
+    found: list[Path | None] = [_tree_top(cwd)]
     with suppress(Exception):
-        principal = git_common_root(cwd)
-        if principal is not None:
-            roots.append(principal)
+        found.append(git_common_root(cwd))
     with suppress(Exception):
-        roots.append(find_project_root(cwd))  # a non-git project's marker (r12, finding 13)
+        found.append(find_project_root(cwd))  # a non-git project's marker (r12, finding 13)
+    roots += [root for root in found if root is not None and _project_root(root)]
     agent = environ.get("AISQUARE_FLEET_AGENT", "").strip()
     if agent:
         record = launch_seal.read(agent)
         if isinstance(record, launch_seal.LaunchRecord):
-            roots += [Path(record.project_root), Path(record.cwd)]
+            # its directory whatever it is; its project's root as git or a marker named it
+            project = Path(record.project_root)
+            roots += [project] if _project_root(project) else []
+            roots.append(Path(record.cwd))
     board = team_project(cwd).id
     pool = current_project(cwd).id
-    real = tuple(dict.fromkeys(found for found in (_real(root) for root in roots) if found))
+    real = tuple(dict.fromkeys(there for there in (_real(root) for root in roots) if there))
     return Scope(board, pool, real, identities=tuple(_identity_of(root) for root in real))
+
+
+def _project_root(found: Path) -> bool:
+    """Whether ``found``, the root git, a project marker or a launch record names for a
+    launch, is a tree :func:`launch_scope` may take: not the home, a directory above it or a
+    filesystem root, as ``workspace.real_project_root`` refuses them. A dotfiles ``~/.git``
+    made the whole home the tree of a launch in a folder of it that is no checkout,
+    ``~/.codex`` and ``~/.ssh`` in it: ``--detail-file`` and ``--artifact`` read them, past a
+    ``deny_read`` of the sandbox's (review r39 of #113, finding 1). A launch in the home
+    itself still has it for its tree, as its own directory."""
+    there = _resolved(found)
+    if there == Path(there.anchor):
+        return False
+    try:
+        home = _resolved(Path.home())
+    except RuntimeError:  # no home to be told: a filesystem root is still refused
+        return True
+    return not home.is_relative_to(there)
 
 
 def _identity_of(root: Path) -> str:

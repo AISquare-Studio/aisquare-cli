@@ -727,7 +727,11 @@ adapter.**
   outside the tree, a link out of it, a FIFO, a device or a larger file is refused,
   saying why and none of the file. So the broker, which reads as the user outside the
   sandbox, puts no file outside the agent's tree on the board, and a sandbox's
-  `deny_read` of a path outside the tree (`~/.codex`) holds. One of a path inside the
+  `deny_read` of a path outside the tree (`~/.codex`) holds. The tree is the launch's
+  own directory and the checkout and project it is in, never the home, a directory
+  above it or `/` that git or a project marker names (a dotfiles `~/.git` made a launch
+  in `~/scratch` take the whole home, `~/.codex` and `~/.ssh` in it); a launch in the
+  home itself has the home. One of a path inside the
   tree does not: the broker reads any regular file of the tree the user may, and a hard
   link in the tree to a file outside it is not told from the tree's own. A path option
   of those commands (`--detail-file`, `--artifact`, `brief check --source-root`, `watch

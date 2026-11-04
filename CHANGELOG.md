@@ -198,9 +198,10 @@ adapter.**
   `core.process_table` is one module for `fleet top`'s machine-wide table and this line's pane
   holdings, and `AgentAccounts.usage` takes main's `fresh` re-read. Where this line's rules
   meet main's new behaviour they stand: a rename renames the sessions the launch records name,
-  by tmux's id (one made by hand is left), a row that ran under the plain home comes back on
-  its plain slot by name, and over SSH an old reading over the line is a floor to the pick.
-  On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask
+  by tmux's id (one made by hand is left), and a row that ran under the plain home comes back
+  on its plain slot by name. Over SSH a launch, a Claude Code one too, takes the Mac's readings
+  over the line as floors, and with no live figure the least full of them, where main takes the
+  default (the manager's ruling, 2026-11-03, on this line's floor rule of 2026-10-26). On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask
   the item of a slot whose agent keeps its login in the Keychain (`keychain_login`) alone.
   - **Through the adapter**, tested on Codex: a pause exits a Codex agent through its own exit
     command and parks its claims on its thread, and a resume brings the thread back (`codex …
@@ -215,8 +216,8 @@ adapter.**
     names the one command its agents share or says each is sent its own, as `fleet stop`'s and
     `fleet pause`'s help do, a bulk receipt's "its /quit was sent", and Remote's Stop sheet,
     from the `exit_command` each agent of `fleet ls --json` and each needs card now carries;
-    a project rename renames the sessions
-    its launch records name, by tmux's id; `fleet top` reads its spend off its rollout by its
+    a project rename renames the sessions its launch records name, by tmux's id, and its old
+    codename still finds it in every agent's `--project`; `fleet top` reads its spend off its rollout by its
     own reader, and its processes as its pane's tree; a tell (typed, or queued to a busy Codex
     by `codex queue`, whose marker a queue that failed takes back), a spawn's first message, a
     wake and the upkeep line leave the marker its `UserPromptSubmit` records as its turn's
@@ -230,7 +231,8 @@ adapter.**
     hook's continuation, an Esc, an approval refused, a patch applied), so its week counts its
     files edited, interrupts and denials, and a turn from before origins were recorded has its
     origin inferred, as a Claude Code session's does. Main's hook launcher change (its pinned
-    release) is in the Codex plugin's copy too. From an SSH login on macOS a Codex spawn starts the
+    release) is in the Codex plugin's copy too, and CI is main's with its Dependabot bumps, this
+    line's Codex native job and ambient Codex steps inside it. From an SSH login on macOS a Codex spawn starts the
     fleet's tmux server and the agent in it: whether a server may be started there is the agent's
     accounts fact `AgentAccounts.keychain_login` (Claude Code's login is in the Keychain, Codex's
     `auth.json` is a file), and a server an SSH login started is marked, so no agent whose login is

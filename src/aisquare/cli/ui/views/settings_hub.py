@@ -4,10 +4,10 @@ Seven links, each a button with one line saying what is behind it — *App
 settings* (the machine-wide settings, ``views.app_settings``), *Remote control* and
 *Captain* (App settings again, on its *Remote* tab and on the *Agent settings* tab the
 captain's box tops: one obvious way in to each, #41), *Accounts* (the AISquare sign-in
-and the Claude Code and Codex accounts, ``views.accounts``), *Usage & stats* (what the
-Claude Code sessions on this machine spent, ``views.usage_stats``), *Agent resources* (what
-each live agent consumes, ``views.resources``) and *Doctor* (the checks, which opening it
-runs). A link posts the message the app routes; the pages it opens keep *⚙ Settings*
+and the Claude Code and Codex accounts, ``views.accounts``), *Usage & stats* (what all
+your agents' sessions on this machine spent, ``views.usage_stats``), *Agent resources*
+(what each live agent consumes, ``views.resources``) and *Doctor* (the checks, which
+opening it runs). A link posts the message the app routes; the pages it opens keep *⚙ Settings*
 highlighted in the sidebar. ↑/↓ move between the links, Enter or a click opens one.
 
 Under them, *Fleet*: *Restart all…* and *Stop all…*, for every running agent of every

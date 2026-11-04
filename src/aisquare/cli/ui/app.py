@@ -3288,12 +3288,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _stop_at_once(self, project: ProjectInfo, agent: FleetAgent) -> None:
         """``[ui] confirm_stop`` is off: the stop the dialog's Stop runs, with no dialog.
 
-        Graceful (``/exit``, no Force), every agent alike — the manager and the captain
-        too (the owner's decision, 2026-10-30) — off the UI thread and pinned to the row
-        (:func:`stop.start_stop`). A second press for the same row while it runs does
-        nothing: the first is already doing what it asks, and its ``stopping …`` toast says
-        so until the stop answers. A timeout would say it for less than the grace alone
-        (review of #477, m1), so the toast is held and taken down with the answer.
+        Graceful (its agent's exit command, ``fleet_service.exit_command_for``, no Force),
+        every agent alike — the manager and the captain too (the owner's decision,
+        2026-10-30) — off the UI thread and pinned to the row (:func:`stop.start_stop`). A
+        second press for the same row while it runs does nothing: the first is already doing
+        what it asks, and its ``stopping …`` toast says so until the stop answers. A timeout
+        would say it for less than the grace alone (review of #477, m1), so the toast is held
+        and taken down with the answer.
         """
         if agent.id in {row.id for row, _toast in self._quick_stops.values()}:
             return

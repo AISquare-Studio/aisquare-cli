@@ -2871,9 +2871,10 @@ class Sidebar(Vertical):
         same constant, not a copy of it. A lost row is an ordinary selectable
         row, so without this the key offered exactly the Stop the button
         refuses; and ``stop`` does not decline such a row, it ends it outright
-        with no ``/exit`` and no grace, which is ``fleet reap``'s outcome and
-        outside this task (found by coder3a-1 before the PR opened). An exited
-        row IS offered: its dead window is what Stop removes there (#138).
+        with no exit command (``fleet_service.exit_command_for``) and no grace, which
+        is ``fleet reap``'s outcome and outside this task (found by coder3a-1 before the
+        PR opened). An exited row IS offered: its dead window is what Stop removes there
+        (#138).
         """
         key = self.selected_key
         if key is None or not key.startswith("agent:") or self.last_frame is None:

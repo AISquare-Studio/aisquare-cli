@@ -47,6 +47,7 @@ import typer
 from typer.core import TyperGroup, TyperOption
 
 from aisquare.cli.common import USAGE_ERROR, expected_home_creation_errors, fail
+from aisquare.cli.native_args import PassthroughCommand
 from aisquare.core.names import undecodable_argument
 from aisquare.core.state import get_state
 from aisquare.core.store import (
@@ -227,6 +228,41 @@ def _value_taking_root_options(command: Any) -> set[str]:
     return opts
 
 
+def passes_through(command: Any) -> bool:
+    """Whether ``command`` hands what follows its ``--`` to another program as given
+    (``cli.native_args.PassthroughCommand``), which then asks its own parameters itself."""
+    return isinstance(command, PassthroughCommand)
+
+
+def _named_command(root: Any, words: list[str]) -> Any:
+    """The command ``words`` name below ``root``, walked by name past each group's options
+    (and the value of one that takes a value); ``None`` when they name no command."""
+    group, skip = root, False
+    for word in words:
+        if skip:
+            skip = False
+        elif word.startswith("-"):
+            skip = "=" not in word and word in _value_taking_root_options(group)
+        else:
+            group = getattr(group, "commands", {}).get(word)
+            if group is None or not isinstance(group, TyperGroup):
+                return group
+    return None
+
+
+def checked_arguments(root: Any, args: list[str]) -> list[str]:
+    """What of ``args`` must be text: all of it, but what follows the ``--`` after a command
+    that hands it to another program (:func:`passes_through`), which never reaches the
+    store, the log or the screen as aisquare's own text (manager's ruling on r39's
+    reopen): ``asq exec -- grep $'\\xff' f`` runs. Before the ``--``, and after one of any
+    other command (``task add -- -x``, a title), each argument is still asked."""
+    if "--" not in args:
+        return args
+    cut = args.index("--")
+    command = _named_command(root, args[:cut])
+    return args[:cut] if command is not None and passes_through(command) else args
+
+
 def _json_led(args: Any, value_taking: frozenset[str] = frozenset()) -> bool:
     """True when ``--json`` appears among the root's own options before the
     first non-flag token (the attempted subcommand name).
@@ -354,10 +390,13 @@ class GlobalFlagsGroup(TyperGroup):
         command, before any of it runs (``core.names.undecodable_argument``): the store, the
         log and the board hold only text, and each command that met one raised the codec's
         error as a traceback or as its reason (review r39 of #113, finding 6, reopened).
+        What follows a ``--`` that another program takes is not asked
+        (:func:`checked_arguments`).
         """
         original_args = list(args)
         try:
-            undecodable = undecodable_argument([str(token) for token in original_args])
+            words = [str(token) for token in original_args]
+            undecodable = undecodable_argument(checked_arguments(self, words))
             if undecodable is not None:
                 raise USAGE_ERROR(undecodable, ctx)
             return super().parse_args(ctx, args)

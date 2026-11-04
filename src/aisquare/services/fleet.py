@@ -5070,7 +5070,14 @@ def spawn(
     columns at which Claude Code opens its diff panel on its own (#149). A
     window tmux would not resize to that size still runs, at its session's
     size, and a note says so (``WindowInfo.resize_refused``).
+
+    ``agent_args`` are taken as given (after a ``--`` the CLI asks nothing of them:
+    ``cli.global_flags.checked_arguments``), but a byte in one that is not UTF-8 is written
+    as its escape (``core.names.as_text``) before anything is made of them: the launch
+    record and the row hold only text, and the window runs what they hold, so a restart
+    replays what the spawn ran (one held raw failed the record's write: r39 reopen of #113).
     """
+    agent_args = [names_core.as_text(argument) for argument in agent_args]
     config = settings()
     _require_role(role)
     # Before anything starts: an agent's spawn may not hand its agent a /model or /effort

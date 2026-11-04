@@ -42,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aisquare.core import orchestrator
 from aisquare.core.insights import RUN_KEY_ENV_VAR
+from aisquare.core.names import as_text
 from aisquare.core.paths import aisquare_home
 from aisquare.core.source_revision import (
     checkout_of,
@@ -863,9 +864,9 @@ def run_command(
                     start_new_session=sys.platform != "win32",
                 )
             except OSError as exc:
-                launch_error = str(exc)[:4096]
+                launch_error = as_text(str(exc))[:4096]
                 returncode = 127 if isinstance(exc, FileNotFoundError) else 126
-                message = f"Unable to execute {argv[0]}: {exc}\n".encode()
+                message = f"Unable to execute {as_text(argv[0])}: {as_text(str(exc))}\n".encode()
                 _write_file(pending / "stdout.bin", b"")
                 _write_file(pending / "stderr.bin", message[:max_output_bytes])
                 records = {
@@ -884,7 +885,9 @@ def run_command(
         with _defer_interrupts() as deferred:
             draft = CommandReport(
                 id=report_id,
-                argv=list(argv),
+                # as run, but each byte that is not UTF-8 written as its escape: the report
+                # is JSON, which holds only text (an argument after `--` is never refused)
+                argv=[as_text(argument) for argument in argv],
                 cwd=str(working_dir),
                 started_at=started,
                 finished_at=started,

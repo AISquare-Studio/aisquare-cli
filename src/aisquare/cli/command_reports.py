@@ -13,6 +13,7 @@ from typing import Annotated, Literal
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.cli.native_args import PassthroughCommand
 from aisquare.core.state import get_state
 from aisquare.services import command_reports as service
 
@@ -362,6 +363,7 @@ def prune(
 def register(root: typer.Typer) -> None:
     root.command(
         "exec",
+        cls=PassthroughCommand,
         context_settings={
             "allow_extra_args": True,
             "ignore_unknown_options": True,

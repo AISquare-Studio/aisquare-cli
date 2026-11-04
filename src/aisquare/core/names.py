@@ -103,16 +103,38 @@ def undecodable_argument(argv: Sequence[str]) -> str | None:
     traceback or the codec's own words in each command that met it (review r39 of #113,
     finding 6, reopened)."""
     for at, argument in enumerate(argv, start=1):
-        try:
-            argument.encode("utf-8")
-        except UnicodeEncodeError:
-            shown = argument.encode("utf-8", "backslashreplace").decode("utf-8")
-            shown = shown if len(shown) <= 200 else f"{shown[:199]}…"
-            return (
-                f"argument {at} ({shown}) holds a byte that is not UTF-8: aisquare takes its "
-                "arguments as UTF-8 text, and reads, runs or stores nothing for this command"
-            )
+        if not holds_utf8(argument):
+            return undecodable_said(f"argument {at}", argument)
     return None
+
+
+def holds_utf8(text: str) -> bool:
+    """Whether UTF-8 can hold ``text``: it has no lone surrogate."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def undecodable_said(where: str, argument: str) -> str:
+    """The refusal of ``argument`` (``where`` names it: its place, or its parameter), which
+    holds a byte that is not UTF-8: shown with the byte escaped, cut to 200 characters."""
+    shown = as_text(argument)
+    shown = shown if len(shown) <= 200 else f"{shown[:199]}…"
+    return (
+        f"{where} ({shown}) holds a byte that is not UTF-8: aisquare takes its arguments as "
+        "UTF-8 text, and reads, runs or stores nothing for this command"
+    )
+
+
+def as_text(argument: str) -> str:
+    """``argument`` with each half of a character (a lone surrogate: a byte of the command
+    line that was not UTF-8) written as its escape (``\\udcff``), which UTF-8 holds: what
+    is stored or shown of an argument aisquare passes to another program as given (after a
+    ``--``: ``cli.global_flags.checked_arguments``), as ``asq exec``'s report and a fleet
+    spawn's agent arguments keep them."""
+    return argument.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def name_key(text: str) -> str:

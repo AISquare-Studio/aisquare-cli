@@ -29,7 +29,7 @@ from rich.console import Console
 from rich.text import Text
 
 from aisquare.cli.common import USAGE_ERROR, fail, format_reset, refuse_conflicting_scope
-from aisquare.cli.native_args import NativeForwardingCommand
+from aisquare.cli.native_args import NativeForwardingCommand, PassthroughCommand
 from aisquare.core import harness
 from aisquare.core.claude_accounts import agent_label
 from aisquare.core.console import stdout_console
@@ -1847,6 +1847,7 @@ def _seconds(text: str) -> float:
 
 @app.command(
     "gate",
+    cls=PassthroughCommand,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def gate(

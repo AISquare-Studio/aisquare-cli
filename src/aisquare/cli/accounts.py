@@ -34,6 +34,7 @@ from rich.text import Text
 
 from aisquare.cli.common import expected_config_write_errors, fail, format_reset
 from aisquare.cli.fleet import not_interactive_reason
+from aisquare.cli.native_args import PassthroughCommand
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing
 from aisquare.core.agent_adapters import get_adapter
@@ -1599,4 +1600,8 @@ def run(ctx: typer.Context, slot: SlotRef) -> None:
     _exec(found.binary, [found.binary, *ctx.args], accounts_service.session_env(account))
 
 
-app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})(run)
+app.command(
+    "run",
+    cls=PassthroughCommand,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)(run)

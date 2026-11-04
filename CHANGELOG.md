@@ -710,10 +710,14 @@ adapter.**
   (`inject`, `context list`/`search`/`preview`/`show` and `log` read that pool or
   the user pool, never another project's, past any `project switch` pin; writes
   never the user pool), and never a fleet
-  operation, a launch, a hook, the config or an account; every refusal it or a
-  command it runs makes is logged, and a forged identity, another board's task or
-  pool, a fleet operation or an unsigned request is put on its board once per
-  launch and kind. The sandbox writes one path in the store, its launch's broker
+  operation, a launch, a hook, the config or an account; every refusal it or a command
+  it runs makes is logged, and a forged identity, another board's task or pool, a
+  fleet operation or an unsigned request is put on its board once per launch and kind.
+  Each is one line of `store-broker.log` whatever the agent's text in it holds: a line
+  break is a space, and any other character that is not printable is escaped (`\x1b`,
+  `\u202e`), so its text forges no line in the file or on a terminal showing it. A
+  byte that is not UTF-8 is escaped too (`fleet $'spawn\xff'` logs `spawn\udcff`).
+  The sandbox writes one path in the store, its launch's broker
   inbox. So nothing that a replay, a kill, a typed line or paste, a launch, a model
   or account choice or a worktree removal the fleet makes reads can have been
   written from inside a sandbox. A sandboxed agent is trusted to the extent of the
@@ -1026,17 +1030,18 @@ adapter.**
   the member list as it starts. The add is the parent manager's own session's, though the
   line names none, and its event names the parent board (`meta`, in `team show` and `board
   --json`). Each read and each add is one `admitted:` line in `store-broker.log`, beside the
-  broker's refusals, whatever line breaks the agent's title or `--project` holds. The parent
-  reads the member's whole board, each task's detail included: `board --project <member>
-  --json` returns it, and so does a `--json` re-add of an open task's title or `--key`. Past
-  that read and the add, nothing on a member's board runs from the sandbox: no claim, done,
-  review, reopen, release or other task verb (nor `task show`, though the board holds what
-  it shows), no `--as` of its sessions (a note, a signal) and no fleet operation. A project
-  in none of its groups is refused without naming that project's board. A member that
-  joined after the launch is refused until the agent's next launch, and one that has left
-  since is refused; each refusal says why. In 0.9.2 only a Claude Code parent manager ran
-  these two lines, outside any sandbox. It runs them as it did, and its delegation's event
-  now names the parent board too.
+  broker's refusals, and its title is escaped as they are. The parent reads the member's
+  whole board, each task's detail included: `board --project <member> --json` returns it,
+  and so does a `--json` re-add of an open task by its `--key`, or by its title when the
+  task's key is its title's (the default; a task given its own `--key` gets a new task added
+  beside it). Past that read and the add, nothing on a member's board runs from the sandbox:
+  no claim, done, review, reopen, release or other task verb (nor `task show`, though the
+  board holds what it shows), no `--as` of its sessions (a note, a signal) and no fleet
+  operation. A project in none of its groups is refused without naming that project's board.
+  A member that joined after the launch is refused until the agent's next launch, and one
+  that has left since is refused; each refusal says why. In 0.9.2 only a Claude Code parent
+  manager ran these two lines, outside any sandbox. It runs them as it did, and its
+  delegation's event now names the parent board too.
 
 - **Ids made in one clock tick sort in the order they were made, and a turn's later notices
   keep their place after its first** (#29). `task add` in a loop, a Remote batch, or any

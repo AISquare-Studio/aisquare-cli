@@ -23,8 +23,9 @@ the one it goes back to:
    *Connect* is the doctor's own one-click fix, and "connected" is the one shared
    answer (``services.agents.claude_code_connected`` for Claude Code, aisquare's
    hooks in ``CODEX_HOME`` for Codex), asked where the manager starts and where the
-   coders do. Codex runs its hooks only once the user trusts them in ``/hooks``, which
-   no button can do: the card says so, and step 3 says where.
+   coders do. Codex runs its hooks only once they are trusted: Connect records that
+   trust where Codex keeps a review's yes, and where it cannot, the user trusts them in
+   ``/hooks``, which no button can do: the card says so, and step 3 says where.
 3. **Fleet** — *Start manager*, then *Start the coders* (coder-1 and coder-2),
    through ``services.first_run.start_on_agent`` (``start_fleet`` on step 2's
    agent), which never types into an agent it starts: Claude Code and Codex first

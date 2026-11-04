@@ -676,3 +676,24 @@ def test_a_handler_put_into_aisquares_group_keeps_readiness_from_reading_trusted
 
     assert _readiness(home) == "unverified"
     assert len(_states(home)) == CODEX_HOOKS, "nothing more trusted for it"
+
+
+def test_upgrade_help_and_the_plugin_readme_say_the_trust_is_recorded_not_asked_for() -> None:
+    """Review r38 of #113, finding 2: since O3, connect and upgrade record Codex's trust of
+    the hooks they write, and Codex asks for a ``/hooks`` review only where that record could
+    not be made (``HookRefresh.review``). ``upgrade --help`` still said Codex asks after every
+    rewrite, and the plugin's README told the user to trust the ``hooks.json`` hooks in
+    ``/hooks`` themselves."""
+    shown = CliRunner().invoke(app, ["upgrade", "--help"], terminal_width=200)
+    assert shown.exit_code == 0, shown.output
+    said = " ".join(shown.output.split())
+    assert "It records Codex's trust of the hooks it rewrites" in said, said
+    assert "/hooks menu only where that record could not be made" in said, said
+
+    readme = Path(__file__).parents[1] / "plugins" / "codex" / "README.md"
+    text = " ".join(readme.read_text("utf-8").split())
+    assert (
+        "`aisquare agents connect codex` and `aisquare upgrade` record Codex's trust of the "
+        "`hooks.json` hooks they write" in text
+    )
+    assert "Trust both in `/hooks`" not in text

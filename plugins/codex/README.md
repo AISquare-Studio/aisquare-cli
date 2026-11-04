@@ -50,7 +50,7 @@ aisquare agents disconnect codex
 codex plugin remove aisquare@aisquare-cli
 ```
 
-Each route's hooks need trusting on their own: the plugin also stands down beside `hooks.json` hooks you have not trusted yet, which Codex skips. Trust both in `/hooks`, or keep one. Beside `hooks.json` hooks whose aisquare is gone (uninstalled after `agents connect`), the plugin runs in their place, and `aisquare doctor` says to remove them.
+Each route's hooks are trusted on their own. `aisquare agents connect codex` and `aisquare upgrade` record Codex's trust of the `hooks.json` hooks they write, where Codex keeps a review's yes (`[hooks.state]` in `config.toml`); the plugin's you trust in `/hooks` yourself, as above. Where that record could not be made (a read-only `config.toml`), `aisquare doctor` says so, and the plugin still stands down beside those untrusted `hooks.json` hooks, which Codex skips: trust them in `/hooks`, or keep one route. Beside `hooks.json` hooks whose aisquare is gone (uninstalled after `agents connect`), the plugin runs in their place, and `aisquare doctor` says to remove them.
 
 `aisquare agents status codex` names the route the Codex home a session from your shell reads takes (`"route": "plugin"`, `"hooks"` or `"both"` under `--json`), and `aisquare doctor` grades each Codex home's.
 

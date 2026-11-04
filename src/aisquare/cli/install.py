@@ -507,11 +507,12 @@ def upgrade(
     `--with` packages and the Python the install already has, checks the new
     version in a new process, and re-connects the hooks in every Claude Code
     directory and Codex home this machine connected, and in its Codex account
-    homes. Codex asks for rewritten hooks to be reviewed again in its /hooks
-    menu, which the report says. Any other install is told the command
-    that upgrades it, where one can, and exits 1; asking for the version that
-    already runs is nothing to do on every install. Asks first at a terminal;
-    off a terminal it is a dry run unless --yes.
+    homes. It records Codex's trust of the hooks it rewrites, where Codex keeps
+    a review's yes: Codex asks for them to be reviewed again in its /hooks menu
+    only where that record could not be made, which the report says. Any other
+    install is told the command that upgrades it, where one can, and exits 1;
+    asking for the version that already runs is nothing to do on every install.
+    Asks first at a terminal; off a terminal it is a dry run unless --yes.
     """
     if not one_click:
         _upgrade(check=check, version=version, yes=yes, dry_run=dry_run, reopen=reopen)

@@ -1296,6 +1296,96 @@ def test_a_large_codex_rollout_is_read_once_and_then_from_where_it_got_to(
     assert appended < budget(0.5), f"a turn appended read in {appended:.2f} s"
 
 
+# --- Codex 0.166.0: code mode (SMOKE12 F3) ---------------------------------------------------
+
+CODEX_CODE_MODE = CODEX_FACTS.with_name("codex-code-mode-0.166.0.jsonl")
+"""Codex 0.166.0's own rollout (SMOKE12 item 8, sanitized: a fleet coder on GPT-6.1-Sol with
+``--permission-mode workspace:ask``, which calls every tool through the code-mode ``exec``
+script): its kickoff, one script that patches two files, a ``git commit && git push`` script
+asking to leave the sandbox (``sandbox_permissions:"require_escalated"`` in its JavaScript)
+refused with ``3. No``, then ``sleep 40`` stopped with Esc, then a docstring patched."""
+CODE_MODE_KINDS = [
+    ("p", "text"),
+    ("e", "/work/alpha/tests/test_calc.py"),
+    ("e", "/work/alpha/calc/__init__.py"),
+    ("d", ""),  # the escalated script refused: its turn's abort is no interrupt
+    ("p", "text"),
+    ("i", ""),  # Esc after a script that asked nothing: an interrupt
+    ("p", "text"),
+    ("e", "/work/alpha/calc/__init__.py"),
+]
+
+
+def test_a_code_mode_script_refused_at_its_approval_is_a_denial_not_an_interrupt(
+    tmp_path: Path,
+) -> None:
+    """SMOKE12 F3: a script asking to leave the sandbox, its approval answered ``3. No``, is a
+    refusal, and the turn it stopped no interrupt; an Esc after a script that asked nothing is
+    one. Before, ``sandbox_permissions`` was read in a function call's JSON alone, and the
+    refusal read as a second interrupt (interrupts 2, denied 0)."""
+    path = tmp_path / "rollout.jsonl"
+    path.write_text(CODEX_CODE_MODE.read_text(encoding="utf-8"), encoding="utf-8")
+    facts = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    assert _kinds(facts) == CODE_MODE_KINDS
+
+
+def test_a_code_mode_rollout_read_in_two_goes_finds_what_one_read_finds(tmp_path: Path) -> None:
+    """Cut after any line, the 0.166.0 rollout gives the same facts: its escalated script is
+    held until its answer, and its refusal until the turn it stopped ends."""
+    from aisquare.core.agent_adapters import get_adapter
+
+    reader = get_adapter("codex").transcript_reader
+    assert reader is not None
+    data = CODEX_CODE_MODE.read_bytes()
+    whole, end = reader.facts(CODEX_CODE_MODE, 0)
+    assert end == len(data) and [(f.kind, f.detail) for f in whole] == CODE_MODE_KINDS
+    path = tmp_path / "rollout.jsonl"
+    for cut in [index + 1 for index, byte in enumerate(data) if byte == ord("\n")]:
+        path.write_bytes(data[:cut])
+        first, offset = reader.facts(path, 0)
+        path.write_bytes(data)
+        rest, final = reader.facts(path, offset)
+        assert ([*first, *rest], final) == (list(whole), len(data)), f"cut at byte {cut}"
+
+
+_ESCALATED = 'sandbox_permissions:"require_escalated"'
+_PATCH = 'await tools.apply_patch("*** Begin Patch\\n*** Add File: /w/a\\n+a\\n*** End Patch");'
+
+
+@pytest.mark.parametrize(
+    ("script", "asks"),
+    [
+        (f'text(await tools.exec_command({{cmd:"git push",{_ESCALATED}}}));', True),
+        ("await tools.exec_command({'sandbox_permissions': 'require_escalated', cmd: 'x'});", True),
+        ('await tools.exec_command({cmd:"rm -rf b", with_escalated_permissions: true});', True),
+        (
+            f'tools.exec_command({{cmd:"ls"}}); tools.exec_command({{cmd:"x", {_ESCALATED}}});',
+            True,
+        ),
+        (_PATCH, True),
+        (f'{_PATCH} text(await tools.exec_command({{cmd:"pytest"}}));', False),
+        (
+            'tools.exec_command({cmd:"grep \\"sandbox_permissions: \'require_escalated\'\\" s"});',
+            False,
+        ),
+        (f'// {_ESCALATED}\nawait tools.exec_command({{cmd:"ls"}});', False),
+        ('await tools.exec_command({cmd:"ls", sandbox_permissions:"use_default"});', False),
+        ('text(await tools.exec_command({cmd:"apply_patch is a word here"}));', False),
+    ],
+)
+def test_a_code_mode_script_asks_first_by_its_own_fields_never_by_a_commands_words(
+    script: str, asks: bool
+) -> None:
+    """What holds a script at its approval is read off its own words: an object it passes
+    asking to leave the sandbox (keys bare or quoted), or the patch tool as the one tool it
+    calls. A command's text, a patch's and a comment that hold those words ask nothing, nor
+    does a patch that rides with a command (an Esc while the command ran is the likelier)."""
+    from aisquare.core.agent_adapters import codex_transcript
+
+    call = {"type": "custom_tool_call", "name": "exec", "call_id": "c1", "input": script}
+    assert codex_transcript._asks_first(call) is asks
+
+
 # --- recording who started a turn --------------------------------------------------------------
 
 

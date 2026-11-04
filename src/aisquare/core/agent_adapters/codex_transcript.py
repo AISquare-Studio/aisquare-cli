@@ -1202,6 +1202,18 @@ def _said_rows(text: str, width: int) -> list[str]:
 #   ``exec command rejected by user``; unmeasured: the TUI has none, and ``codex exec``
 #   refuses an escalation itself, ``approval policy is Never; reject command``) is read as
 #   neither.
+# - **In code mode** (0.166.0, every call GPT-6.1-Sol makes; SMOKE12 F3) a call is a script:
+#   the ``custom_tool_call`` ``exec`` (:data:`_SCRIPT_TOOL`), whose JavaScript calls Codex's
+#   tools (``text(await tools.exec_command({cmd:"git push", sandbox_permissions:
+#   "require_escalated", justification:"…"}))``, ``await tools.apply_patch("*** Begin
+#   Patch…")``), answered once the script ends: a refusal is ``aborted by user after 13.8s``,
+#   the turn ``turn_aborted`` ``interrupted``, as for the patch tool. The script asks first
+#   when an object it passes asks to leave the sandbox, whatever else it runs (on-request
+#   asks about that command every time), or when the patch tool is the one tool it calls
+#   (:func:`_script_asks_first`). A fourth limit, of a script's: an Esc while another command
+#   of one that asks to leave the sandbox runs reads as a refusal too. A patch beside other
+#   calls asks nothing of the script: inside the workspace a patch applies unasked, and an Esc
+#   while the rest ran is the likelier.
 # - **An edit** is each file an ``event_msg`` ``item_completed`` ``FileChange`` names, by its
 #   absolute path, once the patch applied (status ``completed``). A patch refused, or whose
 #   verification failed, writes none; one that could not be written a ``failed`` one, the file
@@ -1358,11 +1370,53 @@ def _user_fact(text: str, stamp: str) -> TranscriptFact | None:
     return TranscriptFact(stamp, FACT_PROMPT, "wake" if wake else "text")
 
 
+_SCRIPT_TOOL = "exec"
+"""Codex's code-mode tool (0.166.0): a ``custom_tool_call`` whose freeform ``input`` is a
+JavaScript script calling Codex's tools as ``tools.<name>(…)``."""
+_ESCALATIONS = ("sandbox_permissions", "with_escalated_permissions")
+_SCRIPT_WORDS = re.compile(
+    r"""(?P<key>\b(?:sandbox_permissions|with_escalated_permissions)\b"""
+    r"""|"(?:sandbox_permissions|with_escalated_permissions)\""""
+    r"""|'(?:sandbox_permissions|with_escalated_permissions)')"""
+    r"""\s*:\s*(?P<value>"[^"\\\n]*"|'[^'\\\n]*'|`[^`\\$]*`|true\b)"""
+    r"""|\btools\s*\.\s*(?P<tool>[A-Za-z_$][\w$]*)"""
+    r"""|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`|//[^\n]*|/\*.*?\*/""",
+    re.DOTALL,
+)
+"""What a code-mode script is read for, left to right: an escalation key of an object it
+passes and the value it gives it, and each tool it calls (``tools.<name>``). Every string
+literal and comment is matched whole and read no further, so a command's or a patch's text
+that holds those words says nothing."""
+
+
+def _script_asks_first(script: str) -> bool:
+    """Whether a code-mode script (:data:`_SCRIPT_TOOL`) is held by its approval: an object it
+    passes asks to leave the sandbox (``sandbox_permissions: "require_escalated"``, or
+    ``with_escalated_permissions: true``), or the patch tool is the one tool it calls. Read off
+    :data:`_SCRIPT_WORDS` alone: no more of the JavaScript is parsed."""
+    tools: set[str] = set()
+    for word in _SCRIPT_WORDS.finditer(script):
+        key, value, tool = word.group("key", "value", "tool")
+        if key is not None and value is not None:
+            name = key.strip("\"'")
+            if name == _ESCALATIONS[0] and value[1:-1] == "require_escalated":
+                return True
+            if name == _ESCALATIONS[1] and value == "true":
+                return True
+        elif tool is not None:
+            tools.add(tool)
+    return tools == {_PATCH_TOOL}
+
+
 def _asks_first(payload: Mapping[str, Any]) -> bool:
     """Whether a call is one only its approval can hold: a patch (the ``apply_patch`` tool, or
-    the ``apply_patch`` command Codex applies itself) or a command asking to leave the sandbox."""
-    if _call_name(payload) == _PATCH_TOOL:
+    the ``apply_patch`` command Codex applies itself) or a command asking to leave the sandbox,
+    in a function call's JSON arguments or a code-mode script (:func:`_script_asks_first`)."""
+    name = _call_name(payload)
+    if name == _PATCH_TOOL:
         return True
+    if payload.get("type") == "custom_tool_call" and name == _SCRIPT_TOOL:
+        return _script_asks_first(_string(payload.get("input")))
     arguments = _call_input(payload)
     if not isinstance(arguments, dict):
         return False

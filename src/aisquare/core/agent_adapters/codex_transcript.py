@@ -53,6 +53,7 @@ codex-background-0.164.0.jsonl``):
 
 from __future__ import annotations
 
+import heapq
 import json
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -1167,14 +1168,17 @@ def _said_rows(text: str, width: int) -> list[str]:
 # Measured on 0.164.0 with a loopback provider and the TUI under tmux (``tests/fixtures/
 # agent_transcripts/codex-facts-0.164.0.jsonl``): a patch by the freeform ``apply_patch`` tool
 # (``gpt-5.5``) and by the ``apply_patch`` heredoc ``exec_command`` runs, an approval refused
-# with Esc, ``3`` and ``n``, an Esc while the model worked and while a command ran, and a Stop
-# hook's ``block``.
+# with Esc, ``3`` and ``n``, an Esc while the model worked and while a command ran, a Stop
+# hook's ``block``, a patch to a read-only file approved and failed, and a PostToolUse hook's
+# ``block`` (``codex-patch-failed-0.164.0.jsonl``).
 #
 # - **A prompt** is a ``response_item`` ``message`` of the ``user`` role that is not Codex's
 #   own context (:func:`_own`), what its usage cuts turns at; the ``event_msg`` copies of it
 #   (``user_message``, an ``item_completed`` ``UserMessage``) are not read again.
 # - **A continuation** is the ``user`` message a Stop hook's ``block`` reason comes back as,
 #   ``<hook_prompt hook_run_id="stop:…">reason</hook_prompt>``, inside the turn it kept going.
+#   A hook prompt of another run id would be none; no other hook writes one (a PostToolUse
+#   ``block`` puts its reason in the call's answer).
 # - **An interrupt** is an ``event_msg`` ``turn_aborted`` of reason ``interrupted`` (the
 #   ``<turn_aborted>`` message beside it is the same act).
 # - **A refusal at an approval** leaves no record of the approval itself: Codex writes none, only
@@ -1194,13 +1198,17 @@ def _said_rows(text: str, width: int) -> list[str]:
 #   refuses an escalation itself, ``approval policy is Never; reject command``) is read as
 #   neither.
 # - **An edit** is each file an ``event_msg`` ``item_completed`` ``FileChange`` names, by its
-#   absolute path, once the patch applied (status ``completed``); a patch refused or failed
-#   writes none.
+#   absolute path, once the patch applied (status ``completed``). A patch refused, or whose
+#   verification failed, writes none; one that could not be written a ``failed`` one, the file
+#   unchanged: no edit.
 #
 # The offset never passes a call whose fact a later line decides: one only its approval can
 # hold that has no answer yet, or that was refused and whose turn has not stopped yet (its
 # ``turn_aborted`` is no interrupt). The read stops before it, and the next reads it again;
-# a new turn, or its own end, settles it.
+# its answer, a new turn, or its own end settles it. An answer that is no refusal (an
+# applied patch's ``Exit code: 0``, a command's output) holds no mark and is found by the
+# call's id (:func:`_answer_line`): a call answered so is held no longer, and an open turn is
+# read on from where the read got to (review of #57, seq 10325).
 
 _PATCH_TOOL = "apply_patch"
 _FACT_MARKS = (
@@ -1214,7 +1222,11 @@ _FACT_MARKS = (
     b"with_escalated_permissions",
     b"aborted by user",
 )
-"""Bytes one of which every line holding a fact holds; no other line is parsed."""
+"""Bytes one of which every line holding a fact holds; no other line is parsed, but the answer
+of a call held for its approval (:func:`_answer_line`)."""
+_RESULT_TYPE = re.compile(rb'"type"\s*:\s*"(?:function|custom_tool)_call_output"')
+"""A call's result, by its ``type`` key (never ``aggregated_output``, which the
+``CommandExecution`` item before a command's answer names it by too)."""
 _TURN_EDGES = frozenset({"task_started", "task_complete", "turn_aborted"})
 """The ``event_msg`` types a turn starts and ends at: what settles a call held for its turn."""
 _HOOK_PROMPT = re.compile(r"\s*<hook_prompt\b([^>]*)>")
@@ -1243,7 +1255,17 @@ def _rollout_facts(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
     """Each call of the open turn only its approval can hold, unanswered: where its line is."""
     refused: int | None = None
     """Where the call is that was refused at its approval, while its turn has not stopped."""
-    for position, line in _marked_lines(data):
+    lines = _marked_starts(data)
+    heapq.heapify(lines)
+    read: set[int] = set()
+    while lines:
+        position = heapq.heappop(lines)
+        if position in read:
+            continue
+        read.add(position)
+        following = data.find(b"\n", position)
+        following = following if following != -1 else len(data)
+        line = data[position:following]
         try:
             record = json.loads(line)
         except (ValueError, RecursionError):
@@ -1271,6 +1293,9 @@ def _rollout_facts(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
             call = _call_id(payload)
             if call is not None and _asks_first(payload):
                 asked[call] = position
+                answer = _answer_line(data, call, following)
+                if answer is not None:
+                    heapq.heappush(lines, answer)  # its answer, which holds no mark of its own
         elif item in _RESULTS:
             call = _call_id(payload)
             output = _message_text({"content": payload.get("output")}).strip()
@@ -1285,20 +1310,35 @@ def _rollout_facts(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
     return [fact for _, fact in found], begin + end
 
 
-def _marked_lines(data: bytes) -> Iterator[tuple[int, bytes]]:
-    """Each line of ``data`` holding one of :data:`_FACT_MARKS`, once, in order, with where it
-    starts: found by their bytes, never by splitting a gigabyte into lines."""
+def _marked_starts(data: bytes) -> list[int]:
+    """Where each line of ``data`` holding one of :data:`_FACT_MARKS` starts, once each: found by
+    their bytes, never by splitting a gigabyte into lines."""
     starts: set[int] = set()
     for mark in _FACT_MARKS:
         position = data.find(mark)
         while position != -1:
-            line = data.rfind(b"\n", 0, position) + 1
-            starts.add(line)
+            starts.add(data.rfind(b"\n", 0, position) + 1)
             following = data.find(b"\n", position)
             position = -1 if following == -1 else data.find(mark, following)
-    for line in sorted(starts):
-        following = data.find(b"\n", line)
-        yield line, data[line : following if following != -1 else len(data)]
+    return list(starts)
+
+
+def _answer_line(data: bytes, call: str, after: int) -> int | None:
+    """Where the line answering ``call`` starts in ``data``, past byte ``after``: the first
+    after it that names the call's id, quoted, and is a call's result (:data:`_RESULT_TYPE`). An
+    approved patch's answer (``Exit code: 0 … Success``) or a command's holds none of
+    :data:`_FACT_MARKS`, and only its id finds it, a ``find`` as far as the answer (to the end,
+    while the approval is still up). ``None`` when no answer is written yet."""
+    quoted = json.dumps(call, ensure_ascii=False).encode()
+    position = data.find(quoted, after)
+    while position != -1:
+        start = data.rfind(b"\n", 0, position) + 1
+        end = data.find(b"\n", position)
+        end = end if end != -1 else len(data)
+        if _RESULT_TYPE.search(data, start, end) is not None:
+            return start
+        position = data.find(quoted, end)
+    return None
 
 
 def _user_fact(text: str, stamp: str) -> TranscriptFact | None:

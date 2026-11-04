@@ -856,9 +856,12 @@ def codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
-def _codex_rollout(home: Path, cwd: Path, *, turns: int | None = None) -> Path:
+def _codex_rollout(
+    home: Path, cwd: Path, *, turns: int | None = None, said: dict[str, str] | None = None
+) -> Path:
     """The recorded rollout as Codex writes it in ``home``, run in ``cwd`` and moved to begin on
-    Tuesday 27 Oct, 12:00 IST: its first ``turns`` turns (all of them by default)."""
+    Tuesday 27 Oct, 12:00 IST: its first ``turns`` turns (all of them by default), each of its
+    words ``said`` maps made the words it maps them to."""
     first = datetime.fromisoformat(json.loads(CODEX_LINES[0])["timestamp"].replace("Z", "+00:00"))
     shift = _at(27, 12) - first
     path = (
@@ -879,19 +882,22 @@ def _codex_rollout(home: Path, cwd: Path, *, turns: int | None = None) -> Path:
                 break
             moment = datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")) + shift
             record["timestamp"] = moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-            handle.write(json.dumps(_moved(record, cwd)) + "\n")
+            handle.write(json.dumps(_moved(record, {"/work/alpha": str(cwd), **(said or {})})))
+            handle.write("\n")
     return path
 
 
-def _moved(value: Any, cwd: Path) -> Any:
-    """``value`` with the recorded folder made ``cwd``, in its strings: never in the JSON's
-    text, where a Windows path's backslashes would be escapes."""
+def _moved(value: Any, swaps: dict[str, str]) -> Any:
+    """``value`` with each of ``swaps`` made in its strings (the recorded folder made the
+    scratch one): never in the JSON's text, where a Windows path's backslashes are escapes."""
     if isinstance(value, str):
-        return value.replace("/work/alpha", str(cwd))
+        for old, new in swaps.items():
+            value = value.replace(old, new)
+        return value
     if isinstance(value, list):
-        return [_moved(item, cwd) for item in value]
+        return [_moved(item, swaps) for item in value]
     if isinstance(value, dict):
-        return {_moved(key, cwd): _moved(item, cwd) for key, item in value.items()}
+        return {_moved(key, swaps): _moved(item, swaps) for key, item in value.items()}
     return value
 
 
@@ -1045,6 +1051,151 @@ def test_a_codex_rollout_read_in_two_goes_finds_what_one_read_finds(tmp_path: Pa
     first, offset = reader.facts(path, 0)
     assert [(f.kind, f.detail) for f in first] == CODEX_KINDS[:3]
     assert offset == (ends[asking - 1] if asking else 0), "read again from the call"
+
+
+CODEX_PATCH_FAILED = CODEX_FACTS.with_name("codex-patch-failed-0.164.0.jsonl")
+"""Codex 0.164.0's own rollout as :data:`CODEX_FACTS` was recorded, ``hello.txt`` made
+read-only first: ``PATCH it``, whose write the sandbox refused, retried outside it once its
+approval (``command failed; retry without sandbox?``) was answered ``1``, and failed again (its
+``FileChange`` ``failed``, the file unchanged); then ``RUN echo POSTBLOCK``, whose PostToolUse
+hook answered ``block``: Codex put the reason in the call's output, and wrote no hook prompt."""
+
+
+def _held(path: Path) -> bool:
+    """Whether Codex's reader stops before the end of ``path``, read from its start."""
+    from aisquare.core.agent_adapters import get_adapter
+
+    reader = get_adapter("codex").transcript_reader
+    assert reader is not None
+    return reader.facts(path, 0)[1] != path.stat().st_size
+
+
+def test_a_codex_rollout_that_ends_right_after_an_applied_patch_reports_its_edit(
+    tmp_path: Path,
+) -> None:
+    """Codex killed mid-turn, its rollout ending on the patch's answer (``Exit code: 0 …
+    Success``, a line no fact's mark is in): the edit is counted at once, as Claude Code's
+    ``Edit`` is, and the read reaches the end (review of #57, seq 10325, repro A)."""
+    path = tmp_path / "rollout.jsonl"
+    path.write_text("\n".join(CODEX_LINES[:13]) + "\n", encoding="utf-8")
+    facts = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    assert _kinds(facts) == [("p", "text"), ("e", "/work/alpha/hello.txt")]
+    cached = json.loads(transcript_facts.facts_cache_path().read_text(encoding="utf-8"))
+    assert cached["files"][str(path)]["offset"] == path.stat().st_size
+
+
+def test_a_codex_call_is_held_only_while_its_approval_or_the_turn_it_refused_decides_it(
+    tmp_path: Path,
+) -> None:
+    """Cut after each line, the read stops early only between a call only its approval can
+    hold and its answer (the patch, the escalated command later approved), and between a
+    refused call and the end of the turn it stopped. An answered call is held no longer:
+    before, every patch and escalated call was held to the end of its turn."""
+    calls = {
+        record["payload"]["call_id"]: index
+        for index, record in enumerate(json.loads(line) for line in CODEX_LINES)
+        if record["payload"].get("type") in ("custom_tool_call", "function_call")
+    }
+    answered = {
+        record["payload"]["call_id"]: index
+        for index, record in enumerate(json.loads(line) for line in CODEX_LINES)
+        if str(record["payload"].get("type")).endswith("_call_output")
+    }
+    aborted = [i for i, line in enumerate(CODEX_LINES) if '"type":"turn_aborted"' in line]
+    patch, refused, sleep, approved = sorted(calls, key=calls.__getitem__)
+    held = {
+        *range(calls[patch], answered[patch]),
+        *range(calls[refused], aborted[0]),  # its answer a refusal: held to its turn's abort
+        *range(calls[approved], answered[approved]),
+    }
+    assert calls[sleep] not in held, "a sandboxed command is never held"
+    path = tmp_path / "rollout.jsonl"
+    found = set()
+    for last in range(len(CODEX_LINES)):
+        path.write_text("\n".join(CODEX_LINES[: last + 1]) + "\n", encoding="utf-8")
+        if _held(path):
+            found.add(last)
+    assert found == held
+
+
+def test_an_open_codex_turn_after_an_applied_patch_is_read_on_from_where_it_got_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn still open after its patch was applied, and 64 MB of its output after it: the
+    first read reaches the end, and the next reads what was appended alone, not the turn again
+    from its patch (review of #57, seq 10325, repro B; ``tests/budgets.py``)."""
+    import time
+
+    from aisquare.core.agent_adapters import codex_transcript
+    from tests.budgets import budget
+
+    path = tmp_path / "rollout.jsonl"
+    pad = {"type": "function_call_output", "call_id": "c_pad", "output": "x" * 65536}
+    padding = json.dumps(
+        {"timestamp": "2026-10-27T06:30:00.000Z", "type": "response_item", "payload": pad}
+    )
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("\n".join(CODEX_LINES[:13]) + "\n")
+        while handle.tell() < 64 * 1024 * 1024:
+            handle.write(padding + "\n")
+    asked: list[int] = []
+    read = codex_transcript._rollout_facts
+
+    def spied(file: Path, start: int) -> Any:
+        asked.append(start)
+        return read(file, start)
+
+    monkeypatch.setattr(codex_transcript, "_rollout_facts", spied)
+    size = path.stat().st_size
+    first = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(padding + "\n")
+    began = time.perf_counter()
+    again = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    appended = time.perf_counter() - began
+
+    assert _kinds(first) == _kinds(again) == [("p", "text"), ("e", "/work/alpha/hello.txt")]
+    assert asked == [0, size], "the second read began where the first ended"
+    assert appended < budget(0.5), f"a line appended to an open turn read in {appended:.2f} s"
+
+
+def test_a_codex_turn_the_fleets_nudge_started_is_an_agents_wake(
+    machine: Machine, codex_home: Path
+) -> None:
+    """A Codex turn from before origins were recorded has its origin inferred from its prompt
+    as a Claude Code one's is: the fleet's nudge is an agent's wake, not a person's words."""
+    repo = machine.repo("alpha")
+    _codex_rollout(codex_home, repo, turns=1, said={"PATCH it": fleet_service.NUDGE_TEXT})
+    usage_stats.sweep(now=NOW, tz=IST)
+    d = _report(use_gh=False).direction
+    assert d.by_origin == {"agent:wake": 1}
+    assert d.inferred_turns == 1 and d.human_turns == 0
+
+
+def test_a_codex_patch_that_failed_to_apply_is_no_edit_nor_a_post_tool_use_block_a_turn(
+    tmp_path: Path,
+) -> None:
+    """Codex's ``FileChange`` of a patch it could not write is ``failed``, the file unchanged: no
+    file was edited. A PostToolUse hook's ``block`` answers its call with the reason and writes
+    no hook prompt: no continuation."""
+    path = tmp_path / "rollout.jsonl"
+    path.write_text(CODEX_PATCH_FAILED.read_text(encoding="utf-8"), encoding="utf-8")
+    facts = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    assert _kinds(facts) == [("p", "text"), ("p", "text")]
+    assert not _held(path)
+
+
+def test_only_a_stop_hooks_prompt_is_a_codex_continuation(tmp_path: Path) -> None:
+    """The recorded Stop hook's ``<hook_prompt hook_run_id="stop:…">``, its run id made another
+    event's: no continuation, and no prompt of a person's either. (No other hook of 0.164.0's
+    writes one: a PostToolUse ``block`` answers its call, :data:`CODEX_PATCH_FAILED`.)"""
+    path = tmp_path / "rollout.jsonl"
+    swap = {'hook_run_id="stop:': 'hook_run_id="session_start:'}
+    lines = [json.dumps(_moved(json.loads(line), swap)) for line in CODEX_LINES]
+    assert sum('hook_run_id=\\"session_start:' in line for line in lines) >= 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    facts = transcript_facts.read_facts([path], since=_at(19, 0), agents={path: "codex"})[path]
+    assert _kinds(facts) == [kind for kind in CODEX_KINDS if kind != ("c", "")]
 
 
 def test_a_rollout_main_read_as_claude_codes_is_read_again_by_codexs_reader(

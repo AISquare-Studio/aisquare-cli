@@ -39,6 +39,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.css.stylesheet import Stylesheet
 from textual.dom import DOMNode
+from textual.errors import NoWidget
 from textual.geometry import Offset, Region
 from textual.pilot import Pilot
 from textual.widget import Widget
@@ -124,7 +125,7 @@ from aisquare.services.captain import state as captain_state
 from tests import guard_paint, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import released, settle_page, settle_until_held, watch_until
+from tests.ui_workers import released, settle_page, settle_until, settle_until_held, watch_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -3434,6 +3435,9 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
 
     The click lands as a person's would, once the view is on screen: after its paint, which
     is what the click guard (``click_guard``) waits for.
+
+    It returns once the dialog's buttons are laid out (:func:`stop_buttons_laid_out`), not a
+    pause after the click on Stop: the caller's next step is a click on one of them.
     """
     await pilot.click(row_for(app, agent_id))
     await pilot.pause()
@@ -3441,10 +3445,39 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
     view = app.current_view()
     assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
     await pilot.click(view.query_one("#agent-stop", Button))
-    await pilot.pause()
+    await settle_until(app, lambda: stop_buttons_laid_out(app), timeout=10)
     screen = app.screen
     assert isinstance(screen, StopAgentScreen), f"Stop opened {type(screen).__name__}"
+    assert stop_buttons_laid_out(app), "the Stop dialog opened, and its buttons were never laid out"
     return screen
+
+
+def stop_buttons_laid_out(app: FleetApp) -> bool:
+    """Whether the Stop dialog is up and a click on each of its buttons lands on that button.
+
+    ``Pilot.click`` aims at the corner of the button's region as it reads it at the call. A
+    pushed dialog is the current screen from its push and is laid out a turn of the loop or
+    more later, by its update timer, which on Windows sleeps on a thread of the default
+    executor and can fire late. Until then *Stop* has no region, the click went to (0, 0),
+    the dialog's backdrop, and nothing was pressed: ``[] == [stop call]`` on windows-latest
+    (CI 41797195272, attempt 2, shard 6, at fab09fdd). A hidden button (*Force* on an exited
+    row) is not clicked, so it is not waited for.
+    """
+    screen = app.screen
+    if not isinstance(screen, StopAgentScreen):
+        return False
+    shown = [button for button in screen.query(Button) if button.display]
+    return bool(shown) and all(_under_its_click(app, button) for button in shown)
+
+
+def _under_its_click(app: FleetApp, widget: Widget) -> bool:
+    region = widget.region
+    if not region:
+        return False
+    try:
+        return app.get_widget_at(*region.offset)[0] is widget
+    except NoWidget:
+        return False
 
 
 def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(

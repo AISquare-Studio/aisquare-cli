@@ -1838,22 +1838,55 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
             thread.join(timeout=2)
 
 
-def _stop_app_servers(*homes: Path) -> None:
-    """Codex 0.162.1 leaves a managed ``app-server`` running per ``CODEX_HOME`` it ran in
-    (``<home>/packages/app-server-daemon/…``): stop those of the homes a test made."""
+def _command_lines() -> list[tuple[int, str]]:
+    """Every live process and its command line: ``/proc``'s, else ``ps``'s (macOS has no
+    ``/proc``, and this read nothing there: task #79)."""
     proc = Path("/proc")
     if not proc.is_dir():
-        return
+        listed = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True, check=True
+        ).stdout
+        return [
+            (int(pid), command)
+            for pid, _, command in (line.strip().partition(" ") for line in listed.splitlines())
+            if pid.isdigit()
+        ]
+    lines: list[tuple[int, str]] = []
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            program = (entry / "cmdline").read_bytes().split(b"\0", 1)[0].decode()
+            argv = (entry / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+            lines.append((int(entry.name), " ".join(arg.decode() for arg in argv)))
         except (OSError, UnicodeDecodeError):
             continue
-        if any(program.startswith(f"{home}{os.sep}") for home in homes):
+    return lines
+
+
+def _stop_app_servers(*homes: Path) -> None:
+    """Codex 0.162.1 leaves a managed ``app-server`` running per ``CODEX_HOME`` it ran in
+    (``<home>/packages/app-server-daemon/…``): stop those of the homes a test made."""
+    for pid, command in _command_lines():
+        if any(command.startswith(f"{home}{os.sep}") for home in homes):
             with contextlib.suppress(OSError):
-                os.kill(int(entry.name), signal.SIGTERM)
+                os.kill(pid, signal.SIGTERM)
+
+
+def _none_outlive(root: Path, seconds: float = 20) -> None:
+    """No process a test started outlives it: none whose command line names a path under its
+    ``root`` (an app-server in a slot's home, a tmux server, a hook, a store broker) is left
+    once its teardown ran. Exit hooks and brokers run on a moment after a tmux server is
+    killed (``_remove_home``), so this waits up to ``seconds``, then names what is left.
+    Hand-run Codex TUIs in scratch homes left 40 app-servers on the owner's Mac (seq 10841)."""
+    names = {f"{root}{os.sep}", f"{os.path.realpath(root)}{os.sep}"}
+    deadline = time.monotonic() + seconds
+    while left := [
+        f"{pid} {command}"
+        for pid, command in _command_lines()
+        if pid != os.getpid() and any(name in command for name in names)
+    ]:
+        assert time.monotonic() < deadline, "outlived the test:\n" + "\n".join(left)
+        time.sleep(0.2)
 
 
 def _remove_home(outside: Path, seconds: float = 20) -> None:
@@ -2531,6 +2564,7 @@ def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothi
             server.shutdown()
             thread.join(timeout=2)
             _stop_app_servers(given.config_dir, asked.config_dir, control.config_dir)
+    _none_outlive(tmp_path)
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")

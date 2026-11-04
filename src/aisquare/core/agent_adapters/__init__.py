@@ -292,7 +292,8 @@ shaped after Gemini CLI, a module of `tests/` beside it. It fails when:
   does not carry its `store_access`; or an agent without a sandbox declares any;
 - an agent that sandboxes its tools declares no broker (`broker_access` answers
   `None` over a sandboxed permission, or its answer does not name the inbox and the
-  store), or one without a sandbox declares one;
+  store, or leaves a `writable` path it is handed one its `sandbox_writes` may not
+  write, or the store one it may), or one without a sandbox declares one;
 - an agent that sandboxes its tools answers `sandbox_writes` with `None` for a sandboxed
   scope, or its answer lets the store be written, or writes the workspace under a
   read-only scope or not under a workspace one; or one without a sandbox answers it;

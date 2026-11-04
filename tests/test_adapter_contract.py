@@ -645,6 +645,16 @@ def test_an_agent_that_sandboxes_its_tools_declares_its_broker(
             assert str(inbox) in _named(launched), f"{adapter.id}'s inbox is not in its sandbox"
             assert str(inbox) not in _named(args)
             assert str(store) in _named(launched), "the store stays named, read-only"
+            # A `writable` path in the store (a manager's own state directory,
+            # `store_broker.own_state_dir`) is the adapter's to spell, never to drop: the
+            # launch decides it for every agent alike (SMOKE13 N1).
+            own = store / "projects" / "prj_1" / "manager"
+            granted = adapter.broker_access(args, store, inbox, writable=(own,))
+            assert granted is not None
+            writes = adapter.sandbox_writes(granted, tmp_path, tmp_path / "agent-home")
+            assert writes is not None, f"{adapter.id} {write}"
+            assert writes.may_write(own / "state.md"), f"{adapter.id} drops a writable path"
+            assert not writes.may_write(store / "state.md"), f"{adapter.id} widens it"
     assert adapter.broker_access(["--unrelated"], store, inbox) is None
 
 

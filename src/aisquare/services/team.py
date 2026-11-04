@@ -5332,8 +5332,7 @@ def _role_cycle(
     # word that starts with `#` begins a comment, and `--task #12 --as …` ran as `--task`
     # alone (review of #338). A tester's cycle verifies that one and stops (#129 a).
     spawned_for = None if task is None else (task.id if task.number is None else str(task.number))
-    # Its fleet project's, else its board's: under a hub, one manager per project.
-    state_file = str(paths.manager_state_file(project.id if project else me.project_id))
+    state_file = str(_cycle_state_file(project, me.project_id))
     escalate = base_role(me.role) == MANAGER_ROLE and _has_parent(
         project.id if project else me.project_id
     )
@@ -5384,6 +5383,50 @@ def _role_cycle(
     return [*told, *cycle]
 
 
+def _cycle_state_file(project: ProjectInfo | None, board_id: str) -> Path:
+    """The state file a cycle names (:func:`harness.role_cycle`'s ``state_file``, a manager's
+    alone keeping one): its fleet project's (:func:`_cycle_project`), else its board's
+    (``board_id``). Under a hub, one manager per project."""
+    return paths.manager_state_file(project.id if project else board_id)
+
+
+def own_state_dir(role: str | None, cwd: Path, fleet_agent: str | None) -> Path | None:
+    """The directory of the state file the cycle of a session of ``role`` started in ``cwd``
+    hands it to keep (:func:`_cycle_state_file`), for a manager, whose cycle alone names one;
+    ``None`` for every other role. Its project is the one its cycle names
+    (:func:`_cycle_project`): the live fleet row ``fleet_agent`` names (the launch's
+    ``AISQUARE_FLEET_AGENT``), whichever project it is in; else, under a hub, its directory's
+    registered project; else its board's (``orchestrator.team_project``). The one path in
+    the store a launch lets the sandbox of an agent that sandboxes its tools write beside its
+    broker's own (``services.store_broker.own_state_dir``), whatever the agent: so a
+    sandboxed manager rewrites its state file on its first attempt, as an unsandboxed one
+    does (SMOKE13, N1), and nothing else in the store. Fail-open as the cycle is: a row that
+    cannot be read names the board's; ``None`` when the board itself cannot be told, which
+    costs the agent that one write, never its launch."""
+    if role is None or base_role(role) != MANAGER_ROLE:
+        return None
+    try:
+        board = orchestrator.team_project(cwd)
+    except Exception as exc:
+        _log.warning(
+            "the board of a manager launched in %s could not be told, so its sandbox may "
+            "not write its state file (%s: %s)",
+            cwd,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    project: ProjectInfo | None = board
+    with suppress(Exception), store_session() as store:
+        named = None
+        if fleet_agent:
+            with suppress(AmbiguousIdError):
+                row = store.get_fleet_agent(fleet_agent)
+                named = row if row is not None and row.ended_at is None else None
+        project = _cycle_project(store, board, cwd, None, named=named)
+    return _cycle_state_file(project, board.id).parent
+
+
 _NO_CYCLE_PROJECT = "<project>"
 """What a cycle's fleet commands name when :func:`_cycle_project` has no project."""
 _NO_CYCLE_PAUSE = f"{harness.PAUSE_SIGNAL}.<project id>"
@@ -5395,7 +5438,7 @@ def _cycle_project(
     store: ContextStore,
     board: ProjectInfo,
     cwd: Path | None,
-    session_id: str,
+    session_id: str | None,
     *,
     named: FleetAgent | None,
 ) -> ProjectInfo | None:
@@ -5410,7 +5453,9 @@ def _cycle_project(
     for the assignment, and hands it over as ``named``: read here too, a session start paid
     for the same GLOB lookup twice (round 23). Without one, it is the row the store records
     against the session (``fleet_agent_for_session``), the lookup the hand-over and the
-    board's chip make. Its project is read stored, codename and all.
+    board's chip make; a launch, which has no session yet, has ``session_id`` ``None`` and
+    only the row it names (:func:`own_state_dir`). Its project is read stored, codename
+    and all.
 
     A session with no live row is named by the board when no hub is set: the board is then
     its directory's project. Read stored too: the board ``orchestrator.team_project`` builds
@@ -5427,7 +5472,9 @@ def _cycle_project(
     """
     hub = orchestrator.team_hub() is not None
     try:
-        agent = named if named is not None else store.fleet_agent_for_session(session_id)
+        agent = named
+        if agent is None and session_id is not None:
+            agent = store.fleet_agent_for_session(session_id)
         if agent is not None:
             return store.get_project(agent.project_id)
         if hub:
@@ -5436,7 +5483,7 @@ def _cycle_project(
     except Exception as exc:
         _log.warning(
             "the project of session %s's cycle could not be read, so it names %s (%s: %s)",
-            short_id(session_id),
+            short_id(session_id) if session_id is not None else "(a launch)",
             "no project" if hub else "the board's",
             type(exc).__name__,
             exc,

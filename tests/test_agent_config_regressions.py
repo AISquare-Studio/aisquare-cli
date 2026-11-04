@@ -186,7 +186,7 @@ def test_group_annotations_do_not_reset_readiness_but_execution_matchers_do(tmp_
     path.write_text(json.dumps(payload))
     assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
     assert agents.remove_hooks("codex", tmp_path)
-    assert not json.loads(path.read_text()).get("hooks")
+    assert not path.exists(), "aisquare made it, and it is empty: it goes (SMOKE13 N2)"
 
 
 @pytest.mark.parametrize("home_value", [None, " \t\n", " /fixture/codex \n"])

@@ -4254,3 +4254,138 @@ def test_real_codex_usage_read_off_its_rollout_sums_to_its_threads_own_total(
     assert (totals.requests, totals.input, totals.cache_read, totals.output) == (2, 1200, 1800, 103)
     again = reader.usage(rollout, scan.state)
     assert again is not None and again.delta.is_empty()
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_manager_rewrites_its_state_file_from_its_sandbox_with_no_escalation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE13 N1 on the real Codex with only loopback: a fleet manager, on its role's own
+    permission (``--approve-for-me``), writes the state file its cycle names on its first,
+    sandboxed attempt: no approval asked, so no review by Codex's automatic reviewer, which
+    SMOKE13 saw three times in one short run, and no question for a human under a mode that
+    asks. From the same sandbox the store's root, its database, its project's own directory
+    and another project's manager directory stay unwritable. The home is OUTSIDE /tmp, which
+    every Codex sandbox may write."""
+    from aisquare.core import paths
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    refused = _sandbox_refused(binary, tmp_path)
+    if refused is not None:
+        pytest.skip(f"Codex's sandbox cannot start a command on this host: {refused}")
+    outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp")).resolve()
+    store, native_home = outside / "h", outside / "c"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Scripted) as server:
+        server.requests = []  # type: ignore[attr-defined]
+        requests: list[dict[str, Any]] = server.requests  # type: ignore[attr-defined]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.delenv("TMPDIR", raising=False)
+        monkeypatch.setenv("AISQUARE_HOME", str(store))
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-manager-state-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        for kept in store_read_only(store_dir()):
+            kept.parent.mkdir(parents=True, exist_ok=True)
+        (store / "codex-accounts").mkdir(exist_ok=True)
+        state = paths.manager_state_file(project.id)
+        theirs = store_dir() / "projects" / "prj_another" / "manager"
+        theirs.mkdir(parents=True)
+        assert not state.parent.exists(), "the launch makes it"
+
+        def outputs() -> list[str]:
+            """Each command's output, oldest first: every request replays the history."""
+            found: dict[str, str] = {}
+            for request in list(requests):
+                for item in request.get("input", []):
+                    if item.get("type") == "function_call_output":
+                        found.setdefault(str(item.get("call_id")), str(item.get("output")))
+            return list(found.values())
+
+        def reviews() -> int:
+            return sum(1 for request in requests if request.get("model") == "codex-auto-review")
+
+        srv = fleet.server(config.fleet)
+        try:
+
+            def until(check: Any, seconds: float, what: str, pane: str) -> None:
+                deadline = time.monotonic() + seconds
+                while not check():
+                    if time.monotonic() >= deadline:
+                        shown = srv.run("capture-pane", "-p", "-t", pane)
+                        raise AssertionError(f"{what}:\n{shown}\n{outputs()[-2:]}")
+                    time.sleep(0.2)
+
+            codex_screen = screen_of(get_adapter("codex"))
+
+            def at_rest(agent: Any) -> bool:
+                rows = srv.run("capture-pane", "-p", "-t", agent.pane_id).splitlines()
+                facts = srv.pane_facts(agent.pane_id)
+                output = None if facts is None else facts.last_output
+                quiet = output is not None and datetime.now(UTC) - output > timedelta(seconds=2)
+                return (
+                    fleet.status_of(agent).state == "waiting" and codex_screen.ready(rows) and quiet
+                )
+
+            seen = len(outputs())
+            write = f"printf 'goal: ship' > {shlex.quote(str(state))} && echo wrote-state"
+            manager = fleet.spawn(
+                project,
+                "manager",
+                agent="codex",
+                worktree=False,
+                prompt=f"RUN {write}",
+                agent_args=["--dangerously-bypass-hook-trust", "--no-alt-screen"],
+            ).agent
+            pane = manager.pane_id
+            until(lambda: len(outputs()) > seen, 60, "the state file's write ran", pane)
+            assert "wrote-state" in outputs()[-1], outputs()[-1]
+            assert state.read_text(encoding="utf-8") == "goal: ship"
+            assert reviews() == 0, "written in its sandbox: nothing asked, nothing reviewed"
+
+            until(lambda: at_rest(manager), 30, "waiting, at rest", pane)
+            seen = len(outputs())
+            targets = [
+                store_dir() / "planted.md",
+                theirs / "state.md",
+                store_dir() / "projects" / project.id / "planted.md",
+            ]
+            chain = "; ".join(
+                [
+                    *(f'printf x > {shlex.quote(str(t))}; echo "rc=$?"' for t in targets),
+                    f': >> {shlex.quote(str(paths.db_path()))}; echo "rc=$?"',
+                ]
+            )
+            assert fleet.tell(project, manager.label, f"RUN {chain}").delivered
+            until(lambda: len(outputs()) > seen, 60, "the writes outside its dir ran", pane)
+            codes = re.findall(r"rc=(\d+)", outputs()[-1])
+            assert len(codes) == 4 and "0" not in codes, outputs()[-1]
+            assert not any(target.exists() for target in targets)
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            server.shutdown()
+            thread.join(timeout=2)
+            _remove_home(outside)

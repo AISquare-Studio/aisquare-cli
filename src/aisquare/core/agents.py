@@ -707,7 +707,12 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
             errno.ENOENT, "no such home on this machine", str(spec.settings_path)
         )
     spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
+    made = not os.path.lexists(spec.settings_path)
     _write_settings(spec.settings_path, settings)
+    if made:
+        # Recorded, so taking its hooks out takes the file it then leaves empty with them.
+        with suppress(OSError):
+            _record_made(spec.settings_path, True)
     if adapter.hook_trust is not None:
         with suppress(HookTrustError, OSError):
             # Its question is the human's answer where the record cannot be written (SMOKE12 O3).
@@ -793,6 +798,12 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     A file that is not a JSON object, or not UTF-8, holds nothing of ours to take out and
     is left alone; where such a file is refused (:func:`hooks_shape_strict`), it and one
     whose hooks have another shape raise :class:`AgentSettingsError`.
+
+    A file :func:`install_hooks` made, where there was none, and that holds nothing once
+    they are out is removed, not left as ``{}`` (SMOKE13, N2), whatever the agent: its hook
+    file is read by its ``settings_name``. One the user had, or one they wrote in since,
+    keeps all of theirs; either way the record that aisquare made it goes, since what is left
+    in it is theirs.
     """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
@@ -824,10 +835,24 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
                 hooks.pop(event, None)
     if not hooks:
         settings.pop("hooks", None)
-    if removed:
+    made = str(spec.settings_path) in _hook_files_made()
+    if made and not settings and _plain_file(spec.settings_path):
+        spec.settings_path.unlink()
+    elif removed:
         _write_settings(spec.settings_path, settings)
+    if made:
+        with suppress(OSError):
+            _record_made(spec.settings_path, False)
     _take_back_trust(name, spec, settings)
     return removed
+
+
+def _plain_file(path: Path) -> bool:
+    """Whether ``path`` is a regular file itself, never a link to one: what aisquare made."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 # --- the Claude Code status line (#287, 2c) ---------------------------------------------------
@@ -1648,6 +1673,49 @@ def _registry() -> dict[str, Any]:
     return read_json(paths.agents_registry_path())
 
 
+#: The registry's list of the hook files :func:`install_hooks` made where there was none
+#: (SMOKE13, N2), each as its agent's spec names it: :func:`remove_hooks` takes one away
+#: when it leaves it empty, never a file the user had.
+_MADE_KEY = "hook_files_made"
+
+
+def _hook_files_made(registry: dict[str, Any] | None = None) -> list[str]:
+    """The hook files aisquare made (:data:`_MADE_KEY`), in the order it made them."""
+    raw = (registry if registry is not None else _registry()).get(_MADE_KEY)
+    return [item for item in raw if isinstance(item, str)] if isinstance(raw, list) else []
+
+
+def _record_made(path: Path, made: bool) -> None:
+    """Record (or forget) that aisquare made the hook file ``path``. Raises ``OSError``."""
+    registry = _registry()
+    was = _hook_files_made(registry)
+    kept = [item for item in was if item != str(path)] + ([str(path)] if made else [])
+    if kept == was:
+        return
+    paths.ensure_home()
+    # The rest of the registry as it was read: only this list changes.
+    if kept:
+        registry[_MADE_KEY] = kept
+    else:
+        registry.pop(_MADE_KEY, None)
+    paths.agents_registry_path().write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_registry(names: set[str], sites: dict[str, list[Path]], made: list[str]) -> None:
+    """Write the agent registry: who is connected where, and the hook files aisquare made."""
+    body: dict[str, Any] = {
+        # `connected` stays for compatibility with readers (and older
+        # aisquare versions) that only know the boolean form.
+        "connected": sorted(names),
+        "connections": {
+            agent: [str(path) for path in dirs] for agent, dirs in sorted(sites.items())
+        },
+    }
+    if made:
+        body[_MADE_KEY] = made
+    paths.agents_registry_path().write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+
+
 def _connected_set(registry: dict[str, Any] | None = None) -> set[str]:
     connected = (registry if registry is not None else _registry()).get("connected", [])
     return set(connected) if isinstance(connected, list) else set()
@@ -1701,22 +1769,7 @@ def set_connected(name: str, connected: bool, config_dir: Path | None = None) ->
         if not current:
             names.discard(name)
     sites[name] = current
-
-    paths.agents_registry_path().write_text(
-        json.dumps(
-            {
-                # `connected` stays for compatibility with readers (and older
-                # aisquare versions) that only know the boolean form.
-                "connected": sorted(names),
-                "connections": {
-                    agent: [str(path) for path in dirs] for agent, dirs in sorted(sites.items())
-                },
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    _write_registry(names, sites, _hook_files_made(registry))
 
 
 #: What ``Path.exists`` reads as "nothing there" (pathlib's ignored errnos and Windows

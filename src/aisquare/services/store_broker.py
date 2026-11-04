@@ -58,6 +58,11 @@ what the report held when the run ended, where the sandbox cannot write
 ``reports/`` (``services.command_reports.adopt_sandboxed``): only a sealed, unchanged,
 owner-only report of this launch's tree and board, copied from the bytes that were checked.
 
+A manager's launch has a third path there, whatever its agent: the directory of the state
+file its cycle tells it to keep (:func:`own_state_dir`, ``<home>/projects/<id>/manager/``
+for the project its cycle names), made before it starts with no link on the way, so its
+rewrites of that file need no approval, as a Claude Code manager's need none (SMOKE13, N1).
+
 ### The broker's whitelist
 
 What a sandboxed agent's broker runs (`services.store_broker.WHITELIST`); a test holds
@@ -130,13 +135,14 @@ sandbox itself (`asq exec`): a test renders the texts and holds each command to 
 runs outside it, so `exec` on its whitelist would run the agent's argv unsandboxed. The
 CLI runs them itself (`store_broker.LOCAL`), `exec`'s command as sandboxed as the agent's
 own, and the report goes to the launch's own `reports/`, beside the broker's inbox and the
-only other place in the store its sandbox may write (`reports_dir()`; every seat's, a
-reviewer's too). With `--project` the report fingerprints the tree it ran in, which needs
-no store (read-only there). When the run ends `exec` has the broker seal the report
-(`reports seal`: its files' digest, recorded in the launch's `seals/`, which the sandbox
-cannot write, once). `brief evidence --report` then adopts it into the home's `reports/`,
-and the evidence cites the copy: the report must be sealed and unchanged since; owner-only,
-with its own files and nothing else, none a link or a pipe; its directory and checkout
+only other place in the store its sandbox may write but a manager's own state directory
+(`reports_dir()`; every seat's, a reviewer's too). With `--project` the report
+fingerprints the tree it ran in, which needs no store (read-only there). When the run ends
+`exec` has the broker seal the report (`reports seal`: its files' digest, recorded in the
+launch's `seals/`, which the sandbox cannot write, once). `brief evidence --report` then
+adopts it into the home's `reports/`, and the evidence cites the copy: the report must be
+sealed and unchanged since; owner-only, with its own files and nothing else, none a link
+or a pipe; its directory and checkout
 absolute paths inside the launch's tree (a relative one is refused: it would be read from
 the directory of whoever reads it) and its board the launch's. The copy is written from the
 bytes that were checked. A pass is judged as for any report, by the broker reading the source again
@@ -1590,6 +1596,84 @@ def _socket_dirs(env: Mapping[str, str], configured: str) -> list[Path]:
     return kept
 
 
+def own_state_dir(env: Mapping[str, str], store: Path, cwd: Path) -> tuple[Path | None, str]:
+    """The directory of the state file this launch's cycle hands its agent to keep
+    (``team.own_state_dir``: a manager's, for the project its cycle names; ``None`` for
+    every other role), made if it is not there, for ``AgentAdapter.broker_access`` to name
+    writable beside the broker's own paths, whatever the agent: the one other path in
+    ``store`` its sandbox may write (SMOKE13, N1). With a line to print when it is refused.
+
+    It is made, or refused, from ``store`` down, one name at a time and none followed
+    (``O_NOFOLLOW``), as the broker opens a file of the tree (:func:`open_in_tree`): a link
+    anywhere on the way, or a name that is not a directory, is refused, never made writable,
+    so the grant cannot reach outside the store. A grant on a link is no grant on POSIX
+    anyway: Codex refuses every command whose writable root is one (measured on 0.164.0 and
+    0.166.0), which would have cost the agent all of them. A link IN the directory carries no
+    write out of it: a sandbox writes where a link leads only where it may write there (the
+    same measure). An empty file where a directory is named, the one a Codex sandbox leaves
+    for a path its profile named that was not there (``launch_seal.ensure_dir``), is made
+    the directory. Refused, the agent runs without it: its state-file writes ask, as before."""
+    from aisquare.services import team
+
+    wanted = team.own_state_dir(
+        env.get("AISQUARE_ROLE"), cwd, env.get("AISQUARE_FLEET_AGENT", "").strip() or None
+    )
+    if wanted is None:
+        return None, ""
+    try:
+        # Below the home as the store's profile names it, resolved (`store_dir`).
+        names = wanted.relative_to(paths.expand_user(paths.aisquare_home())).parts
+    except ValueError:
+        return None, f"its state directory {wanted} is outside the aisquare home {store}"
+    granted = store.joinpath(*names)
+    try:
+        _make_below(store, names)
+    except OSError as exc:
+        return None, (
+            f"its sandbox may not write its state directory {granted} "
+            f"({exc.strerror or exc}: a link, or not a directory, on the way from the "
+            "aisquare home), so each rewrite of its state file there asks"
+        )
+    return granted, ""
+
+
+def _make_below(root: Path, names: Sequence[str]) -> None:
+    """Make ``root``/``names`` a directory, each missing name made owner-only, none followed:
+    ``OSError`` for a link or a name that is not a directory on the way."""
+    if sys.platform == "win32":
+        # No descriptors to walk by: each name asked before it is made, and after.
+        here = root
+        for name in names:
+            here = here / name
+            if here.is_symlink() or _is_junction(here):
+                raise OSError(errno.ELOOP, "a link", str(here))
+            here.mkdir(mode=0o700, exist_ok=True)
+            if not here.is_dir() or here.is_symlink() or _is_junction(here):
+                raise OSError(errno.ENOTDIR, "not a directory", str(here))
+        return
+    descend = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in names:
+            with suppress(FileNotFoundError):
+                found = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISREG(found.st_mode) and found.st_size == 0:
+                    os.unlink(name, dir_fd=descriptor)
+            with suppress(FileExistsError):
+                os.mkdir(name, 0o700, dir_fd=descriptor)
+            deeper = os.open(name, descend, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = deeper
+    finally:
+        os.close(descriptor)
+
+
+def _is_junction(path: Path) -> bool:
+    """Whether ``path`` is a Windows junction (Python 3.12 can tell; 3.11 cannot)."""
+    is_junction = getattr(os.path, "isjunction", None)
+    return bool(is_junction is not None and is_junction(path))
+
+
 #: What holds a Python environment's code under its prefix (a virtualenv, an installation,
 #: a ``bin/``'s parent): its scripts and interpreter, its standard library and
 #: site-packages (whose ``.pth`` files run at every start), Windows' ``Lib`` and ``DLLs``, a
@@ -1952,9 +2036,11 @@ def start_for_launch(
     env: dict[str, str], adapter: AgentAdapter, argv: list[str]
 ) -> tuple[list[str], str]:
     """``argv`` with this launch's broker inbox the one path in the store its sandbox may
-    write (``AgentAdapter.broker_access``), and the broker started; with a line to print
-    when it could not be (the launch goes on: its board calls then say what failed), and
-    what :func:`sandbox_environment` says of ``env``. ``argv`` as it is for an agent that
+    write (``AgentAdapter.broker_access``) beside its ``reports/`` and, for a manager, the
+    directory of the state file its cycle hands it (:func:`own_state_dir`), and the broker
+    started; with a line to print when it could not be (the launch goes on: its board calls
+    then say what failed), when that directory was refused, and what
+    :func:`sandbox_environment` says of ``env``. ``argv`` as it is for an agent that
     runs its tools unsandboxed or under a sandbox of the operator's own (no store profile
     in ``argv``)."""
     from aisquare.core.agent_adapters.types import store_dir
@@ -1982,6 +2068,11 @@ def start_for_launch(
     # The reports its `asq exec` saves: writable to every seat, as its inbox is, since a
     # reviewer's checks are reports too. The seals beside them are not.
     writable = (*writable, directory / REPORTS)
+    # A manager's own state directory, which its cycle tells it to keep: whatever the agent
+    # and its write scope, as a reviewer's reports are (SMOKE13, N1).
+    state, refused = own_state_dir(env, store, cwd)
+    if state is not None:
+        writable = (*writable, state)
     access = adapter.broker_access(
         argv, store, directory / INBOX, protect=protect, writable=writable
     )
@@ -1993,6 +2084,8 @@ def start_for_launch(
     )
     if access is None:
         return argv, "\n".join(said)
+    if refused:
+        said.append(f"{adapter.label}: {refused}")
     if sys.platform == "win32":
         said.append(
             f"{adapter.label}: the aisquare store is read-only in its sandbox, and its "

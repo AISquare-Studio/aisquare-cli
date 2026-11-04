@@ -1400,7 +1400,8 @@ class CodexAdapter:
         Codex's built-in one for ``write`` (``:read-only``, ``:workspace``) with ``store``
         read-only within it, all of it (:func:`store_read_only`), the more specific path
         winning over a writable one around it (the workspace, ``/tmp``). Each launch adds
-        its broker's inbox, the one path there its sandbox may write (:meth:`broker_access`).
+        its broker's inbox, the one path there its sandbox may write (:meth:`broker_access`),
+        with its reports and a manager's own state directory beside it.
         ``full`` runs unsandboxed: nothing to add. Never a path denied reading (``none``):
         with one, Codex reads its own instructions through its sandbox helper, and where
         bwrap cannot bring up loopback (a GitHub runner) the session did not start (CI on

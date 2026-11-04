@@ -252,6 +252,38 @@ def test_disconnect_takes_back_exactly_the_trust_aisquare_recorded(tmp_path: Pat
     assert not (home / codex_config.TRUST_RECORD).exists()
 
 
+def test_disconnect_takes_away_the_hooks_json_connect_made_and_keeps_one_the_user_had(
+    tmp_path: Path,
+) -> None:
+    """SMOKE13 N2: ``agents disconnect codex`` left ``{}`` (3 bytes) in a hooks.json connect
+    had made, the Codex home having none before. It goes with aisquare's hooks, and
+    config.toml is as it was before connect; a hooks.json the user had stays, holding theirs
+    alone. Mutant (``remove_hooks`` writes the emptied file back as before): the first dies."""
+    home = tmp_path / "codex"
+    home.mkdir()
+    hooks = home / "hooks.json"
+    _write(home / "config.toml", 'model = "gpt-6.1-sol"\n')
+    before = (home / "config.toml").read_bytes()
+    runner = CliRunner()
+    connect = ["agents", "connect", "codex", "--config-dir", str(home)]
+    disconnect = ["agents", "disconnect", "codex", "--config-dir", str(home)]
+
+    assert runner.invoke(app, connect).exit_code == 0
+    assert hooks.is_file()
+    gone = runner.invoke(app, disconnect)
+
+    assert gone.exit_code == 0, gone.output
+    assert not hooks.exists(), "the file connect made goes, empty, with its hooks"
+    assert (home / "config.toml").read_bytes() == before
+
+    theirs = _with_users_own(home)
+    users = hooks.read_bytes()
+    assert runner.invoke(app, connect).exit_code == 0
+    assert runner.invoke(app, disconnect).exit_code == 0
+    assert json.loads(hooks.read_bytes()) == json.loads(users), "theirs, and only theirs"
+    assert (home / "config.toml").read_bytes() == theirs
+
+
 def test_a_removal_leaves_a_table_the_human_has_written_over_since(tmp_path: Path) -> None:
     """What uninstall and disconnect both run (``remove_hooks``) takes a table back only while
     it holds the hash aisquare wrote into it."""

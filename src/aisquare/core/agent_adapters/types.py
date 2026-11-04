@@ -423,7 +423,8 @@ class AgentCapabilities:
     (Codex's). Its permission flags make the aisquare store read-only there
     (:meth:`AgentAdapter.store_access`), and every board call it makes there goes through
     its launch's broker, outside the sandbox (``services.store_broker``), whose inbox is
-    the one path in the store its sandbox may write (:meth:`AgentAdapter.broker_access`).
+    the one path in the store its sandbox may write (:meth:`AgentAdapter.broker_access`)
+    beside the launch's reports and a manager's own state directory.
     Claude Code runs its tools unsandboxed."""
     redraws_while_asking: bool = False
     """The agent's UI keeps redrawing while it waits on the human (Codex's approval view,
@@ -809,7 +810,10 @@ def store_read_only(store: Path) -> tuple[Path, ...]:
     worktree removal, a paste) can have been written from inside one. The one path there
     the sandbox may write is its own launch's broker inbox
     (:meth:`AgentAdapter.broker_access`), whose requests the broker runs only from its
-    whitelist, as the launch's own sessions (``services.store_broker``)."""
+    whitelist, as the launch's own sessions (``services.store_broker``), beside the
+    launch's reports and, for a manager, the directory of the state file its cycle hands
+    it (``services.store_broker.own_state_dir``), whose state file aisquare reads back to
+    that manager alone (its start pack) and runs nothing from."""
     return (store,)
 
 
@@ -818,11 +822,11 @@ def prepare_store(store: Path) -> None:
     directory (``launch_seal.ensure_dir``): a fleet agent's own record was written before
     its window started, and an agent that sandboxes its tools is not started without one.
     The broker's inbox, the profile's one writable path there, is made by
-    ``services.store_broker.start_for_launch``. A path the profile names that does not exist
-    is no harm: measured on 0.162.1 in a real turn (the worktree layout, a path inside the
-    workspace and outside every writable root, an absent parent too), the sandbox shows it
-    as an empty read-only mount point and leaves nothing on the host (review r11 of #113,
-    finding 3). Never raises."""
+    ``services.store_broker.start_for_launch``, as a manager's own state directory is. A
+    path the profile names that does not exist is no harm: measured on 0.162.1 in a real
+    turn (the worktree layout, a path inside the workspace and outside every writable root,
+    an absent parent too), the sandbox shows it as an empty read-only mount point and leaves
+    nothing on the host (review r11 of #113, finding 3). Never raises."""
     from aisquare.core import launch_seal
 
     with suppress(OSError):
@@ -1792,8 +1796,10 @@ class AgentAdapter(Protocol):
         starts. ``protect`` is read-only there too, outside the store, whether or not it
         exists yet (the launch inputs of the project's trees, the other agents' worktrees,
         the tmux sockets' directory: ``services.store_broker.launch_paths``), and
-        ``writable`` stays writable within it (the agent's own worktree), the more specific
-        path winning. ``None`` where ``args`` run no sandbox of :meth:`store_access`'s (the
+        ``writable`` stays writable within it (the agent's own worktree, the launch's
+        reports, a manager's own state directory: ``services.store_broker.own_state_dir``),
+        the more specific path winning: the adapter spells each in its sandbox's terms and
+        decides none. ``None`` where ``args`` run no sandbox of :meth:`store_access`'s (the
         agent unsandboxed, or a sandbox the operator chose), which no broker serves."""
         ...
 

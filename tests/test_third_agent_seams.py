@@ -137,6 +137,49 @@ def test_connect_writes_the_agents_own_handlers_and_disconnect_takes_them_out(
     assert agent_core.hook_commands(third.id, home) == []
 
 
+def test_disconnect_takes_away_the_hook_file_connect_made_and_keeps_one_the_user_had(
+    third: AgentAdapter, runner: CliRunner, tmp_path: Path
+) -> None:
+    """SMOKE13 N2, for any agent: its hook file (``settings_name``), made by connect where
+    there was none, goes when disconnect leaves it empty; one the user had keeps their own
+    entries, and so does one connect made that the user then wrote in (theirs from then on,
+    so a later disconnect keeps it too)."""
+    made = _home(third)
+    hooks = made / third.settings_name
+    connect = ["agents", "connect", third.id, "--config-dir", str(made)]
+    disconnect = ["agents", "disconnect", third.id, "--config-dir", str(made)]
+    assert not hooks.exists()
+
+    assert runner.invoke(app, connect).exit_code == 0
+    assert hooks.is_file()
+    assert runner.invoke(app, disconnect).exit_code == 0
+
+    assert not hooks.exists(), "the file connect made goes, empty, with its hooks"
+
+    spec = third.capabilities.hooks[0]
+    users = {"hooks": {spec.event: [{"hooks": [third.hook_entry(spec, "/usr/bin/true")]}]}}
+    had = tmp_path / "theirs"
+    had.mkdir()
+    (had / third.settings_name).write_text(json.dumps(users), encoding="utf-8")
+    for home in (had, made):
+        connected = runner.invoke(app, ["agents", "connect", third.id, "--config-dir", str(home)])
+        assert connected.exit_code == 0, connected.output
+    # Written in since connect made it: the user's from now on.
+    written = json.loads(hooks.read_text(encoding="utf-8"))
+    written["theirs"] = True
+    hooks.write_text(json.dumps(written), encoding="utf-8")
+    for home in (had, made):
+        gone = runner.invoke(app, ["agents", "disconnect", third.id, "--config-dir", str(home)])
+        assert gone.exit_code == 0, gone.output
+
+    assert json.loads((had / third.settings_name).read_text(encoding="utf-8")) == users
+    assert json.loads(hooks.read_text(encoding="utf-8")) == {"theirs": True}
+    hooks.write_text("{}", encoding="utf-8")
+    assert runner.invoke(app, connect).exit_code == 0
+    assert runner.invoke(app, disconnect).exit_code == 0
+    assert json.loads(hooks.read_text(encoding="utf-8")) == {}, "theirs, emptied by them: kept"
+
+
 # --- uninstall -----------------------------------------------------------------------------
 
 
@@ -2792,6 +2835,57 @@ def test_remote_is_sent_the_exit_command_of_each_agent_and_card(third: AgentAdap
 
     assert card(shown.agent)["exit_command"] == third.exit_command
     assert card(None)["exit_command"] is None
+
+
+def test_a_sandboxed_manager_is_granted_its_state_dir_in_its_own_sandboxs_words(
+    third: AgentAdapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE13 N1, for any agent: the launch decides the grant from the role and the project
+    the cycle names (``store_broker.own_state_dir``), and the adapter only spells it, as one
+    more of ``broker_access``'s ``writable`` paths. The fake agent, which declares a sandbox
+    (``capabilities.sandboxes_tools``), is given ``--writable`` on its manager directory and a
+    coder none; the Gemini-shaped one, which declares none, is launched as it was. Mutant (a
+    grant made in the Codex adapter alone, ``codex.broker_access``): the fake's dies here."""
+    import subprocess
+
+    from aisquare.core.agent_adapters.types import option_values, store_dir
+    from aisquare.services import store_broker
+    from aisquare.services import team as team_service
+
+    if os.name != "posix":
+        pytest.skip("a launch's broker is POSIX's")
+    work = tmp_path / "repo"
+    work.mkdir()
+    subprocess.run(["git", "init", "-q", str(work)], check=True)
+    monkeypatch.chdir(work)
+    for name in ("AISQUARE_FLEET_AGENT", "AISQUARE_TEAM_HUB"):
+        monkeypatch.delenv(name, raising=False)
+
+    def not_started(directory: Path, env: object) -> None:
+        raise RuntimeError("not started")
+
+    monkeypatch.setattr(store_broker, "run_broker", not_started)
+    project = team_service.activate(work)
+    own = store_dir() / "projects" / project.id / "manager"
+    plain = [third.binary, *third.store_access("workspace", store_dir())]
+
+    def launched(role: str) -> list[str]:
+        env = {"AISQUARE_LAUNCH_ID": "launch-of-a-" + role, "AISQUARE_ROLE": role}
+        return store_broker.start_for_launch(env, third, list(plain))[0]
+
+    manager, coder = launched("manager"), launched("coder")
+
+    if not third.capabilities.sandboxes_tools:
+        assert manager == plain and coder == plain
+        assert not own.exists()
+        return
+    assert str(own) in option_values(manager, "--writable")
+    assert str(own) not in option_values(coder, "--writable")
+    writes = third.sandbox_writes(manager[1:], work)
+    assert writes is not None
+    assert writes.may_write(own / "state.md")
+    assert not writes.may_write(store_dir() / "state.md")
+    assert not writes.may_write(store_dir() / "projects" / "prj_another" / "manager" / "x")
 
 
 def test_a_cycle_with_no_project_tells_a_sandboxed_agent_no_command_its_broker_refuses(

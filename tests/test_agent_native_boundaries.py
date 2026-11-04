@@ -400,7 +400,7 @@ def test_reordered_hook_options_remain_owned_and_reconnect_without_duplicates(
     agents.install_hooks("codex", tmp_path)
     assert all(len(groups) == 1 for groups in json.loads(path.read_text())["hooks"].values())
     assert agents.remove_hooks("codex", tmp_path)
-    assert "hooks" not in json.loads(path.read_text())
+    assert not path.exists(), "aisquare made it, and it is empty: it goes (SMOKE13 N2)"
 
 
 def _native(project_id: str, name: str) -> TeamSession:

@@ -1826,3 +1826,195 @@ def test_its_stop_dialog_says_its_own_exit_command(third: AgentAdapter) -> None:
     assert f"{third.exit_command}, then the window is killed after" in question.plain
     assert f"Force skips the {third.exit_command}." in question.plain
     assert "/exit" not in question.plain
+
+
+def _a_row(adapter_id: str, label: str, role: str = "coder") -> Any:
+    """A waiting row of ``adapter_id``'s, as the fleet lists one (a ``FleetAgentStatus``)."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import FleetAgent, FleetAgentStatus
+
+    row = FleetAgent(
+        id=f"agt_{label}",
+        project_id="prj_third",
+        label=label,
+        role=role,
+        agent=adapter_id,
+        pane_id="%1",
+        tmux_socket="asq-test-third",
+        cwd=Path("/w"),
+        created_at=datetime.now(UTC),
+    )
+    return FleetAgentStatus(agent=row, state="waiting")
+
+
+def test_its_agent_views_stop_says_its_own_exit_command(
+    third: AgentAdapter, tmp_path: Path
+) -> None:
+    """#60 (tester of #58, seq 10298): the agent view's Stop tooltip spelled ``/exit`` for
+    every agent. It says what ``fleet stop`` types into this one (``exit_command_for``, its
+    ``exit_command``: ``/quit``)."""
+    import asyncio
+
+    from textual.app import App, ComposeResult
+    from textual.widgets import Button
+
+    from aisquare.cli.ui.views.agent import AgentView
+    from aisquare.services import fleet as fleet_service
+    from tests.pane_harness import FakePane, FakeTmux
+
+    assert third.exit_command != "/exit", "the premise: a command of its own"
+    fake = FakeTmux()
+    fake.panes["%1"] = FakePane(screen=["ready"])
+    shown = _a_row(third.id, "coder-third")
+    view = AgentView(shown, server=fake.server(tmp_path), escape_key="f12", id="view")
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield view
+
+    async def drive() -> str:
+        async with Host().run_test(size=(80, 12)) as pilot:
+            await pilot.pause()
+            return str(view.query_one("#agent-stop", Button).tooltip)
+
+    tip = asyncio.run(drive())
+
+    assert fleet_service.exit_command_for(shown.agent) == third.exit_command
+    assert tip.startswith(f"{third.exit_command}, a grace period, then the window"), tip
+    assert "/exit" not in tip
+
+
+def _bulk_about(monkeypatch: pytest.MonkeyPatch, action: str, rows: list[Any]) -> tuple[str, str]:
+    """What the bulk dialog says ``action`` does once it shows ``rows``, and with *Managers
+    only* switched on."""
+    import asyncio
+
+    from textual.app import App
+    from textual.widgets import Static, Switch
+
+    from aisquare.cli.ui.views.fleet_bulk import ConfirmBulk
+    from aisquare.models import ProjectInfo
+    from aisquare.services import fleet as fleet_service
+
+    where = ProjectInfo(id="prj_third", root=Path("/w"))
+    plan = fleet_service.BulkPlan(
+        action,  # type: ignore[arg-type]
+        managers_only=False,
+        rows=tuple(fleet_service.BulkRow(where, row) for row in rows),
+        projects=(where,),
+    )
+    monkeypatch.setattr(fleet_service, "bulk_plan", lambda action, projects=None: plan)
+    dialog = ConfirmBulk(action)  # type: ignore[arg-type]
+
+    class Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(dialog)
+
+    async def drive() -> tuple[str, str]:
+        async with Host().run_test(size=(100, 40)) as pilot:
+            about = dialog.query_one("#bulk-about", Static)
+            for _ in range(200):
+                if dialog.plan is not None:
+                    break
+                await pilot.pause(0.01)
+            await pilot.pause()
+            every = str(about.content)
+            dialog.query_one("#bulk-managers", Switch).value = True
+            await pilot.pause()
+            return every, str(about.content)
+
+    return asyncio.run(drive())
+
+
+@pytest.mark.parametrize("action", ["stop", "pause"])
+def test_its_bulk_stop_and_pause_say_its_own_exit_command(
+    third: AgentAdapter, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """#60: the bulk stop and pause (0.9.2's pause, SCOPE 092 rows 3 and 18) said each agent
+    is sent ``/exit``. Of agents that all share one exit command it names that one, asked of
+    ``exit_command_for`` as ``fleet stop`` types it; while the plan is read, the neutral line."""
+    from aisquare.cli.ui.views.fleet_bulk import OWN_EXIT, about_text
+
+    rows = [_a_row(third.id, "manager", "manager"), _a_row(third.id, "coder-third")]
+
+    every, managers = _bulk_about(monkeypatch, action, rows)
+    reading = about_text(action, None)  # type: ignore[arg-type]
+
+    assert f"Each one is sent {third.exit_command}" in every, every
+    assert f"Each one is sent {third.exit_command}" in managers, managers
+    assert f"Each one is sent {OWN_EXIT}" in reading, reading
+    assert "/exit" not in every + managers + reading
+
+
+@pytest.mark.parametrize("action", ["stop", "pause"])
+def test_a_bulk_of_agents_whose_exit_commands_differ_spells_none(
+    third: AgentAdapter, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """#60: a Claude Code coder beside a manager of the third agent's: each is sent its own
+    command, so the dialog says "its own exit command" and spells neither. *Managers only*
+    leaves the third agent's manager alone, whose command it then names."""
+    from aisquare.cli.ui.views.fleet_bulk import OWN_EXIT
+    from aisquare.core.agent_adapters import DEFAULT_AGENT, get_adapter
+
+    claude = get_adapter(DEFAULT_AGENT)
+    assert claude.exit_command != third.exit_command, "the premise: two commands"
+    rows = [_a_row(third.id, "manager", "manager"), _a_row(claude.id, "coder-1")]
+
+    every, managers = _bulk_about(monkeypatch, action, rows)
+
+    assert f"Each one is sent {OWN_EXIT}" in every, every
+    assert claude.exit_command not in every and third.exit_command not in every, every
+    assert f"Each one is sent {third.exit_command}" in managers, managers
+
+
+def test_no_string_of_the_cli_spells_an_agents_exit_command() -> None:
+    """#60: what a stop types is the row's agent's own (``AgentAdapter.exit_command``), and a
+    screen, a toast or a help line that names it asks ``fleet_service.exit_command_for``. A
+    string under ``aisquare/cli`` that spells a registered agent's command says it of every
+    agent. The commands are read off every registered adapter, never listed here.
+
+    Code prose is left: a docstring, and a bare string statement (the note under a
+    constant). A Typer command's docstring is its help, and is read as any string is."""
+    import ast
+
+    import aisquare.cli
+    from aisquare.core.agent_adapters import adapters
+
+    commands = {adapter.exit_command for adapter in adapters()}
+    assert commands, "the premise: an agent registered"
+    root = Path(aisquare.cli.__file__).parent
+
+    def is_help(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        return any(
+            isinstance(mark, ast.Call)
+            and isinstance(mark.func, ast.Attribute)
+            and mark.func.attr in {"command", "callback"}
+            for mark in node.decorator_list
+        )
+
+    spelled: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        prose = {
+            id(node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and is_help(node):
+                first = node.body[0]
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                    prose.discard(id(first.value))  # a command's docstring is its help
+        spelled += [
+            f"{path.relative_to(root)}:{node.lineno}: {node.value!r}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in prose
+            and any(command in node.value for command in commands)
+        ]
+
+    assert not spelled, "\n".join(spelled)

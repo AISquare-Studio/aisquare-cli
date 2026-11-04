@@ -79,9 +79,9 @@ ABOUT: dict[fleet_service.BulkAction, str] = {
     "transcript when that is on disk. An agent that died without being stopped (killed, "
     "crashed, its tmux server gone) is brought back too; one stopped on purpose is left as "
     "it is.",
-    "stop": "Each one is sent /exit, given a grace period, and then its window is killed. "
+    "stop": "Each one is sent {exit}, given a grace period, and then its window is killed. "
     "Its claims go back to the board. Exited (💤) agents are left as they are.",
-    "pause": "Each one is sent /exit as a stop does, and keeps its label, task claim, "
+    "pause": "Each one is sent {exit} as a stop does, and keeps its label, task claim, "
     "worktree, account and session for a resume. Its project is fleet-paused, so its manager "
     "spawns nothing. Exited (💤) agents are left as they are.",
     "resume": "Each paused agent is started again under its label, with the same role, task, "
@@ -89,6 +89,11 @@ ABOUT: dict[fleet_service.BulkAction, str] = {
     "project's fleet-paused signal is cleared. An agent that exited without a pause stays as "
     "it is.",
 }
+"""What each action does, above the list (:func:`about_text`): ``{exit}`` is what a stop or a
+pause types into each agent, :func:`exit_words`'s, and never spelled here."""
+OWN_EXIT = "its own exit command"
+"""What a stop or a pause is said to type into agents whose exit commands differ (a Claude
+Code agent beside one whose command is its own), or before the plan says whose they are."""
 WILL_START = "will be started again"
 """A dead row a restart brings back (#38), after its state in the dialog's list."""
 WILL_RESUME = "will be resumed"
@@ -137,6 +142,23 @@ def count_words(count: int, *, managers_only: bool, dead: int = 0) -> str:
     noun = "manager" if managers_only else "agent"
     words = f"{count} {noun}{'' if count == 1 else 's'}"
     return f"{words} ({count - dead} running, {dead} dead)" if dead else words
+
+
+def exit_words(plan: fleet_service.BulkPlan | None) -> str:
+    """What a stop or a pause types into the agents ``plan`` acts on, asked of the service
+    (``fleet_service.exit_command_for``, what ``fleet stop`` types into each): the one command
+    they all share, or :data:`OWN_EXIT` when theirs differ, none is acted on or the plan is
+    not read yet. The dialog spelled ``/exit`` for every agent (tester of #58, seq 10298)."""
+    if plan is None:
+        return OWN_EXIT
+    commands = {fleet_service.exit_command_for(row.agent) for row in plan.targets}
+    return commands.pop() if len(commands) == 1 else OWN_EXIT
+
+
+def about_text(action: fleet_service.BulkAction, plan: fleet_service.BulkPlan | None) -> str:
+    """What ``action`` does to the agents ``plan`` acts on (:data:`ABOUT`), its exit command
+    theirs (:func:`exit_words`)."""
+    return ABOUT[action].replace("{exit}", exit_words(plan))
 
 
 def plan_text(plan: fleet_service.BulkPlan) -> Text:
@@ -239,7 +261,7 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
         verb = VERB[self.action]
         with Vertical(id="bulk-box", classes=self.action):
             yield Static(Text(self.heading()), id="bulk-title")
-            yield Static(Text(ABOUT[self.action]), id="bulk-about")
+            yield Static(Text(about_text(self.action, None)), id="bulk-about")
             with Horizontal(id="bulk-switch-row"):
                 yield Switch(False, id="bulk-managers")
                 yield Label("Managers only")
@@ -300,6 +322,8 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
         listing = self.query_one("#bulk-list", Static)
         confirm = self.query_one("#bulk-confirm", Button)
         plan = self.shown()
+        # The agents shown, the managers' alone with the switch on: what each is sent.
+        self.query_one("#bulk-about", Static).update(Text(about_text(self.action, plan)))
         if plan is None:
             listing.update(Text(self.failed or "reading the fleet…", style="dim"))
             confirm.disabled = True

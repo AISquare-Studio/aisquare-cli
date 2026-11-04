@@ -467,8 +467,11 @@ class AgentView(Vertical):
         stop.display = self.status.state in STOP_STATES
         stop.disabled = busy
         paused = self.status.state == "paused"
+        # What the stop types is asked of the service (`exit_command_for`, the call
+        # `fleet stop` types), never spelled here: a future agent's own command (#60).
         stop.tooltip = (
-            "/exit, a grace period, then the window is killed (as `fleet stop` does)"
+            f"{fleet_service.exit_command_for(self.status.agent)}, a grace period, then the "
+            "window is killed (as `fleet stop` does)"
             if self.status.state in _STOPPABLE
             else "End the pause for good: its claims go back to the board, and `fleet resume` "
             "leaves it (as `fleet stop` does)"

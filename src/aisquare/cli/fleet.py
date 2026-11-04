@@ -643,12 +643,14 @@ def stop(
     ctx: typer.Context,
     label: Annotated[str | None, typer.Argument(help="Agent label (not with --all).")] = None,
     project: ProjectRef = None,
-    force: Annotated[bool, typer.Option("--force", help="Kill without a graceful /exit.")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Kill without the agent's graceful exit command.")
+    ] = False,
     every: EveryAgent = False,
     managers: ManagersOnly = False,
     as_session: SessionRef = None,
 ) -> None:
-    """Stop an agent: /exit, a grace period, then the window is killed.
+    """Stop an agent: its exit command, a grace period, then the window is killed.
 
     On an agent that already exited (💤) it removes the dead window that
     `remain-on-exit` kept, which is what takes the row off the live listing.
@@ -1227,7 +1229,7 @@ def shutdown(
         bool, typer.Option("--yes", "-y", help="Shut down without asking; required off a terminal.")
     ] = False,
     force: Annotated[
-        bool, typer.Option("--force", help="Kill every agent without a graceful /exit.")
+        bool, typer.Option("--force", help="Kill every agent without its graceful exit command.")
     ] = False,
     forget: Annotated[
         bool,
@@ -2000,7 +2002,7 @@ def pause(
     as_session: SessionRef = None,
 ) -> None:
     """Pause the fleet: set its `fleet-paused` signal, so its manager spawns nothing, and
-    /exit every running agent of it as `fleet stop` does — keeping each one's label, task
+    exit every running agent of it as `fleet stop` does — keeping each one's label, task
     claim, worktree, account and session for `fleet resume`. An agent that already exited
     is left as it is. `--group` pauses a group's members and its parent, `--all` every
     project; `--managers` the managers alone. Exits 1 when any agent failed."""

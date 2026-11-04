@@ -731,8 +731,9 @@ adapter.**
   `deny_read` of a path outside the tree (`~/.codex`) holds. The tree is the launch's
   own directory and the checkout and project it is in, never the home, a directory
   above it or `/` that git or a project marker names (a dotfiles `~/.git` made a launch
-  in `~/scratch` take the whole home, `~/.codex` and `~/.ssh` in it); a launch in the
-  home itself has the home. One of a path inside the
+  in `~/scratch` take the whole home, `~/.codex` and `~/.ssh` in it), told as
+  directories, not spellings (a `HOME` in another case than the disk's, on macOS); a
+  launch in the home itself has the home. One of a path inside the
   tree does not: the broker reads any regular file of the tree the user may, and a hard
   link in the tree to a file outside it is not told from the tree's own. A path option
   of those commands (`--detail-file`, `--artifact`, `brief check --source-root`, `watch
@@ -747,12 +748,16 @@ adapter.**
   a fleet operation or an unsigned request is put on its board once per launch and kind.
   Each is one line of `store-broker.log` whatever the agent's text in it holds: a line
   break is a space, and any other character that is not printable is escaped (`\x1b`,
-  `\u202e`), and so is a blank that is (`\u3164`, `\u2800`, the Hangul fillers and the
-  Braille blank, which padded a line to wrap as a row of its own), so its text forges
-  no line in the file or on a terminal showing it. A byte that is not UTF-8 is escaped
-  too (`fleet $'spawn\xff'` logs `spawn\udcff`), and a ref holding one, run anywhere
-  (`task claim tsk_$'\xff'`, `--as`, `team show`, `board --project`), names nothing,
-  never a traceback.
+  `\u202e`), and so is a blank that is (`\u3164`, `\u2800`, `\U0001d159`: the Hangul
+  fillers, the Braille blank, the musical null notehead and the like, which padded a
+  line to wrap as a row of its own), so its text forges no line in the file or on a
+  terminal showing it. A byte that is not UTF-8 is escaped too (`fleet $'spawn\xff'`
+  logs `spawn\udcff`). Any other command whose argument holds one is refused by the
+  broker before it runs, logged, as every command the CLI parses refuses one: a usage
+  error in words (exit 2, `{"error": "usage"}` under `--json`) naming the argument, for
+  a ref, a label or free text alike (`task claim tsk_$'\xff'`, `--as`, `fleet stop`,
+  `team focus`, `note --to`), where each such command was a traceback or the codec's
+  own words.
   The sandbox writes three paths in the store: its launch's broker inbox, its
   launch's `reports/` (`asq exec`, above), and a manager's own state directory (below).
   So nothing that a replay,

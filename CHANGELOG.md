@@ -186,6 +186,11 @@ adapter.**
     stats' sweep reads every agent's sessions as its reader lists them (Codex's rollouts
     too), cut into turns by that reader (`AgentTranscript.turns`), each with the slot of the
     home it was found in (`AgentAccounts.transcript_roots`) and the repository it ran in; a
+    subagent's own rollout is its session's, never a session of its own (Codex 0.166.0's
+    `--approve-for-me` reviewer runs a thread beside each session, its `session_meta` naming
+    it, `AgentTranscript.parent_session`): its tokens count once, in that session, and its
+    review requests are no one's turns, where SMOKE12 counted 7 sessions of 5 and 14 typed
+    prompts of 3; a
     Codex Stop's row now carries both, and a Stop and a sweep read on from each other; the
     page and `metrics stats` say "the agents' transcripts", naming none. Usage sharing stays
     Claude Code's: Codex sessions are counted locally and never shared, the shared fleet
@@ -255,7 +260,9 @@ adapter.**
     mark inside the name's 12 cells; the live count, Active only, the "1 account" line and the
     real repository names count every agent's rows; `aisquare outcomes` reads who steered a
     Codex session off its rollout by its own reader (`AgentTranscript.facts`: a prompt, a Stop
-    hook's continuation, an Esc, an approval refused, a patch applied; with the files its
+    hook's continuation, an Esc, an approval refused, in a function call's arguments or in a
+    code-mode `exec` script's, 0.166.0's every call on GPT-6.1-Sol, where SMOKE12 read a refusal
+    as an interrupt, a patch applied; with the files its
     reader names as the session's, `related_files`: Claude Code's subagents', none of Codex's;
     a session of an agent this install does not know read by no reader), so its week counts its
     files edited, interrupts and denials, and a turn from before origins were recorded has its

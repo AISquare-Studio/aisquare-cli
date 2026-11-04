@@ -211,9 +211,11 @@ adapter.**
     screen says the stop types is asked of the one resolver `fleet stop` types
     (`fleet.exit_command_for`, the agent's `AgentAdapter.exit_command`), never `/exit` as text:
     the Stop dialog's line (for an agent this install does not know too, the default's, as the
-    stop types it), the agent view's Stop tooltip, and the bulk stop's and pause's line, which
+    stop types it), the agent view's Stop tooltip, the bulk stop's and pause's line, which
     names the one command its agents share or says each is sent its own, as `fleet stop`'s and
-    `fleet pause`'s help do; a project rename renames the sessions
+    `fleet pause`'s help do, a bulk receipt's "its /quit was sent", and Remote's Stop sheet,
+    from the `exit_command` each agent of `fleet ls --json` and each needs card now carries;
+    a project rename renames the sessions
     its launch records name, by tmux's id; `fleet top` reads its spend off its rollout by its
     own reader, and its processes as its pane's tree; a tell (typed, or queued to a busy Codex
     by `codex queue`, whose marker a queue that failed takes back), a spawn's first message, a

@@ -1025,14 +1025,18 @@ adapter.**
   board parents. That member must be one at the launch and still one now: the broker takes
   the member list as it starts. The add is the parent manager's own session's, though the
   line names none, and its event names the parent board (`meta`, in `team show` and `board
-  --json`). Each read and each add is an `admitted:` line in `store-broker.log`, beside the
-  broker's refusals. Nothing else on a member's board runs from the sandbox: no claim,
-  done, release or other task verb, no `task show`, no `--as` of its sessions (a note, a
-  signal) and no fleet operation. A project in none of its groups is refused without naming
-  that project's board. A member that joined after the launch is refused until the agent's
-  next launch, and one that has left since is refused; each refusal says why. Before, the
-  broker refused nothing here: `board --project` read any board on the machine, and a
-  delegation from the sandbox named no session.
+  --json`). Each read and each add is one `admitted:` line in `store-broker.log`, beside the
+  broker's refusals, whatever line breaks the agent's title or `--project` holds. The parent
+  reads the member's whole board, each task's detail included: `board --project <member>
+  --json` returns it, and so does a `--json` re-add of an open task's title or `--key`. Past
+  that read and the add, nothing on a member's board runs from the sandbox: no claim, done,
+  review, reopen, release or other task verb (nor `task show`, though the board holds what
+  it shows), no `--as` of its sessions (a note, a signal) and no fleet operation. A project
+  in none of its groups is refused without naming that project's board. A member that
+  joined after the launch is refused until the agent's next launch, and one that has left
+  since is refused; each refusal says why. Before, the broker refused nothing here: `board
+  --project` read any board on the machine, and a delegation from the sandbox named no
+  session.
 
 - **Ids made in one clock tick sort in the order they were made, and a turn's later notices
   keep their place after its first** (#29). `task add` in a loop, a Remote batch, or any

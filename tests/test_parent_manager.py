@@ -424,8 +424,9 @@ def test_a_sandboxed_parent_names_no_session_of_its_own_and_delegates_nothing(
 
 
 #: What a parent manager may not do on a member's board from its sandbox: claim, finish,
-#: release or change a task of it, read one in full, or act as one of its sessions (a note,
-#: a signal, a task added as one).
+#: release or change a task of it, run ``task show`` on one (its board read, ``board
+#: --project <member> --json``, holds each task's detail all the same), or act as one of its
+#: sessions (a note, a signal, a task added as one).
 _FORBIDDEN = [
     (["task", "claim", "{task}", "--as", HQ_MANAGER[:8]], "out_of_scope"),
     (["task", "claim", "{task}", "--as", API_CODER[:8]], "not_your_session"),

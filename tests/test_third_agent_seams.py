@@ -1974,10 +1974,15 @@ def test_no_string_of_the_cli_spells_an_agents_exit_command() -> None:
     """#60: what a stop types is the row's agent's own (``AgentAdapter.exit_command``), and a
     screen, a toast or a help line that names it asks ``fleet_service.exit_command_for``. A
     string under ``aisquare/cli`` that spells a registered agent's command says it of every
-    agent. The commands are read off every registered adapter, never listed here.
+    agent, and so does Remote's page (``web/remote/app.js``, read whole). The commands are read
+    off every registered adapter, never listed here.
 
-    Code prose is left: a docstring, and a bare string statement (the note under a
-    constant). A Typer command's docstring is its help, and is read as any string is."""
+    Code prose is left: a docstring, and a bare string statement (the note under a constant).
+    A command's docstring is its help, and is read as any string is: a function decorated
+    ``@<app>.command(…)`` or ``@<app>.callback(…)``, or registered by call,
+    ``<app>.command("x")(fn)`` (``app.command("ui")(fleet.ui)``, ``team.note`` from
+    ``app.py``), by its name, in any file of the package (tester of #60, seq 10323: 36 such
+    commands were read as prose)."""
     import ast
 
     import aisquare.cli
@@ -1986,18 +1991,31 @@ def test_no_string_of_the_cli_spells_an_agents_exit_command() -> None:
     commands = {adapter.exit_command for adapter in adapters()}
     assert commands, "the premise: an agent registered"
     root = Path(aisquare.cli.__file__).parent
+    trees = {
+        path: ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for path in sorted(root.rglob("*.py"))
+    }
 
-    def is_help(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-        return any(
-            isinstance(mark, ast.Call)
-            and isinstance(mark.func, ast.Attribute)
-            and mark.func.attr in {"command", "callback"}
-            for mark in node.decorator_list
+    def registers(call: ast.AST) -> bool:
+        """``<app>.command(…)`` or ``<app>.callback(…)``: what makes a function a command."""
+        return (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr in {"command", "callback"}
         )
 
+    registered = {
+        fn.id if isinstance(fn, ast.Name) else fn.attr
+        for tree in trees.values()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and registers(node.func) and node.args
+        for fn in node.args[:1]
+        if isinstance(fn, ast.Name | ast.Attribute)
+    }
+    assert {"ui", "note", "attention", "launch", "exec_command"} <= registered, "by call"
+
     spelled: list[str] = []
-    for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for path, tree in trees.items():
         prose = {
             id(node.value)
             for node in ast.walk(tree)
@@ -2006,7 +2024,9 @@ def test_no_string_of_the_cli_spells_an_agents_exit_command() -> None:
             and isinstance(node.value.value, str)
         }
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and is_help(node):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and (
+                node.name in registered or any(registers(mark) for mark in node.decorator_list)
+            ):
                 first = node.body[0]
                 if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
                     prose.discard(id(first.value))  # a command's docstring is its help
@@ -2018,5 +2038,102 @@ def test_no_string_of_the_cli_spells_an_agents_exit_command() -> None:
             and id(node) not in prose
             and any(command in node.value for command in commands)
         ]
+    page = root.parent / "web" / "remote" / "app.js"
+    spelled += [
+        f"{page.name}:{number}: {line.strip()}"
+        for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1)
+        if any(command in line for command in commands)
+    ]
 
     assert not spelled, "\n".join(spelled)
+
+
+def test_a_bulk_names_the_command_of_the_agents_it_acts_on_not_of_one_it_leaves(
+    third: AgentAdapter,
+) -> None:
+    """#60 (tester's surviving mutant, seq 10323): the line is asked of the rows the action
+    acts on (``BulkPlan.targets``), not every row read: an exited third-agent row the stop
+    leaves, beside Claude Code agents it stops, leaves the line naming Claude Code's."""
+    from aisquare.cli.ui.views.fleet_bulk import about_text
+    from aisquare.core.agent_adapters import DEFAULT_AGENT, get_adapter
+    from aisquare.models import ProjectInfo
+    from aisquare.services import fleet as fleet_service
+
+    claude = get_adapter(DEFAULT_AGENT)
+    assert claude.exit_command != third.exit_command, "the premise: two commands"
+    where = ProjectInfo(id="prj_third", root=Path("/w"))
+    left = _a_row(third.id, "coder-third").model_copy(update={"state": "exited"})
+    plan = fleet_service.BulkPlan(
+        "stop",
+        managers_only=False,
+        rows=(
+            fleet_service.BulkRow(where, _a_row(claude.id, "manager", "manager")),
+            fleet_service.BulkRow(where, _a_row(claude.id, "coder-1")),
+            fleet_service.BulkRow(where, left, skip="already exited"),
+        ),
+        projects=(where,),
+    )
+    assert [row.agent.agent for row in plan.targets] == [claude.id, claude.id]
+
+    said = about_text("stop", plan)
+
+    assert f"Each one is sent {claude.exit_command}," in said, said
+
+
+def test_a_bulk_receipt_says_the_exit_command_its_stop_sent(
+    third: AgentAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#60: a bulk restart whose stop took the agent down while another command ended its row
+    said ``its /exit was sent``; it says the row's agent's own, the one the stop typed."""
+    from aisquare.models import ProjectInfo
+    from aisquare.services import fleet as fleet_service
+
+    def ended_meanwhile(*_args: object, **_kwargs: object) -> object:
+        raise fleet_service.EndedMeanwhile("ended by another command")
+
+    monkeypatch.setattr(fleet_service, "restart", ended_meanwhile)
+    where = ProjectInfo(id="prj_third", root=Path("/w"))
+    row = fleet_service.BulkRow(where, _a_row(third.id, "coder-third"))
+
+    receipt = fleet_service._bulk_one("restart", row, spawned_by="user")
+
+    assert (receipt.outcome, receipt.why) == (
+        "failed",
+        f"its {third.exit_command} was sent, and another command ended it meanwhile; no "
+        "replacement was started",
+    )
+
+
+def test_remote_is_sent_the_exit_command_of_each_agent_and_card(third: AgentAdapter) -> None:
+    """#60: Remote's Stop sheet says what the machine sends (``tests/test_remote_page.py``,
+    ``stopSaysTheMachinesExit``): each fleet row's ``exit_command`` (``fleet ls --json``'s
+    payload, which Remote serves verbatim) and each card's, of the agent's own adapter; none
+    for a card of no agent."""
+    from datetime import UTC, datetime
+
+    from aisquare.cli.fleet import agents_json
+    from aisquare.models import ProjectInfo
+    from aisquare.services import remote_needs
+
+    where = ProjectInfo(id="prj_third", root=Path("/w"))
+    shown = _a_row(third.id, "coder-third")
+    rows = agents_json(where, [shown])["agents"]
+    assert isinstance(rows, list) and len(rows) == 1
+    assert rows[0]["exit_command"] == third.exit_command
+
+    def card(agent: Any) -> dict[str, object]:
+        now = datetime.now(UTC)
+        return remote_needs._needs_item(
+            "lost",
+            "coder-third",
+            project=where,
+            agent=agent,
+            reason="its window is gone",
+            excerpt=None,
+            detail={},
+            since=now,
+            push_after=None,
+        ).needs_item_json()
+
+    assert card(shown.agent)["exit_command"] == third.exit_command
+    assert card(None)["exit_command"] is None

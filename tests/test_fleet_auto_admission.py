@@ -36,7 +36,14 @@ from aisquare.services import settings as settings_service
 from aisquare.services import watch as watch_service
 from tests import test_fleet_autostop as autostop_suite
 from tests import test_fleet_service as fleet_suite
-from tests.test_fleet_service import FakeTmux, _coder, _git, _second_project, _settings
+from tests.test_fleet_service import (
+    FakeTmux,
+    _coder,
+    _ended_in_the_store,
+    _git,
+    _second_project,
+    _settings,
+)
 
 tmux = fleet_suite.tmux
 clock = fleet_suite.clock
@@ -1569,3 +1576,98 @@ def test_a_number_still_counts_the_manager_as_0_9_1_did(
     with pytest.raises(fleet_service.CapacityRefused):
         fleet_service.restart(project, "manager")
     assert machine.probes == 0 and fleet_service.holds() == []
+
+
+# --- review r36 of #113, finding 5: auto counts what the fixed cap counts ---------------------
+
+
+def test_a_busy_machine_counts_an_agent_the_store_ended_while_its_window_runs(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, machine: Machine
+) -> None:
+    """Main 0.9.2 had one count for the fixed cap and for auto admission: the agents the project
+    runs. Here running is what the window says (review r8 of #113), and the cap counts a row
+    the store has ended while its window runs; auto admission counted the store's live rows,
+    so such an agent was no seat toward ``busy_floor``, and a fourth agent was admitted on a
+    busy machine. Counted, the fourth is held."""
+    machine.busy()
+    first, _second, _third = _three(project)
+    _ended_in_the_store(first)
+    assert first.pane_id in tmux.facts and len(_live(project)) == 2
+
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+
+    assert held.value.code == "capacity_busy"
+    assert "is held, nothing started: it runs 3 live agents (busy_floor = 3)" in str(held.value)
+    assert len(tmux.spawned) == 3, "nothing started"
+
+
+def test_a_paused_agent_is_no_seat_toward_the_busy_floor_as_on_main(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, machine: Machine
+) -> None:
+    """The other half of main's count: a paused agent has no window and its row is ended, so
+    it holds no seat (its resume is admitted as the pause's, never auto's). Three coders, one
+    paused, on a busy machine: a fourth is admitted at 2 of the floor's 3."""
+    first, _second, _third = _three(project)
+    fleet_service.pause_agent(project, first.label, agent_id=first.id)
+    machine.busy()
+
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+
+    assert any(
+        "admitted: " in note and "runs 2 of the 3 agents a project always gets" in note
+        for note in receipt.notes
+    ), receipt.notes
+
+
+def test_a_calm_machines_burst_counts_an_agent_the_store_ended_while_its_window_runs(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """The burst guard is past ``busy_floor``, by the same count: the floor's three and the
+    burst's two run, three of them ended in the store while their windows run. Counted as
+    the store's live rows, two, the project read below the floor and the sixth was admitted
+    past a full burst; counted as they run, it is held."""
+    floor = _three(project)
+    now[0] = NOW + timedelta(minutes=1)
+    _coder(project)
+    now[0] = NOW + timedelta(minutes=2)
+    _coder(project)
+    for agent in floor:
+        _ended_in_the_store(agent)
+    assert len(_live(project)) == 2
+    now[0] = NOW + timedelta(minutes=3)
+
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+
+    assert held.value.code == "capacity_busy"
+    assert "is held, nothing started: it runs 5 live agents (busy_floor = 3)" in str(held.value)
+    assert len(tmux.spawned) == 5, "nothing started"
+
+
+def test_the_count_after_stopping_finished_workers_keeps_an_agent_the_store_ended(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, machine: Machine, later: None
+) -> None:
+    """P2-W1b's stop of a finished worker frees its seat, one of the count the spawn read. The
+    count after was read again as the store's live rows, and lost a row the store has ended
+    while its window runs: four running, one finished, on a busy machine, the stop left
+    three, which is the floor, and the spawn was admitted at two."""
+    done = autostop_suite._worker(project, tmux)
+    autostop_suite._result(done)
+    _coder(project)
+    _coder(project)
+    ended = _coder(project)  # the burst's first, on a calm machine
+    _ended_in_the_store(ended)
+    machine.busy()
+
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+
+    assert held.value.code == "capacity_busy"
+    assert "is held, nothing started: it runs 3 live agents (busy_floor = 3)" in str(held.value)
+    assert done.label not in _live(project), "the finished worker was stopped"
+    assert ended.pane_id in tmux.facts

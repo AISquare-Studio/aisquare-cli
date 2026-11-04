@@ -5407,8 +5407,11 @@ def spawn(
         # retry what auto held, nor to come back after a resume. Nor a paused agent's resume
         # (`auto_admit`): it brings back what the pause stopped, no new agent (review of
         # RC092-MI, round 2, M1).
+        # It counts what the fixed cap above counts, main's one count: the agents the project
+        # runs, a row the store has ended while its window runs among them (review r8 of
+        # #113), a paused agent, which has no window, not (review r36, finding 5).
         if not isinstance(cap, int) and auto_admit and role != "manager":
-            seats = _admit_by_load(project, len(live), config, notes)
+            seats = _admit_by_load(project, len(standing), config, notes)
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -7740,7 +7743,8 @@ def _admit_by_load(
     project: ProjectInfo, live: int, config: FleetSettings, notes: list[str]
 ) -> _Seats:
     """Auto admission (``max_agents_per_project = "auto"``) of one spawn into ``project``,
-    which runs ``live`` agents: the seats its row is settled against, or a hold.
+    which runs ``live`` agents (counted as the fixed cap counts them, by their windows: a
+    paused agent is none): the seats its row is settled against, or a hold.
 
     The machine reads busy by the project's hold while one is in force, without a probe;
     else by the probes (:func:`core.load.read`). Not busy: admitted, any hold forgotten.
@@ -8000,19 +8004,20 @@ def _hold_minutes(config: FleetSettings) -> float:
 
 
 def _after_stopping_finished(project: ProjectInfo, live: int, notes: list[str]) -> int:
-    """``project``'s finished workers stopped (P2-W1b), and its live count after; ``live``
-    when none was."""
+    """``project``'s finished workers stopped (P2-W1b), and its count after: ``live``, the
+    agents the spawn counted (:func:`spawn`'s ``standing``), less the ones stopped; ``live``
+    when none was. Each one stopped is a row the store had live, so one of those counted.
+    Counted again as the store's live rows, the count lost every row the store has ended
+    while its window runs, which the spawn counted (review r36 of #113, finding 5)."""
     try:
         stopped = [item.verdict for item in autostop.reap_finished([project]) if item.stopped]
-        if not stopped:
-            return live
-        with store_session() as store:
-            left = len(store.fleet_agents(project.id, live_only=True))
     except Exception:  # a stop that fails holds the spawn, as none would
+        return live
+    if not stopped:
         return live
     made = ", ".join(f"{v.agent.label} ({v.reason})" for v in stopped)
     notes.append(f"stopped finished workers to make room: {made}")
-    return left
+    return max(live - len(stopped), 0)
 
 
 def _held(project: ProjectInfo, live: int, floor: int, hold: Hold, now: datetime) -> str:

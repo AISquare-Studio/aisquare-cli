@@ -13,8 +13,8 @@ docstring, "Adding a terminal agent"): a recorded-payload fixture for every hook
 its hooks off, and the files of a home that keeps aisquare's MCP server: ``lasting``), a row in
 :data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
 (``tests/fixtures/agent_transcripts/<id>.json``: a permission prompt up, a question, an
-interruption, a turn ended on a question), its token records and its turn ends for its
-``transcript_reader``; and with
+interruption, a turn ended on a question), its token records, its turn ends and who steered
+it (``facts``: a prompt, an edit, a refusal, an Esc) for its ``transcript_reader``; and with
 ``AgentScreen.dialog_on_screen`` or ``screen_prompt``, its screens
 (``tests/fixtures/agent_screens/<id>.json``: each dialog of its own with the words it reads
 and, where it says, the prompt, and screens that show none).
@@ -1312,6 +1312,59 @@ def test_a_turn_end_says_what_it_left_running_and_whether_a_turn_began_since(
         reader.background_work(tmp_path / "missing.jsonl", None)
     with pytest.raises(OSError):
         reader.activity_since(tmp_path / "missing.jsonl", 0)
+
+
+def _facts_moments(adapter: AgentAdapter) -> list[dict[str, Any]]:
+    """The adapter's recorded sessions and who steered them (``facts`` in its fixture)."""
+    recorded = json.loads((TRANSCRIPTS / f"{adapter.id}.json").read_text(encoding="utf-8"))
+    moments: list[dict[str, Any]] = recorded.get("facts", [])
+    assert moments, f"add a facts moment to tests/fixtures/agent_transcripts/{adapter.id}.json"
+    return moments
+
+
+def test_the_facts_reader_says_who_steered_each_recorded_session(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``AgentTranscript.facts``, what ``aisquare outcomes`` reads (SCOPE #113 092 row 10), on
+    the agent's recorded sessions by its own reader: each prompt with its class, edit,
+    refusal, Esc and continuation, in order, and the offset at the file's end, from which
+    nothing is found again. The file is append-only, one record a line: cut after any line,
+    read, then read on from the offset the first read gave, it finds what one whole read
+    does; one shorter than the offset was rewritten, and is read from its start with an
+    offset below it; one that cannot be read is ``((), start)`` (review r36 of #113,
+    findings 10 and 12)."""
+    from aisquare.core.agent_adapters.types import FactKind, PromptClass
+
+    reader = _reader(adapter)
+    for moment in _facts_moments(adapter):
+        what = moment["what"]
+        data = "".join(line + "\n" for line in _usage_lines(moment)).encode()
+        file = tmp_path / "session.jsonl"
+        file.write_bytes(data)
+        whole, end = reader.facts(file, 0)
+        assert [[fact.kind, fact.detail] for fact in whole] == moment["expect"], what
+        assert all(fact.kind in get_args(FactKind) for fact in whole), what
+        prompts = [fact.detail for fact in whole if fact.kind == "p"]
+        assert set(prompts) <= set(get_args(PromptClass)), what
+        assert end == len(data), what
+        again, still = reader.facts(file, end)
+        assert (list(again), still) == ([], end), (what, "found twice")
+        ends = [index + 1 for index, byte in enumerate(data) if byte == ord("\n")]
+        for cut in ends:
+            file.write_bytes(data[:cut])
+            first, offset = reader.facts(file, 0)
+            file.write_bytes(data)
+            rest, final = reader.facts(file, offset)
+            assert ([*first, *rest], final) == (list(whole), end), (what, f"cut at byte {cut}")
+        file.write_bytes(data[: ends[0]])
+        head, offset = reader.facts(file, 0)
+        rewritten, below = reader.facts(file, end)
+        assert (list(rewritten), below) == (list(head), offset) and below < end, what
+    missing = tmp_path / "missing.jsonl"
+    assert [(list(found), at) for found, at in (reader.facts(missing, n) for n in (0, 7))] == [
+        ([], 0),
+        ([], 7),
+    ]
 
 
 def test_a_card_is_made_from_the_readers_facts_and_answered_with_its_keys(

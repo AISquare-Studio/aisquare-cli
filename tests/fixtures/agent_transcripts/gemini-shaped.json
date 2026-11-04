@@ -312,5 +312,105 @@
         "begun": true
       }
     }
+  ],
+  "facts": [
+    {
+      "what": "a prompt whose write_file ran, one whose replace was refused at its dialog (its $patch cancelled), stopped by the human",
+      "records": [
+        {
+          "type": "user",
+          "content": "write it",
+          "timestamp": "2026-10-26T09:00:00.000Z"
+        },
+        {
+          "type": "gemini",
+          "content": "",
+          "timestamp": "2026-10-26T09:00:01.000Z",
+          "toolCalls": [
+            {
+              "id": "c1",
+              "name": "write_file",
+              "args": {
+                "file_path": "/work/alpha/hello.txt",
+                "content": "hello"
+              }
+            }
+          ]
+        },
+        {
+          "$patch": {
+            "toolCalls": [
+              {
+                "id": "c1",
+                "status": "success",
+                "result": "written"
+              }
+            ]
+          },
+          "timestamp": "2026-10-26T09:00:02.000Z"
+        },
+        {
+          "type": "user",
+          "content": "now replace it",
+          "timestamp": "2026-10-26T09:00:03.000Z"
+        },
+        {
+          "type": "gemini",
+          "content": "",
+          "timestamp": "2026-10-26T09:00:04.000Z",
+          "toolCalls": [
+            {
+              "id": "c2",
+              "name": "replace",
+              "args": {
+                "file_path": "/work/alpha/other.txt"
+              }
+            }
+          ]
+        },
+        {
+          "$patch": {
+            "toolCalls": [
+              {
+                "id": "c2",
+                "status": "cancelled"
+              }
+            ]
+          },
+          "timestamp": "2026-10-26T09:00:05.000Z"
+        },
+        {
+          "type": "info",
+          "content": "Request cancelled.",
+          "timestamp": "2026-10-26T09:00:06.000Z"
+        }
+      ],
+      "expect": [
+        [
+          "p",
+          "text"
+        ],
+        [
+          "e",
+          "/work/alpha/hello.txt"
+        ],
+        [
+          "p",
+          "text"
+        ],
+        [
+          "e",
+          "/work/alpha/other.txt"
+        ],
+        [
+          "d",
+          ""
+        ],
+        [
+          "i",
+          ""
+        ]
+      ]
+    }
   ]
 }

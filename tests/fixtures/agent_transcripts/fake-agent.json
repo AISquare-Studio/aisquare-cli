@@ -330,5 +330,45 @@
         "begun": true
       }
     }
+  ],
+  "facts": [
+    {
+      "what": "two things it heard, the first stopped by the human",
+      "records": [
+        {
+          "timestamp": "2026-10-26T09:00:00.000Z",
+          "kind": "heard",
+          "text": "build it"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:01.000Z",
+          "kind": "said",
+          "text": "building"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:02.000Z",
+          "kind": "halt"
+        },
+        {
+          "timestamp": "2026-10-26T09:00:03.000Z",
+          "kind": "heard",
+          "text": "and now?"
+        }
+      ],
+      "expect": [
+        [
+          "p",
+          "text"
+        ],
+        [
+          "i",
+          ""
+        ],
+        [
+          "p",
+          "text"
+        ]
+      ]
+    }
   ]
 }

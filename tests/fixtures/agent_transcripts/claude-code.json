@@ -578,5 +578,208 @@
         "begun": true
       }
     }
+  ],
+  "facts": [
+    {
+      "what": "a prompt whose Edit ran, one whose Bash was refused at its prompt (its \"for tool use\" interruption the same act), one stopped with Esc, one a Stop hook kept going, and the fleet's nudge",
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-26T09:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "PATCH it"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-26T09:00:01.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_edit",
+                "name": "Edit",
+                "input": {
+                  "file_path": "/work/alpha/hello.txt",
+                  "old_string": "hi",
+                  "new_string": "hello"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "r1",
+          "timestamp": "2026-10-26T09:00:02.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_edit",
+                "content": "The file /work/alpha/hello.txt has been updated."
+              }
+            ]
+          },
+          "toolUseResult": {
+            "filePath": "/work/alpha/hello.txt"
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u2",
+          "timestamp": "2026-10-26T09:00:03.000Z",
+          "message": {
+            "role": "user",
+            "content": "ESC touch /work/refused"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a2",
+          "timestamp": "2026-10-26T09:00:04.000Z",
+          "message": {
+            "id": "m2",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bash",
+                "name": "Bash",
+                "input": {
+                  "command": "touch /work/refused",
+                  "description": "Touch"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "r2",
+          "timestamp": "2026-10-26T09:00:05.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_bash",
+                "is_error": true,
+                "content": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u3",
+          "timestamp": "2026-10-26T09:00:05.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Request interrupted by user for tool use]"
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u4",
+          "timestamp": "2026-10-26T09:00:06.000Z",
+          "message": {
+            "role": "user",
+            "content": "SLOW one"
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u5",
+          "timestamp": "2026-10-26T09:00:08.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Request interrupted by user]"
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u6",
+          "timestamp": "2026-10-26T09:00:09.000Z",
+          "message": {
+            "role": "user",
+            "content": "go on"
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u7",
+          "isMeta": true,
+          "timestamp": "2026-10-26T09:00:10.000Z",
+          "message": {
+            "role": "user",
+            "content": "Stop hook feedback:\n2 board update(s) arrived"
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u8",
+          "timestamp": "2026-10-26T09:00:11.000Z",
+          "message": {
+            "role": "user",
+            "content": "aisquare: board update — read the delta above."
+          }
+        }
+      ],
+      "expect": [
+        [
+          "p",
+          "text"
+        ],
+        [
+          "e",
+          "/work/alpha/hello.txt"
+        ],
+        [
+          "p",
+          "text"
+        ],
+        [
+          "d",
+          ""
+        ],
+        [
+          "p",
+          "text"
+        ],
+        [
+          "i",
+          ""
+        ],
+        [
+          "p",
+          "text"
+        ],
+        [
+          "c",
+          ""
+        ],
+        [
+          "p",
+          "wake"
+        ]
+      ]
+    }
   ]
 }

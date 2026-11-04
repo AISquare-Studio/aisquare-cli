@@ -225,5 +225,57 @@
         "begun": false
       }
     }
+  ],
+  "facts": [
+    {
+      "what": "codex-facts-0.164.0.jsonl, measured: a patch applied, an approval refused with Esc, Esc while the model worked, Esc while a command ran, a Stop hook's block, an escalated command approved",
+      "rollout": "codex-facts-0.164.0.jsonl",
+      "expect": [
+        [
+          "p",
+          "text"
+        ],
+        [
+          "e",
+          "/work/alpha/hello.txt"
+        ],
+        [
+          "p",
+          "text"
+        ],
+        [
+          "d",
+          ""
+        ],
+        [
+          "p",
+          "text"
+        ],
+        [
+          "i",
+          ""
+        ],
+        [
+          "p",
+          "text"
+        ],
+        [
+          "i",
+          ""
+        ],
+        [
+          "p",
+          "text"
+        ],
+        [
+          "c",
+          ""
+        ],
+        [
+          "p",
+          "text"
+        ]
+      ]
+    }
   ]
 }

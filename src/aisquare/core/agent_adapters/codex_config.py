@@ -16,10 +16,12 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import stat
 import tomllib
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -332,9 +334,12 @@ class CodexTelemetry:
 # its timeout defaulted and clamped as Codex runs it, its ``async`` given>]}``. Codex reads
 # that state from the user's ``config.toml`` and the launch's ``-c`` alone (``hook_states_from_
 # stack``: no project, plugin or managed layer may write it), and a hook whose hash differs is
-# "changed" and asked about again. :func:`hook_hash` is that hash, held to the hashes 0.166.0
-# wrote (``tests/fixtures/codex_hook_trust-0.166.0.json``), and :func:`record_hook_trust`
-# writes the tables, each where Codex's own write puts it.
+# "changed" and asked about again. :func:`hook_hash` is that hash, held to the hashes 0.164.0
+# and 0.166.0 wrote (``tests/fixtures/codex_hook_trust-<version>.json``), and
+# :func:`sync_hook_trust` writes the tables, each where Codex's own write puts it, for the
+# handlers ``core.agents.install_hooks`` wrote and no other. It keeps a record of the tables it
+# wrote (:data:`TRUST_RECORD`), so it takes back exactly those and never writes over, nor
+# takes back, a table of the human's (SMOKE12 O3 reopen, seq 10437).
 
 #: Codex's hook events (``HookEventName``) that read a group's ``matcher``; the rest run every
 #: group's hooks whatever it says, and hash none (``events/common.rs``
@@ -427,25 +432,47 @@ def hook_states(home: Path) -> dict[str, Any]:
     return states if isinstance(states, dict) else {}
 
 
-def record_hook_trust(home: Path, trusted: Mapping[str, str]) -> list[str]:
-    """Record ``trusted`` (``{[hooks.state] key: trusted_hash}``) in ``home``'s ``config.toml``
-    as Codex's "Trust all" records it; the keys written, ``[]`` when each holds its hash.
+#: aisquare's record, beside a Codex home's ``config.toml``, of the ``[hooks.state]`` tables it
+#: wrote there and the handlers it wrote them for: a table is aisquare's to replace or take
+#: back only while it holds the hash this record says aisquare wrote into it.
+TRUST_RECORD = ".aisquare-hooks-trust.json"
 
-    A key with no table gets ``[hooks.state."<key>"]`` / ``trusted_hash = "<hash>"``,
-    APPENDED after a blank line, as Codex appends one (every byte before it kept). A key whose
-    table holds another hash (aisquare's hook changed, an upgrade's new definition) has that
-    ``trusted_hash`` line replaced in place, or one added under its header, its other keys
-    (``enabled``, the human's off switch) kept. No other key of the file is touched, another
-    hook's trust least of all. The result is parsed before it is written and must be the file
-    as it was with these hashes alone set; one write, replaced by rename, through a symlink.
-    The file is made, owner-only, where there is none. :class:`HookTrustError` says why the
-    file was left as it was: not TOML, a ``hooks`` or ``state`` that is no table, a table of
-    a key spelt some other way (inline, dotted)."""
-    from aisquare.core import atomic
 
-    target = Path(os.path.realpath(home / "config.toml"))
+@dataclass(frozen=True)
+class TrustPlace:
+    """One handler ``install_hooks`` wrote: its place (``<event>:<group>:<handler>``), the
+    hash Codex gives it (:func:`hook_hash`; ``None`` when not known here, which leaves it to
+    Codex's question) and its ``[hooks.state]`` key by each path Codex may find the file at."""
+
+    place: str
+    digest: str | None
+    keys: tuple[str, ...]
+
+
+def sync_hook_trust(home: Path, places: Sequence[TrustPlace]) -> list[str]:
+    """Make aisquare's ``[hooks.state]`` tables in ``home``'s ``config.toml`` exactly those of
+    ``places``; the keys written or taken back, ``[]`` when each was as it should be.
+
+    A key with no table gets ``[hooks.state."<key>"]`` / ``trusted_hash = "<hash>"``, APPENDED
+    after a blank line, as Codex appends one: every byte before it kept. A table that holds
+    the hash already is aisquare's from then on (the human's "Trust all" for aisquare's own
+    hook, before aisquare recorded any). A table that holds a hash aisquare wrote there
+    (:data:`TRUST_RECORD`) has that line replaced in place, any comment after it and any
+    other key of the table (``enabled``, the human's off switch) kept; one that holds any
+    other hash, or none, is the human's and left alone, its hook to Codex's question. A table
+    aisquare wrote for a handler no longer among ``places`` is taken back, the table where its
+    ``trusted_hash`` was all it held, else that line; one the human has written over since is
+    left. ``()`` takes back every one (``agents disconnect``, uninstall).
+
+    The result is parsed before it is written and must be the file as it was with these
+    changes alone. It is written as ``core.agents`` writes a hooks file (a file this user may
+    not write refused, one with a second name written in place), and made owner-only where
+    there is none. :class:`HookTrustError` says why the file was left as it was: not TOML, a
+    ``hooks`` or ``state`` that is no table, an entry that is no table, a table of a key spelt
+    some other way (inline, dotted), a file that could not be written."""
+    config = Path(os.path.realpath(home / "config.toml"))
     try:
-        raw = target.read_bytes()
+        raw = config.read_bytes()
     except FileNotFoundError:
         raw = b""
     except OSError as exc:
@@ -459,41 +486,154 @@ def record_hook_trust(home: Path, trusted: Mapping[str, str]) -> list[str]:
     states = hooks.get("state", {}) if isinstance(hooks, dict) else None
     if not isinstance(states, dict):
         raise HookTrustError("its config.toml has a 'hooks' or 'hooks.state' that is not a table")
-    wanted: dict[str, str] = {}
-    for key, digest in trusted.items():
+    record = _read_record(home)
+    owned = dict(record["tables"])
+    wanted = {key: place.digest for place in places if place.digest for key in place.keys}
+    expected = copy.deepcopy(before)
+    changed: list[str] = []
+    for key, digest in wanted.items():
         entry = states.get(key)
         if entry is not None and not isinstance(entry, dict):
             raise HookTrustError(
                 f"its config.toml has a [hooks.state] entry for {key} that is not a table"
             )
-        if entry is None or entry.get("trusted_hash") != digest:
-            wanted[key] = digest
-    if not wanted:
-        return []
-    for key, digest in wanted.items():
-        value = f"trusted_hash = {json.dumps(digest)}"
-        if key in states:
-            text = _set_in_table(text, ("hooks", "state", key), value)
+        if entry is None:
+            if text and not text.endswith("\n"):
+                text += "\n"
+            header = f"[hooks.state.{json.dumps(key, ensure_ascii=False)}]"
+            text += ("\n" if text else "") + f"{header}\ntrusted_hash = {json.dumps(digest)}\n"
+            expected.setdefault("hooks", {}).setdefault("state", {})[key] = {"trusted_hash": digest}
+        elif entry.get("trusted_hash") == digest:
+            owned[key] = digest
             continue
-        if text and not text.endswith("\n"):
-            text += "\n"
-        header = f"[hooks.state.{json.dumps(key, ensure_ascii=False)}]"
-        text += ("\n" if text else "") + f"{header}\n{value}\n"
+        elif key in owned and entry.get("trusted_hash") == owned[key]:
+            text = _set_hash(text, ("hooks", "state", key), digest)
+            expected["hooks"]["state"][key]["trusted_hash"] = digest
+        else:
+            owned.pop(key, None)  # the human's: their hook to review
+            continue
+        owned[key] = digest
+        changed.append(key)
+    for key in [key for key in owned if key not in wanted]:
+        entry = states.get(key)
+        if isinstance(entry, dict) and entry.get("trusted_hash") == owned[key]:
+            whole = set(entry) == {"trusted_hash"}
+            text = _take_back(text, ("hooks", "state", key), whole=whole)
+            if whole:
+                del expected["hooks"]["state"][key]
+            else:
+                del expected["hooks"]["state"][key]["trusted_hash"]
+            changed.append(key)
+        del owned[key]
+    if changed:
+        try:
+            after = tomllib.loads(text)
+        except (tomllib.TOMLDecodeError, RecursionError):
+            raise HookTrustError("its config.toml cannot take a [hooks.state] table") from None
+        if _pruned(after) != _pruned(expected):
+            raise HookTrustError("its config.toml would read otherwise with the trust recorded")
+        _write_config(config, text, made=not raw)
+    _write_record(home, {place.place: place.digest for place in places}, owned)
+    return changed
+
+
+def hook_trust_in_force(
+    home: Path, settings: Mapping[str, Any], spelt: Sequence[Path | str]
+) -> bool:
+    """Whether the handlers aisquare last recorded (:data:`TRUST_RECORD`) are each still at
+    its place in ``settings`` with the hash it recorded, every one known, and ``home``'s
+    ``config.toml`` trusts each of them under every path in ``spelt``. Read-only."""
+    record = _read_record(home)
+    if not record["places"]:
+        return False
+    states = hook_states(home)
+    hooks = settings.get("hooks")
+    for place, digest in record["places"].items():
+        event, _, rest = place.rpartition(":")
+        event, _, group_at = event.rpartition(":")
+        try:
+            group = hooks[event][int(group_at)]  # type: ignore[index]
+            handler = group["hooks"][int(rest)]
+        except (KeyError, IndexError, TypeError, ValueError):
+            return False
+        if digest is None or not isinstance(group, dict) or not isinstance(handler, dict):
+            return False
+        if hook_hash(event, group, handler) != digest:
+            return False
+        for file in spelt:
+            key = hook_key(file, event, int(group_at), int(rest))
+            state = states.get(key)
+            if record["tables"].get(key) != digest or not isinstance(state, dict):
+                return False
+            if state.get("trusted_hash") != digest:
+                return False
+    return True
+
+
+def _read_record(home: Path) -> dict[str, dict[str, Any]]:
+    """:data:`TRUST_RECORD` as ``{"places": {place: hash}, "tables": {key: hash}}``; empty
+    where there is none or it cannot be read, which owns no table."""
+    found: dict[str, dict[str, Any]] = {"places": {}, "tables": {}}
     try:
-        after = tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, RecursionError):
-        raise HookTrustError("its config.toml cannot take a [hooks.state] table") from None
-    expected = copy.deepcopy(before)
-    expected_states = expected.setdefault("hooks", {}).setdefault("state", {})
-    for key, digest in wanted.items():
-        expected_states.setdefault(key, {})["trusted_hash"] = digest
-    if after != expected:
-        raise HookTrustError("its config.toml would read otherwise with the trust recorded")
+        data = json.loads((home / TRUST_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return found
+    if not isinstance(data, dict):
+        return found
+    for name in ("places", "tables"):
+        value = data.get(name)
+        if isinstance(value, dict):
+            found[name] = {
+                str(key): digest
+                for key, digest in value.items()
+                if digest is None or isinstance(digest, str)
+            }
+    found["tables"] = {key: digest for key, digest in found["tables"].items() if digest}
+    return found
+
+
+def _write_record(home: Path, places: Mapping[str, str | None], tables: Mapping[str, str]) -> None:
+    """Keep :data:`TRUST_RECORD`, or remove it once it names nothing."""
+    from aisquare.core import atomic
+
+    path = home / TRUST_RECORD
+    if not places and not tables:
+        with suppress(FileNotFoundError):
+            path.unlink()
+        return
+    body = json.dumps({"places": dict(places), "tables": dict(tables)}, indent=2) + "\n"
+    with suppress(OSError):
+        if path.read_text(encoding="utf-8") == body:
+            return
     try:
-        atomic.write_replacing(target, text.encode("utf-8"), owner_only=not raw)
+        atomic.write_replacing(path, body)
     except OSError as exc:
+        raise HookTrustError(f"its {TRUST_RECORD} could not be written ({exc})") from exc
+
+
+def _write_config(config: Path, text: str, *, made: bool) -> None:
+    """``text`` over ``config`` as ``core.agents`` writes a hooks file; owner-only if made."""
+    from aisquare.core import agents, atomic
+
+    try:
+        if made and not config.exists():
+            atomic.write_replacing(config, text.encode("utf-8"), owner_only=True)
+        else:
+            agents.write_settings_text(config, text)
+    except (OSError, ValueError) as exc:  # AgentSettingsError (not a regular file) is a ValueError
         raise HookTrustError(f"its config.toml could not be written ({exc})") from exc
-    return list(wanted)
+
+
+def _pruned(table: Mapping[str, Any]) -> dict[str, Any]:
+    """``table`` without an empty ``hooks.state``, or a ``hooks`` emptied by that."""
+    out = copy.deepcopy(dict(table))
+    hooks = out.get("hooks")
+    if isinstance(hooks, dict):
+        if hooks.get("state") == {}:
+            del hooks["state"]
+        if not hooks:
+            del out["hooks"]
+    return out
 
 
 def _header(line: str) -> tuple[str, ...] | None:
@@ -514,11 +654,10 @@ def _header(line: str) -> tuple[str, ...] | None:
     return tuple(path) if node == {} else None
 
 
-def _set_in_table(text: str, path: tuple[str, ...], line: str) -> str:
-    """``text`` with ``line`` (``trusted_hash = …``) set in the table ``path``'s header opens:
-    its ``trusted_hash`` line replaced, else ``line`` put under the header.
+def _table(lines: list[str], path: tuple[str, ...]) -> tuple[int, int]:
+    """The header line of table ``path`` and the line after its last key: its own lines,
+    the comments and blank lines in front of the next header not among them.
     :class:`HookTrustError` when no header opens it (the table spelt inline or dotted)."""
-    lines = text.splitlines(keepends=True)
     start = next((at for at, each in enumerate(lines) if _header(each) == path), None)
     if start is None:
         raise HookTrustError(
@@ -527,13 +666,58 @@ def _set_in_table(text: str, path: tuple[str, ...], line: str) -> str:
     end = next(
         (at for at in range(start + 1, len(lines)) if _header(lines[at]) is not None), len(lines)
     )
+    while end > start + 1 and (
+        not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("#")
+    ):
+        end -= 1
+    return start, end
+
+
+#: A ``trusted_hash`` line: its key and ``=``, its value (a basic or literal string), and what
+#: follows it (spaces, a comment), which a replaced line keeps.
+_HASH_LINE = re.compile(
+    r"""^(?P<key>\s*trusted_hash\s*=\s*)(?P<value>"(?:[^"\\]|\\.)*"|'[^']*')(?P<rest>[^\n]*)(?P<end>\n?)$"""
+)
+
+
+def _hash_line(lines: list[str], start: int, end: int) -> int | None:
+    """The index of the ``trusted_hash`` line in ``lines[start + 1:end]``, else ``None``."""
     for at in range(start + 1, end):
         with suppress(tomllib.TOMLDecodeError, RecursionError):
             if set(tomllib.loads(lines[at].strip())) == {"trusted_hash"}:
-                ending = "\n" if lines[at].endswith("\n") else ""
-                lines[at] = line + ending
-                return "".join(lines)
-    if not lines[start].endswith("\n"):
-        lines[start] += "\n"
-    lines.insert(start + 1, line + "\n")
+                return at
+    return None
+
+
+def _set_hash(text: str, path: tuple[str, ...], digest: str) -> str:
+    """``text`` with the ``trusted_hash`` of table ``path`` set to ``digest``: its line's value
+    replaced, what follows it kept, else a line put under the header."""
+    lines = text.splitlines(keepends=True)
+    start, end = _table(lines, path)
+    at = _hash_line(lines, start, end)
+    if at is None:
+        if not lines[start].endswith("\n"):
+            lines[start] += "\n"
+        lines.insert(start + 1, f"trusted_hash = {json.dumps(digest)}\n")
+        return "".join(lines)
+    match = _HASH_LINE.match(lines[at])
+    if match is None:
+        raise HookTrustError(f"its config.toml spells the trusted_hash of {path[-1]} otherwise")
+    lines[at] = f"{match['key']}{json.dumps(digest)}{match['rest']}{match['end']}"
+    return "".join(lines)
+
+
+def _take_back(text: str, path: tuple[str, ...], *, whole: bool) -> str:
+    """``text`` without table ``path`` (``whole``: its header and its own lines, and the blank
+    line before it that its append added), else without its ``trusted_hash`` line."""
+    lines = text.splitlines(keepends=True)
+    start, end = _table(lines, path)
+    if not whole:
+        at = _hash_line(lines, start, end)
+        if at is not None:
+            del lines[at]
+        return "".join(lines)
+    if start > 0 and not lines[start - 1].strip():
+        start -= 1
+    del lines[start:end]
     return "".join(lines)

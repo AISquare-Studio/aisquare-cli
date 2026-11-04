@@ -16,7 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, get_args
 
 from aisquare.core import harness, paths
 
@@ -869,7 +869,50 @@ class HooksSwitch:
 
 class HookTrustError(ValueError):
     """Why an agent's record of which hooks it trusts was left as it was
-    (:meth:`AgentAdapter.trust_hooks`): those hooks stay untrusted, and the agent asks."""
+    (:meth:`AgentHookTrust.record`): those hooks stay untrusted, and the agent asks."""
+
+
+class HookPlace(NamedTuple):
+    """Where in a hooks file ``core.agents.install_hooks`` wrote one handler: the event, the
+    index of its group in that event's list, and its index in that group's ``hooks``."""
+
+    event: str
+    group: int
+    handler: int
+
+
+class AgentHookTrust(Protocol):
+    """How an agent that runs a hook only once it is trusted (``capabilities.
+    requires_hook_trust``) records that aisquare's own are: ``AgentAdapter.hook_trust``.
+
+    Only the handlers ``core.agents.install_hooks`` generated in that call are ever named to
+    it, by where it wrote them (:class:`HookPlace`), never a handler picked by what its
+    command looks like: a command anyone can write that looks like aisquare's, in an event
+    aisquare does not install, was trusted and ran unreviewed (SMOKE12 O3 reopen, seq
+    10437). It keeps a record of what it wrote, so it takes back exactly that and never
+    touches a record of the human's."""
+
+    def record(
+        self,
+        home: Path,
+        settings_path: Path,
+        settings: Mapping[str, Any],
+        written: Sequence[HookPlace],
+    ) -> list[str]:
+        """Make the agent's record of aisquare's trust in config dir ``home`` exactly the
+        handlers at ``written`` in ``settings`` (its hooks file, at ``settings_path``): each
+        recorded where and as the agent records a human's yes, and each record aisquare made
+        for a handler not among them taken back; ``()`` takes back every one (``agents
+        disconnect``, uninstall). A record the human made is never overwritten nor taken
+        back: its hook stays theirs to review. The records written or taken back; raises
+        :class:`HookTrustError` saying why the agent's file was left as it was."""
+        ...
+
+    def recorded(self, home: Path, settings_path: Path, settings: Mapping[str, Any]) -> bool:
+        """Whether the last :meth:`record` named handlers that are still at their places in
+        ``settings`` as they were, and the agent's record trusts every one of them: what
+        ``core.agents.integration_readiness`` reads as ``trusted``. Read-only; never raises."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -1412,7 +1455,7 @@ class AgentAdapter(Protocol):
     ``install_routes``, ``version_args`` with :func:`version_in`, :meth:`lasting_installs`.
     Hooks: ``settings_name`` (the hooks file in the config dir), ``capabilities.hooks`` with
     :func:`hook_args` and :meth:`hook_entry`, ``hooks_off_setting`` with
-    :meth:`hooks_switch`, :meth:`trust_hooks`, ``plugin``. Events: :meth:`decode_event` and
+    :meth:`hooks_switch`, ``hook_trust``, ``plugin``. Events: :meth:`decode_event` and
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
     :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
     :meth:`label_args`, :meth:`resume_args`, :meth:`fork_args`,
@@ -1482,6 +1525,13 @@ class AgentAdapter(Protocol):
         ...
 
     @property
+    def hook_trust(self) -> AgentHookTrust | None:
+        """How it records that aisquare's hooks are trusted (:class:`AgentHookTrust`), for an
+        agent that runs a hook only once it is; ``None`` for one that runs every hook its
+        files hold (Claude Code)."""
+        ...
+
+    @property
     def mcp_registration(self) -> AgentMcpRegistration | None:
         """How the agent's own CLI registers an MCP server at user scope, and how its config
         says one is there (:class:`AgentMcpRegistration`); ``None`` for an agent whose
@@ -1534,25 +1584,6 @@ class AgentAdapter(Protocol):
         line): the agent's own shape, ``spec.timeout`` (seconds) in its own unit, and a
         ``timeout`` key, where it has one, that an operator's longer value outlives.
         :func:`command_entry` for Claude Code's and Codex's shape."""
-        ...
-
-    def trust_hooks(
-        self,
-        home: Path,
-        settings_path: Path,
-        settings: Mapping[str, Any],
-        ours: Callable[[Mapping[str, Any]], bool],
-    ) -> list[str]:
-        """Record, where and as the agent records a human's yes to them, that the handlers
-        of ``settings`` (the hooks file :attr:`settings_name` of config dir ``home``, at
-        ``settings_path``) that ``ours`` picks are trusted: what ``core.agents.install_hooks``
-        asks once it has written aisquare's, and a fleet launch before it starts the agent
-        there, so an agent that runs a hook only once it is trusted
-        (``capabilities.requires_hook_trust``) runs them with no question to stall on.
-        Every other handler's trust is left as it is. The record's keys written, ``[]``
-        when each was there already or the agent keeps none (Claude Code). Raises
-        :class:`HookTrustError` saying why the record was left as it was: those hooks stay
-        untrusted, and the agent asks about them."""
         ...
 
     def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:

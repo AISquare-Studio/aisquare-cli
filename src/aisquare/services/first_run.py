@@ -558,7 +558,7 @@ def _probe_agent(
                 state, detail = agent_core.integration_readiness(adapter.id, home)
                 if state == "unreadable":
                     refused = detail or f"cannot read {home / adapter.settings_name}"
-                connected = state in {"configured", "observed", "unverified"}
+                connected = state in {"configured", "observed", "unverified", "trusted"}
                 trust = state == "unverified"
                 plugin = agent_core.plugin_of(adapter.id)
                 install = plugin.installed(home) if plugin is not None else None

@@ -4346,7 +4346,9 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                     _warn(adapter.id, f"Context hook timeout too short: {', '.join(short)}", fix)
                 )
                 continue
-            if state in {"configured", "observed"}:
+            if state in {"configured", "observed", "trusted"}:
+                # Trusted: the agent's record trusts the hooks connect wrote (SMOKE12 O3), so
+                # nothing is the human's to do; the first session run makes it observed.
                 checks.append(_ok(adapter.id, f"{adapter.label}: {state} in {directory}"))
             elif state == "unverified":
                 # Installed, and the agent runs them only once the user trusts them: the

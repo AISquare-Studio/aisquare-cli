@@ -2518,46 +2518,62 @@ def test_connect_asks_an_agent_that_trusts_hooks_to_record_its_own_trust(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """SMOKE12 O3 of #113: an agent that runs a hook only once it is trusted
-    (``requires_hook_trust``) is asked, through its own ``trust_hooks``, to record that
-    aisquare's hooks are, once ``connect`` has written them; the shared code picks
-    aisquare's handlers of this definition and none of the user's, and names its own file."""
-    from aisquare.core.agent_adapters.types import AgentCapabilities
+    (``requires_hook_trust``) is asked, through its own ``hook_trust``, to record that
+    aisquare's hooks are, once ``connect`` has written them: by where it wrote each, never by
+    what a command looks like (the reopen, seq 10437), so a look-alike of the user's in an
+    event it does not install is named to it by no place; ``disconnect`` asks it to take every
+    record back; and its readiness reads ``trusted`` off its own ``recorded``."""
+    from aisquare.core.agent_adapters.types import AgentCapabilities, HookPlace
 
-    asked: list[tuple[Path, Path, list[bool]]] = []
+    asked: list[tuple[Path, Path, list[HookPlace], list[str]]] = []
+
+    class Record:
+        def record(self, home: Path, settings_path: Path, settings: Any, written: Any) -> list[str]:
+            commands = [
+                settings["hooks"][at.event][at.group]["hooks"][at.handler]["command"]
+                for at in written
+            ]
+            asked.append((home, settings_path, list(written), commands))
+            return ["recorded"]
+
+        def recorded(self, home: Path, settings_path: Path, settings: Any) -> bool:
+            return bool(asked and asked[-1][2])
 
     class Trusting(GeminiShapedAdapter):
         capabilities: AgentCapabilities = replace(
             GeminiShapedAdapter.capabilities, requires_hook_trust=True
         )
-
-        def trust_hooks(
-            self, home: Path, settings_path: Path, settings: Any, ours: Any
-        ) -> list[str]:
-            picked = [
-                ours(handler)
-                for groups in settings["hooks"].values()
-                for group in groups
-                for handler in group["hooks"]
-            ]
-            asked.append((home, settings_path, picked))
-            return ["recorded"]
+        hook_trust = Record()
 
     adapter = Trusting()
     monkeypatch.delenv(adapter.home_env, raising=False)
     register(adapter)
     try:
         home = _home(adapter)
+        look_alike = "/opt/someone-else/bin/aisquare hook event"
+        assert agent_core._is_aisquare_hook_command(look_alike)
         (home / adapter.settings_name).write_text(
             json.dumps(
-                {"hooks": {"AfterAgent": [{"hooks": [{"type": "command", "command": "true"}]}]}}
+                {
+                    "hooks": {
+                        "Notification": [{"hooks": [{"type": "command", "command": look_alike}]}]
+                    }
+                }
             ),
             encoding="utf-8",
         )
         connected = runner.invoke(app, ["agents", "connect", adapter.id, "--config-dir", str(home)])
         assert connected.exit_code == 0, connected.output
-        [(where, path, picked)] = asked
+        [(where, path, written, commands)] = asked
         assert (where, path) == (home, home / adapter.settings_name)
-        assert picked.count(True) == len(adapter.capabilities.hooks) and picked[0] is False
-        assert agent_core.trust_hooks(adapter.id, home) == ["recorded"]
+        assert sorted(at.event for at in written) == sorted(
+            spec.event for spec in adapter.capabilities.hooks
+        )
+        assert look_alike not in commands and all(" hook " in command for command in commands)
+        assert agent_core.integration_readiness(adapter.id, home)[0] == "trusted"
+
+        gone = runner.invoke(app, ["agents", "disconnect", adapter.id, "--config-dir", str(home)])
+        assert gone.exit_code == 0, gone.output
+        assert asked[-1][2] == [], "every record taken back"
     finally:
         unregister(adapter.id)

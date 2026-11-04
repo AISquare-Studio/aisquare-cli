@@ -14383,9 +14383,9 @@ def _hooks_installed_first(
     anything is started there, or stopped for it: installed now where they are not, and the
     launch refused, saying why, where they cannot be (``nothing`` says what was left as it
     was). Installed, the agent's record of their trust is made too where it keeps one
-    (``agents.trust_hooks``: Codex's ``[hooks.state]``), which ``install_hooks`` makes with
-    them; where that record cannot be made, the agent asks at its start, and ``NEEDS YOU``
-    says so.
+    (``AgentAdapter.hook_trust``: Codex's ``[hooks.state]``), which ``install_hooks`` makes for
+    the hooks it writes; where that record cannot be made, the agent asks at its start, and
+    ``NEEDS YOU`` says so.
 
     A hop onto a Codex slot with no ``hooks.json`` (made by hand, past the install ``accounts
     add`` does) started an agent with no hook: no session registered, its claim stayed on the
@@ -14399,8 +14399,6 @@ def _hooks_installed_first(
     if not home.is_dir():
         return
     if agent_core.connected(adapter.id, home, cwd=cwd):
-        with suppress(Exception):
-            agent_core.trust_hooks(adapter.id, home)
         return
     try:
         installed = agent_core.install_hooks(adapter.id, home)

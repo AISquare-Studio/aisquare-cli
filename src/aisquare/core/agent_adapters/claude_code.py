@@ -2,7 +2,7 @@
 
 import os
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -20,6 +20,7 @@ from aisquare.core.agent_adapters.mcp_servers import ClaudeCodeMcp
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
+    AgentHookTrust,
     AgentScreen,
     AgentTranscript,
     BadEffortError,
@@ -350,15 +351,8 @@ class ClaudeCodeAdapter:
         group (:func:`command_entry`)."""
         return command_entry(spec, command)
 
-    def trust_hooks(
-        self,
-        home: Path,
-        settings_path: Path,
-        settings: Mapping[str, Any],
-        ours: Callable[[Mapping[str, Any]], bool],
-    ) -> list[str]:
-        """None to record: Claude Code runs every hook its settings files hold."""
-        return []
+    #: Claude Code runs every hook its settings files hold: no trust to record.
+    hook_trust: AgentHookTrust | None = None
 
     def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
         """The MCP servers that run aisquare in the ``.claude.json`` ``home`` uses and in the

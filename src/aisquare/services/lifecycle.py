@@ -1336,15 +1336,11 @@ def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
 
 
 def _trusted(site: HookSite) -> bool:
-    """Whether the agent's own record trusts aisquare's hooks in ``site`` once a refresh has
-    rewritten them (``agents.trust_hooks``): the new install's refresh records it, and this
-    records it where one from before it did not, as an install of the hooks does. ``False``
-    where the record cannot be made, and the agent asks again (SMOKE12 O3 of #113)."""
-    try:
-        agent_core.trust_hooks(site.agent, site.config_dir)
-    except Exception:
-        return False
-    return True
+    """Whether the agent's own record trusts the hooks the new install's refresh wrote in
+    ``site``, which its ``install_hooks`` records (``agents.hook_trust_recorded``, read-only):
+    ``False`` where it could not, or a refresh from before it did not, and the agent asks
+    again (SMOKE12 O3 of #113)."""
+    return agent_core.hook_trust_recorded(site.agent, site.config_dir)
 
 
 # --- uninstall ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ from aisquare.core.agent_adapters.types import (
     GENERIC_HOOK,
     AgentCapabilities,
     AgentEvent,
+    AgentHookTrust,
     AgentScreen,
     AgentTranscript,
     AnswerKey,
@@ -701,15 +702,8 @@ class FakeAgentAdapter:
             entry["timeout"] = spec.timeout
         return entry
 
-    def trust_hooks(
-        self,
-        home: Path,
-        settings_path: Path,
-        settings: Mapping[str, Any],
-        ours: Callable[[Mapping[str, Any]], bool],
-    ) -> list[str]:
-        """None to record: the fake runs every hook it holds."""
-        return []
+    #: The fake runs every hook it holds: no trust to record.
+    hook_trust: AgentHookTrust | None = None
 
     def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
         # Its MCP servers in `servers.json` (`{"servers": {name: {"command", "args"}}}`),

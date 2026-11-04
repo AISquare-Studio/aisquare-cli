@@ -34,6 +34,7 @@ from aisquare.core.agent_adapters.types import (
     GENERIC_HOOK,
     AgentAdapter,
     AgentPlugin,
+    HookPlace,
     HookSpec,
     HooksSwitch,
     HookTrustError,
@@ -426,11 +427,21 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
 
     No change means no rewrite: Codex trust refers to the installed definition.
     """
+    text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    write_settings_text(path, text.encode("utf-8", errors="backslashreplace").decode("utf-8"))
+
+
+def write_settings_text(path: Path, body: str) -> None:
+    """``body`` over the agent's own file ``path`` as :func:`_write_settings` writes a hooks
+    file: nothing written where it reads so already; replaced through a link; refused where
+    this user may not write it; in place where a file renamed over it would not be the same
+    file to everyone else (a second name, another owner or group, a mount point). Codex's
+    ``config.toml`` is written so too, where aisquare records its trust of its hooks
+    (``codex_config.sync_hook_trust``): a renamed one dropped a hard link's other name and
+    put a read-only file's trust in anyway (SMOKE12 O3 reopen, seq 10437)."""
     snapshot = _SETTINGS_SNAPSHOT.get()
     if snapshot is not None:
         snapshot.pop(_dir_key(path), None)
-    text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
-    body = text.encode("utf-8", errors="backslashreplace").decode("utf-8")
     if _regular_settings(path) is not None:
         with suppress(OSError, UnicodeError):
             if path.read_text(encoding="utf-8") == body:
@@ -648,9 +659,13 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     adapter = get_adapter(name)
     # already shell-quoted where needed
     command = _aisquare_command(isolated=adapter.capabilities.sandboxes_tools)
+    # Each handler this call writes, where it writes it: these alone carry the definition and
+    # are trusted, never a handler picked by what its command looks like (SMOKE12 O3 reopen).
+    generated: list[tuple[HookPlace, dict[str, Any]]] = []
     for hook in spec.hooks:
         groups = hooks.get(hook.event)
-        kept = _without_aisquare(groups) if isinstance(groups, list) else []
+        groups = groups if isinstance(groups, list) else []
+        kept = _without_aisquare(groups)
         argv = " ".join(_quote(arg) for arg in hook_args(adapter, hook, spec.home))
         # The agent's own handler shape, the timeout in its own unit (Gemini CLI's is ms).
         entry = adapter.hook_entry(hook, f"{command} hook {argv}")
@@ -661,17 +676,19 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         group: dict[str, Any] = {"hooks": [entry]}
         if hook.matcher is not None:
             group["matcher"] = hook.matcher
-        kept.append(group)
+        at = _placed(groups)
+        kept.insert(at, group)
         hooks[hook.event] = kept
+        generated.append((HookPlace(hook.event, at, 0), entry))
     settings["hooks"] = hooks
     if adapter.capabilities.requires_hook_trust:
         definition = _definition_fingerprint(settings)
-        for groups in hooks.values():
-            for group in groups if isinstance(groups, list) else []:
-                for handler in _owned_handlers(group):
-                    handler["command"] = (
-                        _without_hook_definition(handler["command"]) + f" --definition {definition}"
-                    )
+        for _place, entry in generated:
+            # Its own entries alone: a handler outside them that reads like aisquare's (another
+            # event's, anyone's) is left as it was written (SMOKE12 O3 reopen, seq 10437).
+            entry["command"] = (
+                _without_hook_definition(entry["command"]) + f" --definition {definition}"
+            )
     if paths.names_no_home(spec.settings_path):
         # A `~olduser/.claude` read as written (paths.expand_user): made, it landed in the
         # cwd, and connect said ✓ (sweep of #257).
@@ -680,50 +697,53 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         )
     spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
     _write_settings(spec.settings_path, settings)
-    with suppress(HookTrustError, OSError):
-        # Its question is the human's answer where the record cannot be written (SMOKE12 O3).
-        _trust(adapter, spec.home, spec.settings_path, settings)
+    if adapter.hook_trust is not None:
+        with suppress(HookTrustError, OSError):
+            # Its question is the human's answer where the record cannot be written (SMOKE12 O3).
+            adapter.hook_trust.record(
+                spec.home, spec.settings_path, settings, [place for place, _ in generated]
+            )
     return True
 
 
-def trust_hooks(name: str, config_dir: Path | None = None) -> list[str]:
-    """Record that aisquare's hooks in ``config_dir`` are trusted, where and as the agent
-    records a human's yes (``AgentAdapter.trust_hooks``), for an agent that runs a hook only
-    once it is trusted (``capabilities.requires_hook_trust``); the record's keys written.
+def _placed(groups: list[Any]) -> int:
+    """Where aisquare's group goes among ``_without_aisquare(groups)``: where the first group
+    that held one of its hooks was (after it, where the human's hooks beside them keep it),
+    else after every group. Appended at the end each time, it moved behind a group the human
+    added after it, and Codex, which keys a hook's trust by its group's index, read the human's
+    record of that group as aisquare's (SMOKE12 O3 reopen, seq 10437)."""
+    first = next((at for at, group in enumerate(groups) if _is_aisquare_group(group)), None)
+    if first is None:
+        return len(_without_aisquare(groups))
+    return len(_without_aisquare(groups[:first])) + len(_without_aisquare([groups[first]]))
 
-    Each handler of aisquare's whose ``--definition`` is the file's own (:func:`hook_fingerprint`),
-    the hooks :func:`install_hooks` wrote, is trusted; every other one is left to the agent's
-    question. :func:`install_hooks` asks this once it has written them, and a fleet launch
-    before it starts the agent in that dir. Codex 0.164.0 and 0.166.0 held a window at their
-    "Hooks need review" dialog until a human answered it, on every home its hooks were new in,
-    so an unattended fleet stalled on each new slot (SMOKE12 O3 of #113). ``[]`` for an agent
-    that runs every hook, or a dir with no hooks file. Raises :class:`HookTrustError` with
-    why the record was left as it was, and what :func:`settings_for_write` raises."""
+
+def hook_trust_recorded(name: str, config_dir: Path | None = None) -> bool:
+    """Whether the agent's own record trusts the hooks :func:`install_hooks` last wrote in
+    ``config_dir``, each still where and as it wrote it (``AgentHookTrust.recorded``); ``False``
+    for an agent that keeps no such record. Read-only; never raises."""
     adapter = _adapter(name)
-    if adapter is None or not adapter.capabilities.requires_hook_trust:
-        return []
+    trust = adapter.hook_trust if adapter is not None else None
     spec = _spec(name, config_dir)
-    if spec is None or spec.settings_path is None or _regular_settings(spec.settings_path) is None:
-        return []
-    settings = settings_for_write(spec.settings_path, strict=hooks_shape_strict(name))
-    return _trust(adapter, spec.home, spec.settings_path, settings)
+    if trust is None or spec is None or spec.settings_path is None:
+        return False
+    try:
+        settings = _inspected_settings(spec.settings_path, strict=True)
+    except AgentSettingsError:
+        return False
+    return trust.recorded(spec.home, spec.settings_path, settings)
 
 
-def _trust(
-    adapter: AgentAdapter, home: Path, settings_path: Path, settings: dict[str, Any]
-) -> list[str]:
-    """``adapter.trust_hooks`` of aisquare's handlers of this definition in ``settings``."""
-    if not adapter.capabilities.requires_hook_trust:
-        return []
-    definition = _definition_fingerprint(settings)
-
-    def ours(handler: Mapping[str, Any]) -> bool:
-        command = handler.get("command")
-        if not isinstance(command, str) or not _is_aisquare_hook_command(command):
-            return False
-        return _hook_command_parts(command)[1].get("--definition") == definition
-
-    return adapter.trust_hooks(home, settings_path, settings, ours)
+def _take_back_trust(name: str, spec: AgentSpec, settings: Mapping[str, Any]) -> None:
+    """The agent's records of aisquare's trust in ``spec``'s dir taken back, every one and
+    no record of the human's (``AgentHookTrust.record`` with none): ``agents disconnect`` and
+    uninstall left all of them behind (SMOKE12 O3 reopen, seq 10437). Where they cannot be,
+    they trust hooks of aisquare's that are gone, and the file is left as it was."""
+    adapter = _adapter(name)
+    if adapter is None or adapter.hook_trust is None or spec.settings_path is None:
+        return
+    with suppress(HookTrustError, OSError):
+        adapter.hook_trust.record(spec.home, spec.settings_path, settings, ())
 
 
 def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
@@ -752,6 +772,7 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
         raise AgentSettingsError(f"can't read {spec.settings_path}: it is not UTF-8 text") from exc
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
+        _take_back_trust(name, spec, settings)
         return False
     removed = False
     for event, groups in list(hooks.items()):
@@ -768,6 +789,7 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
         settings.pop("hooks", None)
     if removed:
         _write_settings(spec.settings_path, settings)
+    _take_back_trust(name, spec, settings)
     return removed
 
 
@@ -1959,7 +1981,9 @@ def observe_hooks(name: str, config_dir: Path, definition: str | None = None) ->
 def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
     """The native integration's state in ``config_dir``: ``unsupported``, ``unreadable``,
     ``not_configured``, ``configured``, or for an agent whose hooks need trust,
-    ``unverified`` until AISquare has seen this definition run, then ``observed``.
+    ``unverified`` until AISquare has seen this definition run, then ``observed``; and
+    ``trusted`` between them, where the agent's record trusts the hooks ``install_hooks``
+    wrote (:func:`hook_trust_recorded`), so the human has nothing to trust.
 
     ``configured`` is :func:`connected`, the one "connected?" answer, so a plugin-only
     directory reads as configured here too, or ``unverified`` while the agent has not
@@ -1998,6 +2022,14 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
         return "unreadable", str(exc)
     if observed.get("fingerprint") == fingerprint:
         return "observed", "Native hooks observed working; current session policy still applies"
+    if hook_trust_recorded(name, config_dir):
+        # Recorded where the agent records a review's yes: nothing for the human to trust, and
+        # it asks nothing at its start (SMOKE12 O3).
+        return (
+            "trusted",
+            f"Hooks configured and trusted where {adapter.label} records a review's yes; "
+            "AISquare has not yet observed this definition run.",
+        )
     return (
         "unverified",
         f"Hooks configured; open /hooks in {adapter.label} to review and trust them. "

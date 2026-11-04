@@ -117,7 +117,8 @@ def test_only_the_executed_definition_can_verify_trust(
     second = _definition(tmp_path)
     assert second != first
     fire(first)
-    assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
+    # Not observed: the old definition ran. Trusted, as the rewrite recorded it (SMOKE12 O3).
+    assert agents.integration_readiness("codex", tmp_path)[0] == "trusted"
     fire(second)
     assert agents.integration_readiness("codex", tmp_path)[0] == "observed"
     before = (tmp_path / "hooks.json").read_bytes()

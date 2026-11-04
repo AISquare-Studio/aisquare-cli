@@ -903,8 +903,10 @@ class HookTrustLeft:
     #113, finding 3)."""
 
     file: Path
-    tables: tuple[str, ...]
-    """Each record, as the agent's file names it (``--json``'s ``trust_left.tables``)."""
+    records: tuple[str, ...]
+    """Each record, as the agent's file names it (``--json``'s ``trust_left.records``; never
+    Codex's word ``tables``, which this agent-neutral field held before review r39 of #113,
+    finding 3)."""
     record: str
     """The agent's own name for one record, singular (Codex's: ``[hooks.state] table``)."""
 

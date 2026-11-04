@@ -70,7 +70,9 @@ adapter.**
   on every platform (a file this user may not write refused, a hard-linked one written in
   place); one it cannot edit is left as it is, Codex then asking, and where a disconnect or
   uninstall cannot take the trust back it names the file and
-  each table, in its text and its `--json`. Connect and the doctor say `trusted` then, while
+  each table, in its text and its `--json` (`agents disconnect`'s `trust_left`, as `file`
+  and `records`: `records` for every agent, not Codex's word `tables`, and with no `tables`
+  alias, as no release ever printed it). Connect and the doctor say `trusted` then, while
   each of aisquare's handlers is alone in its group, and send nobody to `/hooks`. A Codex
   spawn, restart or switch onto a slot aisquare made installs and trusts the hooks there before
   anything is stopped or started, or refuses saying why: a hop onto a slot with none started

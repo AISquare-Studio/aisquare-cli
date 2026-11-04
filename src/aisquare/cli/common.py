@@ -978,7 +978,7 @@ def emit_disconnected(name: str, *, trust_left: HookTrustLeft | None = None) -> 
         if trust_left is not None:
             payload["trust_left"] = {
                 "file": str(trust_left.file),
-                "tables": list(trust_left.tables),
+                "records": list(trust_left.records),
             }
         typer.echo(json.dumps(payload, separators=(",", ":")))
     else:

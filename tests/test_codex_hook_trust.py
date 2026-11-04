@@ -45,6 +45,15 @@ VERSIONS = ("0.164.0", "0.166.0")
 CODEX_HOOKS = len(get_adapter("codex").capabilities.hooks)
 
 
+def _keys(value: Any) -> set[str]:
+    """Every key of every object in the JSON ``value``, at any depth."""
+    if isinstance(value, dict):
+        return set(value).union(*(_keys(item) for item in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_keys(item) for item in value))
+    return set()
+
+
 def _fixture(version: str) -> dict[str, Any]:
     fixture: dict[str, Any] = json.loads(
         (FIXTURES / f"codex_hook_trust-{version}.json").read_text("utf-8")
@@ -636,7 +645,8 @@ def test_disconnect_names_the_file_and_the_trust_a_read_only_config_toml_kept(
 ) -> None:
     """r37, finding 8: with a 0444 config.toml, ``agents disconnect`` took the hooks out and
     left aisquare's eight trust tables and its record behind in silence. They stay (the file
-    is the user's to unlock), and the text and ``--json`` name the file and each table."""
+    is the user's to unlock), and the text and ``--json`` name the file and each table: the
+    ``--json`` under ``records``, never Codex's own word ``tables`` (r39, finding 3)."""
     home = tmp_path / "codex"
     home.mkdir()
     runner = CliRunner()
@@ -655,8 +665,9 @@ def test_disconnect_names_the_file_and_the_trust_a_read_only_config_toml_kept(
     assert said.exit_code == 0, said.output
     payload = json.loads(said.stdout.strip().splitlines()[-1])
     assert payload["disconnected"] == "codex"
+    assert set(payload["trust_left"]) == {"file", "records"}, payload
     assert payload["trust_left"]["file"] == str(home / "config.toml")
-    assert sorted(payload["trust_left"]["tables"]) == tables and len(tables) == CODEX_HOOKS
+    assert sorted(payload["trust_left"]["records"]) == tables and len(tables) == CODEX_HOOKS
     note = " ".join(said.stderr.split())
     assert f"{home / 'config.toml'} still holds the trust aisquare recorded" in note, said.stderr
     assert "read-only" in note and f"{CODEX_HOOKS} [hooks.state] table(s)" in note
@@ -670,7 +681,8 @@ def test_uninstall_names_the_trust_a_read_only_config_toml_kept(
     isolated_agent_home: Path,
 ) -> None:
     """r37, finding 8, for ``uninstall``: its report's notes, in the text and the ``--json``,
-    name the file and the tables; the hooks go, and the package step still runs."""
+    name the file and the tables, and no key of the ``--json`` is ``tables`` (r39, finding
+    3); the hooks go, and the package step still runs."""
     home = isolated_agent_home / ".codex"
     home.mkdir(parents=True)
     runner = CliRunner()
@@ -687,6 +699,7 @@ def test_uninstall_names_the_trust_a_read_only_config_toml_kept(
     report = _one_object(result.stdout)
     [note] = [n for n in report["notes"] if "still holds the trust aisquare recorded" in n]
     assert str(home / "config.toml") in note and f"{CODEX_HOOKS} [hooks.state] table(s)" in note
+    assert "tables" not in _keys(report), report
     assert report["package"]["runs"] is True
     assert not agents.hook_commands("codex", home)
 

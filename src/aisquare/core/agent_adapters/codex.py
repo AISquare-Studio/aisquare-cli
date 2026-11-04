@@ -661,7 +661,7 @@ class CodexHookTrust:
         if found is None:
             return None
         file, tables = found
-        return HookTrustLeft(file, tables, record="[hooks.state] table")
+        return HookTrustLeft(file, records=tables, record="[hooks.state] table")
 
 
 def _hooks_file_spellings(settings_path: Path) -> list[str]:

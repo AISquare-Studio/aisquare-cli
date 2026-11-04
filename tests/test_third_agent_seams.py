@@ -3020,10 +3020,74 @@ def test_the_trust_a_disconnect_left_is_named_in_the_agent_s_own_terms(
     trust records an agent's file kept (``core.agents.hook_trust_left_note``) is agent-neutral
     code, and it said Codex's ``[hooks.state] table(s)`` of every agent. An agent whose record
     is a JSON key is told of its keys, in the name its ``HookTrustLeft.record`` gives one; the
-    ``--json`` still lists each record under ``tables``."""
-    from aisquare.core.agent_adapters.types import AgentCapabilities, HookTrustLeft
+    ``--json`` lists each record under ``records`` (r39, finding 3: it said Codex's ``tables``
+    of every agent too)."""
+    adapter = _trust_keeping()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        home = _home(adapter)
+        args = ["agents", "connect", adapter.id, "--config-dir", str(home)]
+        assert runner.invoke(app, args).exit_code == 0
+        gone = runner.invoke(app, ["agents", "disconnect", adapter.id, "--config-dir", str(home)])
+        assert gone.exit_code == 0, gone.output
+        note = " ".join(gone.stderr.split())
+        assert f"{home / 'trust.json'} still holds the trust aisquare recorded" in note, note
+        assert f"2 `trusted` key(s), {', '.join(KEPT)}" in note, note
+        assert "[hooks.state]" not in note and "table" not in note, note
 
-    kept = ("aisquare.SessionStart", "aisquare.Stop")
+        assert runner.invoke(app, args).exit_code == 0
+        said = runner.invoke(
+            app, ["--json", "agents", "disconnect", adapter.id, "--config-dir", str(home)]
+        )
+        assert said.exit_code == 0, said.output
+        payload = json.loads(said.stdout.strip().splitlines()[-1])
+        assert payload["trust_left"] == {"file": str(home / "trust.json"), "records": list(KEPT)}
+        assert "tables" not in _keys(payload), payload
+    finally:
+        unregister(adapter.id)
+
+
+def test_the_trust_an_uninstall_left_is_named_in_the_agent_s_own_terms_and_no_tables_key(
+    tool: Tool,  # noqa: F811
+    world: World,  # noqa: F811
+    default_home: None,  # noqa: F811
+    user_home: Path,  # noqa: F811
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r39 of #113, finding 3, for ``uninstall``: what its ``--json`` report says of
+    the trust records an agent's file kept is the note naming each record in the agent's own
+    word, and no key anywhere in it is Codex's ``tables``."""
+    _initialised(runner, tmp_path)
+    adapter = _trust_keeping()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        home = _home(adapter)
+        agents_service.connect(adapter.id, home)
+
+        result = runner.invoke(app, ["--json", "uninstall", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        report = _one_object(result.stdout)
+        [note] = [n for n in report["notes"] if "still holds the trust aisquare recorded" in n]
+        assert str(home / "trust.json") in note, note
+        assert f"2 `trusted` key(s), {', '.join(KEPT)}" in note, note
+        assert "tables" not in _keys(report), report
+    finally:
+        unregister(adapter.id)
+
+
+KEPT = ("aisquare.SessionStart", "aisquare.Stop")
+"""The trust records :func:`_trust_keeping`'s agent says its file still holds."""
+
+
+def _trust_keeping() -> Any:
+    """A Gemini-shaped agent that needs its hooks trusted, keeps its trust as ``trusted``
+    keys of a ``trust.json``, and says it could take none back: :data:`KEPT` stay."""
+    from aisquare.core.agent_adapters.types import AgentCapabilities, HookTrustLeft
 
     class Record:
         def record_trust(
@@ -3035,7 +3099,7 @@ def test_the_trust_a_disconnect_left_is_named_in_the_agent_s_own_terms(
             return False
 
         def trust_left(self, home: Path) -> HookTrustLeft:
-            return HookTrustLeft(home / "trust.json", kept, record="`trusted` key")
+            return HookTrustLeft(home / "trust.json", records=KEPT, record="`trusted` key")
 
     class Trusting(GeminiShapedAdapter):
         capabilities: AgentCapabilities = replace(
@@ -3043,26 +3107,13 @@ def test_the_trust_a_disconnect_left_is_named_in_the_agent_s_own_terms(
         )
         hook_trust = Record()
 
-    adapter = Trusting()
-    monkeypatch.delenv(adapter.home_env, raising=False)
-    register(adapter)
-    try:
-        home = _home(adapter)
-        args = ["agents", "connect", adapter.id, "--config-dir", str(home)]
-        assert runner.invoke(app, args).exit_code == 0
-        gone = runner.invoke(app, ["agents", "disconnect", adapter.id, "--config-dir", str(home)])
-        assert gone.exit_code == 0, gone.output
-        note = " ".join(gone.stderr.split())
-        assert f"{home / 'trust.json'} still holds the trust aisquare recorded" in note, note
-        assert f"2 `trusted` key(s), {', '.join(kept)}" in note, note
-        assert "[hooks.state]" not in note and "table" not in note, note
+    return Trusting()
 
-        assert runner.invoke(app, args).exit_code == 0
-        said = runner.invoke(
-            app, ["--json", "agents", "disconnect", adapter.id, "--config-dir", str(home)]
-        )
-        assert said.exit_code == 0, said.output
-        payload = json.loads(said.stdout.strip().splitlines()[-1])
-        assert payload["trust_left"] == {"file": str(home / "trust.json"), "tables": list(kept)}
-    finally:
-        unregister(adapter.id)
+
+def _keys(value: Any) -> set[str]:
+    """Every key of every object in the JSON ``value``, at any depth."""
+    if isinstance(value, dict):
+        return set(value).union(*(_keys(item) for item in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_keys(item) for item in value))
+    return set()

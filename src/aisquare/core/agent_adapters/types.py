@@ -867,6 +867,11 @@ class HooksSwitch:
         return f"{self.setting} in {self.path or 'the launch arguments'}"
 
 
+class HookTrustError(ValueError):
+    """Why an agent's record of which hooks it trusts was left as it was
+    (:meth:`AgentAdapter.trust_hooks`): those hooks stay untrusted, and the agent asks."""
+
+
 @dataclass(frozen=True)
 class PluginInstall:
     """The aisquare plugin, installed in one config directory and enabled there (user
@@ -1392,7 +1397,7 @@ class AgentAdapter(Protocol):
     ``install_routes``, ``version_args`` with :func:`version_in`, :meth:`lasting_installs`.
     Hooks: ``settings_name`` (the hooks file in the config dir), ``capabilities.hooks`` with
     :func:`hook_args` and :meth:`hook_entry`, ``hooks_off_setting`` with
-    :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
+    :meth:`hooks_switch`, :meth:`trust_hooks`, ``plugin``. Events: :meth:`decode_event` and
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
     :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
     :meth:`label_args`, :meth:`resume_args`, :meth:`fork_args`,
@@ -1514,6 +1519,25 @@ class AgentAdapter(Protocol):
         line): the agent's own shape, ``spec.timeout`` (seconds) in its own unit, and a
         ``timeout`` key, where it has one, that an operator's longer value outlives.
         :func:`command_entry` for Claude Code's and Codex's shape."""
+        ...
+
+    def trust_hooks(
+        self,
+        home: Path,
+        settings_path: Path,
+        settings: Mapping[str, Any],
+        ours: Callable[[Mapping[str, Any]], bool],
+    ) -> list[str]:
+        """Record, where and as the agent records a human's yes to them, that the handlers
+        of ``settings`` (the hooks file :attr:`settings_name` of config dir ``home``, at
+        ``settings_path``) that ``ours`` picks are trusted: what ``core.agents.install_hooks``
+        asks once it has written aisquare's, and a fleet launch before it starts the agent
+        there, so an agent that runs a hook only once it is trusted
+        (``capabilities.requires_hook_trust``) runs them with no question to stall on.
+        Every other handler's trust is left as it is. The record's keys written, ``[]``
+        when each was there already or the agent keeps none (Claude Code). Raises
+        :class:`HookTrustError` saying why the record was left as it was: those hooks stay
+        untrusted, and the agent asks about them."""
         ...
 
     def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:

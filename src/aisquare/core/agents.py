@@ -36,6 +36,7 @@ from aisquare.core.agent_adapters.types import (
     AgentPlugin,
     HookSpec,
     HooksSwitch,
+    HookTrustError,
     PluginInstall,
     hook_args,
 )
@@ -679,7 +680,50 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         )
     spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
     _write_settings(spec.settings_path, settings)
+    with suppress(HookTrustError, OSError):
+        # Its question is the human's answer where the record cannot be written (SMOKE12 O3).
+        _trust(adapter, spec.home, spec.settings_path, settings)
     return True
+
+
+def trust_hooks(name: str, config_dir: Path | None = None) -> list[str]:
+    """Record that aisquare's hooks in ``config_dir`` are trusted, where and as the agent
+    records a human's yes (``AgentAdapter.trust_hooks``), for an agent that runs a hook only
+    once it is trusted (``capabilities.requires_hook_trust``); the record's keys written.
+
+    Each handler of aisquare's whose ``--definition`` is the file's own (:func:`hook_fingerprint`),
+    the hooks :func:`install_hooks` wrote, is trusted; every other one is left to the agent's
+    question. :func:`install_hooks` asks this once it has written them, and a fleet launch
+    before it starts the agent in that dir. Codex 0.164.0 and 0.166.0 held a window at their
+    "Hooks need review" dialog until a human answered it, on every home its hooks were new in,
+    so an unattended fleet stalled on each new slot (SMOKE12 O3 of #113). ``[]`` for an agent
+    that runs every hook, or a dir with no hooks file. Raises :class:`HookTrustError` with
+    why the record was left as it was, and what :func:`settings_for_write` raises."""
+    adapter = _adapter(name)
+    if adapter is None or not adapter.capabilities.requires_hook_trust:
+        return []
+    spec = _spec(name, config_dir)
+    if spec is None or spec.settings_path is None or _regular_settings(spec.settings_path) is None:
+        return []
+    settings = settings_for_write(spec.settings_path, strict=hooks_shape_strict(name))
+    return _trust(adapter, spec.home, spec.settings_path, settings)
+
+
+def _trust(
+    adapter: AgentAdapter, home: Path, settings_path: Path, settings: dict[str, Any]
+) -> list[str]:
+    """``adapter.trust_hooks`` of aisquare's handlers of this definition in ``settings``."""
+    if not adapter.capabilities.requires_hook_trust:
+        return []
+    definition = _definition_fingerprint(settings)
+
+    def ours(handler: Mapping[str, Any]) -> bool:
+        command = handler.get("command")
+        if not isinstance(command, str) or not _is_aisquare_hook_command(command):
+            return False
+        return _hook_command_parts(command)[1].get("--definition") == definition
+
+    return adapter.trust_hooks(home, settings_path, settings, ours)
 
 
 def remove_hooks(name: str, config_dir: Path | None = None) -> bool:

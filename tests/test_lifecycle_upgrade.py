@@ -36,7 +36,7 @@ from aisquare.cli import install as install_cli
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import paths, selfcli, spawn
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.config import REVIEWER_ARGS, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -3881,7 +3881,9 @@ def test_upgrade_rewrites_codex_hooks_in_the_codex_home_and_an_account_home(
 ) -> None:
     """Acceptance 1 of t4: a hooks.json naming an old install, in ~/.codex (connected) and
     in a Codex account home (found by its place, recorded or not), is rewritten BY the new
-    install to name it; the user's own hook group, config.toml and AGENTS.md stay exactly."""
+    install to name it; the user's own hook group and AGENTS.md stay exactly, and config.toml
+    keeps every byte, the trust Codex reads for aisquare's new hooks after them, so Codex
+    asks no review of them (SMOKE12 O3 of #113)."""
     old = tmp_path / "old-install" / "bin" / "aisquare"  # gone: those hooks fail every session
     codex = _codex_hooked(isolated_agent_home / ".codex", old)
     slot = _codex_hooked(_codex_account("2"), old)
@@ -3908,10 +3910,40 @@ def test_upgrade_rewrites_codex_hooks_in_the_codex_home_and_an_account_home(
         assert not any(str(old) in command for command in commands), commands
         stop = json.loads((home / "hooks.json").read_text("utf-8"))["hooks"]["Stop"]
         assert stop[0] == _CODEX_FOREIGN, "the user's own group stays, exactly and first"
-        assert f"✓ hooks re-connected in {home} (Codex) — Codex asks to review them again: " in (
-            result.stdout
-        ), result.stdout
-    assert {path: path.read_bytes() for path in kept} == kept, "config.toml and AGENTS.md stay"
+        assert f"✓ hooks re-connected in {home} (Codex)\n" in result.stdout, result.stdout
+        trusted = codex_config.hook_states(home)
+        assert len(trusted) == len(_CODEX_HOOKS), trusted
+        assert codex_config.hook_key(home / "hooks.json", "Stop", 0, 0) not in trusted
+    assert "asks to review them again" not in result.stdout
+    for path, before in kept.items():
+        if path.name == "AGENTS.md":
+            assert path.read_bytes() == before, "AGENTS.md stays"
+        else:
+            assert path.read_bytes().startswith(before), "every byte of config.toml kept"
+
+
+def test_an_upgrade_whose_codex_trust_cannot_be_recorded_says_codex_asks_again(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    new_install_refreshes: list[list[str]],
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """A config.toml its trust cannot be added to (not TOML) is left as it is, and the line
+    says Codex asks for the rewritten hooks to be reviewed again."""
+    old = tmp_path / "old-install" / "bin" / "aisquare"
+    codex = _codex_hooked(isolated_agent_home / ".codex", old)
+    (codex / "config.toml").write_text("model = \n", encoding="utf-8")
+    _record_agents(codex=[codex])
+
+    result = runner.invoke(app, ["upgrade", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert f"✓ hooks re-connected in {codex} (Codex) — Codex asks to review them again: " in (
+        result.stdout
+    ), result.stdout
+    assert (codex / "config.toml").read_text("utf-8") == "model = \n"
 
 
 def test_a_codex_home_rewritten_into_the_same_definition_needs_no_review(

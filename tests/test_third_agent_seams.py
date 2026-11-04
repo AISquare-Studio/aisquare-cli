@@ -2454,3 +2454,52 @@ def test_a_cycle_with_no_project_tells_a_sandboxed_agent_no_command_its_broker_r
     told = "\n".join(team_service._role_cycle(session, None))
     named = "`aisquare project list` names them" in told
     assert named is not third.capabilities.sandboxes_tools, told
+
+
+def test_connect_asks_an_agent_that_trusts_hooks_to_record_its_own_trust(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE12 O3 of #113: an agent that runs a hook only once it is trusted
+    (``requires_hook_trust``) is asked, through its own ``trust_hooks``, to record that
+    aisquare's hooks are, once ``connect`` has written them; the shared code picks
+    aisquare's handlers of this definition and none of the user's, and names its own file."""
+    from aisquare.core.agent_adapters.types import AgentCapabilities
+
+    asked: list[tuple[Path, Path, list[bool]]] = []
+
+    class Trusting(GeminiShapedAdapter):
+        capabilities: AgentCapabilities = replace(
+            GeminiShapedAdapter.capabilities, requires_hook_trust=True
+        )
+
+        def trust_hooks(
+            self, home: Path, settings_path: Path, settings: Any, ours: Any
+        ) -> list[str]:
+            picked = [
+                ours(handler)
+                for groups in settings["hooks"].values()
+                for group in groups
+                for handler in group["hooks"]
+            ]
+            asked.append((home, settings_path, picked))
+            return ["recorded"]
+
+    adapter = Trusting()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        home = _home(adapter)
+        (home / adapter.settings_name).write_text(
+            json.dumps(
+                {"hooks": {"AfterAgent": [{"hooks": [{"type": "command", "command": "true"}]}]}}
+            ),
+            encoding="utf-8",
+        )
+        connected = runner.invoke(app, ["agents", "connect", adapter.id, "--config-dir", str(home)])
+        assert connected.exit_code == 0, connected.output
+        [(where, path, picked)] = asked
+        assert (where, path) == (home, home / adapter.settings_name)
+        assert picked.count(True) == len(adapter.capabilities.hooks) and picked[0] is False
+        assert agent_core.trust_hooks(adapter.id, home) == ["recorded"]
+    finally:
+        unregister(adapter.id)

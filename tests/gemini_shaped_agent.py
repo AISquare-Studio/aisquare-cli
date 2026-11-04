@@ -811,6 +811,16 @@ class GeminiShapedAdapter:
             entry["timeout"] = _milliseconds(spec.timeout)
         return entry
 
+    def trust_hooks(
+        self,
+        home: Path,
+        settings_path: Path,
+        settings: Mapping[str, Any],
+        ours: Callable[[Mapping[str, Any]], bool],
+    ) -> list[str]:
+        """None to record: it runs every hook its settings hold."""
+        return []
+
     def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
         """The MCP servers that run aisquare in ``home``'s ``settings.json`` (``mcpServers``),
         and the aisquare extension installed in ``home/extensions/aisquare`` and not disabled

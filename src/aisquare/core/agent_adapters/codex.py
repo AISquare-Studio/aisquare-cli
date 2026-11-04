@@ -7,7 +7,7 @@ import re
 import stat
 import sys
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -830,6 +830,44 @@ class CodexAdapter:
         """``{"type": "command", "command": …, "timeout": <seconds>}`` in a ``hooks.json``
         group (:func:`command_entry`), as Claude Code's ``settings.json`` writes one."""
         return command_entry(spec, command)
+
+    def trust_hooks(
+        self,
+        home: Path,
+        settings_path: Path,
+        settings: Mapping[str, Any],
+        ours: Callable[[Mapping[str, Any]], bool],
+    ) -> list[str]:
+        """``[hooks.state]`` in ``home``'s ``config.toml``, as "Trust all and continue" at
+        Codex's "Hooks need review" dialog writes it (``codex_config.record_hook_trust``):
+        each handler ``ours`` picks, keyed by its event, group and place in the hooks.json,
+        with the hash Codex gives it (``codex_config.hook_hash``). Keyed by each path Codex
+        may know the file by: its real path, which a ``CODEX_HOME`` resolves to, and
+        ``$HOME/.codex/hooks.json`` as it is spelt, which Codex takes with no ``CODEX_HOME``
+        (the plain home's launch, ``env -u CODEX_HOME``), where that is this file through a
+        link. A handler whose hash is not known here is left to Codex's question, as is every
+        other handler of the file and every other file's (SMOKE12 O3 of #113)."""
+        from aisquare.core import agents
+
+        hooks = settings.get("hooks")
+        real = os.path.realpath(settings_path)
+        plain = agents.home() / self.home_name / self.settings_name
+        spelt = [str(settings_path), real]
+        if os.path.realpath(plain) == real:
+            spelt.append(str(plain))
+        files = dict.fromkeys(spelt)
+        trusted: dict[str, str] = {}
+        for event, groups in hooks.items() if isinstance(hooks, dict) else ():
+            for at, group in enumerate(groups if isinstance(groups, list) else ()):
+                handlers = group.get("hooks") if isinstance(group, dict) else None
+                for place, handler in enumerate(handlers if isinstance(handlers, list) else ()):
+                    if not isinstance(handler, dict) or not ours(handler):
+                        continue
+                    digest = codex_config.hook_hash(str(event), group, handler)
+                    if digest is not None:
+                        for file in files:
+                            trusted[codex_config.hook_key(file, str(event), at, place)] = digest
+        return codex_config.record_hook_trust(home, trusted) if trusted else []
 
     def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
         """What ``home``'s ``config.toml`` keeps of aisquare's: each ``[mcp_servers.<name>]``

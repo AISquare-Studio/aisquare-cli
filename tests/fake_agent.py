@@ -691,6 +691,16 @@ class FakeAgentAdapter:
             entry["timeout"] = spec.timeout
         return entry
 
+    def trust_hooks(
+        self,
+        home: Path,
+        settings_path: Path,
+        settings: Mapping[str, Any],
+        ours: Callable[[Mapping[str, Any]], bool],
+    ) -> list[str]:
+        """None to record: the fake runs every hook it holds."""
+        return []
+
     def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
         # Its MCP servers in `servers.json` (`{"servers": {name: {"command", "args"}}}`),
         # removed with `fakeagent servers drop <name> --home <home>`.

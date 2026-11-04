@@ -547,7 +547,8 @@ class HookRefresh:
     agent: str = HOOK_AGENT
     review: bool = False
     """Whether the rewrite changed a definition the agent runs only once trusted (Codex's
-    ``/hooks``): it now asks for them to be reviewed again (:func:`_definition`)."""
+    ``/hooks``) and its record of that trust could not be made (:func:`_trusted`): it now
+    asks for them to be reviewed again (:func:`_definition`)."""
 
 
 @dataclass(frozen=True)
@@ -1330,8 +1331,20 @@ def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:
         True,
         hooks_off=site.hooks_off,
         agent=site.agent,
-        review=after is not None and after != before,
+        review=after is not None and after != before and not _trusted(site),
     )
+
+
+def _trusted(site: HookSite) -> bool:
+    """Whether the agent's own record trusts aisquare's hooks in ``site`` once a refresh has
+    rewritten them (``agents.trust_hooks``): the new install's refresh records it, and this
+    records it where one from before it did not, as an install of the hooks does. ``False``
+    where the record cannot be made, and the agent asks again (SMOKE12 O3 of #113)."""
+    try:
+        agent_core.trust_hooks(site.agent, site.config_dir)
+    except Exception:
+        return False
+    return True
 
 
 # --- uninstall ---------------------------------------------------------------------------

@@ -13,15 +13,17 @@ receiver keeps (``services.native_telemetry``).
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import stat
 import tomllib
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from aisquare.core.agent_adapters.types import option_values
+from aisquare.core.agent_adapters.types import HookTrustError, option_values
 
 #: The system layer of Codex's config, under every user's: 0.162.1 reads it (in its binary,
 #: review r14 of #113, finding 9).
@@ -311,3 +313,227 @@ class CodexTelemetry:
         kept = {key: value for key, value in attributes.items() if key in _FIELDS}
         kept["event.name"] = kept.get("event.name") or event or "codex.event"
         return kept
+
+
+# --- the trust of a hooks.json, as Codex records a human's yes -------------------------------
+#
+# Codex runs a hook in a ``hooks.json`` of its home only once that hook is trusted, and 0.164.0
+# and 0.166.0 ask at their start, in a "Hooks need review · N hooks are new or changed" dialog
+# that holds a fleet window until a human answers it (SMOKE12 O3 of #113). The answer "Trust
+# all and continue" writes one table per hook into the home's ``config.toml``:
+#
+#     [hooks.state."<the hooks.json's path>:<event in snake case>:<group>:<handler>"]
+#     trusted_hash = "sha256:<hex>"
+#
+# where the hash is Codex's of the hook as it normalizes it (``hooks/src/engine/discovery.rs``
+# ``hook_hash``, through ``config/src/fingerprint.rs`` ``version_for_toml``, the same code in
+# 0.164.0 and 0.166.0): sha256 over the compact JSON, keys sorted, of ``{"event_name": <event in
+# snake case>, "matcher": <the group's, for an event that takes one>, "hooks": [<the handler,
+# its timeout defaulted and clamped as Codex runs it, its ``async`` given>]}``. Codex reads
+# that state from the user's ``config.toml`` and the launch's ``-c`` alone (``hook_states_from_
+# stack``: no project, plugin or managed layer may write it), and a hook whose hash differs is
+# "changed" and asked about again. :func:`hook_hash` is that hash, held to the hashes 0.166.0
+# wrote (``tests/fixtures/codex_hook_trust-0.166.0.json``), and :func:`record_hook_trust`
+# writes the tables, each where Codex's own write puts it.
+
+#: Codex's hook events (``HookEventName``) that read a group's ``matcher``; the rest run every
+#: group's hooks whatever it says, and hash none (``events/common.rs``
+#: ``matcher_pattern_for_event``).
+_MATCHED_EVENTS = frozenset(
+    {
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "SessionStart",
+        "SessionEnd",
+        "SubagentStart",
+        "SubagentStop",
+        "PreCompact",
+        "PostCompact",
+    }
+)
+_UNMATCHED_EVENTS = frozenset(
+    {"PreModelRequest", "PostModelRequest", "UserPromptSubmit", "Stop", "Interrupt"}
+)
+#: The events whose timeout defaults to one second and is clamped to three
+#: (``normalize_command_hook``); every other one defaults to 600 seconds.
+_SHORT_EVENTS = frozenset({"SessionEnd", "Interrupt"})
+#: The keys of a command handler :func:`hook_hash` knows Codex's normalization of; a handler
+#: with another (``commandWindows``, ``additionalContextLimit``) is hashed by none here.
+_HASHED_KEYS = frozenset({"type", "command", "timeout", "async", "statusMessage"})
+
+
+def hook_event_key(event: str) -> str:
+    """``PreToolUse`` as a ``[hooks.state]`` key spells it: ``pre_tool_use``."""
+    return "".join(
+        f"_{c.lower()}" if c.isupper() and at else c.lower() for at, c in enumerate(event)
+    )
+
+
+def hook_key(hooks_file: Path | str, event: str, group: int, handler: int) -> str:
+    """The ``[hooks.state]`` key of ``hooks_file``'s ``handler``-th hook in its ``group``-th
+    group for ``event`` (``hook_key``): the file by the path Codex found it at."""
+    return f"{hooks_file}:{hook_event_key(event)}:{group}:{handler}"
+
+
+def hook_hash(event: str, group: Mapping[str, Any], handler: Mapping[str, Any]) -> str | None:
+    """The ``trusted_hash`` Codex records for ``handler`` of ``group`` under ``event``, else
+    ``None`` for a hook this does not know how Codex hashes (not a command, a key past
+    :data:`_HASHED_KEYS`, a value of another type, an event Codex does not run), which is left
+    to Codex to ask about."""
+    if event not in _MATCHED_EVENTS | _UNMATCHED_EVENTS or handler.get("type") != "command":
+        return None
+    if not set(handler) <= _HASHED_KEYS:
+        return None
+    command, timeout = handler.get("command"), handler.get("timeout")
+    runs_async, status = handler.get("async", False), handler.get("statusMessage")
+    if not isinstance(command, str) or not command.strip() or not isinstance(runs_async, bool):
+        return None
+    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int)):
+        return None
+    if (timeout is not None and timeout < 0) or (
+        status is not None and not isinstance(status, str)
+    ):
+        return None
+    if event in _SHORT_EVENTS:
+        seconds = min(max(1 if timeout is None else timeout, 1), 3)
+    else:
+        seconds = max(600 if timeout is None else timeout, 1)
+    normalized: dict[str, Any] = {
+        "type": "command",
+        "command": command,
+        "timeout": seconds,
+        "async": runs_async,
+    }
+    if status is not None:
+        normalized["statusMessage"] = status
+    identity: dict[str, Any] = {"event_name": hook_event_key(event), "hooks": [normalized]}
+    matcher = group.get("matcher") if event in _MATCHED_EVENTS else None
+    if matcher is not None:
+        if not isinstance(matcher, str):
+            return None
+        identity["matcher"] = matcher
+    import hashlib
+
+    serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def hook_states(home: Path) -> dict[str, Any]:
+    """``[hooks.state]`` of ``home``'s ``config.toml``: ``{}`` with none, or one that cannot be
+    read (:func:`read_layer`)."""
+    hooks = read_layer(home / "config.toml").get("hooks")
+    states = hooks.get("state") if isinstance(hooks, dict) else None
+    return states if isinstance(states, dict) else {}
+
+
+def record_hook_trust(home: Path, trusted: Mapping[str, str]) -> list[str]:
+    """Record ``trusted`` (``{[hooks.state] key: trusted_hash}``) in ``home``'s ``config.toml``
+    as Codex's "Trust all" records it; the keys written, ``[]`` when each holds its hash.
+
+    A key with no table gets ``[hooks.state."<key>"]`` / ``trusted_hash = "<hash>"``,
+    APPENDED after a blank line, as Codex appends one (every byte before it kept). A key whose
+    table holds another hash (aisquare's hook changed, an upgrade's new definition) has that
+    ``trusted_hash`` line replaced in place, or one added under its header, its other keys
+    (``enabled``, the human's off switch) kept. No other key of the file is touched, another
+    hook's trust least of all. The result is parsed before it is written and must be the file
+    as it was with these hashes alone set; one write, replaced by rename, through a symlink.
+    The file is made, owner-only, where there is none. :class:`HookTrustError` says why the
+    file was left as it was: not TOML, a ``hooks`` or ``state`` that is no table, a table of
+    a key spelt some other way (inline, dotted)."""
+    from aisquare.core import atomic
+
+    target = Path(os.path.realpath(home / "config.toml"))
+    try:
+        raw = target.read_bytes()
+    except FileNotFoundError:
+        raw = b""
+    except OSError as exc:
+        raise HookTrustError(f"its config.toml cannot be read ({exc.strerror or exc})") from exc
+    try:
+        text = raw.decode("utf-8")
+        before = tomllib.loads(text)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError):
+        raise HookTrustError("its config.toml is not valid TOML") from None
+    hooks = before.get("hooks", {})
+    states = hooks.get("state", {}) if isinstance(hooks, dict) else None
+    if not isinstance(states, dict):
+        raise HookTrustError("its config.toml has a 'hooks' or 'hooks.state' that is not a table")
+    wanted: dict[str, str] = {}
+    for key, digest in trusted.items():
+        entry = states.get(key)
+        if entry is not None and not isinstance(entry, dict):
+            raise HookTrustError(
+                f"its config.toml has a [hooks.state] entry for {key} that is not a table"
+            )
+        if entry is None or entry.get("trusted_hash") != digest:
+            wanted[key] = digest
+    if not wanted:
+        return []
+    for key, digest in wanted.items():
+        value = f"trusted_hash = {json.dumps(digest)}"
+        if key in states:
+            text = _set_in_table(text, ("hooks", "state", key), value)
+            continue
+        if text and not text.endswith("\n"):
+            text += "\n"
+        header = f"[hooks.state.{json.dumps(key, ensure_ascii=False)}]"
+        text += ("\n" if text else "") + f"{header}\n{value}\n"
+    try:
+        after = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, RecursionError):
+        raise HookTrustError("its config.toml cannot take a [hooks.state] table") from None
+    expected = copy.deepcopy(before)
+    expected_states = expected.setdefault("hooks", {}).setdefault("state", {})
+    for key, digest in wanted.items():
+        expected_states.setdefault(key, {})["trusted_hash"] = digest
+    if after != expected:
+        raise HookTrustError("its config.toml would read otherwise with the trust recorded")
+    try:
+        atomic.write_replacing(target, text.encode("utf-8"), owner_only=not raw)
+    except OSError as exc:
+        raise HookTrustError(f"its config.toml could not be written ({exc})") from exc
+    return list(wanted)
+
+
+def _header(line: str) -> tuple[str, ...] | None:
+    """The table path a ``[a."b"]`` header line opens, else ``None`` (an array of tables, a
+    key, a value's line)."""
+    stripped = line.strip()
+    if not stripped.startswith("[") or stripped.startswith("[["):
+        return None
+    try:
+        parsed = tomllib.loads(stripped)
+    except (tomllib.TOMLDecodeError, RecursionError):
+        return None
+    path: list[str] = []
+    node: Any = parsed
+    while isinstance(node, dict) and len(node) == 1:
+        ((name, node),) = node.items()
+        path.append(name)
+    return tuple(path) if node == {} else None
+
+
+def _set_in_table(text: str, path: tuple[str, ...], line: str) -> str:
+    """``text`` with ``line`` (``trusted_hash = …``) set in the table ``path``'s header opens:
+    its ``trusted_hash`` line replaced, else ``line`` put under the header.
+    :class:`HookTrustError` when no header opens it (the table spelt inline or dotted)."""
+    lines = text.splitlines(keepends=True)
+    start = next((at for at, each in enumerate(lines) if _header(each) == path), None)
+    if start is None:
+        raise HookTrustError(
+            f"its config.toml spells [hooks.state] for {path[-1]} in a way not edited here"
+        )
+    end = next(
+        (at for at in range(start + 1, len(lines)) if _header(lines[at]) is not None), len(lines)
+    )
+    for at in range(start + 1, end):
+        with suppress(tomllib.TOMLDecodeError, RecursionError):
+            if set(tomllib.loads(lines[at].strip())) == {"trusted_hash"}:
+                ending = "\n" if lines[at].endswith("\n") else ""
+                lines[at] = line + ending
+                return "".join(lines)
+    if not lines[start].endswith("\n"):
+        lines[start] += "\n"
+    lines.insert(start + 1, line + "\n")
+    return "".join(lines)

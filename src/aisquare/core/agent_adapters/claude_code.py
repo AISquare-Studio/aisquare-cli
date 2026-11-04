@@ -2,7 +2,7 @@
 
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -349,6 +349,16 @@ class ClaudeCodeAdapter:
         """``{"type": "command", "command": …, "timeout": <seconds>}`` in a ``settings.json``
         group (:func:`command_entry`)."""
         return command_entry(spec, command)
+
+    def trust_hooks(
+        self,
+        home: Path,
+        settings_path: Path,
+        settings: Mapping[str, Any],
+        ours: Callable[[Mapping[str, Any]], bool],
+    ) -> list[str]:
+        """None to record: Claude Code runs every hook its settings files hold."""
+        return []
 
     def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
         """The MCP servers that run aisquare in the ``.claude.json`` ``home`` uses and in the

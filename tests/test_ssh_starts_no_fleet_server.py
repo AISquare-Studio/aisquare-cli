@@ -33,6 +33,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from tests import test_codex_account_switch as codex_suite
 from tests import test_fleet_service as fleet_suite
+from tests import test_hand_off_across_agents as across_suite
 
 # The fleet suite's fixtures, bound here so pytest finds them for this module's tests.
 tmux = fleet_suite.tmux
@@ -484,6 +485,144 @@ def test_a_take_over_onto_codex_from_ssh_starts_the_server_and_marks_it(
     assert receipt.started.agent == "codex" and tmux.running, "the server started, for Codex"
     assert receipt.started.pane_id in tmux.facts
     assert tmux.options == {fleet_service.SSH_STARTED_OPTION: "1"}, "marked as SSH's"
+
+
+def _codex_in_the_server_ssh_started(
+    tmux: Any, project: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **spawn: Any
+) -> tuple[Any, str, Any]:
+    """A Codex agent that an SSH login started the fleet's server for (marked so), its session
+    on the board holding its task's claim: what a stop before a refusal would lose. A second
+    Codex agent keeps that server up past the first one's stop, as the reviewer's probe
+    did: the switch's replacement opens in it, not in the next server."""
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.services import team as team_service
+    from tests.test_adapter_contract import _moments, _written
+
+    _no_server(tmux, monkeypatch)
+    task = fleet_suite._task(project, "Wire the auth flow")
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, task_id=task.id, **spawn
+    ).agent
+    rollout = _written(_moments(get_adapter("codex"))["asked"], tmp_path / "rollout.jsonl")
+    session = across_suite._ran(agent, rollout, native="0199a3b2-0000-7000-8000-0000000000a5")
+    assert team_service.claim_task(task.id, session_ref=session).status == "doing"
+    fleet_service.spawn(project, "coder", agent="codex", worktree=False)  # keeps the server up
+    assert tmux.options == {fleet_service.SSH_STARTED_OPTION: "1"}, "SSH started the server"
+    return agent, session, task
+
+
+def _as_it_was(project: Any, agent: Any, tmux: Any) -> tuple[object, ...]:
+    """What a refusal before the stop leaves as it was: the row, every key typed, every window
+    opened and killed."""
+    return (_row_now(project, agent.id), list(tmux.typed), len(tmux.spawned), list(tmux.killed))
+
+
+def _still_runs_with_its_claim(agent: Any, session: str, task: Any, tmux: Any) -> None:
+    from aisquare.core.store import store_session
+    from aisquare.services import team as team_service
+
+    assert agent.pane_id in tmux.facts, "its window still runs"
+    held = fleet_suite._task_now(task.id)
+    assert (held.status, held.claimed_by) == ("doing", session), "its claim is still its own"
+    with store_session() as store:
+        now = store.get_session(session)
+    assert now is not None and now.ended_at is None
+    assert now.state != team_service.HANDOVER_STATE, "no hand-over mark left on it"
+
+
+@pytest.mark.parametrize("at", ["ssh", "the-mac"])
+def test_a_switch_onto_claude_code_in_the_server_ssh_started_refuses_before_the_stop(
+    tmux: Any,
+    claude_on_path: Path,
+    codex_on_path: Path,
+    project: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    at: str,
+) -> None:
+    """Review r36 of #113, finding 1: ``fleet switch --agent claude-code`` of a Codex row in
+    the server an SSH login started (by hand, and Remote's Switch, which calls the same
+    ``switch``) stopped the Codex agent first, and only the Claude Code spawn was refused:
+    the agent lost, its task back in the pool. Asked of the agent it starts on, before the
+    stop, as ``restart``'s take-over asks it, from SSH and at the Mac: refused, and the Codex
+    agent runs on with its claim."""
+    agent, session, task = _codex_in_the_server_ssh_started(tmux, project, monkeypatch, tmp_path)
+    monkeypatch.setattr(login_session, "remote_session", lambda: at == "ssh")
+    before = _as_it_was(project, agent, tmux)
+
+    with pytest.raises(fleet_service.FleetError) as refused:
+        fleet_service.switch(project, agent.label, to_agent="claude-code")
+
+    assert str(refused.value).startswith(
+        f"cannot switch {agent.label!r}: not started: {fleet_service.SSH_STARTED_REFUSAL}"
+    ), str(refused.value)
+    assert _as_it_was(project, agent, tmux) == before, "nothing stopped, recorded or started"
+    _still_runs_with_its_claim(agent, session, task, tmux)
+
+
+@pytest.mark.parametrize("at", ["ssh", "the-mac"])
+def test_the_automatic_hand_over_onto_claude_code_there_refuses_before_the_stop_and_says_why(
+    tmux: Any,
+    claude_on_path: Path,
+    codex_on_path: Path,
+    project: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    at: str,
+) -> None:
+    """The same, for the automatic hand-over (``hooks.hand_over``, ``[accounts]
+    cross_agent_handover`` on by default): every Codex account full and a Claude Code one
+    with room, it crossed onto Claude Code, stopped the Codex agent and lost it. Refused
+    before the stop, it stays where it is with its claim, and the board's
+    ``handover_failed`` line, the one that wakes the manager, says why."""
+    from aisquare.services import hooks as hooks_service
+
+    full = across_suite._codex_slot(100, "full@example.com")
+    across_suite._claude_slot(monkeypatch, 20)
+    agent, session, task = _codex_in_the_server_ssh_started(
+        tmux, project, monkeypatch, tmp_path, account=str(full.slot)
+    )
+    monkeypatch.setattr(login_session, "remote_session", lambda: at == "ssh")
+    before = _as_it_was(project, agent, tmux)
+
+    hooks_service.hand_over(session, reason="5h limit")
+
+    events = across_suite._events(project)
+    [said] = [text for kind, text in events if kind == "handover_failed"]
+    assert said.startswith(
+        f"{agent.label}: not switched — cannot switch {agent.label!r}: not started: "
+        f"{fleet_service.SSH_STARTED_REFUSAL}"
+    ), said
+    assert "switched" not in {kind for kind, _text in events}
+    assert _as_it_was(project, agent, tmux) == before, "nothing stopped, recorded or started"
+    _still_runs_with_its_claim(agent, session, task, tmux)
+
+
+@pytest.mark.parametrize("at", ["ssh", "the-mac"])
+def test_a_codex_to_codex_switch_in_the_server_ssh_started_goes_ahead(
+    tmux: Any,
+    codex_on_path: Path,
+    project: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    at: str,
+) -> None:
+    """The refusal is the agent the replacement runs, by its accounts slot: a Codex agent moved
+    onto another Codex account there starts in that server as before, from SSH and at the
+    Mac, which stays marked."""
+    full = across_suite._codex_slot(100, "full@example.com")
+    roomy = across_suite._codex_slot(10, "roomy@example.com")
+    agent, _session, task = _codex_in_the_server_ssh_started(
+        tmux, project, monkeypatch, tmp_path, account=str(full.slot)
+    )
+    monkeypatch.setattr(login_session, "remote_session", lambda: at == "ssh")
+
+    receipt = fleet_service.switch(project, agent.label, to=str(roomy.slot))
+
+    assert (receipt.from_agent, receipt.to_agent, receipt.to_slot) == ("codex", "codex", roomy.slot)
+    assert receipt.started.pane_id in tmux.facts and receipt.started.task_id == task.id
+    assert agent.pane_id not in tmux.facts, "the old window was stopped"
+    assert tmux.options == {fleet_service.SSH_STARTED_OPTION: "1"}, "the same server, marked"
 
 
 def test_a_sign_in_window_asks_the_agent_of_its_slot(

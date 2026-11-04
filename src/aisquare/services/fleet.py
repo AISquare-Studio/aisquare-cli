@@ -13493,8 +13493,9 @@ def switch(
     error is visible, and ``--fresh`` is the documented way around it. What
     ``spawn`` would refuse without the stop — a replay that cannot start
     (:func:`_refuse_a_replay_that_cannot_start`), the role, a task that is
-    closed — is refused before the agent is stopped, as :func:`restart`
-    refuses it.
+    closed, and the SSH rules of #20 for the agent the replacement runs
+    (:func:`_refuse_a_server_start_from_ssh`) — is refused before the agent is
+    stopped, as :func:`restart` refuses it.
 
     ACROSS AGENTS (task #15): ``to_agent`` names another agent to move it onto, and ``to``
     may name an account of another agent, which brings its agent; without either, a
@@ -13687,6 +13688,17 @@ def switch(
                 "another account's home — the replacement starts fresh with a hand-off prompt"
             )
         _refuse_a_replay_that_cannot_start(project, record, target.config_dir, branch=agent.branch)
+    try:
+        # The replacement's window opens in the fleet's server, which from SSH on macOS starts
+        # for no agent whose login is in the Keychain, and which an SSH login started takes
+        # none of, from SSH or at the Mac (#20). Asked of the agent the replacement runs
+        # (`onto`), before the stop, as `restart` asks it: after it, a Codex agent switched
+        # onto Claude Code there, by hand, from Remote or by the automatic hand-over, was
+        # stopped and its replacement refused, the agent lost and its task back in the pool
+        # (review r36 of #113, finding 1).
+        _refuse_a_server_start_from_ssh(server(), onto)
+    except FleetError as exc:
+        raise FleetError(f"cannot switch {label!r}: {exc}") from exc
     if before_stop is not None:
         before_stop()
     # A hand-over whether it resumes or not: the agent is coming back, so its
@@ -13935,7 +13947,10 @@ def _refuse_a_cross_agent_start(
     asks a replay's: the binary the role resolves for that agent and whether it is
     installed, a sandbox that may
     write an aisquare its hooks or broker run (under ``home``, the account it starts on),
-    a bound file it cannot read, a tree that is gone with no branch, a freed socket."""
+    a bound file it cannot read, a tree that is gone with no branch, a freed socket. The SSH
+    rules of #20 for ``onto`` are its callers' to ask, after it, once for every agent they
+    may start on (:func:`_refuse_a_server_start_from_ssh`): :func:`switch` and
+    :func:`restart`."""
     label = record.label or ""
     runs_as = role or record.role
     try:

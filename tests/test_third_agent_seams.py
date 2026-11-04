@@ -750,6 +750,61 @@ def test_a_fleet_spawn_launches_it_by_its_variables_and_one_settings_layer(
         unregister(adapter.id)
 
 
+@pytest.mark.parametrize("keychain", [False, True], ids=["login-a-file", "login-in-keychain"])
+def test_a_switch_onto_it_in_the_server_ssh_started_asks_its_keychain_login_before_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keychain: bool
+) -> None:
+    """Review r36 of #113, finding 1, for a third agent: a Codex agent in the fleet server an
+    SSH login started, switched onto it (``fleet switch --agent``), is asked of ITS accounts
+    slot before the stop. Declaring its login in the Keychain (``keychain_login`` True), the
+    switch is refused as Claude Code's is, and the Codex agent runs on; declaring it a file,
+    it starts in that server as Codex does."""
+    from aisquare.core import login_session
+    from aisquare.core.config import FleetRoleSettings, load_config, save_config
+    from aisquare.core.orchestrator import team_project
+    from aisquare.services import fleet as fleet_service
+    from tests import fakebin
+    from tests.test_fleet_service import FakeTmux
+
+    adapter = GeminiShapedAdapter()
+    if keychain:
+        adapter.accounts = _InTheKeychain()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        config = load_config()
+        config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+        save_config(config)
+        bin_dir = tmp_path / "bin"
+        for binary in ("gemini", "codex"):
+            fakebin.executable_fake(bin_dir, binary, windows="set /p line=", posix="read line")
+        fakebin.prepend_to_path(bin_dir, monkeypatch)
+        tmux = FakeTmux()
+        tmux.running = False  # no fleet server runs
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+        monkeypatch.setattr(login_session, "remote_session", lambda: True)  # an SSH login
+        project = team_project(tmp_path)
+        codex = fleet_service.spawn(project, "coder", agent="codex").agent
+        fleet_service.spawn(project, "coder", agent="codex")  # keeps the server up
+        assert tmux.options == {fleet_service.SSH_STARTED_OPTION: "1"}, "SSH started it"
+        before = (list(tmux.typed), len(tmux.spawned), list(tmux.killed))
+
+        if keychain:
+            with pytest.raises(fleet_service.FleetError) as refused:
+                fleet_service.switch(project, codex.label, to_agent=adapter.id)
+            assert str(refused.value).startswith(
+                f"cannot switch {codex.label!r}: not started: {fleet_service.SSH_STARTED_REFUSAL}"
+            ), str(refused.value)
+            assert (list(tmux.typed), len(tmux.spawned), list(tmux.killed)) == before
+            assert codex.pane_id in tmux.facts, "the Codex agent runs on"
+            return
+        receipt = fleet_service.switch(project, codex.label, to_agent=adapter.id)
+        assert receipt.to_agent == adapter.id and receipt.started.pane_id in tmux.facts
+        assert tmux.options == {fleet_service.SSH_STARTED_OPTION: "1"}, "in that server"
+    finally:
+        unregister(adapter.id)
+
+
 def _gemini_session_settings(home: Path, env: dict[str, str], cwd: Path) -> dict[str, Any]:
     """What a Gemini CLI session reads of its settings files, layered as its
     docs/reference/configuration.md says, each over the one before: the system defaults

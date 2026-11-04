@@ -236,8 +236,9 @@ adapter.**
     fleet's tmux server and the agent in it: whether a server may be started there is the agent's
     accounts fact `AgentAccounts.keychain_login` (Claude Code's login is in the Keychain, Codex's
     `auth.json` is a file), and a server an SSH login started is marked, so no agent whose login is
-    in the Keychain is opened in it, from SSH or at the Mac (a restart and the sign-in window
-    included). `tests/test_no_agent_literals.py`'s BASELINE is 109, as before the merge: its one new
+    in the Keychain is opened in it, from SSH or at the Mac (the sign-in window included, and a
+    restart, a take-over, a switch and the automatic hand-over onto such an agent, each refused
+    before it stops the agent it would replace). `tests/test_no_agent_literals.py`'s BASELINE is 109, as before the merge: its one new
     line, `CLAUDECODE` in `core/prompt_origin.py`, is Claude Code's `process_env` now.
   - **Not Codex's** (N-A): usage over SSH from what the Mac recorded is Claude Code's login in
     the Keychain (a Codex slot's login is its own file, its usage read off its rollouts); the

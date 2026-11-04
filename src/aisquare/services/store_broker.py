@@ -79,8 +79,11 @@ this list to it, and every board call a role's cycle teaches to it:
 - `aisquare team focus`
 - `aisquare team log`
 - `aisquare team verify`
+- `aisquare team show` (the event on its own board an update line points at)
 - `aisquare team signal` (not the fleet's own)
 - `aisquare team signals`
+- `aisquare watch show` (a detail file of its own project's, which a watch line names; never
+  another file, and never the watcher itself)
 - `aisquare remember`
 - `aisquare inject`
 - `aisquare log`
@@ -108,8 +111,12 @@ this list to it, and every board call a role's cycle teaches to it:
 
 Global output flags (`--json`, `-q`, `-v`, `--no-color`) and `--help` are fine; `aisquare
 --version` runs in the sandbox, reading nothing. Everything else is refused there,
-`aisquare fleet …` with the reason that the broker never runs a fleet operation, and
-`aisquare code index`, which writes the index.
+`aisquare fleet …` and the fleet's watcher (`aisquare watch`, `--detach` and `--stop`)
+with the reason that the broker never runs a fleet operation, and that the agent may ask for
+it to run outside its sandbox (an approval), and `aisquare code index`, which writes the
+index. Every command aisquare's own text tells an agent to run is on the list, or is one of
+those operations (a manager's cycle, a cleanup's reap, the memory gate), or runs in the
+sandbox itself (`asq exec`): a test renders the texts and holds each command to that.
 
 **`asq exec` and `asq reports` run in the sandbox, not through the broker.** The broker
 runs outside it, so `exec` on its whitelist would run the agent's argv unsandboxed. The
@@ -206,7 +213,9 @@ READS: frozenset[tuple[str, ...]] = frozenset(
         ("team", "status"),
         ("team", "log"),
         ("team", "verify"),
+        ("team", "show"),
         ("team", "signals"),
+        ("watch", "show"),
         ("context", "list"),
         ("context", "show"),
         ("context", "search"),
@@ -258,8 +267,10 @@ WHITELIST: dict[tuple[str, ...], str] = {
     ("team", "focus"): "announce your focus",
     ("team", "log"): "read the team pipe",
     ("team", "verify"): "re-check a receipt",
+    ("team", "show"): "read one board event in full (what an update line points at)",
     ("team", "signal"): "set or read a board signal (not the fleet's own)",
     ("team", "signals"): "list board signals",
+    ("watch", "show"): "read what a watch line counted (its own project's)",
     ("remember",): "remember a fact",
     ("inject",): "inject context",
     ("log",): "show captured prompts",
@@ -282,7 +293,10 @@ WHITELIST: dict[tuple[str, ...], str] = {
     ("reports", "seal"): "seal the report an `asq exec` saved here (for `brief evidence`)",
 }
 """Every command a sandboxed agent's broker runs, by its path: what the role protocols
-(``core.harness``) and the memory use, the MCP server's tools' set
+(``core.harness``) and the memory use, every command aisquare's own text tells an agent to
+run (its board, kickoff, update lines, wake lines and hints: ``team show <seq>`` ends every
+cut update line, ``watch show <path>`` a manager's watch line; a test renders them all and
+holds each to this list, SMOKE12 F1), the MCP server's tools' set
 (``services.mcp_server``), the symbol index's reads (``code find|refs|similar``: ``code
 index`` writes the index, so it stays out) and the work briefs (``brief …``: store-only, the
 paths they name held to the launch's tree, :func:`outside_tree`). Never a fleet operation
@@ -308,6 +322,7 @@ _GROUPS = {
             "reports",
             "task",
             "team",
+            "watch",
         )
     },
     "ctx": "context",
@@ -589,7 +604,7 @@ def vet(argv: Sequence[str]) -> str | None:
         return None
     if asks_help and any(known[: len(path)] == path for known in WHITELIST):
         return None
-    if path and path[0] == "fleet":
+    if fleet_operation(path):
         return (
             f"aisquare {shown} is a fleet operation, which the broker never runs for a "
             "sandboxed agent: ask for it to run outside the sandbox (an approval), or "
@@ -601,11 +616,21 @@ def vet(argv: Sequence[str]) -> str | None:
     )
 
 
+def fleet_operation(path: Sequence[str]) -> bool:
+    """Whether the command ``path`` (:func:`command_path`'s) is one of the fleet's own
+    operations, which the broker never runs, however a text names it: ``fleet …``, and the
+    fleet's watcher (``watch`` with no command of its group, which runs, detaches or stops a
+    process in the fleet's server; a manager's cycle names ``watch --detach``). A sandboxed
+    agent asks for one to run outside its sandbox (an approval), or leaves it to the
+    operator: its refusal says so (:func:`vet`). ``watch show`` only reads, and is run."""
+    return tuple(path[:1]) == ("fleet",) or tuple(path) == ("watch",)
+
+
 def refusal_kind(argv: Sequence[str]) -> str:
-    """How :func:`vet`'s refusal of ``argv`` is recorded: ``fleet`` for a fleet operation,
-    ``command`` for anything else (:func:`record_refusal`)."""
+    """How :func:`vet`'s refusal of ``argv`` is recorded: ``fleet`` for a fleet operation
+    (:func:`fleet_operation`), ``command`` for anything else (:func:`record_refusal`)."""
     named = command_path(argv)
-    return "fleet" if not isinstance(named, str) and named[0][:1] == ("fleet",) else "command"
+    return "fleet" if not isinstance(named, str) and fleet_operation(named[0]) else "command"
 
 
 def _runs() -> str:

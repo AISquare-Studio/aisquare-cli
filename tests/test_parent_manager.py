@@ -309,6 +309,28 @@ def test_delegating_to_a_project_this_board_does_not_parent_is_refused(
         team_service.add_task("y", session_ref=HQ_MANAGER, origin=str(origin.number))
 
 
+def test_a_sandboxed_agent_is_not_told_to_set_a_groups_parent(
+    tree: dict[str, ProjectInfo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its broker runs no configuration, so the refusal a sandboxed agent reads names no
+    ``project group parent`` (SMOKE12, F1): the operator names a group's parent."""
+    from aisquare.services import store_broker
+
+    stranger = _project(tmp_path / "other", "other")
+    origin, _ = team_service.add_task("ship auth", session_ref=HQ_MANAGER)
+    monkeypatch.setenv("AISQUARE_LAUNCH_ID", "launch-hq")
+    with store_session() as store:
+        store.set_meta("launch-session:launch-hq", HQ_MANAGER)
+    monkeypatch.setenv(store_broker.CALLER_ENV, "1")
+    monkeypatch.setenv(store_broker.BOARD_ENV, tree["hq"].id)
+    with pytest.raises(ValueError, match="not a member of a group this board") as refused:
+        team_service.add_task(
+            "x", session_ref=HQ_MANAGER, project=stranger.codename, origin=str(origin.number)
+        )
+    assert "project group" not in str(refused.value)
+    assert "the human who runs this fleet names a group's parent" in str(refused.value)
+
+
 # --- the manager's cycle and the parent's briefing -------------------------------------------
 
 

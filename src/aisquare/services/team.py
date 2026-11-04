@@ -2049,9 +2049,15 @@ def _delegated_board(store: ContextStore, ref: str, parent: _Board) -> _Board:
     member = found[0]
     over = parent_service.parent_of(store, member.id)
     if over is None or over.project.id != parent.id:
+        # A group's parent is the operator's to name: from an agent's sandbox, whose broker
+        # runs no configuration, said without the command it would refuse (SMOKE12, F1).
+        how = (
+            "the human who runs this fleet names a group's parent"
+            if brokered()
+            else "`aisquare project group parent <group> <project>` names a group's parent"
+        )
         raise ValueError(
-            f"--project {ref}: not a member of a group this board ({parent.name}) parents; "
-            "`aisquare project group parent <group> <project>` names a group's parent"
+            f"--project {ref}: not a member of a group this board ({parent.name}) parents; {how}"
         )
     return _board_of(store, member.id)
 
@@ -5080,9 +5086,13 @@ def _assignment_lines(
             ]
         return [
             head,
-            "It is in review and you were spawned for the rework: `aisquare task show",
-            f"{task.id}` carries the verdict. Address what it names, then `aisquare task",
-            f"review {task.id} --as {sid}` again — do not take pool work first.",
+            # Each command whole on its line: one cut at a line break reads as two
+            # (`aisquare task` alone), to an agent and to the test that holds every command
+            # this text names to the broker's list (SMOKE12, F1).
+            "It is in review and you were spawned for the rework:",
+            f"`aisquare task show {task.id}` carries the verdict. Address what it names,",
+            f"then `aisquare task review {task.id} --as {sid}` again — do not take pool",
+            "work first.",
         ]
     if task.status == "blocked":
         return [
@@ -5203,10 +5213,18 @@ def _role_cycle(
     )
     if not any(_NO_CYCLE_PROJECT in line for line in cycle):
         return cycle
+    adapter = recorded_adapter(me.agent)
+    # A session whose tools run sandboxed is told no command its broker refuses: listing
+    # the projects reads the whole machine's, not its own (SMOKE12, F1).
+    names = (
+        "the human who runs this fleet can name it: no command run from this agent's "
+        "sandbox lists the projects"
+        if adapter is not None and adapter.capabilities.sandboxes_tools
+        else "`aisquare project list` names them"
+    )
     told = [
         f"The fleet commands below name {_NO_CYCLE_PROJECT}: this session's own project "
-        "could not be told, so put in the codename of the one they are for (`aisquare "
-        "project list` names them)."
+        f"could not be told, so put in the codename of the one they are for ({names})."
     ]
     if any(_NO_CYCLE_PAUSE in line for line in cycle):
         told.append(

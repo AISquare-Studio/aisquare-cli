@@ -16,6 +16,7 @@ import typer
 from aisquare.cli.common import fail
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+from aisquare.services import store_broker
 from aisquare.services import watch as watch_service
 
 app = typer.Typer(
@@ -139,6 +140,11 @@ def show(
         fail("give a path or --last, not both", error="usage", exit_code=2)
     try:
         data = watch_service.show(path)
+    except store_broker.OutOfScope as exc:
+        # Only a command a sandboxed agent's broker runs is refused here: recorded, as
+        # every scope refusal of one is (`cli.team._fail_team`).
+        store_broker.record_refusal(exc.kind, str(exc))
+        fail(str(exc), error="out_of_scope")
     except (FileNotFoundError, ValueError) as exc:
         fail(str(exc), error="no_such_file")
     if get_state().json_output:

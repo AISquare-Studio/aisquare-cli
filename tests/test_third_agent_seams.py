@@ -2429,3 +2429,28 @@ def test_remote_is_sent_the_exit_command_of_each_agent_and_card(third: AgentAdap
 
     assert card(shown.agent)["exit_command"] == third.exit_command
     assert card(None)["exit_command"] is None
+
+
+def test_a_cycle_with_no_project_tells_a_sandboxed_agent_no_command_its_broker_refuses(
+    third: AgentAdapter,
+) -> None:
+    """SMOKE12, F1: listing the projects reads the whole machine's, and an agent whose tools
+    run sandboxed (``capabilities.sandboxes_tools``: the fake agent's, not the Gemini-shaped
+    one's) is told who can name its project instead of a command its broker refuses."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import TeamSession
+    from aisquare.services import team as team_service
+
+    now = datetime.now(tz=UTC)
+    session = TeamSession(
+        id="cafe0000-0000-0000-0000-000000000000",
+        agent=third.id,
+        project_id="prj_x",
+        role="coder",
+        started_at=now,
+        last_seen_at=now,
+    )
+    told = "\n".join(team_service._role_cycle(session, None))
+    named = "`aisquare project list` names them" in told
+    assert named is not third.capabilities.sandboxes_tools, told

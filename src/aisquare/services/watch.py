@@ -682,17 +682,74 @@ def detail_files() -> list[Path]:
 
 def show(path: Path | None) -> dict[str, Any]:
     """A detail file's items: ``path``, or the newest with ``None``. Raises
-    ``FileNotFoundError``."""
+    ``FileNotFoundError``.
+
+    Run by a sandboxed agent's broker (``services.store_broker``, which runs it outside the
+    sandbox: a manager's watch line names it), only a detail file of the launch's own
+    project (:func:`_own_projects`): ``path`` must be one in the watch directory, and the
+    newest is its project's newest. Any other path is refused (``OutOfScope``): read for it,
+    a JSON file anywhere the user may read (an agent's login among them) was printed."""
+    own = _own_projects()
     if path is None:
         files = detail_files()
+        if own is not None:
+            files = [found for found in files if _project_of(found) in own]
         if not files:
             raise FileNotFoundError("no watch detail file yet")
         path = files[-1]
+    elif own is not None:
+        path = _own_detail_file(Path(path), own)
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path} is not a watch detail file")
     data["path"] = str(path)
     return data
+
+
+def _own_projects() -> frozenset[str] | None:
+    """The projects whose detail files a brokered ``watch show`` may read: the launch's
+    board and its project pool (``store_broker.own_board``, ``own_pool``); ``None`` for a
+    command that is not brokered, which reads any."""
+    from aisquare.services import store_broker
+
+    if not store_broker.brokered_call():
+        return None
+    return frozenset(
+        found for found in (store_broker.own_board(), store_broker.own_pool()) if found
+    )
+
+
+def _project_of(path: Path) -> str | None:
+    """The ``project_id`` a detail file records, or ``None`` when it records none."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    found = data.get("project_id") if isinstance(data, dict) else None
+    return found if isinstance(found, str) else None
+
+
+def _own_detail_file(path: Path, own: frozenset[str]) -> Path:
+    """``path``, resolved, when it is a detail file of one of ``own``'s projects in the watch
+    directory (``<watch>/<project>/<stamp>.json``); else ``OutOfScope``."""
+    from aisquare.services.store_broker import OutOfScope
+
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+        root = watch_dir().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise FileNotFoundError(f"{path}: no such watch detail file") from exc
+    if (
+        resolved.parent.parent != root
+        or resolved.suffix != ".json"
+        or not resolved.is_file()
+        or _project_of(resolved) not in own
+    ):
+        raise OutOfScope(
+            f"{path} is not a watch detail file of this agent's project: a command from its "
+            "sandbox reads only the ones its own watch lines name"
+        )
+    return resolved
 
 
 def kinds(items: Iterable[WatchItem]) -> dict[str, int]:

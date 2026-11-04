@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -1381,6 +1382,14 @@ _PATCH = 'await tools.apply_patch("*** Begin Patch\\n*** Add File: /w/a\\n+a\\n*
         (f'// {_ESCALATED}\nawait tools.exec_command({{cmd:"ls"}});', False),
         ('await tools.exec_command({cmd:"ls", sandbox_permissions:"use_default"});', False),
         ('text(await tools.exec_command({cmd:"apply_patch is a word here"}));', False),
+        # One left open ends where JavaScript stops reading it (r37 finding 12): its words
+        # before it still ask, and those it swallows ask nothing, as the script cannot run.
+        (f'tools.exec_command({{cmd:"x", {_ESCALATED}}}); /* left open', True),
+        (f'tools.exec_command({{cmd:"ls"}}); /* {_ESCALATED}', False),
+        (f'tools.exec_command({{cmd:"ls"}}); `{_ESCALATED}', False),
+        (f"tools.exec_command({{cmd:'ls'}}); 'left open {_ESCALATED}", False),
+        ('x = "a string its line ends\n' + _PATCH, True),
+        (f"tools.exec_command({{cmd:'x', {_ESCALATED}}}); 'a lone backslash last\\", True),
     ],
 )
 def test_a_code_mode_script_asks_first_by_its_own_fields_never_by_a_commands_words(
@@ -1394,6 +1403,26 @@ def test_a_code_mode_script_asks_first_by_its_own_fields_never_by_a_commands_wor
 
     call = {"type": "custom_tool_call", "name": "exec", "call_id": "c1", "input": script}
     assert codex_transcript._asks_first(call) is asks
+
+
+@pytest.mark.parametrize(
+    "opener",
+    ["/* ", "\\`", '\\"', "\\'", 'sandbox_permissions:\\"', "`${", "tools "],
+    ids=["comment", "template", "double", "single", "key", "placeholder", "tools"],
+)
+def test_a_code_mode_script_is_read_in_time_linear_in_its_length(opener: str) -> None:
+    """r37 finding 12: an opener that never closed was scanned to the end and given up on,
+    and the next one scanned it again, so the script's read was quadratic in the text the
+    model writes (60 KB of unclosed ``/*`` took 2.5 s; 30 KB of ``\\"`` 1.5 s). 200 KB of
+    each shape is read in one pass, well under a budget the quadratic read missed by
+    minutes."""
+    from aisquare.core.agent_adapters import codex_transcript
+
+    script = opener * (200_000 // len(opener))
+    started = time.perf_counter()
+    codex_transcript._script_asks_first(script)
+    took = time.perf_counter() - started
+    assert took < 0.25, f"{len(script)} chars of {opener!r} took {took:.2f} s"
 
 
 def _rollout_at(source: Path, home: Path, cwd: Path, swaps: dict[str, str]) -> Path:

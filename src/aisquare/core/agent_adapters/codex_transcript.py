@@ -1416,13 +1416,21 @@ _SCRIPT_WORDS = re.compile(
     r"""|'(?:sandbox_permissions|with_escalated_permissions)')"""
     r"""\s*:\s*(?P<value>"[^"\\\n]*"|'[^'\\\n]*'|`[^`\\$]*`|true\b)"""
     r"""|\btools\s*\.\s*(?P<tool>[A-Za-z_$][\w$]*)"""
-    r"""|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`|//[^\n]*|/\*.*?\*/""",
+    r"""|"(?:[^"\\\n]|\\.?)*"?|'(?:[^'\\\n]|\\.?)*'?|`(?:[^`\\]|\\.?)*`?"""
+    r"""|//[^\n]*|/\*.*?(?:\*/|\Z)""",
     re.DOTALL,
 )
 """What a code-mode script is read for, left to right: an escalation key of an object it
 passes and the value it gives it, and each tool it calls (``tools.<name>``). Every string
 literal and comment is matched whole and read no further, so a command's or a patch's text
-that holds those words says nothing."""
+that holds those words says nothing.
+
+One left open ends where JavaScript would stop reading it: a string at its line's end, a
+template or a ``/*`` comment at the script's, a lone backslash last included. Each literal and
+comment is then matched once, in one pass, and read past; a script that leaves one open
+cannot run, so the words it swallows ask nothing. Before, each opener that never closed was
+scanned to the end and given up on, and the next one scanned it again: 30 KB of ``/* `` or
+of ``\\"`` took a second and more (r37 finding 12 of #113), on text the model writes."""
 
 
 def _script_asks_first(script: str) -> bool:

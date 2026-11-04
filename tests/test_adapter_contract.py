@@ -1331,8 +1331,10 @@ def test_the_facts_reader_says_who_steered_each_recorded_session(
     nothing is found again. The file is append-only, one record a line: cut after any line,
     read, then read on from the offset the first read gave, it finds what one whole read
     does; one shorter than the offset was rewritten, and is read from its start with an
-    offset below it; one that cannot be read is ``((), start)`` (review r36 of #113,
-    findings 10 and 12)."""
+    offset below it, found by its first facts (a file cut at the first line whose head holds
+    one: Codex's first line, its ``session_meta``, holds none, and a reader that read from
+    EOF found nothing there either); one that cannot be read is ``((), start)`` (review r36
+    of #113, findings 10 and 12; the reopen, seq 10389)."""
     from aisquare.core.agent_adapters.types import FactKind, PromptClass
 
     reader = _reader(adapter)
@@ -1350,16 +1352,21 @@ def test_the_facts_reader_says_who_steered_each_recorded_session(
         again, still = reader.facts(file, end)
         assert (list(again), still) == ([], end), (what, "found twice")
         ends = [index + 1 for index, byte in enumerate(data) if byte == ord("\n")]
+        holding: int | None = None  # the first line end whose head holds a fact
         for cut in ends:
             file.write_bytes(data[:cut])
             first, offset = reader.facts(file, 0)
+            if holding is None and first:
+                holding = cut
             file.write_bytes(data)
             rest, final = reader.facts(file, offset)
             assert ([*first, *rest], final) == (list(whole), end), (what, f"cut at byte {cut}")
-        file.write_bytes(data[: ends[0]])
+        assert holding is not None and holding < end, (what, "a head with a fact, shorter")
+        file.write_bytes(data[:holding])
         head, offset = reader.facts(file, 0)
+        assert list(head), (what, "the rewritten file holds a fact to find again")
         rewritten, below = reader.facts(file, end)
-        assert (list(rewritten), below) == (list(head), offset) and below < end, what
+        assert (list(rewritten), below) == (list(head), offset) and below < end, (what, holding)
     missing = tmp_path / "missing.jsonl"
     assert [(list(found), at) for found, at in (reader.facts(missing, n) for n in (0, 7))] == [
         ([], 0),

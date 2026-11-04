@@ -78,6 +78,8 @@ adapter.**
   runs `--no-daemon`: its `-c` overrides keep Codex off its shared background server anyway,
   and asked, 0.166.0 shows no "requires embedded mode" warning in the pane. The bulk dialog's
   Tab goes from *Managers only* to Confirm to Cancel, and a focused Confirm shows Cancel's band.
+  Its list stays out of Tab, and ↑ ↓, PgUp, PgDn, Home and End scroll it from any of the
+  three, so the agents past its twentieth row are read by keyboard too.
 - What each Claude Code feature does on Codex, as observed in eleven live smoke
   tests (SMOKE8 on 0.8.2's personas, captain, Spawn dialog, info line, hand-off and
   `--all` on Codex 0.164.0 and 0.162.1; the last, SMOKE11, 13/13 on Codex 0.164.0
@@ -239,8 +241,9 @@ adapter.**
   default (the manager's ruling, 2026-11-03, on this line's floor rule of 2026-10-26). On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask
   the item a slot's accounts slot names (`AgentAccounts.keychain_item`; Claude Code's is the
   item it always was, byte for byte), so a slot whose login is a file, or in an item its agent
-  names none for, has no row, and a third agent whose login is in its own item is read, said
-  over SSH and removed on that item.
+  names none for, has no row, and a third agent whose login is in its own item is read through
+  the Keychain memo Claude Code's is (once per ten seconds, not on every tick), said over SSH
+  and removed on that item.
   - **Through the adapter**, tested on Codex: a pause exits a Codex agent through its own exit
     command and parks its claims on its thread, and a resume brings the thread back (`codex …
     resume <id>`) with the pause's carry-on line, or starts it fresh with its claims when no
@@ -270,7 +273,8 @@ adapter.**
     real repository names count every agent's rows; `aisquare outcomes` reads who steered a
     Codex session off its rollout by its own reader (`AgentTranscript.facts`: a prompt, a Stop
     hook's continuation, an Esc, an approval refused, in a function call's arguments or in a
-    code-mode `exec` script's, 0.166.0's every call on GPT-6.1-Sol, where SMOKE12 read a refusal
+    code-mode `exec` script's, 0.166.0's every call on GPT-6.1-Sol, read in one pass with a
+    string, template or comment left open ending where JavaScript stops, where SMOKE12 read a refusal
     as an interrupt, a patch applied; with the files its
     reader names as the session's, `related_files`: Claude Code's subagents', none of Codex's;
     a session of an agent this install does not know read by no reader), so its week counts its
@@ -983,14 +987,16 @@ adapter.**
   pointer every cut update line ends with, because the store broker did not run it, and
   `aisquare watch show <path>`, the one a manager's watch line names. Both run through the
   broker now, each on the launch's own board or project alone: `watch show` reads only a
-  detail file of the agent's own project, never another path. The watcher itself (`watch`,
+  detail file of the agent's own project, never another path, and `team show` or `team
+  verify` of another board's event says not-found without naming that board. The watcher itself (`watch`,
   `--detach`, `--stop`) is refused as a fleet operation is, with the same advice: ask for it
   to run outside the sandbox. A Codex session is no longer told to run
   `aisquare project list` or `aisquare project group parent`, which list or set the whole
-  machine's projects. A test renders every text aisquare hands a Codex agent (its board,
+  machine's projects. A test renders every text aisquare hands an agent (its board,
   start pack, cycle, kickoffs, update and wake lines, the watch line, restart and hand-off
-  lines, a brief's hint, the claim's hint and the team errors) and holds each command it
-  names to the broker. A Codex kickoff is built before its session exists, so it said
+  lines, a brief's hint, the claim's hint and the team errors), for each agent registered and
+  each synthetic one, and holds each command it names to the broker for each agent whose tools
+  run sandboxed, a third one's included. A Codex kickoff is built before its session exists, so it said
   `task claim <id> --as <label>`, cut to 8 characters (`--as coder-01` for `coder-01m6j729`).
   No label resolved, and the CLI reported the missing session as the task: "nothing matches
   '<task id>'". Now `--as` takes a live fleet label of the caller's project (its own fleet

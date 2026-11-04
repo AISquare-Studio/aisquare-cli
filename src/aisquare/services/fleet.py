@@ -8191,16 +8191,23 @@ def _project_labels(
 
 
 def _counted_agents(store: ContextStore, project_id: str | None = None) -> list[FleetAgent]:
-    """The agents ``project_id`` runs, every project's for ``None``, as EVERY count of them
-    counts them, read in the caller's ``store`` session: the fixed cap
-    (``max_agents_per_project``, :func:`spawn`) and its settlement (:func:`_verify_cap`),
-    auto admission (:func:`spawn`'s count, and :func:`_after_stopping_finished`'s after a
-    stop) and its burst's settlement (:func:`_verify_burst`), a hold's wake
-    (:func:`freed_holds`), ``fleet capacity`` (:func:`capacity`, through
-    :func:`_live_by_project`) and the fleet-wide budget (:func:`_verify_budget`). One count,
-    as main 0.9.2 had: the rows the store has live (a paused agent's is ended), the
-    captain's excepted, which no budget counts. A project's are in the order they were
-    written (``live_fleet_agent_ids_written``), the one order racing spawns all agree on.
+    """The agents a count of them counts, read in the caller's ``store`` session: ONE count,
+    as main 0.9.2 had, the rows the store has live (a paused agent's is ended), in two views
+    of those same rows, exactly as main draws them.
+
+    ``project_id``: the agents that project runs, the captain's row counted in its home
+    project as any agent's, in the order they were written (``live_fleet_agent_ids_written``,
+    the one order racing spawns all agree on). The fixed cap (``max_agents_per_project``,
+    :func:`spawn`) and its settlement (:func:`_verify_cap`), auto admission and its
+    ``busy_floor`` (:func:`spawn`'s count, :func:`_after_stopping_finished`'s after a stop),
+    its burst's settlement (:func:`_verify_burst`) and a hold's wake (:func:`freed_holds`)
+    read this view: auto admission never holds the captain, but it counts toward the floor
+    for the agents after it (main's CHANGELOG [0.9.2]).
+
+    ``None``: every project's, the captain's excepted, which the fleet-wide budget never
+    counts: the budget (:func:`_admit` through :func:`_live_per_project`, and its settlement
+    :func:`_verify_budget`), ``fleet capacity`` (:func:`capacity`, through
+    :func:`_live_by_project`) and the sidebar's live total (:func:`live_ids`).
 
     Not by the windows (``spawn``'s ``standing``): the settlements decide inside the store
     session that wrote the row, which asks tmux nothing, and a hold's wake and ``fleet
@@ -8210,11 +8217,7 @@ def _counted_agents(store: ContextStore, project_id: str | None = None) -> list[
     an admit past the floor went unrecorded in the burst (review r36 of #113, finding 5)."""
     if project_id is None:
         return [agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE]
-    rows = {
-        agent.id: agent
-        for agent in store.fleet_agents(project_id, live_only=True)
-        if agent.role != CAPTAIN_ROLE
-    }
+    rows = {agent.id: agent for agent in store.fleet_agents(project_id, live_only=True)}
     written = store.live_fleet_agent_ids_written(project_id)
     return [rows[ident] for ident in written if ident in rows]
 

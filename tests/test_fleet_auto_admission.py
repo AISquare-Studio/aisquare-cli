@@ -1662,6 +1662,65 @@ def test_a_paused_agent_is_no_seat_toward_the_busy_floor_as_on_main(
     ), receipt.notes
 
 
+def _captain_and_its_home() -> tuple[FleetAgent, ProjectInfo]:
+    """The captain started, as ``aisquare captain`` starts it, and its home project."""
+    from aisquare.services.captain import brain
+    from aisquare.services.captain import state as captain_state
+
+    brain.start()
+    home = captain_state.home_project()
+    with store_session() as store:
+        [captain] = [a for a in store.fleet_agents(home.id, live_only=True) if a.role == "captain"]
+    return captain, home
+
+
+@pytest.mark.needs_captain
+def test_the_captain_counts_toward_its_home_projects_cap_and_not_the_fleets_budget(
+    tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As main 0.9.2 counts it: the captain's row is one of its home project's agents for the
+    fixed cap, so with ``max_agents_per_project = 3`` the captain and two coders fill it and
+    a third coder is refused; the fleet-wide budget, ``fleet capacity`` and the live total
+    leave it out (review r36 of #113, finding 5, second reopen)."""
+    _settings(monkeypatch, max_agents_per_project=3)
+    captain, home = _captain_and_its_home()
+    _coder(home)
+    _coder(home)
+
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(home)
+
+    assert refused.value.code == "capacity_project"
+    assert "already runs 3 agents (max_agents_per_project = 3)" in str(refused.value)
+    with store_session() as store:
+        assert captain.id not in fleet_service.live_ids(store), "never the fleet's"
+    assert list(fleet_service.capacity().live.values()) == [2]
+
+
+@pytest.mark.needs_captain
+def test_the_captain_counts_toward_its_home_busy_floor_and_the_wake_agrees(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """Auto admission never holds the captain, but it counts toward ``busy_floor`` for the
+    agents after it (main's CHANGELOG [0.9.2]): on a busy machine the captain and two coders
+    are the floor's 3, and the third coder is held, a hold its wake does not free while the
+    machine reads busy."""
+    _captain, home = _captain_and_its_home()
+    _coder(home)
+    _coder(home)
+    machine.busy()
+
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(home)
+
+    assert held.value.code == "capacity_busy"
+    assert "it runs 3 live agents (busy_floor = 3)" in str(held.value)
+    assert fleet_service.freed_holds(NOW) == [], "no wake while the spawn would be held again"
+
+
 #: Each site that counts a project's agents, or every project's, and what it counts them for.
 COUNTS = {
     "spawn": "the fixed cap and auto admission",

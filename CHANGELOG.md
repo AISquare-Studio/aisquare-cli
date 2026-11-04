@@ -218,9 +218,9 @@ adapter.**
   by tmux's id (one made by hand is left), a row that ran under the plain home comes back
   on its plain slot by name, and a project's agents are counted one way, as on main: the fixed
   cap, auto admission and its burst, a hold's wake and `fleet capacity` count the rows the
-  store has live (a paused agent's is ended), the captain's excepted in each as main excepted
-  it from the budget and `fleet capacity`, while a row the store ended as its window runs
-  keeps its label and its tree. Over SSH a launch, a Claude Code one too, takes the Mac's readings
+  store has live (a paused agent's is ended), the captain's counted in its home project and
+  left out only of the fleet-wide budget and `fleet capacity`, while a row the store ended
+  as its window runs keeps its label and its tree. Over SSH a launch, a Claude Code one too, takes the Mac's readings
   over the line as floors, and with no live figure the least full of them, where main takes the
   default (the manager's ruling, 2026-11-03, on this line's floor rule of 2026-10-26). On macOS main's Keychain rows asked every slot's item, and a Codex slot's raised: they ask
   the item a slot's accounts slot names (`AgentAccounts.keychain_item`; Claude Code's is the

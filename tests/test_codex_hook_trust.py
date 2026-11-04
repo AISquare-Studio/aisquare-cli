@@ -31,6 +31,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents
 from aisquare.core.agent_adapters import codex_config, get_adapter
+from tests.rendered import plain
 from tests.test_lifecycle_uninstall import (  # noqa: F401 (fixtures: pytest finds them by name)
     Tool,
     World,
@@ -686,7 +687,8 @@ def test_upgrade_help_and_the_plugin_readme_say_the_trust_is_recorded_not_asked_
     ``/hooks`` themselves."""
     shown = CliRunner().invoke(app, ["upgrade", "--help"], terminal_width=200)
     assert shown.exit_code == 0, shown.output
-    said = " ".join(shown.output.split())
+    # Styled where typer forces a terminal (GITHUB_ACTIONS): its escapes land inside words.
+    said = plain(shown.output)
     assert "It records Codex's trust of the hooks it rewrites" in said, said
     assert "/hooks menu only where that record could not be made" in said, said
 

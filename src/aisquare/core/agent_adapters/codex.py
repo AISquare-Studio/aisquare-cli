@@ -237,6 +237,14 @@ PERMISSION_PROFILE = "aisquare"
 #: What a fleet window's Codex launches with (:meth:`CodexAdapter.fleet_settings`), each
 #: unless a config layer of the operator's sets its key.
 FLEET_SETTINGS = ("notice.hide_rate_limit_model_nudge=true", "check_for_update_on_startup=false")
+#: What a fleet window's Codex runs without: its shared background server. Every fleet launch
+#: gives ``-c`` overrides, which that server cannot take, so Codex runs embedded all the same;
+#: unasked, 0.166.0 says so in every pane ("⚠ 1 warning": "Running without the shared
+#: background server: command-line configuration overrides … requires embedded mode"), and
+#: asked, it says nothing (SMOKE12 O4 of #113). 0.164.0 takes it too, before or after
+#: ``resume <id>`` and ``fork <id>``. Codex refuses it beside ``--remote``.
+NO_DAEMON = "--no-daemon"
+_REMOTE_OPTIONS = ("--remote", "--remote-auth-token-env")
 _BUILT_IN_PROFILES = {"read_only": ":read-only", "workspace": ":workspace"}
 #: ``-c`` keys (and their tables) that choose the sandbox: given natively, the sandbox is
 #: the operator's, and Codex refuses ``sandbox_mode`` beside ``default_permissions``.
@@ -1558,7 +1566,12 @@ class CodexAdapter:
         starting pane: an npm-installed 0.162.1 opened it once 0.163.0 was out (CI on
         72a88fc0), its first choice, which an Enter picks, running ``npm install -g
         @openai/codex``. A ``-c`` is over the managed config too, so one the administrator
-        set is left as they set it, with a note that says so (review r18 of #113, 14)."""
+        set is left as they set it, with a note that says so (review r18 of #113, 14).
+
+        And :data:`NO_DAEMON` after them, unless ``args`` ask for it or for a ``--remote`` server
+        (which Codex refuses it beside): a fleet launch's ``-c`` already keeps Codex off its
+        shared background server, and saying so keeps 0.166.0's "requires embedded mode"
+        warning out of the pane (measured on 0.166.0 and 0.164.0 in tmux, SMOKE12 O4)."""
         given: list[str] = []
         notes: list[str] = []
         managed = codex_config.read_layer(codex_config.MANAGED_CONFIG)
@@ -1575,6 +1588,8 @@ class CodexAdapter:
             except codex_config.NativeConfigError:
                 continue
             given += ["-c", setting]
+        if not any(_given(args, option) for option in (NO_DAEMON, *_REMOTE_OPTIONS)):
+            given.append(NO_DAEMON)
         return LaunchPart(tuple(given), notes=tuple(notes))
 
     def settings_layer(
@@ -2023,3 +2038,14 @@ def _native_setting(args: Sequence[str], keys: Sequence[str]) -> str | None:
         if any(key == name or key.startswith(f"{name}.") for name in keys):
             return item.value
     return None
+
+
+def _given(args: Sequence[str], option: str) -> bool:
+    """Whether ``args`` give ``option`` (``--x``, or ``--x=<value>``) before Codex's own
+    ``--``, after which every word is the prompt's."""
+    for arg in args:
+        if arg == "--":
+            return False
+        if arg == option or arg.startswith(f"{option}="):
+            return True
+    return False

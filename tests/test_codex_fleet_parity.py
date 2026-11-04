@@ -1129,6 +1129,39 @@ def test_every_fleet_codex_launch_hides_its_rate_limit_dialog_unless_the_operato
     assert not hides(), "the operator's own setting"
 
 
+def test_every_fleet_codex_launch_runs_without_its_background_server(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SMOKE12 O4 of #113: the window's own ``aisquare launch`` gives ``--no-daemon`` on a
+    spawn and on a restart's ``resume <id>``, once, among the options before the subcommand
+    (where Codex 0.164.0 and 0.166.0 take it, measured), so no pane says "requires embedded
+    mode"."""
+    codex, _ = codex_agent
+
+    def launched() -> list[str]:
+        spawned = tmux.spawned[-1]
+        environment = spawned["env"]
+        assert isinstance(environment, dict)
+        for key, value in environment.items():
+            monkeypatch.setenv(key, value)
+        argv = _launched_argv(_command(tmux), runner, monkeypatch)
+        codex.become()
+        return argv
+
+    spawned = launched()
+    assert spawned.count("--no-daemon") == 1, spawned
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    fleet_service.restart(codex.project, codex.agent.label)
+    resumed = launched()
+    at = resumed.index("resume")
+    assert resumed[at : at + 2] == ["resume", THREAD_ONE], resumed
+    assert resumed.count("--no-daemon") == 1 and resumed.index("--no-daemon") < at, resumed
+
+
 @pytest.mark.parametrize(
     ("config", "args", "added"),
     [
@@ -1157,7 +1190,8 @@ def test_the_fleets_codex_setting_yields_to_any_layer_of_the_operators(
     given = list(agent_launch.fleet_settings(selected, window, args).args)
     assert (["-c", "notice.hide_rate_limit_model_nudge=true"] in _pairs(given)) is added
     if config is None:
-        assert given == [], "a layer that cannot be read may set any of them"
+        # A layer that cannot be read may set any of them; `--no-daemon` is no setting.
+        assert given == ["--no-daemon"]
     # Outside a fleet window the human answers Codex's dialogs, and nothing is added.
     assert not agent_launch.fleet_settings(selected, {"CODEX_HOME": str(home)}, args)
     claude = agent_launch.resolve(agent="claude-code")
@@ -1166,6 +1200,36 @@ def test_the_fleets_codex_setting_yields_to_any_layer_of_the_operators(
 
 def _pairs(argv: list[str]) -> list[list[str]]:
     return [argv[at : at + 2] for at in range(0, len(argv), 2)]
+
+
+@pytest.mark.parametrize(
+    ("args", "added"),
+    [
+        pytest.param([], True, id="none"),
+        pytest.param(["--no-daemon"], False, id="asked"),
+        pytest.param(["--remote", "ws://127.0.0.1:9"], False, id="remote"),
+        pytest.param(["--remote=ws://127.0.0.1:9"], False, id="remote-joined"),
+        pytest.param(["--remote-auth-token-env", "T"], False, id="remote-token"),
+        pytest.param(["--", "--no-daemon --remote"], True, id="a-prompt-saying-them"),
+    ],
+)
+def test_a_fleet_codex_window_runs_without_its_background_server_and_says_no_warning(
+    tmp_path: Path, args: list[str], added: bool
+) -> None:
+    """SMOKE12 O4 of #113: every Codex 0.166.0 pane showed "⚠ 1 warning", "Running without
+    the shared background server: command-line configuration overrides (-c, --enable,
+    --disable, or --search) requires embedded mode". A fleet launch's ``-c`` overrides keep
+    Codex off that server anyway; ``--no-daemon`` asks for what it runs, and Codex says
+    nothing then (measured in tmux on 0.166.0 and 0.164.0, fresh, ``resume`` and ``fork``).
+    Never twice, never beside ``--remote`` (Codex refuses the two together), and never
+    outside a fleet window."""
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    selected = agent_launch.resolve(agent="codex")
+    window = {"CODEX_HOME": str(home), "AISQUARE_FLEET_AGENT": "agt-1"}
+    given = list(agent_launch.fleet_settings(selected, window, args).args)
+    assert given.count("--no-daemon") == (1 if added else 0)
+    assert not agent_launch.fleet_settings(selected, {"CODEX_HOME": str(home)}, args)
 
 
 @pytest.mark.parametrize(

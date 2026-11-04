@@ -52,6 +52,23 @@ adapter.**
 - On a machine with Codex alone, every step has a Codex path:
   `install.sh --agent codex`, Welcome, a manager and two coders on Codex,
   restart, switch, tell, stop, accounts and usage limits.
+- **An unattended Codex fleet asks nothing at its start** (SMOKE12 O1-O4, measured live on
+  Codex 0.166.0 and 0.164.0). Both run a `hooks.json` hook only once it is trusted, and ask at
+  their start, *Hooks need review*, which held the first manager and every agent a switch moved
+  onto a new Codex slot until a human answered. Once aisquare writes its hooks into a Codex home
+  (`agents connect`, `accounts add`, `init --agent codex`, an upgrade's refresh) it records
+  their trust where Codex's own *Trust all and continue* does, a `[hooks.state."<hooks.json>:
+  <event>:<group>:<handler>"]` table of `trusted_hash` in that home's `config.toml`, with Codex's
+  own hash of each hook (`AgentAdapter.trust_hooks`, held to what both versions wrote): no other
+  hook's trust is touched, an upgrade's new definition has its hash replaced in place beside the
+  human's `enabled`, and a `config.toml` it cannot edit is left as it is, Codex then asking. A
+  spawn, restart or switch installs the hooks where the agent's window starts before anything
+  is stopped or started, or refuses saying why: a hop onto a slot with none started the agent
+  blind, its session never on the board. A hand-over's mark leaves a session that ended ended,
+  where it brought one back to the board as a live teammate for good. Every fleet Codex window
+  runs `--no-daemon`: its `-c` overrides keep Codex off its shared background server anyway,
+  and asked, 0.166.0 shows no "requires embedded mode" warning in the pane. The bulk dialog's
+  Tab goes from *Managers only* to Confirm to Cancel, and a focused Confirm shows Cancel's band.
 - What each Claude Code feature does on Codex, as observed in eleven live smoke
   tests (SMOKE8 on 0.8.2's personas, captain, Spawn dialog, info line, hand-off and
   `--all` on Codex 0.164.0 and 0.162.1; the last, SMOKE11, 13/13 on Codex 0.164.0

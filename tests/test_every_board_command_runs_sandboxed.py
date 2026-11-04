@@ -6,8 +6,11 @@ line ends with: the broker's whitelist lacked it, and store-broker.log held 6 re
 real Codex 0.166.0. The commands are read here from the texts themselves, rendered by the
 code that writes them for a Codex session (its board and start pack, its role's cycle, its
 kickoff in every state, its update and wake lines, the watch line, its restart, resume,
-fork and hand-off lines, a brief's hint, the claim's own hint and the team commands'
-errors), never from a list kept beside them: a new pointer the broker refuses fails here.
+fork and hand-off lines, a brief's hint, the claim's own hint, the team commands' errors,
+and a parent manager's start pack with its group's briefing and the routed line a member's
+question sends it), never from a list kept beside them: a new pointer the broker refuses
+fails here. A parent manager's two lines also run as written through its broker, and do
+nothing else on a member's board (review r37 of #113, Q5).
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,18 +27,22 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import harness
+from aisquare.core import harness, paths
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import briefs, store_broker, watch
 from aisquare.services import fleet as fleet_service
+from aisquare.services import parent as parent_service
 from aisquare.services import team as team_service
 from tests.test_store_broker import (  # noqa: F401 - the fixture, by name
+    LAUNCH,
     MINE,
+    NONCE,
     THEIRS,
     _answer,
     _broker,
     _request,
+    parented,
     work,
 )
 
@@ -167,7 +175,57 @@ def _agent_texts(work: Path) -> dict[str, str]:  # noqa: F811
         )
     )
     assert long.seq is not None and f"aisquare team show {long.seq}" in texts["delta"]
+    texts.update(_parent_texts(work, project))
     return texts
+
+
+#: A member's coder, whose question routes up to the parent's board.
+MEMBER_CODER = "cccc3333-0000-0000-0000-000000000000"
+
+
+def _routed_line(work: Path, member: ProjectInfo) -> TeamEvent:  # noqa: F811
+    """The ``routed`` line a member's question to its parent puts on the parent's board."""
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=MEMBER_CODER,
+                project_id=member.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+            )
+        )
+    team_service.add_note(
+        "which base, rc/p1 or rc/p2?", kind="question", to_role="parent", session_ref=MEMBER_CODER
+    )
+    with store_session() as store:
+        own = store.get_session(MINE)
+        assert own is not None
+        events = store.recent_events(own.project_id, limit=50)
+    return next(event for event in events if event.kind == "routed")
+
+
+def _parent_texts(work: Path, project: ProjectInfo) -> dict[str, str]:  # noqa: F811
+    """A parent manager's own texts: its start pack, with its group's briefing (the
+    delegation verb), and the routed line a member's question puts on its board."""
+    [member] = parented(work, "api")
+    routed = _routed_line(work, member)
+    with store_session() as store:
+        me = store.get_session(MINE)
+        assert me is not None
+        pack = team_service._start_pack(
+            store,
+            project,
+            _codex(me, "manager"),
+            assigned=None,
+            persona_note=None,
+            fleet=project,
+            cwd=work,
+        )
+    assert "You are the parent manager of:" in pack and "aisquare task add" in pack, pack
+    assert routed.text.endswith(" — aisquare board --project api"), routed.text
+    return {"parent manager's start pack": pack, "routed line": routed.text}
 
 
 def test_every_command_aisquare_tells_a_codex_agent_to_run_runs_through_its_broker(
@@ -181,12 +239,14 @@ def test_every_command_aisquare_tells_a_codex_agent_to_run_runs_through_its_brok
     broker's refusal tells it (``store_broker.fleet_operation``)."""
     monkeypatch.setattr(harness, "_test_gate_on", lambda: True)  # its line too
     found: dict[tuple[str, ...], str] = {}
+    by_source: dict[str, set[tuple[str, ...]]] = {}
     for source, text in _agent_texts(work).items():
         for match in COMMAND.finditer(text):
             words = [word for word in match.groups() if word]
             named = store_broker.command_path(words)
             assert not isinstance(named, str), (source, match.group(0))
             found.setdefault(named[0], source)
+            by_source.setdefault(source, set()).add(named[0])
     refused = []
     for path, source in sorted(found.items()):
         if path[0] in store_broker.LOCAL:
@@ -208,12 +268,16 @@ def test_every_command_aisquare_tells_a_codex_agent_to_run_runs_through_its_brok
         ("task", "review"),
         ("task", "list"),
         ("board",),
+        ("task", "add"),
         ("note",),
         ("log",),
         ("brief", "evidence"),
         ("fleet", "gate"),
         ("watch",),
     } <= set(found), sorted(found)
+    # A parent manager's own (review r37 of #113, Q5): its delegation, and its routed pointer.
+    assert ("task", "add") in by_source.get("parent manager's start pack", set()), by_source
+    assert by_source.get("routed line") == {("board",)}, by_source
 
 
 def test_a_cycle_with_no_project_names_project_list_only_to_an_unsandboxed_session(
@@ -311,3 +375,67 @@ def test_the_watcher_itself_stays_out_of_the_broker() -> None:
         assert store_broker.refusal_kind(argv) == "fleet"
     assert store_broker.vet(["watch", "show", "/x.json"]) is None
     assert store_broker.vet(["team", "show", "12"]) is None
+
+
+# --- a parent manager's lines, through its broker (review r37 of #113, Q5) -----------------
+
+
+def _rid(n: int) -> str:
+    return f"{n:032x}"
+
+
+def test_a_parent_managers_routed_lines_run_as_written_through_its_broker(
+    work: Path,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """A Codex parent manager acts on two lines: the routed line's pointer reads the member's
+    board, and its briefing's ``task add … --project <member> --origin <task>`` delegates
+    there. Both run through its broker exactly as written, the add as the launch's own
+    session and logged; nothing else on the member's board does (a claim, a done, a release,
+    a fleet operation), nor a member that joined after the broker started, nor the members of
+    a broker that never took them at its start."""
+    [member] = parented(work, "api")
+    routed = _routed_line(work, member)
+    origin, _ = team_service.add_task("ship auth", cwd=work)
+    with store_session() as store:
+        briefing = "\n".join(parent_service.briefing(store, origin.project_id))
+    [verb] = re.findall(r"`(aisquare task add [^`]+)`", briefing)
+    filled = verb.replace("…", "auth API").replace("<member>", "api")
+    delegation = shlex.split(filled.replace("<task>", str(origin.number)))
+    pointer = shlex.split(routed.text.rsplit(" — ", 1)[1])
+    broker = _broker(tmp_path)
+    broker.settle()
+
+    read = _answer(broker, _request(pointer[1:], work))
+    added = _answer(broker, _request(["--json", *delegation[1:]], work, rid=_rid(1)))
+
+    assert read["code"] == 0 and "which base, rc/p1 or rc/p2?" in str(read["stdout"]), read
+    assert added["code"] == 0, added
+    task = json.loads(str(added["stdout"]))
+    assert (task["project_id"], task["created_by"]) == (member.id, MINE)
+    log = (paths.log_dir() / store_broker.LOG_NAME).read_text(encoding="utf-8")
+    assert f"launch={LAUNCH} " in log and f" admitted: task add #{task['number']} " in log
+    assert f" admitted: board --project api: read api ({member.id})" in log
+    assert f"on api ({member.id}) from board {origin.project_id}" in log
+
+    forbidden = [
+        ["task", "claim", task["id"], "--as", MINE[:8]],
+        ["task", "done", task["id"]],
+        ["task", "release", task["id"]],
+        ["task", "show", task["id"]],
+        ["task", "add", "x", "--project", "api", "--as", MEMBER_CODER[:8]],
+        ["fleet", "spawn", "coder", "--project", "api"],
+    ]
+    for n, argv in enumerate(forbidden, start=2):
+        refused = _answer(broker, _request(argv, work, rid=_rid(n)))
+        assert refused["code"] not in (0, None), (argv, refused)
+    with store_session() as store:
+        kept = store.get_task(task["id"])
+    assert kept is not None and (kept.status, kept.claimed_by) == ("todo", None)
+
+    parented(work, "late")
+    late = _answer(broker, _request(["board", "--project", "late"], work, rid=_rid(20)))
+    assert late["code"] == 1 and "after this agent launched" in str(late["stderr"]), late
+    unsettled = store_broker.Broker(tmp_path / "unsettled", NONCE, dict(os.environ))
+    never = _answer(unsettled, _request(pointer[1:], work, rid=_rid(21)))
+    assert never["code"] == 1 and "after this agent launched" in str(never["stderr"]), never

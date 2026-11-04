@@ -11,6 +11,8 @@ The store is real (an isolated home); the nudges are recorded instead of typed.
 from __future__ import annotations
 
 import json
+import re
+import shlex
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,9 +20,9 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import harness
+from aisquare.core import harness, paths
 from aisquare.core.store import store_session
-from aisquare.models import ProjectInfo, TeamEvent, TeamSession
+from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import parent as parent_service
 from aisquare.services import project_groups as groups
@@ -313,22 +315,227 @@ def test_a_sandboxed_agent_is_not_told_to_set_a_groups_parent(
     tree: dict[str, ProjectInfo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Its broker runs no configuration, so the refusal a sandboxed agent reads names no
-    ``project group parent`` (SMOKE12, F1): the operator names a group's parent."""
+    ``project group parent`` (SMOKE12, F1): the operator names a group's parent. A project
+    that is no member is a scope refusal from its sandbox (review r37 of #113, Q5), and its
+    own board named as the member the plain refusal, worded for it."""
     from aisquare.services import store_broker
 
     stranger = _project(tmp_path / "other", "other")
     origin, _ = team_service.add_task("ship auth", session_ref=HQ_MANAGER)
-    monkeypatch.setenv("AISQUARE_LAUNCH_ID", "launch-hq")
-    with store_session() as store:
-        store.set_meta("launch-session:launch-hq", HQ_MANAGER)
-    monkeypatch.setenv(store_broker.CALLER_ENV, "1")
-    monkeypatch.setenv(store_broker.BOARD_ENV, tree["hq"].id)
-    with pytest.raises(ValueError, match="not a member of a group this board") as refused:
+    _sandbox(monkeypatch, tree)
+    with pytest.raises(store_broker.OutOfScope, match="names no member of a group") as refused:
         team_service.add_task(
             "x", session_ref=HQ_MANAGER, project=stranger.codename, origin=str(origin.number)
         )
-    assert "project group" not in str(refused.value)
-    assert "the human who runs this fleet names a group's parent" in str(refused.value)
+    with pytest.raises(ValueError, match="not a member of a group this board") as itself:
+        team_service.add_task("y", session_ref=HQ_MANAGER, project="hq", origin=origin.id)
+    for said in (str(refused.value), str(itself.value)):
+        assert "project group" not in said
+        assert "the human who runs this fleet names a group's parent" in said
+
+
+# --- a sandboxed parent manager: through its store broker (review r37 of #113, Q5) ----------
+
+LAUNCH_HQ = "launch-hq"
+
+
+def _sandbox(monkeypatch: pytest.MonkeyPatch, tree: dict[str, ProjectInfo]) -> Path:
+    """From here on, every command runs as hq's manager's store broker runs one for its Codex
+    launch: on hq's board, which parented api and web as the launch started
+    (``store_broker.MEMBERS_ENV``, :meth:`Broker.settle`), as the session its own hook bound
+    to the launch. Returns the brokers' log."""
+    from aisquare.services import store_broker
+
+    monkeypatch.chdir(tree["hq"].root)
+    monkeypatch.setenv("AISQUARE_LAUNCH_ID", LAUNCH_HQ)
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
+    with store_session() as store:
+        store.set_meta(f"launch-session:{LAUNCH_HQ}", HQ_MANAGER)
+    monkeypatch.setenv(store_broker.CALLER_ENV, "1")
+    monkeypatch.setenv(store_broker.BOARD_ENV, tree["hq"].id)
+    monkeypatch.setenv(store_broker.MEMBERS_ENV, f"{tree['api'].id},{tree['web'].id}")
+    return paths.log_dir() / store_broker.LOG_NAME
+
+
+def _delegation_line(briefing: str, title: str, member: str, origin: TeamTask) -> list[str]:
+    """The briefing's delegation verb, its three blanks filled, as a shell splits it."""
+    [line] = re.findall(r"`(aisquare task add [^`]+)`", briefing)
+    filled = line.replace("…", title).replace("<member>", member)
+    return shlex.split(filled.replace("<task>", str(origin.number)))
+
+
+def test_a_sandboxed_parent_runs_its_routed_pointer_and_its_briefings_delegation_as_written(
+    tree: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The two lines a parent manager acts on, run as written from its sandbox: the routed
+    line's pointer shows the member's board, and the briefing's ``task add … --project
+    <member> --origin <task>`` adds the task there, linked, as the launch's own session
+    though the line names none, its event naming the parent's board. Each is a line in the
+    brokers' log beside its refusals. Before, a brokered ``board --project`` read any board,
+    and a delegation from the sandbox named nobody (the #66 LIMIT, seq 10405)."""
+    _note("which base, rc/p1 or rc/p2?", to="parent", kind="question")
+    [routed] = _events(tree["hq"], "routed")
+    origin, _ = team_service.add_task("ship auth", session_ref=HQ_MANAGER)
+    with store_session() as store:
+        briefing = "\n".join(parent_service.briefing(store, tree["hq"].id))
+    log = _sandbox(monkeypatch, tree)
+
+    shown = runner.invoke(app, shlex.split(routed.text.rsplit(" — ", 1)[1])[1:])
+    added = runner.invoke(
+        app, ["--json", *_delegation_line(briefing, "auth API", "api", origin)[1:]]
+    )
+
+    assert shown.exit_code == 0, shown.output
+    assert "which base, rc/p1 or rc/p2?" in shown.stdout, shown.stdout
+    assert added.exit_code == 0, added.output
+    task = json.loads(added.stdout)
+    assert (task["project_id"], task["created_by"]) == (tree["api"].id, HQ_MANAGER)
+    [made] = [e for e in _events(tree["api"], "task_added") if e.task_id == task["id"]]
+    assert made.session_id == HQ_MANAGER, "attributed to the parent manager's session"
+    assert made.meta == {"from": tree["hq"].id, "origin": origin.id}, made.meta
+    with store_session() as store:
+        assert store.task_origins(tree["api"].id)[task["id"]][0] == origin.id
+    [read, logged] = [ln for ln in log.read_text("utf-8").splitlines() if " admitted: " in ln]
+    assert f"launch={LAUNCH_HQ} " in read and f"launch={LAUNCH_HQ} " in logged
+    assert f"admitted: board --project api: read api ({tree['api'].id}), a member" in read
+    assert f"of a group board {tree['hq'].id} parents, for session {HQ_MANAGER}" in read
+    assert f"task add #{task['number']} {task['id']} on api ({tree['api'].id})" in logged
+    assert f"from board {tree['hq'].id}, from #{origin.number} {origin.id}" in logged
+    assert f"as session {HQ_MANAGER}: added at seq {made.seq}: auth API" in logged
+
+    again = runner.invoke(app, _delegation_line(briefing, "auth API", "api", origin)[1:])
+    assert again.exit_code == 0 and "already tracked" in again.stdout, again.output
+    assert "already open, not added again: auth API" in log.read_text("utf-8").splitlines()[-1]
+
+
+def test_a_sandboxed_parent_names_no_session_of_its_own_and_delegates_nothing(
+    tree: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delegation from a sandbox is its launch's own session's: with none bound yet (its
+    first hook has not run), nothing is added on the member's board."""
+    origin, _ = team_service.add_task("ship auth", session_ref=HQ_MANAGER)
+    _sandbox(monkeypatch, tree)
+    monkeypatch.setenv("AISQUARE_LAUNCH_ID", "a-launch-no-hook-bound")
+
+    with pytest.raises(ValueError, match="no session of its own yet"):
+        team_service.add_task("auth API", project="api", origin=origin.id)
+
+    assert _events(tree["api"], "task_added") == []
+
+
+#: What a parent manager may not do on a member's board from its sandbox: claim, finish,
+#: release or change a task of it, read one in full, or act as one of its sessions (a note,
+#: a signal, a task added as one).
+_FORBIDDEN = [
+    (["task", "claim", "{task}", "--as", HQ_MANAGER[:8]], "out_of_scope"),
+    (["task", "claim", "{task}", "--as", API_CODER[:8]], "not_your_session"),
+    (["task", "done", "{task}"], "out_of_scope"),
+    (["task", "release", "{task}"], "out_of_scope"),
+    (["task", "review", "{task}"], "out_of_scope"),
+    (["task", "reopen", "{task}", "--reason", "redo"], "out_of_scope"),
+    (["task", "block", "{task}", "--reason", "stuck"], "out_of_scope"),
+    (["task", "drop", "{task}"], "out_of_scope"),
+    (["task", "show", "{task}"], "out_of_scope"),
+    (["note", "from the parent", "--as", API_CODER[:8]], "not_your_session"),
+    (["team", "signal", "phase", "frozen", "--as", API_CODER[:8]], "not_your_session"),
+    (["task", "add", "x", "--project", "api", "--as", API_CODER[:8]], "not_your_session"),
+]
+
+
+@pytest.mark.parametrize(("argv", "error"), _FORBIDDEN, ids=lambda v: " ".join(v)[:40])
+def test_from_its_sandbox_a_parent_does_nothing_else_on_a_members_board(
+    tree: dict[str, ProjectInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    argv: list[str],
+    error: str,
+) -> None:
+    """Its board read and its ``task add`` are all a member's board gives the parent's
+    sandbox; each other verb on it is refused, and the member's board is as it was. A fleet
+    operation there its broker never runs (``store_broker.vet``)."""
+    from aisquare.services import store_broker
+
+    theirs, _ = team_service.add_task("auth API", session_ref=API_CODER)
+    team_service.claim_task(theirs.id, session_ref=API_CODER)
+    before = (_events(tree["api"], "task_added"), _events(tree["api"], "note"))
+    _sandbox(monkeypatch, tree)
+
+    refused = runner.invoke(app, ["--json", *(a.replace("{task}", theirs.id) for a in argv)])
+
+    assert refused.exit_code == 1 and f'"{error}"' in refused.stdout, refused.output
+    with store_session() as store:
+        kept = store.get_task(theirs.id)
+        assert kept is not None and (kept.status, kept.claimed_by) == ("doing", API_CODER)
+        kinds = {e.kind for e in store.recent_events(tree["api"].id, limit=50)}
+    assert (_events(tree["api"], "task_added"), _events(tree["api"], "note")) == before
+    assert kinds <= {"task_added", "task_claimed", "activated"}, kinds
+    fleet = store_broker.vet(["fleet", "spawn", "coder", "--project", "api"])
+    assert fleet is not None and "fleet operation" in fleet
+
+
+def test_the_members_a_command_may_name_are_its_brokers_alone(
+    tree: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The members come from the broker, with the mark of a command it runs
+    (``store_broker.CALLER_ENV``), never from the variable alone: an MCP tool bound to a
+    sandboxed launch's board (``store_broker.scoped_board``) reads no member's board,
+    whatever its environment says."""
+    from aisquare.services import store_broker
+
+    monkeypatch.setenv(store_broker.MEMBERS_ENV, tree["api"].id)
+    with (
+        store_broker.scoped_board(tree["hq"].id),
+        pytest.raises(store_broker.OutOfScope, match="after this agent launched"),
+    ):
+        team_service.board_project("api")
+    assert team_service.board_project("api").id == tree["api"].id, "outside a sandbox: any"
+
+
+def test_a_stranger_a_former_member_and_a_member_added_after_launch_are_refused_with_why(
+    tree: dict[str, ProjectInfo],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """Only a member the store says hq parents NOW, and that it parented when the launch
+    started: a project in no group of it is refused without a word of its board, one that
+    joined after the launch and one that has left are refused saying so. Each refusal is
+    recorded (store-broker.log). A member still in the group reads and delegates as before."""
+    stranger = _project(tmp_path / "other", "other")
+    late = _project(tmp_path / "late", "late")
+    team_service.add_note("the stranger's own secret", project_id=stranger.id)
+    origin, _ = team_service.add_task("ship auth", session_ref=HQ_MANAGER)
+    with store_session() as store:
+        groups.add_to_group(store, "app", [late.id])
+        groups.remove_from_group(store, [tree["web"].id])
+    log = _sandbox(monkeypatch, tree)
+    with store_session() as store:  # the store as it is now; the launch kept api and web
+        assert {p.id for p in parent_service.members_parented_by(store, tree["hq"].id)} == {
+            tree["api"].id,
+            late.id,
+        }
+
+    for ref, why in (
+        ("other", "--project other: names no member of a group this agent's board parents"),
+        ("late", "--project late: joined a group this agent's board parents after this agent"),
+        ("web", "--project web: no longer a member of a group this agent's board parents"),
+    ):
+        read = runner.invoke(app, ["board", "--project", ref])
+        add = runner.invoke(app, ["task", "add", "x", "--project", ref, "--origin", origin.id])
+        for refused in (read, add):
+            assert refused.exit_code == 1 and why in refused.output, refused.output
+        assert "secret" not in read.output
+    with store_session() as store:
+        for project in (stranger, late, tree["web"]):
+            assert store.team_tasks(project.id) == [], project.codename
+    refusals = [
+        line for line in log.read_text("utf-8").splitlines() if " board: --project " in line
+    ]
+    assert len(refusals) == 6, refusals
+    several = runner.invoke(app, ["board", "--project", "prj_"])  # hq, api and web's prefix
+    assert several.exit_code == 1 and "'prj_' is ambiguous" in several.output, several.output
+    member = runner.invoke(app, ["--json", "board", "--project", "api"])
+    assert member.exit_code == 0 and json.loads(member.stdout)["project"]["id"] == tree["api"].id
 
 
 # --- the manager's cycle and the parent's briefing -------------------------------------------

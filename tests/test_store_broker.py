@@ -34,7 +34,7 @@ from aisquare.core import paths, selfcli, spawn
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import WriteScope, store_dir
 from aisquare.core.store import store_session
-from aisquare.models import TeamSession
+from aisquare.models import ProjectInfo, TeamSession
 from aisquare.services import agent_launch, store_broker
 from aisquare.services import team as team_service
 from tests.conftest import _PRIVATE_FLEETS
@@ -2383,3 +2383,59 @@ def test_the_site_packages_an_interpreter_loads_count_outside_its_prefix(
     argv = ["codex", "--sandbox", "workspace-write", "--add-dir", str(dist / "extra")]
     with pytest.raises(store_broker.LaunchRefused, match=re.escape(str(dist / "extra"))):
         store_broker.refuse_inside(argv, project, get_adapter("codex"))
+
+
+# --- review r37 of #113, Q5: a parent manager's members --------------------------------------
+
+
+def parented(work: Path, *names: str) -> list[ProjectInfo]:
+    """Projects ``names``, each a checkout beside ``work`` with that codename, members of the
+    group ``app`` whose parent is ``work``'s board (the launch's)."""
+    from aisquare.services import project_groups
+
+    made = []
+    for name in names:
+        root = work.parent / name
+        root.mkdir()
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        activated = team_service.activate(root)
+        with store_session() as store:
+            made.append(
+                store.onboard_project(ProjectInfo(id=activated.id, root=root), codename=name)
+            )
+    with store_session() as store:
+        own = store.get_session(MINE)
+        assert own is not None
+        group = store.find_project_group("app")
+        if group is None:
+            group, _ = project_groups.create_group(store, "app", [p.id for p in made])
+        else:
+            project_groups.add_to_group(store, group.id, [p.id for p in made])
+        store.set_group_settings(group.id, parent_project_id=own.project_id)
+    return made
+
+
+def test_a_launch_s_broker_fixes_its_boards_members_as_it_starts(
+    work: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The members a parent manager's sandbox reads and delegates to are the ones its board
+    parented when its broker started (``serve`` settles the scope before it answers), not
+    those of the store at each call: a project joined to the group later is refused, saying
+    so, until the agent's next launch."""
+    [member] = parented(work, "api")
+    running = _a_launch_s_broker(work, monkeypatch, {})
+    try:
+        next(running)
+        # Answered, so settled: the broker answers nothing before it has taken its scope.
+        assert store_broker.forward(["board", "--project", "api"]) == 0
+        assert "The orchestrator is quiet here" in capsys.readouterr().out
+        parented(work, "late")
+
+        assert store_broker.forward(["board", "--project", "late"]) == 1
+        assert "after this agent launched" in capsys.readouterr().err
+        assert store_broker.forward(["task", "add", "x", "--project", "late"]) == 1
+        assert "after this agent launched" in capsys.readouterr().err
+        assert store_broker.forward(["task", "add", "auth API", "--project", "api"]) == 0
+        assert f"on {member.id}" in capsys.readouterr().out
+    finally:
+        running.close()

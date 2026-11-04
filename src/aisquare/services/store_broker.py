@@ -32,9 +32,10 @@ its board too, once per launch and kind. The command it runs acts only as the
 launch's own board sessions (:data:`CALLER_ENV`, held where every ``--as`` resolves,
 ``services.team``): the ones the agent's own hooks, which its agent runs outside the
 sandbox, bound to this launch (``core.agent_sessions.bind_launch_session``); only on the
-launch's own board (:data:`BOARD_ENV`: a task of another board is not one it may name)
-and in its own project's memory pool (:data:`POOL_ENV`: never the user pool, which every
-project's agents are given). It never runs a fleet operation.
+launch's own board (:data:`BOARD_ENV`: a task of another board is not one it may name),
+but for a parent manager's read of a member's board and the tasks it delegates there
+(:data:`MEMBERS_ENV`); and in its own project's memory pool (:data:`POOL_ENV`: never the
+user pool, which every project's agents are given). It never runs a fleet operation.
 
 The transport, measured on codex-cli 0.162.1 (Linux bwrap, a real ``exec_command``): the
 sandbox's seccomp filter refuses ``connect`` on every unix socket (EPERM: a path one on a
@@ -63,8 +64,11 @@ What a sandboxed agent's broker runs (`services.store_broker.WHITELIST`); a test
 this list to it, and every board call a role's cycle teaches to it:
 
 - `aisquare note`
-- `aisquare board` (not `--watch`)
-- `aisquare task add`
+- `aisquare board` (not `--watch`; `--project` names its own board, or a member's of a group
+  its board parented at its launch and still parents, logged: a parent manager's routed
+  line points there)
+- `aisquare task add` (`--project` adds on such a member's board alone, as its launch's own
+  session, the event naming its board, and logged: a parent manager's delegation)
 - `aisquare task list`
 - `aisquare task show`
 - `aisquare task claim`
@@ -158,7 +162,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -195,8 +199,17 @@ SEALS_ENV = "AISQUARE_BROKERED_SEALS"
 ROOTS_ENV = "AISQUARE_BROKERED_ROOTS"
 """The launch's tree (its directories, ``os.pathsep``-joined), in the environment of the
 command a broker runs: the command refuses to run anywhere else (:func:`check_cwd`)."""
+MEMBERS_ENV = "AISQUARE_BROKERED_MEMBERS"
+"""The member projects (ids, comma-joined) of the groups the launch's board parented when the
+launch started (:meth:`Broker.settle`), in the environment of the command a broker runs: a
+parent manager's. The only boards but its own it may name, to read one (``board --project``)
+or add a task to it (``task add --project``), and only while the store still says its board
+parents each (``services.team``; review r37 of #113, Q5): never a claim, a done, a release or
+any other write there, nor a session of it (:data:`BOARD_ENV`)."""
 LOG_NAME = "store-broker.log"
-"""The brokers' refusals, one line each, in the aisquare home's log directory."""
+"""The brokers' refusals, and what a parent manager's broker admitted on a member's board
+(:func:`record_admission`: a read, a task added), one line each, in the aisquare home's log
+directory."""
 #: The refusals put on the launch's board as well as logged, once per launch and kind: a
 #: session not its own, another board's task, another project's pool, a fleet operation
 #: (its signals included), a request not signed by its launch.
@@ -397,6 +410,15 @@ def own_pool(environ: Mapping[str, str] | None = None) -> str | None:
     return (source.get(POOL_ENV) or None) if brokered_call(source) else None
 
 
+def own_members(environ: Mapping[str, str] | None = None) -> frozenset[str]:
+    """The member projects a brokered command's launch fixed at its start (:data:`MEMBERS_ENV`):
+    empty for any other command, and for a launch whose board parents none."""
+    source = os.environ if environ is None else environ
+    if not brokered_call(source):
+        return frozenset()
+    return frozenset(member for member in source.get(MEMBERS_ENV, "").split(",") if member)
+
+
 def check_cwd(environ: Mapping[str, str] | None = None) -> str | None:
     """Why a command a broker runs may not run where it is, or ``None``: its cwd, as the
     kernel has it now (``os.getcwd``), must be in the launch's tree (:data:`ROOTS_ENV`).
@@ -510,18 +532,7 @@ def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:
     own, another board's task, a fleet operation, a request not signed by its launch),
     one note on the launch's board (``board``, else :data:`BOARD_ENV`) per launch and
     kind, naming the agent, for its manager and the human. Never raises."""
-    from datetime import UTC, datetime
-
-    launch = os.environ.get("AISQUARE_LAUNCH_ID", "").strip() or "?"
-    agent = os.environ.get("AISQUARE_FLEET_AGENT", "").strip()
-    flat = " ".join(detail.split())
-    stamp = datetime.now(UTC).isoformat()
-    line = f"{stamp} launch={launch} agent={agent or '-'} {kind}: {flat}\n"
-    with suppress(OSError):
-        logs = paths.log_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        with open(logs / LOG_NAME, "a", encoding="utf-8") as handle:
-            handle.write(line)
+    launch, agent, flat = _log_line(kind, detail)
     board = board or os.environ.get(BOARD_ENV) or None
     if kind not in NOTED or board is None or launch == "?":
         return  # no launch to name (a child of a brokered command's): logged only
@@ -537,6 +548,33 @@ def record_refusal(kind: str, detail: str, *, board: str | None = None) -> None:
             # (``core.store._PROJECT_META``): a launch need not have bound a session to it
             key=f"broker-refused:{board}:{launch}:{kind}",
         )
+
+
+def record_admission(detail: str) -> None:
+    """One line in the brokers' log (:data:`LOG_NAME`, kind ``admitted``) for what a parent
+    manager's broker ran on a member's board (:data:`MEMBERS_ENV`), the one board not its
+    launch's it reads or writes: its read, and each task it added there, beside its refusals
+    (review r37 of #113, Q5). Never raises."""
+    with suppress(Exception):
+        _log_line("admitted", detail)
+
+
+def _log_line(kind: str, detail: str) -> tuple[str, str, str]:
+    """Append one line of ``kind`` to the brokers' log, naming the launch and its agent;
+    returns those two and ``detail`` on one line. A log that cannot be written is skipped."""
+    from datetime import UTC, datetime
+
+    launch = os.environ.get("AISQUARE_LAUNCH_ID", "").strip() or "?"
+    agent = os.environ.get("AISQUARE_FLEET_AGENT", "").strip()
+    flat = " ".join(detail.split())
+    stamp = datetime.now(UTC).isoformat()
+    line = f"{stamp} launch={launch} agent={agent or '-'} {kind}: {flat}\n"
+    with suppress(OSError):
+        logs = paths.log_dir()
+        logs.mkdir(parents=True, exist_ok=True)
+        with open(logs / LOG_NAME, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    return launch, agent, flat
 
 
 def _who(agent: str) -> str:
@@ -938,12 +976,15 @@ def _capped(stream: Any, into: list[bytes], cut: list[bool]) -> None:
 
 @dataclass(frozen=True)
 class Scope:
-    """Where a launch's broker acts: its board, its project's memory pool, and the
-    directories a request may run in (its worktree and its project's directory)."""
+    """Where a launch's broker acts: its board, its project's memory pool, the directories
+    a request may run in (its worktree and its project's directory), and the members of the
+    groups its board parented at the launch's start (:meth:`Broker.settle`), whose boards a
+    parent manager reads and delegates to (:data:`MEMBERS_ENV`)."""
 
     board: str
     pool: str
     roots: tuple[Path, ...]
+    members: tuple[str, ...] = ()
 
     def holds(self, cwd: Path) -> bool:
         resolved = _resolved(cwd)
@@ -1019,10 +1060,27 @@ class Broker:
         self._closing = threading.Event()
 
     def scope(self) -> Scope:
-        """The launch's scope, taken once, from the broker's own cwd: the launch's."""
+        """The launch's scope, taken once, from the broker's own cwd: the launch's. Its
+        members are :meth:`settle`'s, and none when it did not take them."""
         if self._scope is None:
             self._scope = launch_scope(Path.cwd(), self.environ)
         return self._scope
+
+    def settle(self) -> None:
+        """Take the launch's scope as its broker starts (:func:`serve`), before its agent
+        asks for anything, with the members of the groups its board parents then
+        (``services.parent.members_parented_by``): a project that joins its group later is
+        none its board calls may name until the agent's next launch (review r37 of #113,
+        Q5). A scope that cannot be taken now is taken at the first request, with no
+        member. Never raises."""
+        from aisquare.core.store import store_session
+        from aisquare.services import parent
+
+        with suppress(Exception):
+            scope = self.scope()
+            with store_session() as store:
+                members = parent.members_parented_by(store, scope.board)
+            self._scope = replace(scope, members=tuple(member.id for member in members))
 
     def _refuse(self, kind: str, message: str, code: int = 2) -> dict[str, object]:
         """A refusal, recorded: its line whatever else fails, its note when its kind is one
@@ -1094,6 +1152,7 @@ class Broker:
             )
         env = dict(self.environ)
         env[BOARD_ENV], env[POOL_ENV] = scope.board, scope.pool
+        env[MEMBERS_ENV] = ",".join(scope.members)
         env[ROOTS_ENV] = os.pathsep.join(str(root) for root in scope.roots)
         env[REPORTS_ENV] = str(self.directory / REPORTS)
         env[SEALS_ENV] = str(self.directory / SEALS)
@@ -1261,6 +1320,7 @@ def serve(
     staging = directory / f".{READY}.part"
     staging.write_text(json.dumps({"pid": os.getpid(), "owner": owner_pid}), encoding="utf-8")
     staging.replace(ready)
+    broker.settle()
     tidied = time.monotonic()
     try:
         while alive():

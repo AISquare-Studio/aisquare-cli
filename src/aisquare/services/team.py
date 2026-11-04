@@ -719,16 +719,22 @@ def _acting_as(store: ContextStore, session: TeamSession, ref: str) -> TeamSessi
     outside the sandbox, where nothing inside it writes (``types.store_read_only``)."""
     if not brokered():
         return session
-    own = list(
+    own = _launch_sessions(store)
+    if session.id not in own:
+        raise ForeignSessionError(ref, own)
+    return session
+
+
+def _launch_sessions(store: ContextStore) -> list[str]:
+    """The sessions bound to this process's launch tokens (the launch's, then its fleet
+    agent's), each once: a brokered command's own (:func:`_acting_as`)."""
+    return list(
         dict.fromkeys(
             bound
             for prefix, token in agent_sessions.launch_tokens()
             if (bound := store.get_meta(f"{prefix}-session:{token}"))
         )
     )
-    if session.id not in own:
-        raise ForeignSessionError(ref, own)
-    return session
 
 
 @dataclass(frozen=True)
@@ -1927,18 +1933,24 @@ def add_task(
     on ``project``'s board, a member of a group whose parent is the writer's board, and
     ``origin`` is the task on that parent board it was delegated from, which its status
     changes route up to (``services.parent``). ``ValueError`` names what does not fit.
+    From a sandboxed parent manager's broker, only to a member it launched with
+    (:func:`_brokered_member`), as its launch's own session when it names none, and logged
+    (:func:`_log_delegation`).
     """
     _require_enabled()
     _DELIVERY.set(None)
     _SUPERSEDES.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
+        if project is not None and session is None and brokered():
+            session = _delegating_session(store, project)
         board = _board(store, session, cwd, write=True)
         origin_task: TeamTask | None = None
         if origin is not None:
             origin_task = find_task(store, origin, board.id)
             if origin_task is None or origin_task.project_id != board.id:
                 raise ValueError(f"--origin {origin}: no such task on this board ({board.name})")
+        delegator = board.id if project is not None else None
         if project is not None:
             board = _delegated_board(store, project, board)
         elif origin_task is not None:
@@ -2021,9 +2033,15 @@ def add_task(
                 session_id=session.id if session else None,
                 task_id=task.id,
                 to_role=task.role,
+                # A parent's delegation names the parent board its session is on, which
+                # the member's board has no row of (review r37 of #113, Q5).
+                meta=_delegation_meta(delegator, origin_task),
             )
+    delegated = project is not None and brokered()
     if event is not None:
         _record_delivery(event, board)
+        if delegated:
+            _log_delegation(task, board, session, origin_task, event.seq)
         return task, created
     # Idempotent duplicate: nothing new hit the pipe, but the caller still
     # gets a truthful receipt — the existing row, read back fresh.
@@ -2034,14 +2052,129 @@ def add_task(
     _DELIVERY.set(
         Delivery(seq=None, board_id=board.id, board_name=board.name, warning=board.warning)
     )
+    if delegated:
+        _log_delegation(fresh, board, session, origin_task, None)
     return fresh, created
 
 
-def _delegated_board(store: ContextStore, ref: str, parent: _Board) -> _Board:
-    """The board of the member ``ref`` names, which the writer's board must parent."""
-    from aisquare.services import parent as parent_service  # lazy: it imports this module
+def _delegation_meta(parent: str | None, origin: TeamTask | None) -> dict[str, object] | None:
+    """A delegated task's ``task_added`` details: the parent board it came from, and the
+    origin task there when it names one; ``None`` for a task added on its own board."""
+    if parent is None:
+        return None
+    return {"from": parent, **({"origin": origin.id} if origin is not None else {})}
 
-    found = store.find_projects(ref)
+
+def board_project(ref: str) -> ProjectInfo:
+    """The project ``board --project <ref>`` shows: the pointer a parent manager's routed line
+    gives (P2-W6). For a command a sandboxed agent's broker runs, only its launch's own board
+    or a member's it may read (:func:`_brokered_member`); for any other, whichever project
+    ``ref`` names (``services.fleet.resolve_project``, and its ``NoSuchProject``)."""
+    from aisquare.services.store_broker import own_board
+
+    own = own_board()
+    if own is None:
+        from aisquare.services import fleet as fleet_service  # lazy: fleet imports the store
+
+        return fleet_service.resolve_project(ref)
+    with store_session() as store:
+        member = _brokered_member(store, ref, own)
+        if member.id == own:
+            return member
+        sessions = _launch_sessions(store)
+    from aisquare.services.store_broker import record_admission
+
+    record_admission(
+        f"board --project {ref}: read {member.codename or member.id} ({member.id}), a member "
+        f"of a group board {own} parents" + (f", for session {sessions[0]}" if sessions else "")
+    )
+    return member
+
+
+def _brokered_member(store: ContextStore, ref: str, own: str) -> ProjectInfo:
+    """The project ``--project <ref>`` names for a command a sandboxed agent's broker runs:
+    its launch's own board ``own``, or a member of a group that board parents both as the
+    store has it now and as it had it when the launch started (``store_broker.own_members``):
+    a parent manager reads a member's board and delegates to it from its sandbox, as it does
+    from any other shell, and nothing past those (review r37 of #113, Q5). Only those
+    projects are looked among, so a refusal names no other board, nor says whether ``ref``
+    names one. :class:`~aisquare.services.store_broker.OutOfScope` for anything else, saying
+    why; :class:`AmbiguousIdError` for a ref that names several of them."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+    from aisquare.services.store_broker import OutOfScope, own_members
+
+    at_launch = own_members()
+    now = {member.id for member in parent_service.members_parented_by(store, own)}
+    looked_among = {own, *now, *at_launch}
+    found = [named for named in store.find_projects(ref) if named.id in looked_among]
+    if len(found) > 1:
+        raise AmbiguousIdError(ref)
+    if not found:
+        raise OutOfScope(
+            f"--project {ref}: names no member of a group this agent's board parents; a "
+            "command from its sandbox reads and delegates to its own board and its members' "
+            "alone, and the human who runs this fleet names a group's parent"
+        )
+    member = found[0]
+    if member.id == own or (member.id in now and member.id in at_launch):
+        return member
+    if member.id in at_launch:
+        raise OutOfScope(
+            f"--project {ref}: no longer a member of a group this agent's board parents, as "
+            "it was when this agent launched; a command from its sandbox reads and delegates "
+            "to a member still in the group alone"
+        )
+    raise OutOfScope(
+        f"--project {ref}: joined a group this agent's board parents after this agent "
+        "launched; a command from its sandbox reads and delegates to the members it launched "
+        "with alone, so to this one after its next launch (a restart)"
+    )
+
+
+def _delegating_session(store: ContextStore, ref: str) -> TeamSession:
+    """The session a parent manager's delegation from its sandbox is attributed to when it
+    names none (``--as``): its launch's own, the one its routed lines and briefing need not
+    name (review r37 of #113, Q5). ``ValueError`` while it has none."""
+    own = _launch_sessions(store)
+    session = store.get_session(own[0]) if own else None
+    if session is None:
+        raise ValueError(
+            f"--project {ref}: this agent has no session of its own yet (its first hook has not "
+            "run), and a task it delegates from its sandbox is its own session's"
+        )
+    return session
+
+
+def _log_delegation(
+    task: TeamTask,
+    member: _Board,
+    session: TeamSession | None,
+    origin: TeamTask | None,
+    seq: int | None,
+) -> None:
+    """The line in the brokers' log a sandboxed parent manager's delegation leaves
+    (``store_broker.record_admission``): the task, the member's board, the launch's own
+    board and session, and the origin."""
+    from aisquare.services.store_broker import own_board, record_admission
+
+    added = f"added at seq {seq}" if seq is not None else "already open, not added again"
+    origin_said = f", from {task_label(origin)}" if origin is not None else ""
+    record_admission(
+        f"task add {task_label(task)} on {member.name} ({member.id}) from board "
+        f"{own_board()}{origin_said} as session {session.id if session else '-'}: {added}: "
+        f"{task.title[:200]}"
+    )
+
+
+def _delegated_board(store: ContextStore, ref: str, parent: _Board) -> _Board:
+    """The board of the member ``ref`` names, which the writer's board must parent; for a
+    command a sandboxed agent's broker runs, one of its launch's members too
+    (:func:`_brokered_member`)."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+    from aisquare.services.store_broker import own_board
+
+    own = own_board()
+    found = [_brokered_member(store, ref, own)] if own is not None else store.find_projects(ref)
     if len(found) != 1:
         raise ValueError(
             f"--project {ref}: {'no such project' if not found else 'more than one project'}"

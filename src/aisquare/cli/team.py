@@ -1609,13 +1609,14 @@ def board(
 def _named_project(ref: str | None) -> ProjectInfo | None:
     """The project ``board --project`` names (as ``ui --project`` resolves it), or
     ``None`` for this folder's. A parent manager's routed line points at a member's board
-    this way (P2-W6), and the option it named did not exist (TUI-401c check 4)."""
+    this way (P2-W6), and the option it named did not exist (TUI-401c check 4). From a
+    sandboxed agent's broker, its own board or a member's alone (``team.board_project``)."""
     if ref is None:
         return None
     from aisquare.services import fleet as fleet_service  # lazy: board alone needs none
 
     try:
-        return fleet_service.resolve_project(ref)
+        return team_service.board_project(ref)
     except fleet_service.FleetError as exc:
         fail(str(exc), error="not_found", ref=ref)
     except STORE_ERRORS as exc:

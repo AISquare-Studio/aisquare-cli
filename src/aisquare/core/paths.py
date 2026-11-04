@@ -713,8 +713,12 @@ def _lstat_below_windows(root: Path, names: Sequence[str]) -> os.stat_result:
 
 def _open_below_windows(root: Path, names: Sequence[str]) -> int:
     """A descriptor on ``root``/``names`` once :func:`_lstat_below_windows` found no link
-    or junction on the way."""
-    _lstat_below_windows(root, names)
+    or junction on the way and a regular file there: Windows refuses to open a directory
+    (``PermissionError``), so what it is is asked first, as :func:`read_below` asks the
+    descriptor after."""
+    kind = _not_regular(_lstat_below_windows(root, names).st_mode)
+    if kind is not None:
+        raise NotReadBelow(errno.EINVAL, f"it is {kind}, not a regular file")
     return os.open(root.joinpath(*names), os.O_RDONLY | getattr(os, "O_BINARY", 0))
 
 

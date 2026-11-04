@@ -223,6 +223,25 @@ def test_a_file_over_the_limit_is_refused_and_one_at_it_is_read(tmp_path: Path) 
     assert len(paths.read_below(tmp_path, ("just.md",), 1024).data) == 1024
 
 
+def test_the_windows_walk_refuses_what_the_posix_one_does(tmp_path: Path, secret: Path) -> None:
+    """Windows' branch (``_open_below_windows``: each name ``lstat``-ed, then opened), run on
+    every platform: a directory is refused before it is opened (Windows raised
+    ``PermissionError`` opening one, CI e1778119), and so is a link, at the file or on the
+    way; a regular file opens."""
+    (tmp_path / "a" / "dir.md").mkdir(parents=True)
+    (tmp_path / "a" / "f.md").write_text("goal", encoding="utf-8")
+    with pytest.raises(paths.NotReadBelow, match="a directory"):
+        paths._open_below_windows(tmp_path, ("a", "dir.md"))
+    os.close(paths._open_below_windows(tmp_path, ("a", "f.md")))
+    if not can_symlink():
+        return
+    (tmp_path / "a" / "l.md").symlink_to(secret)
+    (tmp_path / "b").symlink_to(secret.parent, target_is_directory=True)
+    for names in (("a", "l.md"), ("b", "auth.json")):
+        with pytest.raises(paths.NotReadBelow):
+            paths._open_below_windows(tmp_path, names)
+
+
 @posix
 def test_a_fifo_is_refused_at_once_never_waited_on(tmp_path: Path) -> None:
     """Mutants: ``O_NONBLOCK`` dropped (the open waits for a writer: past the bound), the

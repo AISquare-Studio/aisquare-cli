@@ -605,6 +605,13 @@ def test_a_double_or_triple_click_on_what_opens_a_dialog_presses_nothing_in_it()
                 if not isinstance(app.screen, Over):
                     return False
                 confirm = app.screen.query_one("#confirm", GuardedButton)
+                # Over is current from its push, and laid out a turn of the loop or more later.
+                # Until then its map is empty: Confirm has no region, nothing is at ``where``,
+                # and the guard, which goes up at Confirm's first layout, is not up yet. A look
+                # in that gap read the guard as down and raised NoWidget at (2, 1) (windows CI,
+                # runs 41741181600 and 41748932341). Confirm laid out over ``where`` first.
+                if not confirm.region.contains_point(where):
+                    return False
                 return not confirm.guarding and app.get_widget_at(*where)[0] is confirm
 
             def seen() -> list[object]:

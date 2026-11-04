@@ -357,6 +357,22 @@ class NoSuchTaskNumber(KeyError):
         return f"no task #{self.number} on this board ({self.board})"
 
 
+class NoSuchSession(KeyError):
+    """``--as`` names no session: no id or id prefix, and no live fleet agent of the
+    caller's project by that label (:func:`_session_named`). Said as the session it is,
+    never as the task ref beside it: ``task claim <id> --as coder1`` said "nothing matches
+    '<id>'" of a task that was there (SMOKE12, F4). ``why`` is what more there is to say:
+    the agent by that label whose first hook has not bound a session yet."""
+
+    def __init__(self, ref: str, why: str | None = None) -> None:
+        super().__init__(ref)
+        self.ref = ref
+        self.why = why
+
+    def __str__(self) -> str:
+        return f"no session matches '{self.ref}'" + (f" ({self.why})" if self.why else "")
+
+
 class TurnEndDeliveryError(RuntimeError):
     """A non-manager's turn-end delivery failed (P0-W2); the row still says ``waiting``.
 
@@ -558,15 +574,89 @@ def _emit(
 def _resolve_session(
     store: ContextStore, ref: str | None, *, acting: bool = True
 ) -> TeamSession | None:
-    """The session ``ref`` names (an id prefix); the one a command acts as unless it is
-    only a filter (``acting``), which a brokered command may name only when it is its own
+    """The session ``ref`` names (an id, an id prefix or a fleet label:
+    :func:`_session_named`); the one a command acts as unless it is only a filter
+    (``acting``), which a brokered command may name only when it is its own
     (:func:`_acting_as`)."""
     if ref is None:
         return None
-    session = store.get_session(ref)
-    if session is None:
-        raise KeyError(ref)
+    session = _session_named(store, ref)
     return _acting_as(store, session, ref) if acting else session
+
+
+#: What may be a fleet label: a spawn's (``services.fleet.LABEL``) or a bound role's, kept as
+#: its role spells it (``data_eng-1``). A session id prefix that starts with a digit is none.
+_MAYBE_LABEL = re.compile(r"[a-z][a-z0-9_-]{1,63}")
+
+
+def _session_named(store: ContextStore, ref: str) -> TeamSession:
+    """The session ``ref`` names: a whole session id; else the session of the live fleet
+    agent it labels in the caller's project (:func:`_labelled_agent`); else an id prefix.
+
+    A label is what a kickoff names when it is built before its agent's session exists (a
+    Codex agent's, whose thread id it learns at its start): ``task claim <id> --as coder1``
+    failed for every Codex agent spawned for a task (SMOKE12, F4). It is that agent's
+    CURRENT session, as the fleet row has it (a ``/clear`` moves the row with its claims).
+    Sound for every caller: a command run here acts as any session it names by id, so a
+    label lends it nothing more; a command a sandboxed agent's broker runs still acts only
+    as its launch's own (:func:`_acting_as`), whichever way it named it.
+
+    A ref that is both a label and the prefix of another session's id is ambiguous
+    (:class:`AmbiguousIdError`), never one of the two picked; one that is neither raises
+    :class:`NoSuchSession`, as does a label whose agent has bound no session yet."""
+    ambiguous = False
+    try:
+        by_id = store.get_session(ref)
+    except AmbiguousIdError:
+        by_id, ambiguous = None, True
+    if by_id is not None and by_id.id == ref:
+        return by_id
+    agent = _labelled_agent(store, ref)
+    if agent is None:
+        if ambiguous:
+            raise AmbiguousIdError(ref)
+        if by_id is None:
+            raise NoSuchSession(ref)
+        return by_id
+    labelled = store.get_session(agent.session_id) if agent.session_id else None
+    if ambiguous or (by_id is not None and (labelled is None or labelled.id != by_id.id)):
+        raise AmbiguousIdError(ref)
+    if labelled is None:
+        raise NoSuchSession(
+            ref, f"fleet agent {agent.label} has no session yet: its first hook has not run"
+        )
+    return labelled
+
+
+def _labelled_agent(store: ContextStore, ref: str) -> FleetAgent | None:
+    """The live fleet agent labelled ``ref`` in the caller's project, or ``None``.
+
+    The caller's project is its own fleet row's (``AISQUARE_FLEET_AGENT``: a window's, and
+    its broker's, which runs in the launch's environment), else its directory's
+    (``orchestrator.directory_project``: a worktree answers as its principal checkout).
+    Labels are unique among a project's live agents only, so never another project's.
+    Asked only of a ref that may be a label and a live agent holds: one cheap read of the
+    live rows, then the directory's ``git`` call only when its own row did not answer."""
+    if _MAYBE_LABEL.fullmatch(ref) is None:
+        return None
+    # Newest first, as ``fleet_agent_by_label`` picks a label's row.
+    named = [agent for agent in reversed(store.live_fleet_agents()) if agent.label == ref]
+    if not named:
+        return None
+    own_row = orchestrator.env_fleet_agent()
+    row = None
+    if own_row is not None:
+        with suppress(AmbiguousIdError):
+            row = store.get_fleet_agent(own_row)
+    if row is not None:
+        mine = next((agent for agent in named if agent.project_id == row.project_id), None)
+        if mine is not None:
+            return mine
+    try:
+        here = orchestrator.directory_project().id
+    except Exception:  # a directory that cannot be asked names no project: no label then
+        return None
+    return next((agent for agent in named if agent.project_id == here), None)
 
 
 def brokered() -> bool:
@@ -4889,8 +4979,12 @@ _VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "ui-tester"})
 _GATING_ROLES = frozenset({"validator"})
 
 
-def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
+def _assignment_lines(
+    assignment: Assignment, me: TeamSession, *, as_ref: str | None = None
+) -> list[str]:
     """What the agent is told about the task it was spawned for — by state and role.
+    Its commands act ``--as`` ``as_ref``, ``me``'s short id unless one is given (a
+    kickoff's label: :func:`kickoff_prompt`).
 
     Written per state, not per the coder's cycle: the manager spawns a tester
     once a task reaches review, and that tester's assignment is a ``[review]``
@@ -4915,7 +5009,7 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
     """
     task = assignment.task
     mine = assignment.mine
-    sid = short_id(me.id)
+    sid = as_ref or short_id(me.id)
     verifier = base_role(me.role) in _VERIFYING_ROLES
     head = f"ASSIGNED TO YOU: {task.id} [{task.status}] {task.title}"
     if base_role(me.role) in _GATING_ROLES:
@@ -5018,7 +5112,13 @@ def kickoff_prompt(
     <label>.``, then the lines its ASSIGNED TO YOU block carries (:func:`_assignment_lines`),
     worked out as the block works them out at its session start (:func:`_resolve_assignment`),
     so the kickoff and the block never disagree. A context block starts no turn; this does.
-    ``statuses`` are the board's task statuses, for what a ``todo`` task still waits on."""
+    ``statuses`` are the board's task statuses, for what a ``todo`` task still waits on.
+
+    Its commands act ``--as`` the session's short id, or, built before the session exists
+    (``session_id`` ``None``: an agent whose native id is known only once it starts, as
+    Codex's is), ``--as`` the whole label, which resolves to that agent's session when the
+    command runs (:func:`_session_named`). Never the label cut to a short id: a task's
+    agent's label is ``coder-<task>``, and ``--as coder-01`` named nothing (SMOKE12, F4)."""
     now = _now()
     me = TeamSession(
         id=session_id or label,
@@ -5031,7 +5131,8 @@ def kickoff_prompt(
     waiting_on = unmet_needs(task, statuses) if task.status == "todo" else []
     expired = task.claim_expires_at is not None and task.claim_expires_at < now
     assignment = Assignment(task, mine, waiting_on, task.status == "doing" and not mine and expired)
-    return "\n".join([f"You are {label}.", *_assignment_lines(assignment, me)])
+    lines = _assignment_lines(assignment, me, as_ref=None if session_id else label)
+    return "\n".join([f"You are {label}.", *lines])
 
 
 def _has_parent(project_id: str) -> bool:

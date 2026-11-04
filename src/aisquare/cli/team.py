@@ -130,6 +130,10 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         fail(f"context store error: {exc}", error="store_error", detail=str(exc))
     if isinstance(exc, team_service.NoSuchTaskNumber):
         fail(str(exc), error="not_found", ref=f"#{exc.number}")  # never looked for elsewhere
+    if isinstance(exc, team_service.NoSuchSession):
+        # The session `--as` named, never `ref`, the task or event beside it: "nothing
+        # matches '<task id>'" sent agents looking for a task that was there (SMOKE12, F4).
+        fail(str(exc), error="not_found", ref=exc.ref)
     if isinstance(exc, KeyError):
         missing = ref if ref is not None else str(exc)
         fail(f"nothing matches '{missing}'", error="not_found", ref=missing)

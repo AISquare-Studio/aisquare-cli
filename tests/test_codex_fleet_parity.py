@@ -37,7 +37,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.cli.ui.views.app_settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import harness, launch_seal, prompt_origin
+from aisquare.core import harness, launch_seal, procs, prompt_origin
 from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, prepare_store, screen_of, store_dir
 from aisquare.core.config import (
@@ -745,6 +745,77 @@ def test_a_queue_killed_past_its_wait_keeps_its_marker(
     assert told.delivered is False and "could not queue it (TimeoutExpired" in told.how, told
     assert len(_markers_for("rebase on main first")) == 1
     assert prompt_origin.take_origin("rebase on main first") == "human:tell"
+
+
+def _queued_behind_a_long_turn(
+    codex: Codex, monkeypatch: pytest.MonkeyPatch, *, alive: bool, turn: timedelta
+) -> list[str | None]:
+    """Tell a busy Codex ``rebase on main first`` (queued) from a person's shell, then let its
+    turn run ``turn`` longer on the markers' clock (``prompt_origin._now``) with its pane's
+    process running or not (``alive``), another text's marker written meanwhile (which sweeps
+    what no longer waits), and the queue start its turn: the origins of its turns, newest
+    first."""
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+
+    def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "Queued message m for thread t.\n", "")
+
+    monkeypatch.setattr(fleet_service, "_run_native", run)
+    _from_a_persons_shell(monkeypatch)
+    told = fleet_service.tell(codex.project, codex.agent.label, "rebase on main first")
+    assert told.delivered is True and "queued for its next turn" in told.how, told
+    [marker] = _markers_for("rebase on main first")
+    held = json.loads(marker.read_text(encoding="utf-8"))
+    assert (held["queued"], held["holder"]) == (True, PANE_PID), "it waits on the agent's pane"
+
+    later = datetime.now(UTC) + turn
+    monkeypatch.setattr(prompt_origin, "_now", lambda: later)
+    monkeypatch.setattr(procs, "alive", lambda pid: alive and pid == PANE_PID)
+    prompt_origin.mark_origin("another text", prompt_origin.TELL)  # its sweep runs at `later`
+    codex.become()
+    codex.hook("Stop", THREAD_ONE, turn_id="turn-1", stop_hook_active=False)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="rebase on main first", turn_id="turn-2")
+    with store_session() as store:
+        return [turn.origin for turn in store.turn_metrics(session_id=codex.board_id(THREAD_ONE))]
+
+
+def test_a_tell_queued_behind_a_45_minute_turn_is_the_origin_of_the_turn_it_starts(
+    codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``codex queue`` holds the text until the busy turn ends, however long it runs: its
+    marker outlives ``prompt_origin.MAX_AGE`` (30 minutes, a typed text's) while the agent
+    whose queue holds it runs, so a turn of 45 minutes before it still leaves the queued turn
+    the person's tell. It read ``human:typed`` (review r36 of #113, finding 3)."""
+    codex, _ = codex_agent
+    assert timedelta(minutes=45) > prompt_origin.MAX_AGE
+
+    origins = _queued_behind_a_long_turn(codex, monkeypatch, alive=True, turn=timedelta(minutes=45))
+
+    assert origins == ["human:tell", "human:typed"]
+    assert _markers_for("rebase on main first") == [], "taken by the turn it named"
+
+
+@pytest.mark.parametrize(
+    ("alive", "turn"),
+    [(False, timedelta(minutes=45)), (True, prompt_origin.QUEUED_MAX_AGE + timedelta(minutes=1))],
+    ids=["its agent gone", "past the bound"],
+)
+def test_a_queued_tells_marker_goes_with_its_agent_or_at_its_bound(
+    codex_agent: tuple[Codex, TeamTask],
+    monkeypatch: pytest.MonkeyPatch,
+    alive: bool,
+    turn: timedelta,
+) -> None:
+    """Once the agent whose queue held the text is gone, the queue went with it: past
+    ``MAX_AGE`` its marker is swept and names no turn. Nor does it wait past
+    ``prompt_origin.QUEUED_MAX_AGE`` for an agent still running, whose pid may be another
+    process's by then."""
+    codex, _ = codex_agent
+
+    origins = _queued_behind_a_long_turn(codex, monkeypatch, alive=alive, turn=turn)
+
+    assert origins == ["human:typed", "human:typed"]
 
 
 def test_tell_to_a_codex_agent_that_is_not_working_queues_nothing(

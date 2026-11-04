@@ -23,8 +23,11 @@ as the input box folds it) and a nonce, holding the kind and who sent it. The
 (:func:`take_origin`), so the origin is the one of the text that was submitted, not a guess from
 timing, and two writes of the same text waiting at once (two wakes) keep one each. A marker
 nobody takes (the write was refused, the agent died) is ignored after :data:`MAX_AGE` and
-removed by the next :func:`mark_origin`. With no marker, the fleet's nudge (:data:`WAKE_TEXT`)
-is still a wake.
+removed by the next :func:`mark_origin`. A text a busy agent's own queue holds
+(``AgentAdapter.queue_args``) is submitted only once the turn before it ends, however long that
+runs, so its marker (``queued``) waits past :data:`MAX_AGE` for as long as the agent whose queue
+holds it runs (its ``holder``), up to :data:`QUEUED_MAX_AGE`. With no marker, the fleet's nudge
+(:data:`WAKE_TEXT`) is still a wake.
 
 **Who authored it.** ``wake``, ``upkeep``, ``continuation`` and ``notice`` are ``agent`` by kind
 (:data:`AGENT_KINDS`): no person writes them, whatever process sends them. A ``tell`` and a
@@ -35,7 +38,8 @@ window carries ``AISQUARE_FLEET_AGENT``), ``human`` otherwise (``asq``, a shell,
 server: :func:`sent_by`). So a ``fleet tell`` typed in a terminal is ``human:tell``, and the
 manager's is ``agent:tell``; a spawn is ``human`` when a person ran it and ``agent`` when an
 agent session did, its ``--as`` session included (``services.fleet.spawn``). A tell a busy
-agent's own queue takes (``AgentAdapter.queue_args``) leaves its marker as a typed one does.
+agent's own queue takes (``AgentAdapter.queue_args``) leaves its marker as a typed one does,
+one that waits for the turn the queue starts (``services.fleet._queue_message``).
 
 Nothing here raises: a marker that cannot be written or read costs the record (the turn reads
 ``human:typed``), never the write or the turn.
@@ -55,7 +59,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import paths
+from aisquare.core import paths, procs
 
 HUMAN = "human"
 AGENT = "agent"
@@ -91,6 +95,15 @@ MAX_AGE = timedelta(minutes=30)
 """How long a marker waits for its prompt: a spawn's first message is submitted once Claude Code
 has started (seconds; a trust dialog may hold it longer), a typed one within its minute of
 re-pressed Enters."""
+
+QUEUED_MAX_AGE = timedelta(hours=24)
+"""How long, at most, the marker of a text a busy agent's own queue holds (``AgentAdapter.
+queue_args``; :func:`mark_origin`'s ``queued``) waits for the turn the queue starts with it. The
+queue gives it to the next turn once the current one ends, and a Codex turn may run for hours,
+so past :data:`MAX_AGE` the marker waits for as long as the process whose queue holds it runs
+(its ``holder``, the agent's pane's: ``services.fleet._queue_message``). Once that process is
+gone the queue went with it, and the marker is removed. The bound is for a holder that cannot
+be told gone: none was known, or another process took its pid."""
 
 HARNESS_BLOCK = re.compile(
     r"<(task-notification|local-command-caveat|command-name|command-message|command-args"
@@ -180,30 +193,42 @@ def sent_by(by: str) -> Iterator[None]:
 
 
 def mark_origin(
-    text: str, kind: str, *, by: str | None = None, now: datetime | None = None
+    text: str,
+    kind: str,
+    *,
+    by: str | None = None,
+    now: datetime | None = None,
+    queued: bool = False,
+    holder: int | None = None,
 ) -> Path | None:
     """Say that ``text``, about to reach an agent's prompt, is a ``kind`` sent by ``by`` (the
     process's :func:`origin_sender` when not given; always ``agent`` for one of
     :data:`AGENT_KINDS`). One marker per write, ``<digest>.<nonce>.json``: two writes of the same
     text waiting at once (two wakes, from the watcher and a teammate's ``task done``) keep an
     origin each. The marker's path, for :func:`unmark_origin`; ``None`` when none was written.
-    Stale markers are removed on the way."""
+    Stale markers are removed on the way.
+
+    ``queued``: the text waits in a busy agent's own queue (``AgentAdapter.queue_args``) for the
+    turn it is running to end, and its marker waits as long, past :data:`MAX_AGE`, while
+    process ``holder`` (the agent's, whose queue holds it) runs, up to :data:`QUEUED_MAX_AGE`
+    (``None``: not known, the bound alone)."""
     if not text.strip():
         return None
     by = AGENT if kind in AGENT_KINDS else by or origin_sender()
-    when = now or datetime.now(tz=UTC)
+    when = now or _now()
     folder = origin_markers_dir()
+    marker: dict[str, object] = {"kind": kind, "by": by, "at": when.isoformat()}
+    if queued:
+        marker.update(queued=True, holder=holder)
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        _forget_stale_markers(folder)
+        _forget_stale_markers(folder, when)
         # Nanoseconds first, so the names of one text sort oldest first; the pid and a counter
         # keep two writes in one nanosecond, or two processes, apart.
         nonce = f"{time.time_ns():020d}-{os.getpid()}-{next(_WRITES)}"
         path = folder / f"{origin_digest(text)}.{nonce}.json"
         temp = folder / f".{path.name}.tmp"
-        temp.write_text(
-            json.dumps({"kind": kind, "by": by, "at": when.isoformat()}), encoding="utf-8"
-        )
+        temp.write_text(json.dumps(marker), encoding="utf-8")
         temp.replace(path)
     except OSError:
         return None
@@ -220,8 +245,9 @@ def unmark_origin(marker: Path | None) -> None:
 
 def take_origin(prompt: str | None, *, now: datetime | None = None) -> str | None:
     """The origin the oldest live marker for ``prompt`` left, that marker gone (claimed by a
-    rename, so two prompts never take the same one); ``None`` when there is none. A marker older
-    than :data:`MAX_AGE` is removed and passed over."""
+    rename, so two prompts never take the same one); ``None`` when there is none. A marker that
+    no longer waits (:func:`_waits`: older than :data:`MAX_AGE`, unless a queue still holds its
+    text) is removed and passed over."""
     if not prompt or not prompt.strip():
         return None
     folder = origin_markers_dir()
@@ -234,7 +260,7 @@ def take_origin(prompt: str | None, *, now: datetime | None = None) -> str | Non
         )
     except OSError:
         return None
-    when = now or datetime.now(tz=UTC)
+    when = now or _now()
     for name in names:
         claimed = folder / f".{name}.{os.getpid()}.taken"
         try:
@@ -251,7 +277,7 @@ def take_origin(prompt: str | None, *, now: datetime | None = None) -> str | Non
             by, kind = str(data["by"]), str(data["kind"])
         except (ValueError, KeyError, TypeError):
             continue
-        if when - at > MAX_AGE or by not in AUTHORS or not kind:
+        if not _waits(data, at, when) or by not in AUTHORS or not kind:
             continue
         return compose_origin(AGENT if kind in AGENT_KINDS else by, kind)
     return None
@@ -297,14 +323,53 @@ def origin_of_prompt(
     return HUMAN_TYPED
 
 
-def _forget_stale_markers(folder: Path) -> None:
-    """Remove the markers older than :data:`MAX_AGE` by the wall clock (their files' age)."""
-    cutoff = time.time() - MAX_AGE.total_seconds()
+def _now() -> datetime:
+    """The clock markers are aged by (a test's fake one)."""
+    return datetime.now(tz=UTC)
+
+
+def _waits(data: dict[str, object], at: datetime, when: datetime) -> bool:
+    """Whether the marker ``data``, written at ``at``, still waits for its prompt at ``when``:
+    every marker within :data:`MAX_AGE`; past it, one a busy agent's queue holds the text of
+    (``queued``), while its ``holder`` runs (or is not known) and within
+    :data:`QUEUED_MAX_AGE`."""
+    try:
+        age = when - at
+    except TypeError:  # a time with no zone, which no marker of ours holds
+        return False
+    if age <= MAX_AGE:
+        return True
+    if data.get("queued") is not True or age > QUEUED_MAX_AGE:
+        return False
+    holder = data.get("holder")
+    if isinstance(holder, bool) or not isinstance(holder, int):
+        return holder is None
+    return procs.alive(holder)
+
+
+def _forget_stale_markers(folder: Path, when: datetime) -> None:
+    """Remove what no longer waits at ``when``: a file older than :data:`MAX_AGE` (by its
+    modification time), unless it is a marker that still waits (:func:`_waits`: a queue holds
+    its text)."""
+    cutoff = when.timestamp() - MAX_AGE.total_seconds()
     try:
         entries = list(os.scandir(folder))
     except OSError:
         return
     for entry in entries:
         with contextlib.suppress(OSError):
-            if entry.stat().st_mtime < cutoff:
+            if entry.stat().st_mtime < cutoff and not _still_waits(entry, when):
                 os.unlink(entry.path)
+
+
+def _still_waits(entry: os.DirEntry[str], when: datetime) -> bool:
+    """Whether the stale-looking file ``entry`` is a marker that still waits (:func:`_waits`);
+    a claimed or half-written one, or one that cannot be read, does not."""
+    if entry.name.startswith(".") or not entry.name.endswith(".json"):
+        return False
+    try:
+        data = json.loads(Path(entry.path).read_text(encoding="utf-8"))
+        at = datetime.fromisoformat(str(data["at"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return _waits(data, at, when)

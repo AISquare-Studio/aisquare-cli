@@ -1311,6 +1311,21 @@ def test_a_stale_marker_is_ignored(as_human: None) -> None:
     assert prompt_origin.take_origin("late") is None
 
 
+def test_a_queued_marker_whose_holder_is_not_known_waits_for_its_bound(as_human: None) -> None:
+    """A text a busy agent's queue holds waits for the turn it starts past ``MAX_AGE``: with no
+    process known to hold the queue (tmux did not say), up to ``QUEUED_MAX_AGE`` alone. A
+    typed text's marker is gone at ``MAX_AGE``, as before."""
+    then = datetime.now(UTC) - timedelta(hours=3)
+    prompt_origin.mark_origin("queued", prompt_origin.TELL, now=then, queued=True)
+    prompt_origin.mark_origin("typed", prompt_origin.TELL, now=then)
+    assert prompt_origin.take_origin("typed") is None
+    assert prompt_origin.take_origin("queued") == "human:tell"
+
+    prompt_origin.mark_origin("queued", prompt_origin.TELL, now=then, queued=True)
+    past = then + prompt_origin.QUEUED_MAX_AGE + timedelta(seconds=1)
+    assert prompt_origin.take_origin("queued", now=past) is None
+
+
 SLASH_COMMAND = (
     "<command-name>/model</command-name><command-message>model</command-message>"
     "<command-args>sonnet</command-args>"

@@ -9860,7 +9860,7 @@ def tell(
             and session.state == "working"
             and adapter is not None
         ):
-            queued = _queue_message(adapter, agent, session, text, placement.record)
+            queued = _queue_message(adapter, agent, session, text, placement.record, pane)
             if queued is True:
                 return TellResult("yes", "queued for its next turn (it was working)")
             if isinstance(queued, str):
@@ -9973,6 +9973,7 @@ def _queue_message(
     session: TeamSession,
     text: str,
     record: launch_seal.LaunchRecord | str | None = None,
+    pane: PlacedPane | None = None,
 ) -> bool | str | None:
     """Queue ``text`` for the next turn of ``agent``'s session through the agent's own
     queue.
@@ -9991,7 +9992,11 @@ def _queue_message(
 
     The text leaves its origin marker (``prompt_origin.mark_origin``, a ``tell`` by this
     process's sender) before the queue runs, so the turn it starts is the tell's and not a
-    person's typing (SCOPE #113 092, row 11); a queue that failed takes it back.
+    person's typing (SCOPE #113 092, row 11); a queue that failed takes it back. The queue
+    holds the text until the busy turn ends, however long that runs, so the marker is a queued
+    one: it waits past ``prompt_origin.MAX_AGE`` for as long as the process of the agent's
+    ``pane`` (where ``aisquare launch`` exec'd it) runs, which holds the queue, up to
+    ``prompt_origin.QUEUED_MAX_AGE`` (review r36 of #113, finding 3).
     """
     if adapter.queue_args(session.id, text) is None:
         return None  # no queue: asked before anything it would run with is read
@@ -10019,8 +10024,11 @@ def _queue_message(
     if executable is None:
         return f"{record.binary!r} is not on your PATH to queue it"
     # The turn the queued text starts is a tell, as a typed one is (`deliver_typed`'s
-    # marker): left before the queue runs, so its `UserPromptSubmit` finds it however soon.
-    marker = prompt_origin.mark_origin(text, prompt_origin.TELL)
+    # marker): left before the queue runs, so its `UserPromptSubmit` finds it however soon,
+    # and however late: it waits while the agent whose queue holds the text runs.
+    marker = prompt_origin.mark_origin(
+        text, prompt_origin.TELL, queued=True, holder=_queue_holder(pane)
+    )
     try:
         done = _run_native([executable, *argv], env={**untraced_env(), adapter.home_env: home})
     except subprocess.TimeoutExpired as exc:
@@ -10035,6 +10043,18 @@ def _queue_message(
         said = (done.stderr or done.stdout or "").strip().splitlines()
         return f"{adapter.label} could not queue it ({said[-1] if said else done.returncode})"
     return True
+
+
+def _queue_holder(pane: PlacedPane | None) -> int | None:
+    """The pid of the process in ``pane``, the agent whose own queue holds a told text
+    (``aisquare launch`` execs it there): what its origin marker waits on
+    (``prompt_origin.mark_origin``'s ``holder``). ``None`` when tmux does not say."""
+    if pane is None:
+        return None
+    try:
+        return pane.pid()
+    except (TmuxError, OSError):
+        return None
 
 
 def _run_native(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:

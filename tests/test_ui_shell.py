@@ -3866,10 +3866,12 @@ def test_stop_on_an_exited_row_removes_its_dead_window_through_the_same_dialog(
         question = screen.question().plain
         force_offered = screen.query_one("#stop-force", Button).display
         await pilot.click("#stop-cancel")
-        await pilot.pause()
+        await settle_until(app, lambda: not isinstance(app.screen, StopAgentScreen), timeout=10)
         app.sidebar.focus()
         await pilot.press("x")  # the row is still selected: a cancel leaves its view open
-        await pilot.pause()
+        # x's dialog is clicked next, so it is read once its buttons are laid out, as
+        # open_stop_dialog reads its own (stop_buttons_laid_out).
+        await settle_until(app, lambda: stop_buttons_laid_out(app), timeout=10)
         x_opens = isinstance(app.screen, StopAgentScreen)
         await pilot.click("#stop-confirm")
         await settle(app)

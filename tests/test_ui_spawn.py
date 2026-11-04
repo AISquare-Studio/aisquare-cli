@@ -103,7 +103,7 @@ from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import state as captain_state
 from tests.fleet_fakes import list_agents_as
-from tests.ui_workers import released, settle_page, settle_until, settle_workers
+from tests.ui_workers import released, settle_page, settle_until, settle_until_held, settle_workers
 
 T = TypeVar("T")
 SIZE = (120, 50)
@@ -3143,6 +3143,11 @@ def test_the_project_field_is_the_first_field_and_offers_every_project_in_the_or
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         labels = [str(label.render()) for label in dialog.query(".spawn-row > Label")]
         field = select(dialog, "project")
+        # The Select sets the value it was given in its own mount handler, and reads
+        # Select.NULL until then: read once it holds one (which one is asserted below).
+        await settle_until_held(
+            host, lambda: not field.is_blank(), what="the Project field set", timeout=10
+        )
         return [labels[:2], field.value, option_prompts(dialog, "project"), field.disabled]
 
     seen = drive(git_project, scenario, projects=[other_project, git_project])

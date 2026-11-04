@@ -408,7 +408,9 @@ def test_spawn_agent_opens_on_the_selected_card_the_selected_agents_project_else
     async def open_spawn(pilot: Pilot[None]) -> tuple[str, str, list[str]]:
         app = fleet_app(pilot)
         await pilot.click(app.query_one(SpawnButton))
-        await pilot.pause()
+        await settle_until_held(
+            app, project_field_set(app), what="the Spawn dialog's Project field set", timeout=10
+        )
         seen = dialog_project(app)
         await pilot.press("escape")
         await settle(app)

@@ -600,7 +600,7 @@ def test_ls_json_names_where_each_agents_server_is_asked(
     it): the path its tmux server is asked at (`tmux -S`), or null where it is asked by
     its socket's name (`tmux -L`). The keys each agent has are pinned with it, so one
     added or dropped is a change the CHANGELOG has to name: `held` since (review of #259,
-    round 1), and `remote_control` (#289)."""
+    round 1), `remote_control` (#289), and `exit_command`, what a stop types into it (#60)."""
     at = Path("/tmp/tmux-1000/asq")
     agents = [
         _status(_agent("coder-auth"), "working").model_copy(update={"socket_at": at}),
@@ -624,6 +624,7 @@ def test_ls_json_names_where_each_agents_server_is_asked(
             "socket_at",
             "held",
             "remote_control",
+            "exit_command",
         }
         for agent in listed
     ), listed

@@ -163,13 +163,16 @@ def agents_json(project: ProjectInfo, agents: list[FleetAgentStatus]) -> dict[st
     """The ``fleet ls --json`` payload — shared with the Remote Control server verbatim.
 
     Each agent says whether it was spawned with Claude Code's own Remote Control asked for
-    (``remote_control``, #289), from its row's spec: ``False`` for a row with none."""
+    (``remote_control``, #289), from its row's spec: ``False`` for a row with none; and what
+    a stop types into it (``exit_command``, ``fleet_service.exit_command_for``), which
+    Remote's Stop sheet says rather than spelling one (#60)."""
     payload = _project_json(project)
     rows: list[dict[str, object]] = []
     for status in agents:
         spec = status.agent.launch_spec
         row = status.model_dump(mode="json")
         row["remote_control"] = spec is not None and spec.remote_control
+        row["exit_command"] = fleet_service.exit_command_for(status.agent)
         rows.append(row)
     payload["agents"] = rows
     return payload

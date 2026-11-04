@@ -2102,9 +2102,20 @@ const AGENT_ACTIONS = {
   switch: { title: "Switch account", busy: "Switching", done: "Switched" },
 };
 
+/* What a stop types into ctx's agent, as the machine says it (`exit_command` on the card or
+ * on the agent's fleet row: what `fleet stop` types, each agent's own), never spelled here
+ * (#60). Where the page has neither (a card of no agent, the fleet not read yet), "its exit
+ * command". */
+function exitCommandOf(ctx) {
+  const said = (one) => (one && isText(one.exit_command) ? plainText(one.exit_command) : "");
+  const fleet = S.fleet && projectIdOf(S.fleet) === ctx.pid ? S.fleet.read || S.fleet : null;
+  const row = fleet ? findAgent(fleet, ctx.label) : null;
+  return said(ctx.item) || said(row) || "its exit command";
+}
+
 function effectSentence(kind, label, o) {
   let text;
-  if (kind === "stop") text = o.force ? "Stop " + label + " now: its window is killed without /exit." : "Stop " + label + ": Esc if it is busy, then /exit; its window is killed 5 s later.";
+  if (kind === "stop") text = o.force ? "Stop " + label + " now: its window is killed without " + o.exit + "." : "Stop " + label + ": Esc if it is busy, then " + o.exit + "; its window is killed 5 s later.";
   else if (kind === "restart") text = "Restart " + label + ": it stops, then starts again on " + (o.fresh ? "a fresh conversation." : "its own conversation.") + " This can take 40 s.";
   else text = "Switch " + label + (o.to ? " to " + o.to : " to the account with the most headroom") + ": it hands over and carries on there. This can take 40 s.";
   return o.dismiss ? text + " Its prompt is dismissed (No) first." : text;
@@ -2133,7 +2144,8 @@ function actionSheet(kind, ctx) {
   openSheet(meta.title + " " + label, (sheet) => {
     const lead = el("p", "lead");
     sheet.body.appendChild(lead);
-    const force = kind === "stop" ? checkbox("Force: kill the window now, without /exit", false) : null;
+    const exit = exitCommandOf(ctx);
+    const force = kind === "stop" ? checkbox("Force: kill the window now, without " + exit, false) : null;
     const fresh = kind === "restart" ? checkbox("Fresh: start a new conversation", false) : null;
     let to = null;
     if (kind === "switch") {
@@ -2151,7 +2163,7 @@ function actionSheet(kind, ctx) {
     const say = () => {
       lead.textContent = effectSentence(kind, label, {
         force: force && force.box.checked, fresh: fresh && fresh.box.checked,
-        to: to && to.value.trim() ? plainText(to.value.trim()) : "", dismiss,
+        to: to && to.value.trim() ? plainText(to.value.trim()) : "", dismiss, exit,
       });
     };
     for (const option of [force, fresh]) if (option) option.box.addEventListener("change", say);

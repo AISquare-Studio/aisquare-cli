@@ -7343,7 +7343,7 @@ def test_the_feed_is_one_scan_away_when_no_watcher_runs(live: Live) -> None:
     card = body["items"][0]
     assert set(card) == {
         "id", "kind", "project", "agent", "agent_id", "reason", "excerpt", "detail",
-        "answers", "since", "actions",
+        "answers", "since", "actions", "exit_command",
     }  # fmt: skip
     assert card["project"] == {"id": "prj_alpha", "name": "alpha"}
     assert card["detail"] == {"tool": "Bash", "input": {"command": "git push"}}

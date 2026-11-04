@@ -1750,6 +1750,31 @@ def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
     assert stop["toast"] == "Stopped coder-1"
 
 
+def test_stop_says_the_exit_command_the_machine_says_and_spells_none_of_its_own(
+    boot_report: dict[str, Any],
+) -> None:
+    """#60: the sheet spelled ``/exit`` for every agent. It says the ``exit_command`` the
+    machine sends on the agent's fleet row (an agent's own, ``/quit``), Force included, or on
+    its card where the page has not read that project's fleet; a row that carries none, "its
+    exit command"."""
+    said = boot_report["stopSaysTheMachinesExit"]
+    assert said["own"] == {
+        "lead": "Stop coder-1: Esc if it is busy, then /quit; its window is killed 5 s later.",
+        "force": "Force: kill the window now, without /quit",
+        "forced": "Stop coder-1 now: its window is killed without /quit.",
+    }
+    assert said["none"] == {
+        "lead": "Stop coder-1: Esc if it is busy, then its exit command; its window is killed "
+        "5 s later.",
+        "force": "Force: kill the window now, without its exit command",
+        "forced": "Stop coder-1 now: its window is killed without its exit command.",
+    }
+    assert said["card"]["lead"] == (
+        "Stop coder-9: Esc if it is busy, then /quit; its window is killed 5 s later."
+    )
+    assert said["card"]["forced"] == "Stop coder-9 now: its window is killed without /quit."
+
+
 def test_a_write_refused_read_only_shuts_every_write_button_at_once(
     boot_report: dict[str, Any],
 ) -> None:

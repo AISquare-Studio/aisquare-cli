@@ -330,6 +330,10 @@ class NeedsItem:
     (``remote_server._remote_card_board``): from a session no row holds, a Reply naming only
     its author went to the board the project's manager reads (review of #259, round 32, 1/9).
     Sent to the page and back, it was the client's to name (round 33, 9/10)."""
+    exit_command: str | None = None
+    """What a stop types into the card's agent (``fleet.exit_command_for``), which the page's
+    Stop sheet says rather than spelling one: a card's agent may be of a project whose fleet
+    the page has not read (#60). ``None`` for a card of no agent."""
 
     def needs_item_json(self) -> dict[str, object]:
         """The wire shape (SPEC §1.4): the project as ``{id, name}``, ``push_after`` left out,
@@ -348,6 +352,7 @@ class NeedsItem:
             "answers": [{"label": a.label, "keys": list(a.keys)} for a in self.answers],
             "since": _iso_seconds(self.since),
             "actions": list(self.actions),
+            "exit_command": self.exit_command,
         }
 
 
@@ -862,6 +867,8 @@ def _needs_item(
     answers: tuple[QuickAnswer, ...] = (),
     sighted: bool = False,
 ) -> NeedsItem:
+    from aisquare.services import fleet as fleet_service
+
     return NeedsItem(
         id=needs_item_id(project.id, kind, subject),
         kind=kind,
@@ -877,6 +884,7 @@ def _needs_item(
         actions=_NEEDS_ACTIONS[kind],
         push_after=push_after,
         sighted=sighted,
+        exit_command=None if agent is None else fleet_service.exit_command_for(agent),
     )
 
 

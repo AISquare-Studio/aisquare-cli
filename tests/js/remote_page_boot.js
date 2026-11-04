@@ -469,7 +469,7 @@ function textsOf(nodes) {
 const FLEET = {
   project: { id: PROJECT, root: "/tmp/x" },
   name: "x",
-  agents: [{ agent: { id: "agt_1", label: "coder-1", role: "coder" }, state: "waiting", detail: null }],
+  agents: [{ agent: { id: "agt_1", label: "coder-1", role: "coder" }, state: "waiting", detail: null, exit_command: "/exit" }],
 };
 const ITEM = {
   id: NEEDS_ID,
@@ -1092,6 +1092,50 @@ async function stopAtAPrompt() {
   click(buttonNamed(page.run("UI.sheet"), "Press Esc (No) first"));
   await settle();
   return { said, lead, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
+}
+
+/* #60: what Stop says it types is the machine's word for the agent (`exit_command` on its
+ * fleet row or its card), never the page's: an agent whose command is its own, with Force
+ * ticked too; a row that carries none, the neutral line; and a lost card of a project whose
+ * fleet the page has not read. */
+async function stopSaysTheMachinesExit() {
+  const sheetOf = async (page, open) => {
+    open();
+    await settle();
+    const sheet = page.run("UI.sheet");
+    const lead = () => find(sheet, (node) => node.className === "lead").textContent;
+    const box = find(sheet, (node) => node.tagName === "INPUT" && node.type === "checkbox");
+    const said = { lead: lead(), force: box.parentNode.textContent };
+    box.checked = true;
+    box.dispatch("change");
+    said.forced = lead();
+    return said;
+  };
+  const fleetWith = (row) => Object.assign({}, FLEET, { agents: [Object.assign({}, FLEET.agents[0], row)] });
+  const viewWith = async (row) => {
+    const page = await agentView({});
+    page.live().frame("fleet", fleetWith(row));
+    await settle();
+    return sheetOf(page, () => {
+      click(buttonNamed(page.main(), "Actions…"));
+      click(buttonNamed(page.run("UI.sheet"), "Stop…"));
+    });
+  };
+  const lost = Object.assign({}, ITEM, {
+    id: "ny_0123456789abcd99", kind: "lost", project: { id: "prj_elsewhere", name: "elsewhere" },
+    agent: "coder-9", agent_id: "agt_9", reason: "coder-9's window is gone", detail: {},
+    answers: [], actions: ["restart", "stop", "dismiss"], exit_command: "/quit",
+  });
+  const feed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [lost] } }) }));
+  await settle();
+  feed.acceptSockets();
+  feed.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  return {
+    own: await viewWith({ exit_command: "/quit" }),
+    none: await viewWith({ exit_command: undefined }),
+    card: await sheetOf(feed, () => click(buttonNamed(feed.main(), "Stop…"))),
+  };
 }
 
 /* A pad key refused read_only: writes went off on the machine, and no remote frame has
@@ -3899,6 +3943,7 @@ async function main() {
     tellNotSent: await tellNotSent(),
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
+    stopSaysTheMachinesExit: await stopSaysTheMachinesExit(),
     notTyped: await notTyped(),
     ledgerUndone: await ledgerUndone(),
     refusedReadOnly: await refusedReadOnly(),

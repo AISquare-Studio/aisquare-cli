@@ -16912,11 +16912,14 @@ def _bulk_one(
                 team=team,
             )
     except EndedMeanwhile:
-        # This turn's `/exit` took the agent down, and another writer (a `fleet stop`, a
-        # shutdown) ended its row first: never "left alone", and a restart started no
-        # replacement (review of #266, round 3).
+        # This turn's exit command took the agent down, and another writer (a `fleet stop`,
+        # a shutdown) ended its row first: never "left alone", and a restart started no
+        # replacement (review of #266, round 3). The command is the row's agent's, as the
+        # stop typed it (#60).
         after = "; no replacement was started" if action == "restart" else ""
-        why = f"its /exit was sent, and another command ended it meanwhile{after}"
+        why = (
+            f"its {exit_command_for(agent)} was sent, and another command ended it meanwhile{after}"
+        )
         return BulkReceipt(project, agent, "failed", why, dead=dead)
     except NoSuchAgent as exc:
         # Pinned to the row: a stop's ended between the read and its turn, and its label is

@@ -2439,3 +2439,62 @@ def test_a_launch_s_broker_fixes_its_boards_members_as_it_starts(
         assert f"on {member.id}" in capsys.readouterr().out
     finally:
         running.close()
+
+
+#: Each line end ``str.splitlines`` splits a text at, CR LF among them.
+LINE_ENDS = ("\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+#: Agent text with, after each line end, a line that would pass for an admission of the
+#: broker's own: short enough that all of it is in a delegation's line (its title's first 200).
+FORGED = "evil" + "".join(f"{end}admitted: {n}" for n, end in enumerate(LINE_ENDS))
+_LOGGED = re.compile(r"\S+ launch=(\S+) agent=\S+ (\w+): (.*)")
+
+
+def test_each_event_the_broker_logs_is_one_line_whatever_line_ends_its_agent_wrote(
+    work: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The brokers' log holds text an agent chose in its sandbox: a delegation's line its
+    task's title (the key and the origin it gave hold the same line ends), a refusal's the
+    ``--project``, command or option it named. Whatever line ends that text holds, each
+    event is one line with all of it on that line. Unflattened (mutant T19 of #71's tester,
+    seq 10552), a title of ``evil\\nadmitted: …`` writes a second line that reads as an
+    admission of the broker's own."""
+    ends = {chr(n) for n in range(sys.maxunicode + 1) if len(f"a{chr(n)}b".splitlines()) == 2}
+    assert ends == {end for end in LINE_ENDS if len(end) == 1}, "every line end, and no other"
+    [member] = parented(work, "api")
+    origin, _ = team_service.add_task(FORGED, key=FORGED, session_ref=MINE)
+    log = paths.log_dir() / store_broker.LOG_NAME
+    delegate = ["task", "add", FORGED, "--project", "api", "--key", FORGED, "--origin", origin.id]
+    running = _a_launch_s_broker(work, monkeypatch, {})
+    try:
+        next(running)
+        logged_before = log.read_bytes() if log.exists() else b""
+        codes = [
+            store_broker.forward(argv)
+            for argv in (
+                delegate,
+                delegate,  # its idempotent re-add, by its key
+                ["board", "--project", FORGED],
+                ["task", "add", "x", "--project", FORGED],
+                [FORGED],
+                [f"-{FORGED}", "board"],
+                ["fleet", FORGED],
+            )
+        ]
+        capsys.readouterr()
+    finally:
+        running.close()
+
+    assert codes == [0, 0, 1, 1, 2, 2, 2], codes
+    lines = log.read_bytes().removeprefix(logged_before).decode("utf-8").splitlines()
+    events = [_LOGGED.fullmatch(line) for line in lines]
+    assert all(events), lines
+    assert [(e[1], e[2]) for e in events if e] == [
+        (LAUNCH, kind)
+        for kind in ("admitted", "admitted", "board", "board", "command", "command", "fleet")
+    ], lines
+    flat = " ".join(FORGED.split())
+    assert all(flat in line for line in lines), lines
+    saids = ("added at seq", "already open, not added again")
+    for line, said in zip(lines[:2], saids, strict=True):
+        assert f"on api ({member.id})" in line and said in line, line
+        assert f"from #{origin.number} {origin.id} as session {MINE}" in line, line

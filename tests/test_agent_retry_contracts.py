@@ -45,6 +45,7 @@ from aisquare.services import (
     fleet,
     native_telemetry,
 )
+from tests.test_agent_native_boundaries import published
 from tests.test_fleet_service import FakeTmux
 from tests.test_store import _dogfooded_113
 
@@ -106,10 +107,7 @@ def receiver(tmp_path: Path, shipping: None) -> Iterator[Callable[[dict[str, Any
     )
     thread.start()
     try:
-        deadline = time.monotonic() + 5
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        state = json.loads(ready.read_text())
+        state = published(ready, thread)  # once it opens, as Windows lets it (task #79)
 
         def post(payload: dict[str, Any]) -> int:
             request = urllib.request.Request(
@@ -190,11 +188,7 @@ def test_the_receiver_is_ready_without_asking_the_resolver_its_own_name(
     )
     thread.start()
     try:
-        deadline = time.monotonic() + 10
-        while not ready.exists() and thread.is_alive() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert ready.exists(), "the receiver never published its port"
-        assert json.loads(ready.read_text())["port"] > 0
+        assert published(ready, thread, 10)["port"] > 0, "the receiver published its port"
     finally:
         stop.set()
         thread.join(timeout=5)

@@ -993,10 +993,9 @@ def test_receiver_distinguishes_permanent_and_temporary_spool_failures(
     )
     thread.start()
     try:
-        deadline = time.monotonic() + 5
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        state = json.loads(ready.read_text())
+        # Read once it opens: on Windows `exists()` holds while the rename's handle is still
+        # open, and the read was refused (windows shard 9/10, CI 42123077743; R7's list).
+        state = published(ready, thread)
 
         def post(payload: dict[str, object]) -> int:
             request = urllib.request.Request(

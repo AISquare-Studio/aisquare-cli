@@ -6058,8 +6058,17 @@ def spawn(
         # ahead of the role's tool policy and the window's own flags.
         bound_native = selected.adapter.native_args([*bound, *defaults.args])
         if bound_native and rest[: len(bound_native)] == bound_native:
-            leading, rest = bound_native, rest[len(bound_native) :]
-            flags += [agent_launch.BOUND_IN_LINE_FLAG, str(len(leading))]
+            # Only what comes before a literal `--` the binding carries: after it, the window's
+            # own flags would be prompt text (`agent_launch.ordered_argv`'s rule), so the `--`
+            # and what follows it stay last, as they were.
+            cut = (
+                bound_native.index(agent_launch.END_OF_OPTIONS)
+                if agent_launch.END_OF_OPTIONS in bound_native
+                else len(bound_native)
+            )
+            leading, rest = bound_native[:cut], rest[cut:]
+            if leading:
+                flags += [agent_launch.BOUND_IN_LINE_FLAG, str(len(leading))]
     command = selfcli.argv_for_agent(
         ["launch", role, *flags, "--", *leading, *native, *model_args, *models.flags, *rest],
         sandboxes_tools=selected.adapter.capabilities.sandboxes_tools,

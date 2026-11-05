@@ -95,14 +95,38 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   most 64 KiB. Over SSH, a launch takes the Mac's last usage readings as floors. Doctor
   has *fleet server env* and *accounts sharing* rows, and `aisquare upgrade` says *hooks
   already current* for a hooks file it left alone.
-- What you may see in output: `aisquare accounts` names `[--agent codex]` in its last
-  line. `--json` output gains keys and loses none: `agent`, `detail` and `installs` in
-  `accounts`; `agent` and `exit_command` in `fleet ls`; a session's `agent` and
-  `native_session_id` in `fleet ls` and `board`; `price_lists` in `metrics tokens`. `config list` shows new defaults: `[agents] mcp`
-  (off; on, each launch is handed aisquare's MCP server), `[agents.models]`, a role's
-  `agent_args`, and `[accounts] cross_agent_handover` (on). Doctor's Codex row, which said
-  support was planned for 0.10, now reports Codex's integration as `codex (beta)`.
-<!-- R1-R3: one line for each item they classify CLAUDE-VISIBLE and the owner keeps. -->
+- **Placement goes by the launch record:** `fleet attach` and a rename go by the tmux
+  session's id; a session you made by hand under the project's codename is no longer
+  renamed or shut down; `project fresh` stops only what the records name.
+- **Every `aisquare launch`** (by hand, `team spawn`, a fleet window) gives the agent
+  `AISQUARE_LAUNCH_ID`, `AISQUARE_LAUNCH_AGENT` and `AISQUARE_LAUNCH_PID`; `accounts run`
+  does not. The line `team spawn` prints is `<python> -P -m aisquare launch <role> --agent
+  claude-code --command claude --no-bound-args --custom-role -- …`, where it was
+  `AISQUARE_ROLE=… claude …`; pasted, it prints launch's banner.
+- **What else you may notice:**
+  - Words: Codex is marked `(beta)` where agents are listed or chosen (`agents list`, the
+    `--agent` helps, `aisquare accounts`' last line, `[--agent codex (beta)]`). Doctor's
+    Codex row, which said support was planned for 0.10, reports Codex's own integration
+    (doctor reads every agent's hook sites). `accounts trust` says *on every account that
+    can hold it*; usage pages say *the agents' transcripts*; a hand-off line made by hand
+    says *by its operator's `fleet switch`*; help texts say *the agent* or *Claude Code
+    and Codex*. The sidebar's and info line's `#slot·%` is the window that limits: the
+    week's when it is fuller.
+  - `--json` gains keys and loses none: `agent`, `detail` and `installs` in `accounts`;
+    `agent` and `exit_command` in `fleet ls`; a session's `agent` and `native_session_id`
+    in `fleet ls` and `board`; `agent` in `upgrade`'s and `uninstall`'s rows (and `plugin`
+    in uninstall's plugin rows); `killed` in `fleet stop`; `price_lists` in `metrics
+    tokens`.
+  - Files: `launch-seals/` is new; `agents.json` gains `hook_files_made`; a saved
+    `config.toml` gains an empty `[fleet.roles.<role>.agent_args]` table per role. 0.9.2
+    reads both. `config list` shows new defaults: `[agents] mcp` (off; on, each launch is
+    handed aisquare's MCP server), `[agents.models]`, a role's `agent_args` and
+    `[accounts] cross_agent_handover` (on).
+<!-- #94 (R8): R1's F2 (AISQUARE_TEAM_HUB on a hand launch), F3 (argv order, the fleet
+     window's command), F5 (a persona on a wrapper binary), C2-C5 (persona export's hint,
+     the captain's trust words), the Windows printed-command tests and the model probe's
+     cache: their lines from #94's DONE note. -->
+<!-- R2: one line for each item SMOKE14 classifies CLAUDE-VISIBLE and the owner keeps. -->
 
 ### Fixed
 
@@ -111,7 +135,8 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   date is read too.
 - A fresh Claude Code agent's first line (`fleet spawn --prompt`, `restart`, `switch`, the
   hand-over) is typed only once its session has started. In a folder the account had not
-  trusted, the Enter used to answer *No, exit*.
+  trusted, the Enter used to answer *No, exit*. The line is filed as a board note after 20 s
+  at a dialog, otherwise after up to 120 s.
 - A restart keeps an agent that ran on no account on its own home, instead of moving it
   onto a binding or default set since.
 - A locked login Keychain asks once at startup, not twice. Ids made in the same

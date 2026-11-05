@@ -96,7 +96,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   already current* for a hooks file it left alone.
 - **Placement goes by the launch record:** `fleet attach` and a rename go by the tmux
   session's id; a session you made by hand under the project's codename is no longer
-  renamed or shut down; `project fresh` stops only what the records name.
+  renamed or shut down; `project fresh` stops only what the records name. A row the store
+  ended whose window still runs keeps its label and its tree against a new spawn, and
+  `fleet attach` refuses an ended 0.9.2 manager whose window lingers, naming how to attach
+  by hand.
+- **New and changed commands:** `aisquare agents use <agent> [--project]` chooses the
+  coding agent future launches run (a role's binding still wins). The captain
+  (experimental) hands Claude Code its MCP server inline (`--mcp-config <json>`), so
+  `~/.aisquare/captain/mcp.json` is no longer written and 0.9.2's copy is left where it is.
+  `persona import --engine manager` gives Claude Code the strict form of its answer's
+  schema (every field required, no other).
 - **Every `aisquare launch`** (by hand, `team spawn`, a fleet window) gives the agent
   `AISQUARE_LAUNCH_ID`, `AISQUARE_LAUNCH_AGENT` and `AISQUARE_LAUNCH_PID`; `accounts run`
   does not. The line `team spawn` prints is `<python> -P -m aisquare launch <role> --agent
@@ -109,13 +118,18 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     (doctor reads every agent's hook sites). `accounts trust` says *on every account that
     can hold it*; usage pages say *the agents' transcripts*; a hand-off line made by hand
     says *by its operator's `fleet switch`*; help texts say *the agent* or *Claude Code
-    and Codex*. The sidebar's and info line's `#slot·%` is the window that limits: the
+    and Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose agent*,
+    where it said *general-purpose Claude*. Remote's sheets and refusals for Ctrl-C, Ctrl-D
+    and a second Esc speak of *the coding agent* and *the agent's rewind*. `persona import
+    --engine manager` names its run `<binary> (Claude Code headless, …)`, where it said
+    `<binary> -p`, and says *Claude Code gave no JSON answer*, where it said *the answer
+    was not JSON*. The sidebar's and info line's `#slot·%` is the window that limits: the
     week's when it is fuller.
   - `--json` gains keys and loses none: `agent`, `detail` and `installs` in `accounts`;
     `agent` and `exit_command` in `fleet ls`; a session's `agent` and `native_session_id`
     in `fleet ls` and `board`; `agent` in `upgrade`'s and `uninstall`'s rows (and `plugin`
-    in uninstall's plugin rows); `killed` in `fleet stop`; `price_lists` in `metrics
-    tokens`.
+    in uninstall's plugin rows) and in `persona export`; `killed` in `fleet stop`;
+    `price_lists` in `metrics tokens`; and `exit_command` in Remote's needs cards.
   - Files: `launch-seals/` is new; `agents.json` gains `hook_files_made`; a saved
     `config.toml` gains an empty `[fleet.roles.<role>.agent_args]` table per role. 0.9.2
     reads both. `config list` shows new defaults: `[agents] mcp` (off; on, each launch is
@@ -124,7 +138,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 <!-- #94 (R8): R1's F2 (AISQUARE_TEAM_HUB on a hand launch), F3 (argv order, the fleet
      window's command), F5 (a persona on a wrapper binary), C2-C5 (persona export's hint,
      the captain's trust words), the Windows printed-command tests and the model probe's
-     cache: their lines from #94's DONE note. -->
+     cache, and #87's N1 (`-E` on Claude Code's fleet-window launcher and the hook
+     hand-over): their lines from #94's DONE note. -->
+<!-- #92 (R6): #87's N5 (a `fleet tell` to a Claude Code agent whose SessionStart this
+     launch has not seen files a board note and types nothing), from #92's DONE note. -->
 <!-- R2: one line for each item SMOKE14 classifies CLAUDE-VISIBLE and the owner keeps. -->
 
 ### Fixed
@@ -132,10 +149,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - Claude Code 2.1.312's *You've hit your 5-hour limit* notice is read again, so the limit
   marks its account and the hand-over moves the agent. A weekly notice whose reset is a
   date is read too.
-- A fresh Claude Code agent's first line (`fleet spawn --prompt`, `restart`, `switch`, the
-  hand-over) is typed only once its session has started. In a folder the account had not
-  trusted, the Enter used to answer *No, exit*. The line is filed as a board note after 20 s
-  at a dialog, otherwise after up to 120 s.
+- Under `[fleet] first_prompt = "type"`, a fresh Claude Code agent's first line (`fleet
+  spawn --prompt`, `restart`, `switch`, the hand-over) is typed only once its session has
+  started; in a folder the account had not trusted, the Enter used to answer *No, exit*.
+  The line is filed as a board note after 20 s at a dialog, otherwise after up to 120 s.
+  The default, `argv`, hands Claude Code the line on its command line and waits for
+  nothing, as 0.9.2 did.
 - A restart keeps an agent that ran on no account on its own home, instead of moving it
   onto a binding or default set since.
 - A locked login Keychain asks once at startup, not twice. Ids made in the same

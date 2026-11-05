@@ -17953,6 +17953,8 @@ def _rename_project_sessions(
                 launch_seal.rename_project_session(
                     project.id, session.target, session.address.name, name
                 )
+                # The census names a session by its name alone: the old one found nothing.
+                launch_seal.rename_census_session(session.address.name, session.name, name)
         except TmuxError as exc:
             if notes is not None:
                 by = (

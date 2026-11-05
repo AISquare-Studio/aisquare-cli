@@ -16566,6 +16566,31 @@ def test_a_dead_092_agent_stays_listed_and_its_restart_replaces_its_window(
     assert restarted.replaced.id == agent.id and agent.pane_id in tmux.killed
 
 
+def test_a_dead_092_agent_stays_listed_after_a_project_rename_and_its_restart_replaces_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R5's verify, G1: a census record names its tmux session by name alone, and a project
+    rename renamed the session but not the census, so a 0.9.2 agent that died after it was
+    listed once, then not at all, and a restart left its dead window. The rename renames the
+    census's name for the session it renamed (``launch_seal.rename_census_session``)."""
+    agent = _coder(project)
+    _before_records()
+    fleet_service.list_agents(project)  # the census, under the old session's name
+    project = fleet_service.rename(project, "quiet-lynx")
+    tmux.die(agent.pane_id, 0)
+
+    reads = [
+        [s.state for s in fleet_service.list_agents(project) if s.agent.id == agent.id]
+        for _ in range(3)
+    ]
+    restarted = fleet_service.restart(project, agent.label)
+
+    assert reads == [["exited"]] * 3, reads
+    assert restarted.replaced.id == agent.id and agent.pane_id in tmux.killed
+    [legacy] = launch_seal.legacy_records(project.id)
+    assert legacy.window is not None and legacy.window.session == "asq-quiet-lynx"
+
+
 @pytest.mark.parametrize("verb", ["restart", "switch"])
 def test_a_092_agents_first_restart_or_switch_resumes_its_transcript(
     verb: str,

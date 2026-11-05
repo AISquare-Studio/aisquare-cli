@@ -123,7 +123,7 @@ import logging
 import re
 import tempfile
 from collections.abc import Callable, Collection, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -562,6 +562,35 @@ def census_records() -> list[LaunchRecord]:
     if not census_taken():
         return []
     return list(_census().records.values())
+
+
+def rename_census_session(tmux_socket: str, old: str, new: str) -> None:
+    """The tmux session called ``old`` on the server ``tmux_socket`` names is called ``new``
+    now: every census record that names it by ``old`` names it ``new``. A census record keeps
+    its session's name alone (no tmux id), and the listing looks an ended row's window up in
+    the session by that name (``services.fleet._census_sessions``): after a project rename
+    the old name found nothing, and the 💤 row of a 0.9.2 agent that died was gone after one
+    read (R5 of 0.10.0, its verify's G1). The rest of each record is kept as it was. Under
+    the census's lock; never raises (a write that fails keeps the old name)."""
+    if old == new or not census_taken():
+        return
+    path = _census_path()
+    with suppress(OSError), _locked(path):
+        census = _census_or_why()
+        if isinstance(census, str):
+            return
+        renamed = {
+            key: record.model_copy(
+                update={"window": record.window.model_copy(update={"session": new})}
+            )
+            for key, record in census.records.items()
+            if record.window is not None
+            and record.window.tmux_socket == tmux_socket
+            and record.window.session == old
+        }
+        if renamed:
+            body = census.model_copy(update={"records": {**census.records, **renamed}})
+            write_replacing(path, body.model_dump_json(indent=1) + "\n", keep_mode=False)
 
 
 def legacy_records(project_id: str) -> list[LaunchRecord]:

@@ -5669,6 +5669,8 @@ def test_tell_waits_for_a_resumed_claude_agents_own_start(
 
     assert not told.delivered and "has not started" in told.how
     assert tmux.typed == [], "no Enter for the dialog to take as No, exit"
+    # The human trusted the folder: the dialog is gone, and its SessionStart fires.
+    del tmux.screens[agent.pane_id]
     team_service.hook_session_start(agent.session_id, project.root, "resume")
     _started(agent)  # the same hook's word in its launch record (`launch_seal.observe`)
     assert fleet_service.tell(project, agent.label, "please rebase").delivered

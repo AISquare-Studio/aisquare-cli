@@ -45,7 +45,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any, Literal, NoReturn
 
 from aisquare.core import agents as agent_core
@@ -9332,6 +9332,26 @@ def _at_a_start_dialog(pane: PlacedPane, adapter: AgentAdapter | None) -> bool:
     return last.startswith(mark)
 
 
+def _dialog_on_its_screen(pane: PlacedPane, adapter: AgentAdapter | None) -> str | None:
+    """What a dialog of the agent's own on the screen of ``pane`` is, in the owner's words,
+    where the agent's own reader names one (``AgentScreen.modal``): Claude Code's ``/resume``,
+    ``/model`` or ``/config`` opened at its idle prompt, its chooser. ``None`` for a screen it
+    names nothing on (its prompt, a draft, a shape it does not know) and for one tmux will
+    not give; never raises."""
+    if adapter is None:
+        return None
+    try:
+        lines = pane.captured()
+    except TmuxError:
+        return None
+    # The agent's screen reads rows as `capture-pane -p` gives them, escapes stripped.
+    return screen_of(adapter).modal(pane_screen.strip_escapes(lines))
+
+
+#: A key as the human presses it, where tmux's name for it is not that (``dismiss_key``).
+_KEY_SAID = MappingProxyType({"Escape": "Esc"})
+
+
 #: How long after its end an agent whose window is still on the tmux server stays in
 #: the live listing as 💤 exited — `remain-on-exit` keeps the last screen readable,
 #: and the row beside it is what offers Restart (#138). Older ended rows are history
@@ -10175,6 +10195,18 @@ def tell(
             except FleetError as exc:
                 raise FleetError(f"not typed: {why}; {exc}") from exc
             return TellResult("no", f"{why} — {how}")
+        shown = _dialog_on_its_screen(pane, adapter)
+        if shown is not None and adapter is not None:
+            # Its hooks say waiting, and its screen names a dialog of its own the human
+            # opened since (Claude Code's /resume, /model or /config), where the Enter after
+            # the text would answer it (R6 F5): a resume, a model switch. A screen its reader
+            # names nothing on, known or not, is typed into as before.
+            why = (
+                f"its pane shows {shown}, where an Enter would answer it for you: close it "
+                f"with {_KEY_SAID.get(adapter.dismiss_key, adapter.dismiss_key)} in its pane "
+                f"(`{project_service.fleet_command('attach', project)}`) and tell it again"
+            )
+            return TellResult("no", noted(why, agent))
         # One store connection for the acknowledgement wait (`delivery.prompted_since`).
         with store_session() as store:
             done = pane.deliver_typed(

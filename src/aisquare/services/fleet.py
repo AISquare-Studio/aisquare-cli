@@ -1209,9 +1209,12 @@ def _census_records(
     opens the store only for rows the files alone do not refuse."""
     held = {record.id for record in launch_seal.census_records()}
     refused: dict[str, str] = {}
+    first = _first_census()
+    if first:
+        rows = None  # the first census is of every row, as the fleet stands before any record
     if rows is not None:
         rows = [row for row in rows if row.id not in held and not launch_seal.recorded(row.id)]
-        refused = _refused_by_the_records(rows)
+        refused = _refused_by_the_records(rows, first=first)
         rows = [row for row in rows if row.id not in refused]
         if not rows:
             return {}, refused
@@ -1226,7 +1229,7 @@ def _census_records(
                 for row in store.fleet_agents(project.id, live_only=False)
                 if row.id not in held and not launch_seal.recorded(row.id)
             ]
-            refused = _refused_by_the_records(rows)
+            refused = _refused_by_the_records(rows, first=first)
         missing = [row for row in rows if row.id not in refused and row.project_id in projects]
         running = (
             {project_id: store.fleet_agents(project_id, live_only=True) for project_id in projects}
@@ -1242,10 +1245,18 @@ def _census_records(
     return made, refused
 
 
-def _refused_by_the_records(rows: Sequence[FleetAgent]) -> dict[str, str]:
-    """Why the census takes none of the ``rows`` the launch records alone refuse, by row id
-    (:func:`_census_refusal`'s first rule): asked before the store is opened, so a row whose
-    record is lost costs a listing nothing more."""
+def _first_census() -> bool:
+    """Whether the census to take now is the first here: none was taken, and no launch record
+    was kept, so no agent that sandboxes its tools has run under a launch of this aisquare's,
+    and the store is the fleet as it stood before any could have written it."""
+    return not launch_seal.census_taken() and not launch_seal.records_kept()
+
+
+def _refused_by_the_records(rows: Sequence[FleetAgent], *, first: bool) -> dict[str, str]:
+    """Why the census takes none of the ``rows`` the launch records and the rows' agents alone
+    refuse, by row id (:func:`_census_refusal`'s first two rules): asked before the store is
+    opened, so a row whose record is lost costs a listing nothing more. ``first`` is
+    :func:`_first_census`'s."""
     refused: dict[str, str] = {}
     indexed: dict[str, set[str]] = {}
     for row in rows:
@@ -1253,8 +1264,14 @@ def _refused_by_the_records(rows: Sequence[FleetAgent]) -> dict[str, str]:
             indexed[row.project_id] = {
                 entry.row_id for entry in launch_seal.project_windows(row.project_id)
             }
+        adapter = recorded_adapter(row.agent)
         if launch_seal.window_recorded(row.id) or row.id in indexed[row.project_id]:
             refused[row.id] = launch_seal.UNRECORDED
+        elif not first and (adapter is None or adapter.capabilities.sandboxes_tools):
+            refused[row.id] = (
+                f"{launch_seal.UNRECORDED}: after the first census the census takes no row of "
+                "an agent that sandboxes its tools, or of one this aisquare does not know"
+            )
     return refused
 
 
@@ -1272,6 +1289,12 @@ def _census_refusal(
     - a row anything in the launch records names (its window, as its spawn recorded it,
       or its project's index of windows): a row whose record is lost since, which no census
       makes a record of (``launch_seal.read`` says so);
+    - after the first census (:func:`_first_census`), a row of an agent that sandboxes its
+      tools (``AgentCapabilities.sandboxes_tools``), or of one this aisquare does not know:
+      every aisquare that runs one records its launches, so such a row met later is one its
+      sandbox could have INSERTed before its broker (review r7 of #113, finding 1, on a
+      real Codex), where a row of an agent that does not is what 0.9.2 makes. The first
+      census, taken before any record, takes every row of every agent, as it always did;
     - a row at a pane another row's record (its window), its project's index or the
       census holds on the same server (by
       its socket and the pane's id, and the server's start where the row names one, as
@@ -1284,8 +1307,7 @@ def _census_refusal(
     - a running row under a label a running agent's record holds: ``fleet stop <label>``
       ended the decoy (r9, finding 7).
 
-    Whatever its agent, as the census taken once took every row. The first rule is
-    :func:`_refused_by_the_records`'; ``rows`` passed it."""
+    The first two rules are :func:`_refused_by_the_records`'; ``rows`` passed them."""
     refused: dict[str, str] = {}
     # Every server numbers its panes from %0: the holders of each (socket, pane), by the
     # digest of the holder's row id (`launch_seal.digest`), with the start of its server.
@@ -14596,10 +14618,17 @@ def _with_legacy_session(
     stands, so it takes its session as it stands: a replay of it started fresh, where 0.9.2
     resumed (R3 of 0.10.0, F1). Read when it is replayed, so a ``/clear`` since is the
     session resumed, as it was. Any other record, or a session that is not the row's, as it
-    is: a recorded row's session is its own hook's word alone (:func:`_resumable`)."""
+    is: a recorded row's session is its own hook's word alone (:func:`_resumable`); and so is a
+    census record of an agent that sandboxes its tools, which starts fresh, as it did."""
     if not record.legacy or record.session is not None:
         return record
     if session is None or session.id != row.session_id:
+        return record
+    adapter = recorded_adapter(record.agent)
+    if adapter is None or adapter.capabilities.sandboxes_tools:
+        # Its board session's columns were its sandbox's to write before its broker, and a
+        # transcript there could be a conversation of the sandbox's making (review r4 of
+        # #113, finding 1): no aisquare that kept no records resumed such an agent.
         return record
     facts = launch_seal.SessionFacts(
         id=session.id,

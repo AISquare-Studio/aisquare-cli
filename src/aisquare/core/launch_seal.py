@@ -92,7 +92,9 @@ open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in
   resumed it. A census taken once was the only way in, and every row spawned after it, a
   still-open 0.9.2 asq's or a rollback's, read lost (R3 of 0.10.0, F2 and F3). It takes
   no row that anything here names (a row whose record is lost since), none at a pane
-  another row's record holds, and none under a label a running agent's record holds. Such
+  another row's record holds, none under a label a running agent's record holds, and, after
+  the first census (taken before any record was kept, of every row), none of an agent that
+  sandboxes its tools, which no aisquare that keeps no records ran. Such
   a row is told nothing, and only a dead window of its is removed (r8, findings 1, 3 and
   9).
 - What the fleet reads of a session to act on outside the sandbox — a failed turn's
@@ -505,6 +507,19 @@ def _census() -> LegacyCensus:
     return (
         census if isinstance(census, LegacyCensus) else LegacyCensus(taken_at=datetime.now(tz=UTC))
     )
+
+
+_RECORD_FILE = re.compile(r"[0-9a-f]{64}\.json")
+
+
+def records_kept() -> bool:
+    """Whether any launch record was ever written here: once one was, an agent that sandboxes
+    its tools may have run, and the store is no longer the fleet as it stood before records
+    were kept (``services.fleet._first_census``)."""
+    try:
+        return any(_RECORD_FILE.fullmatch(entry.name) for entry in seals_dir().iterdir())
+    except OSError:
+        return False
 
 
 def window_recorded(agent_id: str) -> bool:

@@ -93,6 +93,9 @@ def test_real_claude_code_transcript_reads_its_steering_usage_ledger_and_outcome
     reader = get_adapter(AGENT).transcript_reader
     assert reader is not None
     # Who steered: four prompts that opened turns, the edit, the interruption, the denial.
+    # Claude Code appends its own bookkeeping (cost-state, last-prompt) after the last Stop,
+    # so the file may grow under the read: the offset is at or past the size before it.
+    before = transcript.stat().st_size
     facts, offset = reader.facts(transcript, 0)
     kinds = [fact.kind for fact in facts]
     assert kinds.count(FACT_PROMPT) == 4, facts
@@ -101,9 +104,9 @@ def test_real_claude_code_transcript_reads_its_steering_usage_ledger_and_outcome
     ], facts
     assert kinds.count(FACT_INTERRUPT) == 1, facts
     assert kinds.count(FACT_DENIAL) == 1, facts
-    assert offset == transcript.stat().st_size
-    again_facts, again_offset = reader.facts(transcript, offset)
-    assert (list(again_facts), again_offset) == ([], offset), "nothing found twice"
+    assert before <= offset <= transcript.stat().st_size
+    again_facts, _ = reader.facts(transcript, offset)
+    assert list(again_facts) == [], "nothing found twice"
     # Its usage: each request the model answered, once, at the stub's own counts.
     answered = len(native.stub.turns)
     scan = reader.usage(transcript, None)

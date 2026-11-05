@@ -36,8 +36,25 @@ SEAM = (
     f"{PACKAGE}/services/store_broker.py",
 )
 #: Line and branch coverage (percent) each floored module may not read under: CI's figure on
-#: the commit that set it, less one point.
-FLOORS: Mapping[str, tuple[float, float]] = {}
+#: the commit that set it, less one point, rounded down. Set from run 42091550486 (9f1c7912,
+#: py3.12, every shard): lower one only in a commit that says why.
+FLOORS: Mapping[str, tuple[float, float]] = {
+    f"{PACKAGE}/core/agent_adapters/claude_code.py": (95.1, 93.7),
+    f"{PACKAGE}/core/agent_adapters/claude_installs.py": (94.2, 85.1),
+    f"{PACKAGE}/core/agent_adapters/claude_ledger.py": (91.8, 84.7),
+    f"{PACKAGE}/core/agent_adapters/claude_screen.py": (97.7, 91.6),
+    f"{PACKAGE}/core/agent_adapters/claude_shared.py": (99.0, 99.0),
+    f"{PACKAGE}/core/agent_adapters/claude_transcript.py": (94.2, 88.0),
+    f"{PACKAGE}/core/agent_adapters/claude_usage.py": (95.0, 83.0),
+    f"{PACKAGE}/core/agents.py": (94.0, 91.8),
+    f"{PACKAGE}/core/claude_accounts.py": (94.8, 91.2),
+    f"{PACKAGE}/core/launch_seal.py": (92.6, 81.6),
+    f"{PACKAGE}/services/agent_launch.py": (95.4, 93.3),
+    f"{PACKAGE}/services/claude_accounts.py": (94.0, 90.5),
+    f"{PACKAGE}/services/fleet.py": (92.9, 90.3),
+    f"{PACKAGE}/services/handoff.py": (95.7, 94.5),
+    f"{PACKAGE}/services/store_broker.py": (87.5, 81.4),
+}
 
 
 @dataclass(frozen=True)

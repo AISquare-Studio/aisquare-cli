@@ -228,3 +228,17 @@ def test_a_shard_missing_fails_the_coverage_rather_than_reading_part_of_the_suit
 def test_every_floor_names_a_module_it_holds() -> None:
     assert all(coverage_floors.floored(path) for path in coverage_floors.FLOORS)
     assert json.dumps(sorted(coverage_floors.FLOORS))  # paths, in the report's spelling
+
+
+def test_every_held_module_has_its_floor() -> None:
+    """Claude Code's adapter modules and the seam, each held: a new ``claude_*.py`` gets a
+    floor in the commit that adds it, and none is dropped quietly."""
+    root = Path(__file__).resolve().parents[1]
+    held = {
+        f"src/aisquare/core/agent_adapters/{p.name}"
+        for p in (root / "src/aisquare/core/agent_adapters").glob("claude_*.py")
+    } | set(coverage_floors.SEAM)
+    assert set(coverage_floors.FLOORS) == held
+    assert all(
+        0 < line <= 100 and 0 < branch <= 100 for line, branch in coverage_floors.FLOORS.values()
+    )

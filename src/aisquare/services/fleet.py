@@ -1558,42 +1558,83 @@ def _sessions_of(placements: Sequence[Placement]) -> list[PlacedSession]:
     return list(found.values())
 
 
-def _census_sessions(
-    placements: Sequence[Placement],
-) -> list[tuple[PlacedSession, PlacedPane]]:
-    """The sessions the placed rows' census records name by their name alone (a census
-    record keeps no tmux id for its session), each once, by server and name, with the pane
-    of one row placed there: listed by that name, as :func:`_running_ids` lists them, so an
-    ENDED census row's dead window is found in its session's list as a recorded row's is.
-    Looked for nowhere else, the 💤 row of a 0.9.2 agent that died showed once and was gone
-    from the next read while its window lingered, and a restart left that window behind (R1
-    of 0.10.0, seq 11047; R3, F7). A name that finds nothing is asked again of the pane
-    (:func:`_census_session_moved`). Read only: what acts on the window acts on its pane's
-    id, on its record's server."""
-    found: dict[tuple[_Address, str], tuple[PlacedSession, PlacedPane]] = {}
+@dataclass(frozen=True)
+class _CensusGroup:
+    """The census rows of one listing placed in one session, as the census names it."""
+
+    session: PlacedSession
+    """Their session by the census's name for it (a census record keeps no tmux id)."""
+    panes: tuple[PlacedPane, ...]
+    """Each placed row's pane there, live or ended, oldest row first."""
+    projects: frozenset[str]
+    """Whose rows they are: a heal renames these projects' census entries alone."""
+
+
+def _census_sessions(placements: Sequence[Placement]) -> list[_CensusGroup]:
+    """The sessions the placed rows' census records name by their name alone, each once, by
+    server and name, with every placed census row's pane there: listed by that name, as
+    :func:`_running_ids` lists them, so an ENDED census row's dead window is found in its
+    session's list as a recorded row's is. Looked for nowhere else, the 💤 row of a 0.9.2
+    agent that died showed once and was gone from the next read while its window lingered,
+    and a restart left that window behind (R1 of 0.10.0, seq 11047; R3, F7). A session that
+    name finds holding none of these panes has moved (:func:`_census_windows`). Read only:
+    what acts on the window acts on its pane's id, on its record's server."""
+    found: dict[tuple[_Address, str], tuple[PlacedSession, list[PlacedPane], set[str]]] = {}
     for placement in _placed_only(placements):
         place = placement.record.window
         if not placement.record.legacy or place is None or place.session_id or not place.session:
             continue
         address = placement.pane.address
-        found.setdefault(
+        _, panes, projects = found.setdefault(
             (address, place.session),
-            (_listed_session(address, place.session, placement.pane.config), placement.pane),
+            (_listed_session(address, place.session, placement.pane.config), [], set()),
         )
-    return list(found.values())
+        panes.append(placement.pane)
+        projects.add(placement.row.project_id)
+    return [
+        _CensusGroup(session, tuple(panes), frozenset(projects))
+        for session, panes, projects in found.values()
+    ]
 
 
-def _census_session_moved(session: PlacedSession, pane: PlacedPane) -> list[WindowInfo]:
-    """The windows of the session tmux says holds ``pane`` (:meth:`PlacedPane.holding_session`)
-    when no session of ``session``'s name is on its server: one renamed where the census was
-    not told, by 0.9.2's own `project rename` while rolled back (R5's verify, G1). The census
-    takes its name from here (``launch_seal.rename_census_session``), so the next read lists
-    it by name again. Nothing when the pane is gone, or tmux will not say."""
-    held = pane.holding_session()
-    if held is None or held.name == session.name:
+def _census_windows(
+    group: _CensusGroup,
+    named: Sequence[WindowInfo] | None,
+    every: Callable[[], Mapping[str, Sequence[WindowInfo]]],
+) -> list[WindowInfo]:
+    """The windows to look ``group``'s rows up in: the session its census name finds
+    (``named``), while that session holds one of the group's panes; otherwise the session
+    that holds one now, in the server's one answer for every session (``every``, asked only
+    then), whose name the census takes for these projects' rows
+    (``launch_seal.rename_census_session``), so the next read lists it by name again.
+
+    Moved where the census was not told: 0.9.2's own `project rename` while rolled back. One
+    pane asked of tmux alone was the first row's, and with that older sibling's window gone
+    the session was never found again, and a 0.9.2 agent that died was lost after one read
+    (R5's verify, G1b); and a name 0.9.2 then gave another session found that one, holding
+    none of these rows. A pane of the server before this one is no row's here
+    (:meth:`PlacedPane.outlived`). Nothing when none of the panes is left, or tmux will not
+    say."""
+    wanted = {pane.pane_id: pane for pane in group.panes}
+    if named and any(window.pane_id in wanted for window in named):
+        return list(named)
+    try:
+        sessions = every()
+    except TmuxError:
         return []
-    launch_seal.rename_census_session(session.address.name, session.name, held.name)
-    return held.panes()
+    started = _server_start(sessions)
+    for name, windows in sessions.items():
+        held = [
+            window
+            for window in windows
+            if window.pane_id in wanted and not wanted[window.pane_id].outlived(started)
+        ]
+        if held and name != group.session.name:
+            launch_seal.rename_census_session(
+                group.session.address.name, group.session.name, name, projects=group.projects
+            )
+            return list(windows)
+    return []
 
 
 def _indexed_sessions(project_id: str, config: FleetSettings) -> list[PlacedSession]:
@@ -3931,11 +3972,8 @@ def _observe(
                 found = every.get(session.name)
                 for listed in found if found is not None else session.panes():
                     windows[listed.pane_id] = listed
-            for session, member in _census_sessions(placements):
-                named_now = every.get(session.name)
-                if named_now is None:
-                    named_now = _census_session_moved(session, member)
-                for named in named_now:
+            for group in _census_sessions(placements):
+                for named in _census_windows(group, every.get(group.session.name), lambda: every):
                     windows.setdefault(named.pane_id, named)
             output_at = times if live else {}
         else:
@@ -3944,8 +3982,16 @@ def _observe(
                 for session in _sessions_of(placements)
                 for window in session.panes()
             }
-            for session, member in _census_sessions(placements):
-                for named in session.panes() or _census_session_moved(session, member):
+            server_answer: dict[str, Mapping[str, Sequence[WindowInfo]]] = {}
+
+            def every_session() -> Mapping[str, Sequence[WindowInfo]]:
+                """The server's one answer for every session, asked once for this read."""
+                if "all" not in server_answer:
+                    server_answer["all"] = srv.every_window()[0]
+                return server_answer["all"]
+
+            for group in _census_sessions(placements):
+                for named in _census_windows(group, group.session.panes(), every_session):
                     windows.setdefault(named.pane_id, named)
             output_at = _activity_times(srv) if live else {}
         said = [w.server_started for w in windows.values() if w.server_started is not None]
@@ -17974,7 +18020,9 @@ def _rename_project_sessions(
                     project.id, session.target, session.address.name, name
                 )
                 # The census names a session by its name alone: the old one found nothing.
-                launch_seal.rename_census_session(session.address.name, session.name, name)
+                launch_seal.rename_census_session(
+                    session.address.name, session.name, name, projects={project.id}
+                )
         except TmuxError as exc:
             if notes is not None:
                 by = (

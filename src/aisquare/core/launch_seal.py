@@ -564,14 +564,18 @@ def census_records() -> list[LaunchRecord]:
     return list(_census().records.values())
 
 
-def rename_census_session(tmux_socket: str, old: str, new: str) -> None:
+def rename_census_session(
+    tmux_socket: str, old: str, new: str, *, projects: Collection[str] | None = None
+) -> None:
     """The tmux session called ``old`` on the server ``tmux_socket`` names is called ``new``
     now: every census record that names it by ``old`` names it ``new``. A census record keeps
     its session's name alone (no tmux id), and the listing looks an ended row's window up in
     the session by that name (``services.fleet._census_sessions``): after a project rename
     the old name found nothing, and the 💤 row of a 0.9.2 agent that died was gone after one
-    read (R5 of 0.10.0, its verify's G1). The rest of each record is kept as it was. Under
-    the census's lock; never raises (a write that fails keeps the old name)."""
+    read (R5 of 0.10.0, its verify's G1). ``projects``, when given, are the only projects
+    whose records are renamed: a name another project's session took since is not theirs.
+    The rest of each record is kept as it was. Under the census's lock; never raises (a
+    write that fails keeps the old name)."""
     if old == new or not census_taken():
         return
     path = _census_path()
@@ -587,6 +591,7 @@ def rename_census_session(tmux_socket: str, old: str, new: str) -> None:
             if record.window is not None
             and record.window.tmux_socket == tmux_socket
             and record.window.session == old
+            and (projects is None or record.project_id in projects)
         }
         if renamed:
             body = census.model_copy(update={"records": {**census.records, **renamed}})

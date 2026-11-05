@@ -470,6 +470,16 @@ class FakeTmux(TmuxServer):
             return []
         return [self._current(window) for window in self.sessions.get(self._named(session), [])]
 
+    def every_window(self) -> tuple[dict[str, list[WindowInfo]], dict[str, datetime]]:
+        """Every session's windows by its name, as one ``list-panes -a`` answers them (the
+        output times are the activity query's here)."""
+        if not self._read():
+            return {}, {}
+        return {
+            name: [self._current(window) for window in windows]
+            for name, windows in self.sessions.items()
+        }, {}
+
     def _current(self, window: WindowInfo) -> WindowInfo:
         facts = self.facts[window.pane_id]
         dead_status = facts.dead_status
@@ -16577,6 +16587,10 @@ def test_a_dead_092_agent_stays_listed_after_a_project_rename_and_its_restart_re
     _before_records()
     fleet_service.list_agents(project)  # the census, under the old session's name
     project = fleet_service.rename(project, "quiet-lynx")
+    # The rename itself renames it, before any read, whatever a read's fallback would find
+    # (G1b's test gap: with the fallback healing it, dropping this went unseen).
+    [renamed] = launch_seal.legacy_records(project.id)
+    assert renamed.window is not None and renamed.window.session == "asq-quiet-lynx"
     tmux.die(agent.pane_id, 0)
 
     reads = [
@@ -16613,6 +16627,69 @@ def test_a_dead_092_agent_stays_listed_after_092_renamed_its_session_where_the_c
 
     assert reads == [["exited"]] * 3, reads
     assert restarted.replaced.id == agent.id and agent.pane_id in tmux.killed
+    [legacy] = launch_seal.legacy_records(project.id)
+    assert legacy.window is not None and legacy.window.session == "asq-renamed-by-092"
+
+
+def _stopped_by_092(agent: FleetAgent, tmux: FakeTmux) -> None:
+    """``agent`` stopped as 0.9.2 stops one: its window killed, its row ended, nothing else."""
+    tmux.kill_window(agent.pane_id)
+    with store_session() as store:
+        store.end_fleet_agent_if_live(agent.id, exit_status=0, ended_by="stopped")
+
+
+@pytest.mark.parametrize("stopped_by", ["this aisquare", "0.9.2"])
+def test_a_dead_092_agent_beside_a_stopped_older_one_stays_listed_after_092_renamed_them(
+    stopped_by: str, tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R5's verify, G1b: the census session's fallback asked tmux about ONE pane, the first
+    row's; an older 0.9.2 sibling stopped within the day (so still listed) had no window, the
+    rename 0.9.2 made while rolled back was never found, and the agent that died was lost
+    after one read, its restart leaving its dead window. Every placed census row's pane is
+    looked for, in the server's one answer for every session (``fleet._census_windows``)."""
+    older, agent = _coder(project), _coder(project)
+    _before_records()
+    fleet_service.list_agents(project)  # the census, under the session's name then
+    if stopped_by == "0.9.2":
+        _stopped_by_092(older, tmux)
+    else:
+        fleet_service.stop(project, older.label)
+    old = _session_of(project).split(":", 1)[1]
+    tmux.rename_session(old, "asq-renamed-by-092")  # tmux alone, as 0.9.2 renames it
+    tmux.die(agent.pane_id, 0)
+
+    reads = [
+        [s.state for s in fleet_service.list_agents(project) if s.agent.id == agent.id]
+        for _ in range(3)
+    ]
+    restarted = fleet_service.restart(project, agent.label)
+
+    assert reads == [["exited"]] * 3, reads
+    assert restarted.replaced.id == agent.id and agent.pane_id in tmux.killed
+    named = {r.id: r.window.session for r in launch_seal.legacy_records(project.id) if r.window}
+    assert named[agent.id] == "asq-renamed-by-092", named
+
+
+def test_a_census_name_another_session_took_while_rolled_back_is_no_session_of_its_rows(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R5's verify, G1b's secondary: 0.9.2 renamed the project's session, then gave its old
+    name to another session. The census's name found that one, which holds none of its
+    rows' panes: moved all the same, and the session that holds them is found and named."""
+    agent = _coder(project)
+    _before_records()
+    fleet_service.list_agents(project)
+    old = _session_of(project).split(":", 1)[1]
+    tmux.rename_session(old, "asq-renamed-by-092")
+    tmux.spawn_window(old, name="theirs", cwd=Path.home(), command=["zsh"])  # the name, taken
+    tmux.die(agent.pane_id, 0)
+
+    reads = [
+        [s.state for s in fleet_service.list_agents(project) if s.agent.id == agent.id]
+        for _ in range(3)
+    ]
+
+    assert reads == [["exited"]] * 3, reads
     [legacy] = launch_seal.legacy_records(project.id)
     assert legacy.window is not None and legacy.window.session == "asq-renamed-by-092"
 

@@ -4318,6 +4318,82 @@ def test_a_bound_scalar_flag_never_beats_the_windows_own_or_the_users(
     assert ran["argv"][1 : 2 + len(bound)] == [*bound, "--chrome"], ran["argv"]
 
 
+@pytest.mark.parametrize("how", ["restart", "switch"])
+def test_a_bindings_literal_separator_never_takes_a_replays_resume(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    how: str,
+) -> None:
+    """Review of #94, seq 11214: a binding that ends Claude Code's options (`--add-dir D --
+    BOUND-TEXT`) had a restart's and a switch's `--resume <transcript>` after its `--`, where
+    Claude Code 2.1.318 reads it as prompt text: the agent started fresh, its conversation
+    lost. Every flag of ours goes in front of the binding's `--` (`ordered_argv`), through
+    the window's own `aisquare launch`; the binding's text stays after it."""
+    from importlib import import_module
+
+    from aisquare.core.config import RoleLaunchProfile, load_config, save_config
+
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(
+        args=["--add-dir", "/opt/d", "--", "BOUND-TEXT"]
+    )
+    save_config(config)
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    if how == "restart":
+        tmux.die(agent.pane_id, 1)
+        receipt = fleet_service.restart(project, agent.label)
+    else:
+        receipt = fleet_service.switch(project, agent.label, to="3")
+    assert receipt.resumed is True
+    command = _command(tmux)
+    ran: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        import_module("aisquare.cli.launch"),
+        "_exec",
+        lambda binary, argv, env: ran.update(argv=argv),
+    )
+    launched = CliRunner().invoke(app, command[command.index("launch") :])
+    assert launched.exit_code == 0, launched.output
+    argv = ran["argv"]
+    cut = argv.index("--")
+    assert argv.index("--resume") < cut and argv[argv.index("--resume") + 1] == str(transcript)
+    assert argv[1:3] == ["--add-dir", "/opt/d"] and argv[cut + 1] == "BOUND-TEXT", argv
+
+
+def test_a_bindings_literal_separator_never_takes_the_roles_defaults(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #94, seq 11214: a ui-tester bound `--verbose --` got `-- --chrome`, which Claude
+    Code sends as its prompt, with no Chrome. The role's defaults go in front of the binding's
+    `--`, as a hand launch puts them (`launch ui-tester -- hi`)."""
+    from importlib import import_module
+
+    from aisquare.core.config import RoleLaunchProfile, load_config, save_config
+
+    config = load_config()
+    config.team.profiles["ui-tester"] = RoleLaunchProfile(args=["--verbose", "--"])
+    save_config(config)
+    fleet_service.spawn(project, "ui-tester", worktree=False)
+    command = _command(tmux)
+    ran: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        import_module("aisquare.cli.launch"),
+        "_exec",
+        lambda binary, argv, env: ran.update(argv=argv),
+    )
+    launched = CliRunner().invoke(app, command[command.index("launch") :])
+    assert launched.exit_code == 0, launched.output
+    argv = ran["argv"]
+    assert argv[1:3] == ["--verbose", "--chrome"] and argv.index("--chrome") < argv.index("--")
+
+
 def test_spawn_without_tmux_is_fleet_unavailable(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

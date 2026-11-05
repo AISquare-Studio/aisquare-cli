@@ -5507,6 +5507,7 @@ def spawn(
     # `--continue`): see `_without_session_choice`.
     recorded_args = _without_session_choice(resolution.binary, [*role_args, *extra])
     forked: ForkArgs | None = None
+    replay_lead: list[str] = []
     if resume is not None:
         # The agent's resume (`--resume <transcript path>`) keeps the ORIGINAL session
         # id (#146), so the row is joined to it here rather than minted or learned
@@ -5520,6 +5521,7 @@ def spawn(
             lead = list(forked.args)
         else:
             lead = selected.adapter.resume_args(native_id, resume.transcript_path)
+        replay_lead = list(lead)
         extra = [*lead, *extra]
     # Validate native model pins before creating a worktree/window or live row.
     model_resolution = None
@@ -6051,26 +6053,40 @@ def spawn(
     # tmux server's PYTHONPATH, which may name a directory its sandbox writes, while the
     # agent it execs keeps it (review r14 of #113, finding 4). Claude Code's window runs `-P`
     # alone, as 0.9.2's did (`selfcli.argv_for_agent`).
-    leading: list[str] = []
-    rest = list(arguments.argv)
+    window_line = [*native, *model_args, *models.flags, *arguments.argv]
     if binding_first:
-        # The binding's and the role's defaults (`--chrome`), where 0.9.2's launch put them:
-        # ahead of the role's tool policy and the window's own flags.
-        bound_native = selected.adapter.native_args([*bound, *defaults.args])
-        if bound_native and rest[: len(bound_native)] == bound_native:
-            # Only what comes before a literal `--` the binding carries: after it, the window's
-            # own flags would be prompt text (`agent_launch.ordered_argv`'s rule), so the `--`
-            # and what follows it stay last, as they were.
-            cut = (
-                bound_native.index(agent_launch.END_OF_OPTIONS)
-                if agent_launch.END_OF_OPTIONS in bound_native
-                else len(bound_native)
+        # 0.9.2's order, the binding's and the role's defaults first (`BOUND_IN_LINE_FLAG`), and
+        # none of ours after a literal `--` the binding carries, where Claude Code reads them as
+        # its prompt (`agent_launch.ordered_argv`): the defaults (a ui-tester's `--chrome`) and a
+        # replay's `--resume <transcript>` too, which, read as prompt text, started the agent
+        # fresh (review of #94, seq 11214). The role's `extra_args` and the spawn's own are the
+        # operator's: after that `--`, where the operator put them.
+        parts = [
+            selected.adapter.native_args(list(part))
+            for part in (bound, defaults.args, role_args, replay_lead)
+        ]
+        b, d, r, replay = parts
+        owned = [*b, *d, *r, *replay]
+        if arguments.argv[: len(owned)] == owned:
+            window_line = agent_launch.ordered_argv(
+                [
+                    (False, b),
+                    (True, d),
+                    (True, native),
+                    (True, model_args),
+                    (True, models.flags),
+                    (False, r),
+                    (True, replay),
+                    (False, arguments.argv[len(owned) :]),
+                ]
             )
-            leading, rest = bound_native[:cut], rest[cut:]
-            if leading:
-                flags += [agent_launch.BOUND_IN_LINE_FLAG, str(len(leading))]
+            cut = (
+                b.index(agent_launch.END_OF_OPTIONS) if agent_launch.END_OF_OPTIONS in b else len(b)
+            )
+            if cut + len(d):
+                flags += [agent_launch.BOUND_IN_LINE_FLAG, str(cut + len(d))]
     command = selfcli.argv_for_agent(
-        ["launch", role, *flags, "--", *leading, *native, *model_args, *models.flags, *rest],
+        ["launch", role, *flags, "--", *window_line],
         sandboxes_tools=selected.adapter.capabilities.sandboxes_tools,
     )
     # The hub as THIS process resolves it, blank for none: the window's

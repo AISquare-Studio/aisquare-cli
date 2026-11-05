@@ -242,6 +242,25 @@ def capture(payload: dict[str, Any], launch_id: str, *, agent: str) -> int:
     return count
 
 
+def _loopback_server() -> type:
+    """``http.server.HTTPServer``, but for a socket on loopback: ``HTTPServer.server_bind``
+    asks the resolver for its own name (``socket.getfqdn``, a reverse lookup of 127.0.0.1),
+    which the receiver never reads, and where the resolver is slow that held ``ready`` past
+    the launch's :data:`START_S`: Codex launched without its telemetry on a macOS CI runner,
+    whose import of this module took 1.7 s cold (R7, CI 42110645564 and 42113584607)."""
+    import socketserver
+    from http.server import HTTPServer
+
+    class LoopbackServer(HTTPServer):
+        def server_bind(self) -> None:
+            socketserver.TCPServer.server_bind(self)
+            host, port = self.server_address[:2]
+            self.server_name = str(host)
+            self.server_port = int(port)
+
+    return LoopbackServer
+
+
 def serve(
     ready: Path,
     owner_pid: int,
@@ -253,7 +272,7 @@ def serve(
     """Receive ``agent``'s OTLP logs for launch ``launch_id`` on a loopback port, until the
     owner (``owner_pid``, else ``owner_alive``) is gone; ``ready`` says the port and token."""
     import secrets
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler
 
     token = TOKEN_PREFIX + secrets.token_urlsafe(32)
 
@@ -305,7 +324,7 @@ def serve(
         def log_message(self, format: str, *args: object) -> None:
             pass
 
-    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+    with _loopback_server()(("127.0.0.1", 0), Handler) as server:
         server.timeout = 0.5
         staging = ready.with_suffix(".tmp")
         staging.write_text(json.dumps({"port": server.server_port, "token": token}))

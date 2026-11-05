@@ -168,6 +168,38 @@ def test_native_positional_owns_the_remaining_launch_arguments(
     assert "K" not in execute.call_args.args[2]
 
 
+def test_the_receiver_is_ready_without_asking_the_resolver_its_own_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7's macOS leg: ``HTTPServer`` asked the resolver for its own name before the receiver
+    published ``ready``, and where the reverse lookup of 127.0.0.1 is slow, a launch's 15 s
+    passed and Codex ran without its telemetry. Ready with the resolver never asked."""
+    import socket
+
+    def resolver(*args: object, **kwargs: object) -> str:
+        raise AssertionError("the receiver asked the resolver its own name")
+
+    monkeypatch.setattr(socket, "getfqdn", resolver)
+    stop = threading.Event()
+    ready = tmp_path / "ready.json"
+    thread = threading.Thread(
+        target=native_telemetry.serve,
+        args=(ready, os.getpid(), "resolver"),
+        kwargs={"agent": "codex", "owner_alive": lambda: not stop.is_set()},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "the receiver never published its port"
+        assert json.loads(ready.read_text())["port"] > 0
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+
 @pytest.mark.parametrize("native", [["--model", "opus"], ["--add-dir", "/repo"]])
 def test_native_value_then_prompt_opens_boundary_only_at_the_prompt(native: list[str]) -> None:
     command = get_command(app).commands["launch"]  # type: ignore[attr-defined]

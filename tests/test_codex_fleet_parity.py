@@ -2245,8 +2245,8 @@ def test_a_refusal_is_said_on_the_board_once_per_row_and_reason(
     stop = project_service.fleet_command("stop", codex.project, codex.agent.label)
     assert said == [
         f"{codex.agent.label}: cannot restart it — no launch record was written for it (it was "
-        "spawned by an aisquare that keeps none, or its record could not be written), and it "
-        "was not in the fleet when this aisquare first read it; end its agent in its own "
+        "spawned by an aisquare that keeps none, or its record could not be written), and the "
+        "census does not hold it; end its agent in its own "
         f"window, then `{stop}` removes the window and ends its row, and spawn a new agent"
     ]
     assert told.delivered is False and UNRECORDED in told.how

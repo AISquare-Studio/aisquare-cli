@@ -23,7 +23,6 @@ from aisquare.core import (
     code_index,
     experimental,
     harness,
-    launch_seal,
     orchestrator,
     paths,
     tls,
@@ -58,6 +57,7 @@ from aisquare.models import (
     PruneCandidate,
     ShippingStatus,
     StatusReport,
+    TeamSession,
 )
 from aisquare.services import agents as agents_service
 from aisquare.services import claude_accounts as claude_accounts_service
@@ -1678,12 +1678,19 @@ def _check_resumable_agents() -> list[DoctorCheck]:
     without starts fresh from a hand-off prompt. A label that is live again, or
     was reused, is not an exited agent. Counted over the last day's rows,
     machine-wide; silent when there are none. Gated on the store existing.
+
+    Whether it resumes is the restart's own word (``fleet.restart_resumes``): its launch
+    record, as the fleet's next read holds it (a 0.9.2 row's census record included,
+    ``fleet.records_as_read``, written by nothing here), and the session that record
+    resumes. Read off the board session alone, it offered ``fleet restart`` for rows the
+    restart then refused (R3 of 0.10.0, F4).
     """
     if _uncreated_home("fleet-resume") is not None:
         return []
     try:
         cutoff = datetime.now(tz=UTC) - fleet_service.RECENTLY_ENDED
         resumable: list[str] = []
+        exited: list[tuple[ProjectInfo, FleetAgent, TeamSession | None]] = []
         with store_session() as store:
             for project in store.list_projects(all=True):
                 # The NEWEST row under each label only, the one `fleet restart
@@ -1696,14 +1703,14 @@ def _check_resumable_agents() -> list[DoctorCheck]:
                 for agent in newest.values():
                     if agent.ended_at is None or agent.ended_at < cutoff or not agent.session_id:
                         continue
-                    session = store.get_session(agent.session_id)
-                    if session is None or not session.transcript_path:
-                        continue
-                    if Path(session.transcript_path).is_file():
-                        # Its own restart, naming its project: alone, `fleet restart <label>`
-                        # restarted the active project's (review of #259, round 21).
-                        restart = project_service.fleet_command("restart", project, agent.label)
-                        resumable.append(f"`{restart}`")
+                    exited.append((project, agent, store.get_session(agent.session_id)))
+        records = fleet_service.records_as_read([agent for _, agent, _ in exited])
+        for project, agent, session in exited:
+            if fleet_service.restart_resumes(project, agent, records[agent.id], session):
+                # Its own restart, naming its project: alone, `fleet restart <label>`
+                # restarted the active project's (review of #259, round 21).
+                restart = project_service.fleet_command("restart", project, agent.label)
+                resumable.append(f"`{restart}`")
     except Exception:  # the database line reports a broken store
         return []
     if not resumable:
@@ -3943,12 +3950,14 @@ def _check_fleet(
         exited: list[FleetAgent] = []
         started: dict[fleet_service._Address, datetime] = {}
         # Where their launch records place them, as `reap` asks (`fleet.resolve_place`): a
-        # row no record places is judged by nothing, there or here.
-        # Read as written, the census never taken here: the doctor writes nothing.
+        # row no record places is judged by nothing, there or here. As the fleet's next
+        # read holds them, a 0.9.2 row the census would take included; the doctor writes
+        # nothing, so it takes none (`fleet.records_as_read`).
+        records = fleet_service.records_as_read(live)
         placed = [
             placement
             for placement in (
-                fleet_service.resolve_place(row, launch_seal.read(row.id), config) for row in live
+                fleet_service.resolve_place(row, records[row.id], config) for row in live
             )
             if isinstance(placement, fleet_service.Placed)
         ]

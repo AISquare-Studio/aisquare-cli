@@ -38,7 +38,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
-from aisquare.core import paths, selfcli
+from aisquare.core import launch_seal, paths, selfcli
 from aisquare.core.config import AccountsSettings, AppConfig, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -554,12 +554,16 @@ def test_a_hand_over_its_launch_record_refuses_is_said_on_the_board_once(
     fake_home: Path, work: ProjectInfo, runner: CliRunner
 ) -> None:
     """The usage-limit hand-over of a row with no launch record (``core.launch_seal``) that
-    the census of the fleet before records did not find (``fleet.take_census``) is refused
-    before anything is stopped; the reason is on the board once, said by the switch, not
-    again by the hand-over's own line, and not again at the next limit."""
+    the census does not take (``fleet.take_census``: its record lost since its spawn, which
+    recorded its window) is refused before anything is stopped; the reason is on the board
+    once, said by the switch, not again by the hand-over's own line, and not again at the
+    next limit."""
     _session(work, "sess-fleet")
-    fleet_service.take_census()  # taken before the row was written
     _fleet_row(work, "agt_unrecorded", "coder-db", "sess-fleet")
+    place = launch_seal.WindowPlace(
+        tmux_socket="asq", pane_id="%3", created_at=datetime.now(tz=UTC)
+    )
+    assert launch_seal.placed("agt_unrecorded", place) is None
     for _ in range(2):
         with store_session() as store:
             store.mark_limited("sess-fleet", None)

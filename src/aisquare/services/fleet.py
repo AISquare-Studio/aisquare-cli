@@ -1178,43 +1178,155 @@ class Unplaced:
 Placement = Placed | Unplaced
 
 
-def take_census() -> None:
-    """Take the census of the rows spawned before launch records were kept
-    (``launch_seal.LegacyCensus``), once on this machine, while no launch record has been
-    written yet: each such row's record made from the row as it stands now. Run before
-    anything in a sandbox could have written the store: by the first fleet read or spawn
-    of this aisquare (a spawn takes it before it writes a record or starts any window), and
-    before any agent that sandboxes its tools is launched (``agent_launch.prepare_sandbox``).
-    Never raises: a census not taken leaves those rows refused, as a row with no record
-    is. The doctor, which writes nothing, never takes it."""
-    if launch_seal.census_taken() or launch_seal.records_kept():
-        # Taken already; or never to be: records were kept here before it, by an aisquare
-        # that took none, and an agent sandboxed since under that aisquare's profile,
-        # which left the store writable, may have written it.
-        return
+def take_census(rows: Sequence[FleetAgent] | None = None) -> dict[str, str]:
+    """Take into the census (``launch_seal.LegacyCensus``) each of ``rows`` (every project's
+    when ``None``) that no launch record names and the census does not hold yet: the rows an
+    aisquare that keeps no records spawned (0.9.2 before the upgrade, a 0.9.2 asq left open
+    across it, a rollback), each record made from the row as it stands now. Returns why
+    each row it would not take was refused (:func:`_census_refusal`), by row id.
+
+    Taken by every fleet read that meets such a row (:func:`_records_of`), a spawn, and the
+    launch of an agent that sandboxes its tools (``agent_launch.prepare_sandbox``). Taken
+    once, by the first fleet read, a census of 136 rows left every row spawned since on the
+    owner's machine lost: its 7 running agents could not be told, stopped, restarted or
+    switched (R3 of 0.10.0, F2); and so was every agent a 0.9.2 asq open across the upgrade,
+    or a rollback, spawned after it (F3). Never raises: a census not taken leaves those rows
+    refused, as a row with no record is. The doctor, which writes nothing, reads what it
+    would take (:func:`records_as_read`)."""
+    refused: dict[str, str] = {}
     with suppress(Exception):
-        with store_session() as store:
-            projects = {
-                project.id: project
-                for project in store.list_projects(all=True, include_forgotten=True)
-            }
+        made, refused = _census_records(rows)
+        if made or not launch_seal.census_taken():
+            launch_seal.take_census(list(made.values()))
+    return refused
+
+
+def _census_records(
+    rows: Sequence[FleetAgent] | None,
+) -> tuple[dict[str, launch_seal.LaunchRecord], dict[str, str]]:
+    """The census records :func:`take_census` would add for ``rows`` (every project's when
+    ``None``), by row id, and why each row it would not take was refused. Writes nothing;
+    opens the store only for rows the files alone do not refuse."""
+    held = {record.id for record in launch_seal.census_records()}
+    refused: dict[str, str] = {}
+    if rows is not None:
+        rows = [row for row in rows if row.id not in held and not launch_seal.recorded(row.id)]
+        refused = _refused_by_the_records(rows)
+        rows = [row for row in rows if row.id not in refused]
+        if not rows:
+            return {}, refused
+    with store_session() as store:
+        projects = {
+            project.id: project for project in store.list_projects(all=True, include_forgotten=True)
+        }
+        if rows is None:
             rows = [
                 row
                 for project in projects.values()
                 for row in store.fleet_agents(project.id, live_only=False)
+                if row.id not in held and not launch_seal.recorded(row.id)
             ]
-        launch_seal.take_census(
-            [
-                _legacy_record(row, projects[row.project_id])
-                for row in rows
-                if row.project_id in projects and not launch_seal.recorded(row.id)
-            ]
-        )
+            refused = _refused_by_the_records(rows)
+        missing = [row for row in rows if row.id not in refused and row.project_id in projects]
+        running = {
+            project_id: store.fleet_agents(project_id, live_only=True)
+            for project_id in {row.project_id for row in missing}
+        }
+    refused |= _census_refusal(missing, projects, running)
+    made = {
+        row.id: _legacy_record(row, projects[row.project_id])
+        for row in missing
+        if row.id not in refused
+    }
+    return made, refused
+
+
+def _refused_by_the_records(rows: Sequence[FleetAgent]) -> dict[str, str]:
+    """Why the census takes none of the ``rows`` the launch records alone refuse, by row id
+    (:func:`_census_refusal`'s first two rules): asked before the store is opened, so a row
+    whose record is lost costs a listing nothing more."""
+    refused: dict[str, str] = {}
+    indexed: dict[str, set[str]] = {}
+    for row in rows:
+        if row.project_id not in indexed:
+            indexed[row.project_id] = {
+                entry.row_id for entry in launch_seal.project_windows(row.project_id)
+            }
+        adapter = recorded_adapter(row.agent)
+        if launch_seal.window_recorded(row.id) or row.id in indexed[row.project_id]:
+            refused[row.id] = launch_seal.UNRECORDED
+        elif adapter is None or adapter.capabilities.sandboxes_tools:
+            refused[row.id] = (
+                f"{launch_seal.UNRECORDED}: the census takes no row of an agent that sandboxes "
+                "its tools, or of one this aisquare does not know"
+            )
+    return refused
+
+
+def _census_refusal(
+    rows: Sequence[FleetAgent],
+    projects: Mapping[str, ProjectInfo],
+    running: Mapping[str, Sequence[FleetAgent]],
+) -> dict[str, str]:
+    """Why the census takes none of the ``rows`` it refuses, by row id. A row spawned by an
+    aisquare that keeps no records is taken as it stands: that aisquare made it, its hooks
+    keep its session, and its restart replayed it from the row alone. What the census takes
+    no row for, each a row no such aisquare made, whose record would be another's word:
+
+    - a row anything in the launch records names (its window, as its spawn recorded it,
+      or its project's index of windows): a row whose record is lost since, which no census
+      makes a record of (``launch_seal.read`` says so);
+    - a row of an agent that sandboxes its tools (``AgentCapabilities.sandboxes_tools``), or
+      of one this aisquare does not know: no aisquare that keeps no records ran one;
+    - a row at a pane another row's record, or the census, holds on the same server (by
+      its socket, the pane's id and the server's start, which 0.9.2 recorded too): one pane
+      is one agent's, and a row INSERTed at another's had ``fleet stop`` kill it (review r7
+      of #113, finding 1);
+    - a running row under a label a running agent's record holds: ``fleet stop <label>``
+      ended the decoy (r9, finding 7).
+
+    The first two are :func:`_refused_by_the_records`'; ``rows`` passed them."""
+    refused: dict[str, str] = {}
+    # By the server's start too: every server numbers its panes from %0. A start neither
+    # side knows (tmux did not say) is taken for the same server, so such a pane is refused.
+    held_panes: dict[tuple[str, str, datetime | None], str] = {}
+    for project_id in projects:
+        for entry in launch_seal.project_windows(project_id):
+            held_panes.setdefault(
+                (entry.tmux_socket, entry.pane_id, entry.server_started_at), entry.row_id
+            )
+    for legacy in launch_seal.census_records():
+        place = legacy.window
+        if place is not None:
+            held_panes.setdefault(
+                (place.tmux_socket, place.pane_id, place.server_started_at), legacy.id
+            )
+    held_labels: dict[str, dict[str, str]] = {}
+    for project_id, live in running.items():
+        for other in live:
+            record = launch_seal.read(other.id)
+            if isinstance(record, launch_seal.LaunchRecord) and record.label:
+                held_labels.setdefault(project_id, {}).setdefault(record.label, other.id)
+    for row in rows:
+        pane = held_panes.get((row.tmux_socket, row.pane_id, row.server_started_at))
+        label = held_labels.get(row.project_id, {}).get(row.label)
+        if pane is not None and pane != row.id:
+            refused[row.id] = (
+                f"{launch_seal.UNRECORDED}: the census takes no row at a pane another "
+                "agent's launch record holds"
+            )
+        elif row.ended_at is None and label is not None and label != row.id:
+            refused[row.id] = (
+                f"{launch_seal.UNRECORDED}: the census takes no row under a label a running "
+                "agent's launch record holds"
+            )
+    return refused
 
 
 def _legacy_record(row: FleetAgent, project: ProjectInfo) -> launch_seal.LaunchRecord:
-    """The record the census makes for ``row``, spawned before records were kept: the row
-    as it stands, its window where it is, its session the one its codename named then."""
+    """The record the census makes for ``row``, spawned by an aisquare that kept no launch
+    records: the row as it stands, its window where it is, its session the one its codename
+    named then."""
     spec = row.launch_spec or LaunchSpec(binary=row.binary, worktree=row.worktree)
     return launch_seal.LaunchRecord(
         id=row.id,
@@ -1241,12 +1353,44 @@ def _legacy_record(row: FleetAgent, project: ProjectInfo) -> launch_seal.LaunchR
     )
 
 
-def _read_record(agent_id: str) -> launch_seal.LaunchRecord | str:
-    """``launch_seal.read``, the census taken first when it has not been (:func:`take_census`):
-    the first read of this aisquare finds a row spawned before records were kept placed."""
-    if not launch_seal.census_taken() and not launch_seal.recorded(agent_id):
-        take_census()
-    return launch_seal.read(agent_id)
+def _records_of(rows: Sequence[FleetAgent]) -> dict[str, launch_seal.LaunchRecord | str]:
+    """Each row's launch record (``launch_seal.read``), by row id, the census taken first of
+    the rows no record names (:func:`take_census`), in one write for them all: a row spawned
+    by an aisquare that keeps no records is placed by the first read that meets it, however
+    long after the upgrade, a rollback or another such row it comes. A row the census
+    refuses has its reason."""
+    records = {row.id: launch_seal.read(row.id) for row in rows}
+    untaken = [
+        row for row in rows if isinstance(records[row.id], str) and not launch_seal.recorded(row.id)
+    ]
+    if untaken:
+        refused = take_census(untaken)
+        for row in untaken:
+            records[row.id] = refused.get(row.id) or launch_seal.read(row.id)
+    return records
+
+
+def _read_record(row: FleetAgent) -> launch_seal.LaunchRecord | str:
+    """``row``'s launch record, the census taken of it first when no record names it
+    (:func:`_records_of`)."""
+    return _records_of([row])[row.id]
+
+
+def records_as_read(rows: Sequence[FleetAgent]) -> dict[str, launch_seal.LaunchRecord | str]:
+    """Each row's launch record as the fleet's next read would hold it (:func:`_records_of`),
+    the census records it would take included, writing nothing: what the doctor judges a
+    row by, so it offers no command the fleet then refuses (R3 of 0.10.0, F4). Never
+    raises: what cannot be read is the record's own reason."""
+    records = {row.id: launch_seal.read(row.id) for row in rows}
+    untaken = [
+        row for row in rows if isinstance(records[row.id], str) and not launch_seal.recorded(row.id)
+    ]
+    if untaken:
+        with suppress(Exception):
+            made, refused = _census_records(untaken)
+            for row in untaken:
+                records[row.id] = made.get(row.id) or refused.get(row.id) or records[row.id]
+    return records
 
 
 def resolve_place(
@@ -1269,7 +1413,7 @@ def resolve_place(
     record places it (r6, finding 4). ``record`` is one already read (r6, finding 11).
     """
     config = config or settings()
-    record = _read_record(row.id) if record is None else record
+    record = _read_record(row) if record is None else record
     if isinstance(record, str):
         return Unplaced(row, record)
     place = record.window
@@ -1376,6 +1520,27 @@ def _sessions_of(placements: Sequence[Placement]) -> list[PlacedSession]:
             and session.created_at > kept.created_at
         ):
             found[key] = session
+    return list(found.values())
+
+
+def _census_sessions(placements: Sequence[Placement]) -> list[PlacedSession]:
+    """The sessions the placed rows' census records name by their name alone (a census
+    record keeps no tmux id for its session), each once, by server and name: listed by that
+    name, as :func:`_running_ids` lists them, so an ENDED census row's dead window is found
+    in its session's list as a recorded row's is. Looked for nowhere else, the 💤 row of a
+    0.9.2 agent that died showed once and was gone from the next read while its window
+    lingered, and a restart left that window behind (R1 of 0.10.0, seq 11047; R3, F7).
+    Read only: what acts on the window acts on its pane's id, on its record's server."""
+    found: dict[tuple[_Address, str], PlacedSession] = {}
+    for placement in _placed_only(placements):
+        place = placement.record.window
+        if not placement.record.legacy or place is None or place.session_id or not place.session:
+            continue
+        address = placement.pane.address
+        found.setdefault(
+            (address, place.session),
+            _listed_session(address, place.session, placement.pane.config),
+        )
     return list(found.values())
 
 
@@ -3714,6 +3879,9 @@ def _observe(
                 found = every.get(session.name)
                 for listed in found if found is not None else session.panes():
                     windows[listed.pane_id] = listed
+            for session in _census_sessions(placements):
+                for named in every.get(session.name, ()):
+                    windows.setdefault(named.pane_id, named)
             output_at = times if live else {}
         else:
             windows = {
@@ -3721,6 +3889,9 @@ def _observe(
                 for session in _sessions_of(placements)
                 for window in session.panes()
             }
+            for session in _census_sessions(placements):
+                for named in session.panes():
+                    windows.setdefault(named.pane_id, named)
             output_at = _activity_times(srv) if live else {}
         said = [w.server_started for w in windows.values() if w.server_started is not None]
         seen: dict[str, _PaneView] = {}
@@ -4775,7 +4946,7 @@ def _by_label(
     row = store.fleet_agent_by_label(project_id, label, live_only=live_only)
     decoy: tuple[FleetAgent, launch_seal.LaunchRecord | str] | None = None
     if row is not None:
-        record = _read_record(row.id)
+        record = _read_record(row)
         if isinstance(record, launch_seal.LaunchRecord) and record.label in (None, label):
             return row, record
         if not isinstance(record, launch_seal.LaunchRecord):
@@ -4791,10 +4962,14 @@ def _by_label(
             -(candidate.ended_at or candidate.created_at).timestamp(),
         ),
     )
+    # Read together, so the census takes every row of them it takes in one write.
+    records = _records_of(
+        [candidate for candidate in ordered if row is None or candidate.id != row.id]
+    )
     for candidate in ordered:
         if row is not None and candidate.id == row.id:
             continue
-        record = _read_record(candidate.id)
+        record = records[candidate.id]
         if isinstance(record, launch_seal.LaunchRecord) and record.label == label:
             if decoy is not None:
                 _say_refused(
@@ -4826,7 +5001,7 @@ def _live_row(
             and pinned.ended_at is None
             and _renamed_from(store, project, label) == pinned.id
         ):
-            return pinned, _read_record(pinned.id)
+            return pinned, _read_record(pinned)
     if found is None:
         raise NoSuchAgent(
             f"no live agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)} — "
@@ -5327,8 +5502,9 @@ def spawn(
     # onboarded the project, which listed a captured directory, and brought back a
     # forgotten one, for an agent that never started (review of #168, round 2).
     # The deliberate add is made with the agent's row (`_record`).
-    # The census of the rows spawned before launch records were kept, before this spawn
-    # starts any window, so before any agent it starts could write the store (`take_census`).
+    # The census of the rows an aisquare that keeps no records spawned, as they stand before
+    # this spawn starts any window, so before any agent it starts could write the store
+    # (`take_census`); a row it meets later is taken when a read meets it.
     take_census()
     with store_session() as store:
         known = store.get_project(project.id)
@@ -9326,7 +9502,7 @@ def _statuses(
     # (`FleetAgentStatus.socket_at`), and a row the sandbox pointed at another pane showed
     # that pane there, and was ended when that one was dead (r5, finding 1). One no record
     # places is asked about nowhere, and reads lost (`_status`).
-    records = {agent.id: _read_record(agent.id) for agent in agents}
+    records = _records_of(agents)
     placements = _resolve_all(agents, config, records)
     views = _observe_sockets(placements, running, tick=tick)
     ended = {
@@ -10065,7 +10241,7 @@ def _queue_message(
     """
     if adapter.queue_args(session.id, text) is None:
         return None  # no queue: asked before anything it would run with is read
-    record = _read_record(agent.id) if record is None else record
+    record = _read_record(agent) if record is None else record
     if isinstance(record, str):
         _say_refused(
             agent.project_id,
@@ -14165,7 +14341,7 @@ def _respawn(
     notes: list[str] = []
     # Read again after the stop, which can outlast its agent's last hook: the replay
     # below takes everything it runs from the record, nothing from the row.
-    record = _launch_record(project, agent, "replace")
+    record = _with_legacy_session(_launch_record(project, agent, "replace"), agent, session)
     if task is not None and agent.task_id != task.id:
         # Read before the stop, and closed during it: the row the stop ended no longer
         # names it (rule 3), and a hand-off prompt naming it set the replacement on
@@ -14345,6 +14521,32 @@ def _moves_home(
     return agent_core.dir_identity(config_dir(ran)) != agent_core.dir_identity(config_dir(goes))
 
 
+def _with_legacy_session(
+    record: launch_seal.LaunchRecord, row: FleetAgent, session: TeamSession | None
+) -> launch_seal.LaunchRecord:
+    """``record``, when it is a census record (:attr:`~aisquare.core.launch_seal.LaunchRecord.
+    legacy`), holding the session ``row``'s board session names: its id, its transcript,
+    its native id and its home, as the hooks of the aisquare that spawned it recorded them,
+    and as that aisquare's restart, switch and hand-over resumed it (0.9.2's
+    ``_respawn``: ``ResumeSpec(session.id, transcript)``). The census takes the row as it
+    stands, so it takes its session as it stands: a replay of it started fresh, where 0.9.2
+    resumed (R3 of 0.10.0, F1). Read when it is replayed, so a ``/clear`` since is the
+    session resumed, as it was. Any other record, or a session that is not the row's, as it
+    is: a recorded row's session is its own hook's word alone (:func:`_resumable`)."""
+    if not record.legacy or record.session is not None:
+        return record
+    if session is None or session.id != row.session_id:
+        return record
+    facts = launch_seal.SessionFacts(
+        id=session.id,
+        agent=record.agent,
+        native_id=session.native_session_id,
+        transcript=session.transcript_path,
+        home=session.account,
+    )
+    return record.model_copy(update={"session": facts})
+
+
 def _resumable(
     record: launch_seal.LaunchRecord, adapter: AgentAdapter | None
 ) -> tuple[ResumeSpec | None, str | None]:
@@ -14362,13 +14564,15 @@ def _resumable(
     option, r3, finding 2). An agent that never reached a hook has no session recorded,
     and one recorded with no native id has nothing to name the thread by: both start
     fresh and say so. A census record (:attr:`~aisquare.core.launch_seal.LaunchRecord.
-    legacy`) holds no session whether or not its agent reached a hook: its row was
-    spawned before launch records were kept, and that is what it says (SMOKE6).
+    legacy`) holds the session its board row names (:func:`_with_legacy_session`): with
+    none there, its row was spawned before launch records were kept, and that is what it
+    says (SMOKE6).
     """
     facts = record.session
     if facts is None and record.legacy:
         return None, (
-            "it was spawned before this aisquare kept launch records, so no session is held for it"
+            "it was spawned before this aisquare kept launch records, and its board row names "
+            "no session to resume"
         )
     if facts is None:
         return None, "no session is recorded for it (its agent never reached a hook)"
@@ -14741,21 +14945,10 @@ def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch
     whose directory decides where the replacement runs and where its worktree lives: it
     has to be the one the record names.
     """
-    record = _read_record(agent.id)
-    if isinstance(record, str):
-        why = record
-    elif record.project_id != project.id:
-        why = "its launch record is another project's"
-    elif not _same_dir(project.root, Path(record.project_root)):
-        why = (
-            f"the project's directory in the store ({project.root}) is not the one it was "
-            f"spawned in ({record.project_root})"
-        )
-    elif not record.worktree and not _within(Path(record.cwd), Path(record.project_root)):
-        # Its directory or one under it: the captain runs from its brain folder under the
-        # home, its project's directory (0.8.2's `spawn(cwd=…)`).
-        why = "its launch record runs it outside its project's directory"
-    else:
+    record = _read_record(agent)
+    why = _replay_refusal(project, record)
+    if why is None:
+        assert isinstance(record, launch_seal.LaunchRecord)  # a reason is a str's own
         # A running agent is stopped first, where its record places it, a row rewritten
         # to name another pane included (`_stop_row`, review r6 of #113, finding 4).
         return record
@@ -14779,6 +14972,48 @@ def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch
         f"cannot {verb} {agent.label!r}: {why} — a replacement takes nothing from the store "
         f"that its launch record does not hold; {way_out}"
     )
+
+
+def _replay_refusal(project: ProjectInfo, record: launch_seal.LaunchRecord | str) -> str | None:
+    """Why no replacement is started from ``record`` in ``project`` (:func:`_launch_record`),
+    or ``None`` when one is."""
+    if isinstance(record, str):
+        return record
+    if record.project_id != project.id:
+        return "its launch record is another project's"
+    if not _same_dir(project.root, Path(record.project_root)):
+        return (
+            f"the project's directory in the store ({project.root}) is not the one it was "
+            f"spawned in ({record.project_root})"
+        )
+    if not record.worktree and not _within(Path(record.cwd), Path(record.project_root)):
+        # Its directory or one under it: the captain runs from its brain folder under the
+        # home, its project's directory (0.8.2's `spawn(cwd=…)`).
+        return "its launch record runs it outside its project's directory"
+    return None
+
+
+def restart_resumes(
+    project: ProjectInfo,
+    row: FleetAgent,
+    record: launch_seal.LaunchRecord | str,
+    session: TeamSession | None,
+) -> bool:
+    """Whether ``fleet restart`` of ``row``, read with ``record`` (:func:`records_as_read`)
+    and its board ``session``, would resume its session rather than start fresh: a record a
+    replacement is started from (:func:`_replay_refusal`) that holds a session on disk
+    (:func:`_resumable`, a census record's its board row's: :func:`_with_legacy_session`).
+    What the doctor's ``fleet-resume`` row offers by: it offered ``fleet restart`` for rows
+    the restart refused (R3 of 0.10.0, F4). Never raises."""
+    try:
+        if isinstance(record, str) or _replay_refusal(project, record) is not None:
+            return False
+        found, _ = _resumable(
+            _with_legacy_session(record, row, session), recorded_adapter(record.agent)
+        )
+    except Exception:
+        return False
+    return found is not None
 
 
 def _unrecorded_refusal(why: str) -> str:
@@ -15587,6 +15822,9 @@ def hand_off(
     # What it forks is the source's launch record's, as every replay's is (`_launch_record`):
     # its launch, its tree, and the session its own hook reported, never the row's columns.
     record = _launch_record(project, agent, "fork")
+    if record.legacy and agent.session_id:
+        with store_session() as store:
+            record = _with_legacy_session(record, agent, store.get_session(agent.session_id))
     forks = recorded_adapter(record.agent)
     onto = _crossing_to(record, to_agent, source)
     runs_as = role or record.role
@@ -18008,7 +18246,7 @@ def _relabel_records(project: ProjectInfo, old: str, renamed: FleetAgent) -> Non
                 was = renamed.label
             else:
                 continue
-            record = _read_record(row.id)
+            record = _read_record(row)
             if isinstance(record, launch_seal.LaunchRecord) and record.label == was:
                 launch_seal.relabel(row.id, row.label)
 

@@ -85,17 +85,23 @@ open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in
   deciding nothing (r8, findings 2, 5 and 6). The sessions a project's spawns made are
   kept here too (:func:`project_sessions`): what later spawns join and ``shutdown``
   takes down, whatever rows are left (r8, findings 2 and 4).
-- A row spawned before records were kept is placed by the census (:func:`take_census`),
-  taken once, while no record was written here, so before anything sandboxed could have
-  written the store; it is then a row like any other, but that its replay starts fresh.
-  A row with no record that the census did not find is told nothing, and only a dead
-  window of its is removed (r8, findings 1, 3 and 9).
+- A row spawned by an aisquare that keeps no records (0.9.2, before an upgrade or after a
+  rollback) is placed by the census (:func:`take_census`), which takes it when the fleet
+  first reads it (``services.fleet._records_of``), as the row stood then: it is then a row
+  like any other, but that its session is the one its board row names, as that aisquare
+  resumed it. A census taken once was the only way in, and every row spawned after it, a
+  still-open 0.9.2 asq's or a rollback's, read lost (R3 of 0.10.0, F2 and F3). It takes
+  no row that anything here names (a row whose record is lost since), none of an agent
+  that sandboxes its tools (no aisquare that keeps no records ran one), none at a pane
+  another row's record holds, and none under a label a running agent's record holds. Such
+  a row is told nothing, and only a dead window of its is removed (r8, findings 1, 3 and
+  9).
 - What the fleet reads of a session to act on outside the sandbox — a failed turn's
   limit, the hand-over it starts — is read from the transcript the record holds, never
   the board session's (r5, finding 2).
 
-Nothing scans the store to mint a record but the census, once, before any record was
-kept (above): a row whose record is lost later is refused, naming the way out. What a
+Nothing reads the store to mint a record but the census, of rows no record names (above):
+a row whose record is lost later is refused, naming the way out. What a
 record holds is read back as it was written, never compared with a digest of today's
 model, so a release that adds a field reads an older record with that field's default.
 
@@ -221,10 +227,11 @@ class LaunchRecord(BaseModel):
     ``label`` column, which a sandbox can swap with another row's (review r8 of #113,
     finding 5). ``None`` in a record written before it was kept."""
     legacy: bool = False
-    """Made by the census (:func:`take_census`) for a row spawned before launch records
-    were kept, from the row as it stood then, before any sandboxed agent could write the
-    store: its window is that row's own, its agent starts fresh on a replay (no session
-    is held for it), and its session is the one tmux says holds its pane."""
+    """Made by the census (:func:`take_census`) for a row spawned by an aisquare that kept
+    no launch records, from the row as it stood when the census took it: its window is
+    that row's own, its agent's session on a replay is the one its board row names
+    (``services.fleet._with_legacy_session``: that aisquare's hooks recorded it, and its
+    replay resumed it), and its tmux session is the one tmux says holds its pane."""
 
 
 class SessionPlace(BaseModel):
@@ -270,16 +277,20 @@ class ProjectSessions(BaseModel):
 
 
 class LegacyCensus(BaseModel):
-    """The rows that had no launch record when this aisquare first read the fleet, each
-    as a launch record made from the row as it stood then (:attr:`LaunchRecord.legacy`).
+    """The rows spawned by an aisquare that kept no launch records, each as a launch record
+    made from the row as it stood when the census took it (:attr:`LaunchRecord.legacy`).
 
-    Taken once (:func:`take_census`), by the first fleet read or spawn outside any
-    sandbox and before any agent that sandboxes its tools is launched, so before anything
-    in a sandbox could have written the store; never rewritten. A row inserted later with
-    no record is not in it, and is refused (review r8 of #113, finding 1)."""
+    Added to (:func:`take_census`) outside any sandbox, by a fleet read that meets such a
+    row, a spawn, and the launch of any agent that sandboxes its tools; an entry is never
+    replaced. Taken once, it never held the rows a 0.9.2 asq left open across the upgrade
+    spawned, nor a rollback's: they read lost, and nothing could tell, stop or restart them
+    (R3 of 0.10.0, F2 and F3). Which rows it may take is the fleet's
+    (``services.fleet._census_refusal``); a row it refuses is refused as a row with no
+    record is (review r8 of #113, finding 1)."""
 
     version: int = VERSION
     taken_at: datetime
+    """When the census was first written; an entry added later keeps it."""
     records: dict[str, LaunchRecord] = Field(default_factory=dict)
 
 
@@ -391,10 +402,17 @@ def recorded(agent_id: str) -> bool:
     return _path(agent_id).exists()
 
 
+UNRECORDED = (
+    "no launch record was written for it (it was spawned by an aisquare that keeps none, "
+    "or its record could not be written), and the census does not hold it"
+)
+"""Why a row has no record to replay, when no spawn wrote one and the census holds none."""
+
+
 def read(agent_id: str) -> LaunchRecord | str:
     """The record of the row ``agent_id``, or why there is none to replay. Never raises.
-    A row spawned before records were kept has the one the census made for it
-    (:func:`take_census`), when it was in the fleet then."""
+    A row spawned by an aisquare that keeps no records has the one the census made for it
+    (:func:`take_census`), once it took it."""
     path = _path(agent_id)
     try:
         body = path.read_text(encoding="utf-8")
@@ -402,11 +420,7 @@ def read(agent_id: str) -> LaunchRecord | str:
         legacy = _census().records.get(agent_id) if census_taken() else None
         if legacy is not None and legacy.id == agent_id:
             return legacy
-        return (
-            "no launch record was written for it (it was spawned by an aisquare that "
-            "keeps none, or its record could not be written), and it was not in the "
-            "fleet when this aisquare first read it"
-        )
+        return UNRECORDED
     except (OSError, UnicodeDecodeError) as exc:
         return f"its launch record could not be read ({exc})"
     try:
@@ -427,71 +441,91 @@ def _census_path() -> Path:
     return seals_dir() / "legacy-census.json"
 
 
-_CENSUS_CACHE: dict[str, tuple[tuple[int, int], LegacyCensus]] = {}
+_CENSUS_CACHE: dict[str, tuple[tuple[int, int, int], LegacyCensus]] = {}
 
 
 def census_taken() -> bool:
-    """Whether the census of rows spawned before records were kept was taken here."""
+    """Whether a census of rows spawned by an aisquare that keeps no records is here."""
     return _census_path().exists()
 
 
-def _census() -> LegacyCensus:
-    """The census (:func:`take_census`), read once per change of its file; an empty one
-    when it cannot be read, so nothing is placed on a guess."""
+def _census_or_why() -> LegacyCensus | str:
+    """The census (:func:`take_census`) as written, read once per change of its file (a
+    rewrite is a new file: its inode is part of the key); an empty one when there is
+    none, and why when one is there that cannot be read."""
     path = _census_path()
     try:
         stat = path.stat()
-        key = (stat.st_mtime_ns, stat.st_size)
-        cached = _CENSUS_CACHE.get(str(path))
-        if cached is not None and cached[0] == key:
-            return cached[1]
-        census = LegacyCensus.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValidationError):
+    except FileNotFoundError:
         return LegacyCensus(taken_at=datetime.now(tz=UTC))
+    except OSError as exc:
+        return f"{path} cannot be read ({exc.strerror or exc})"
+    key = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    cached = _CENSUS_CACHE.get(str(path))
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        census = LegacyCensus.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValidationError) as exc:
+        return f"{path} cannot be read ({exc})"
     _CENSUS_CACHE[str(path)] = (key, census)
     return census
 
 
-_RECORD_FILE = re.compile(r"[0-9a-f]{64}\.json")
+def _census() -> LegacyCensus:
+    """The census (:func:`_census_or_why`); an empty one when it cannot be read, so nothing
+    is placed on a guess."""
+    census = _census_or_why()
+    return (
+        census if isinstance(census, LegacyCensus) else LegacyCensus(taken_at=datetime.now(tz=UTC))
+    )
 
 
-def records_kept() -> bool:
-    """Whether any launch record was ever written here: once one was, an agent that
-    sandboxes its tools may have run, and the store is no longer the fleet as it stood
-    before records were kept, so no census is taken from it (:func:`take_census`)."""
-    try:
-        return any(_RECORD_FILE.fullmatch(entry.name) for entry in seals_dir().iterdir())
-    except OSError:
-        return False
+def window_recorded(agent_id: str) -> bool:
+    """Whether a spawn recorded the row ``agent_id``'s window (:func:`placed`), readable or
+    not: a row of an aisquare that keeps records, whose record may be lost since."""
+    return _window_path(agent_id).exists()
 
 
-def take_census(records: list[LaunchRecord]) -> str | None:
-    """Write the census of the rows spawned before records were kept: ``None`` when it was
-    written now, or was already (it is never rewritten), otherwise why it could not be.
-    Created exclusively, so two processes taking it at once keep the first; only a
-    process outside the sandbox can (the directory is read-only in it)."""
+def take_census(records: Collection[LaunchRecord]) -> str | None:
+    """Add ``records`` to the census of the rows spawned by an aisquare that keeps no
+    records: ``None`` when each is in it now, otherwise why they could not be added. An
+    entry already there is kept as it was, never replaced, and a census that cannot be read
+    is never written over (its rows would be lost to it). Under its lock (:func:`_locked`),
+    so two processes adding at once keep both; only a process outside the sandbox can (the
+    directory is read-only in it)."""
     why = ensure_dir()
     if why is not None:
         return why
-    census = LegacyCensus(
-        taken_at=datetime.now(tz=UTC),
-        records={record.id: record.model_copy(update={"legacy": True}) for record in records},
-    )
+    path = _census_path()
     try:
-        with _census_path().open("x", encoding="utf-8") as handle:
-            handle.write(census.model_dump_json(indent=1) + "\n")
-    except FileExistsError:
-        return None
+        with _locked(path):
+            census = _census_or_why()
+            if isinstance(census, str):
+                return census
+            new = {
+                record.id: record.model_copy(update={"legacy": True})
+                for record in records
+                if record.id not in census.records
+            }
+            if new or not path.exists():
+                body = census.model_copy(update={"records": {**census.records, **new}})
+                write_replacing(path, body.model_dump_json(indent=1) + "\n", keep_mode=False)
     except OSError as exc:
-        return f"{_census_path()} could not be written ({exc.strerror or exc})"
+        return f"{path} could not be written ({exc.strerror or exc})"
     return None
+
+
+def census_records() -> list[LaunchRecord]:
+    """Every record the census holds (:func:`take_census`), of every project."""
+    if not census_taken():
+        return []
+    return list(_census().records.values())
 
 
 def legacy_records(project_id: str) -> list[LaunchRecord]:
     """The census's records of ``project_id``'s rows (:func:`take_census`)."""
-    if not census_taken():
-        return []
-    return [record for record in _census().records.values() if record.project_id == project_id]
+    return [record for record in census_records() if record.project_id == project_id]
 
 
 def _project_path(project_id: str) -> Path:

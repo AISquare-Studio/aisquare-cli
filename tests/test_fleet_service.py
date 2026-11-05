@@ -16264,8 +16264,9 @@ def test_a_restart_of_a_row_from_before_launch_records_says_why_it_starts_fresh(
 ) -> None:
     """SMOKE6 (PR #113 at 8b33c942): restarting a census-placed row said "its agent never
     reached a hook", which was false: its agent ran its hooks under the aisquare it was
-    spawned with, and the census record holds no session because it never carries one. A
-    recorded row whose agent never reached a hook keeps that reason."""
+    spawned with, and the census record holds no session of its own (its board row's is the
+    one it resumes, ``fleet._with_legacy_session``). A recorded row whose agent never
+    reached a hook keeps that reason."""
     legacy, recorded = _coder(project), _coder(project)
     for agent in (legacy, recorded):
         tmux.set_command(agent.pane_id, "claude")
@@ -16275,7 +16276,9 @@ def test_a_restart_of_a_row_from_before_launch_records_says_why_it_starts_fresh(
     assert [r.id for r in launch_seal.legacy_records(project.id)] == [legacy.id, recorded.id]
     restarted = fleet_service.restart(project, legacy.label)
     said = " ".join(restarted.notes)
-    assert "spawned before this aisquare kept launch records" in said, said
+    # Its board session is the one it resumes (R3 of 0.10.0, F1): this one has no
+    # transcript on disk, which is what it says.
+    assert "no transcript on disk to resume" in said, said
     assert "never reached a hook" not in said, said
     # A recorded row whose agent's hook never reported a session keeps its own reason.
     fresh = fleet_service.spawn(project, "coder", worktree=False).agent
@@ -16304,14 +16307,13 @@ def test_a_listing_shows_the_account_its_launch_record_runs_it_on(
     assert listed.agent.account_slot == record.account_slot != 7
 
 
-def test_the_census_is_taken_once_and_never_from_a_store_records_were_kept_beside(
+def test_the_census_takes_no_row_at_another_agents_pane_and_the_doctor_takes_none(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    """Rule A's guard: which rows are legacy is not a store column (a sandbox could date
-    an INSERT back): it is the census, written once in launch-seals/ (read-only to a
-    sandbox) before any record was kept here. A row inserted after it with no record is
-    not legacy; nor is one whose record was lost; and the doctor, which writes nothing,
-    never takes it."""
+    """Rule A's guard, as the census taken on read keeps it (R3 of 0.10.0, F2): which rows
+    are legacy is the census, in launch-seals/ (read-only to a sandbox). A row inserted
+    after it at a pane another agent's record or census entry holds is not legacy; nor is
+    one whose record was lost; and the doctor, which writes nothing, never takes it."""
     agent = _coder(project)
     _before_records()
     diagnostics._check_fleet(lambda socket: tmux)
@@ -16322,7 +16324,10 @@ def test_the_census_is_taken_once_and_never_from_a_store_records_were_kept_besid
     fake = _fake_row(project, agent, agent.pane_id, label="coder-9")
     placement = fleet_service.resolve_place(fake)
     assert isinstance(placement, fleet_service.Unplaced)
-    assert "not in the fleet when this aisquare first read it" in placement.why
+    assert "the census takes no row at a pane another agent's launch record holds" in (
+        placement.why
+    )
+    assert [r.id for r in launch_seal.legacy_records(project.id)] == [agent.id]
 
 
 def test_a_legacy_agents_own_hook_leaves_it_placed(
@@ -16347,6 +16352,200 @@ def test_a_legacy_agents_own_hook_leaves_it_placed(
 
     assert not launch_seal.recorded(agent.id)
     assert isinstance(fleet_service.resolve_place(agent), fleet_service.Placed)
+
+
+# --- R5 of 0.10.0: every agent 0.9.2 made stays manageable --------------------------------
+
+
+def _as_092(row: FleetAgent) -> FleetAgent:
+    """``row`` as 0.9.2 leaves the one it spawns: no launch record, no window recorded, no
+    entry in its project's index of windows, and no agent named (0.9.2 has no such column,
+    and a store this aisquare migrated holds NULL in what 0.9.2 writes)."""
+    launch_seal._path(row.id).unlink()
+    launch_seal._window_path(row.id).unlink()
+    launch_seal.forget_row_windows(row.project_id, [row.id])
+    with store_session() as store:
+        stored = store.get_fleet_agent(row.id)
+        assert stored is not None
+        return store.upsert_fleet_agent(stored.model_copy(update={"agent": None}))
+
+
+def _092_transcript(row: FleetAgent, tmp_path: Path) -> Path:
+    """The board session 0.9.2's hooks wrote for ``row``, naming its transcript on disk."""
+    assert row.session_id is not None
+    transcript = tmp_path / f"{row.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=row.session_id,
+                project_id=row.project_id,
+                role=row.role,
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=str(transcript),
+            )
+        )
+    return transcript
+
+
+def test_a_census_taken_once_still_places_every_agent_092_spawned_after_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R3 of 0.10.0, F2 (the owner's machine): a pre-release build took the census of 136
+    rows on 2026-10-24, and it was never taken again, so the 7 agents 0.9.2 spawned since
+    read "✗ lost — not placed: no launch record" and tell, stop, restart and switch refused
+    them. The census takes each row no record names when a read meets it."""
+    old = _coder(project)
+    _before_records()
+    fleet_service.list_agents(project)  # the census, as the pre-release build took it
+    assert [r.id for r in launch_seal.legacy_records(project.id)] == [old.id]
+    later = _as_092(_coder(project))  # 0.9.2 spawned it since
+    tmux.set_command(later.pane_id, "claude")
+    _board_session(later, "waiting")
+
+    listed = {s.agent.id: s.state for s in fleet_service.list_agents(project)}
+    restarted = fleet_service.restart(project, later.label)
+
+    assert listed[later.id] == "waiting", listed
+    assert {r.id for r in launch_seal.legacy_records(project.id)} == {old.id, later.id}
+    assert restarted.replaced.id == later.id and restarted.was_running
+    assert (later.pane_id, "literal", "/exit") in tmux.typed and later.pane_id in tmux.killed
+
+
+def test_an_agent_092_spawns_after_this_aisquare_kept_records_is_placed_and_operated(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R3 of 0.10.0, F3 (i): an asq of 0.9.2 left open across a shell's `aisquare upgrade`
+    spawns in its own process, after this aisquare has written records (and its census)
+    here. That agent read lost: no census was ever taken where records were kept. It is
+    told, listed and stopped as any other."""
+    manager = fleet_service.spawn(project, "manager").agent  # this aisquare's, recorded
+    late = _as_092(_coder(project))  # the open 0.9.2 asq's spawn
+    for agent in (manager, late):
+        tmux.set_command(agent.pane_id, "claude")
+        _board_session(agent, "waiting")
+
+    listed = {s.agent.id: s.state for s in fleet_service.list_agents(project)}
+    told = fleet_service.tell(project, late.label, "please rebase")
+    stopped = fleet_service.stop(project, late.label)
+
+    assert listed == {manager.id: "waiting", late.id: "waiting"}, listed
+    assert "no launch record" not in told.how, told.how
+    assert any(pane == late.pane_id for pane, _, _ in tmux.typed), "told in its own pane"
+    assert stopped.agent.id == late.id and late.pane_id in tmux.killed
+
+
+def test_a_rollback_round_trip_leaves_the_agents_092_restarted_manageable(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """R3 of 0.10.0, F3 (ii): rolled back, 0.9.2 restarts an agent this aisquare spawned
+    (its row ended, a new row under the label, in a new window, no record); upgraded again,
+    that agent read lost, and a restart of its label picked the old row this aisquare had
+    recorded, on that row's account. The new row is the label's, and is restarted, resumed
+    as 0.9.2 resumes it."""
+    first = _coder(project)
+    fleet_service.stop(project, first.label)  # 0.9.2's restart stops it first
+    again = _as_092(_coder(project, label=first.label))  # and spawns it again, unrecorded
+    transcript = _092_transcript(again, tmp_path)
+    tmux.set_command(again.pane_id, "claude")
+
+    [listed] = fleet_service.list_agents(project)
+    restarted = fleet_service.restart(project, first.label)
+
+    assert listed.agent.id == again.id and listed.state != "lost", listed
+    assert restarted.replaced.id == again.id, "the row 0.9.2 made, not the old recorded one"
+    assert restarted.resumed and _flag(_command(tmux), "--resume") == str(transcript)
+
+
+@pytest.mark.parametrize("died", ["after the upgrade", "under 0.9.2"])
+def test_a_dead_092_agent_stays_listed_and_its_restart_replaces_its_window(
+    died: str, tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R1 of 0.10.0 (seq 11047) and R3's F7: a 0.9.2 agent that died after the upgrade was
+    listed '💤 exited' once, then not at all while its dead window lingered; one that died
+    under 0.9.2 was never listed; and a restart left the dead window. 0.9.2 listed both on
+    every read and its restart replaced the window. The census names the session by its
+    name alone, and the listing now looks the window up there (`fleet._census_sessions`)."""
+    agent = _coder(project)
+    if died == "under 0.9.2":
+        tmux.die(agent.pane_id, 0)
+        with store_session() as store:  # 0.9.2's own listing ended it
+            store.end_fleet_agent_if_live(agent.id, exit_status=0, ended_by="died")
+    _before_records()  # the upgrade: no record, no index of the project's windows
+    if died == "after the upgrade":
+        fleet_service.list_agents(project)  # the census, while it ran
+        tmux.die(agent.pane_id, 0)
+
+    reads = [
+        [s.state for s in fleet_service.list_agents(project) if s.agent.id == agent.id]
+        for _ in range(3)
+    ]
+    restarted = fleet_service.restart(project, agent.label)
+
+    assert reads == [["exited"]] * 3, reads
+    assert restarted.replaced.id == agent.id and agent.pane_id in tmux.killed
+
+
+@pytest.mark.parametrize("verb", ["restart", "switch"])
+def test_a_092_agents_first_restart_or_switch_resumes_its_transcript(
+    verb: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """R3 of 0.10.0, F1: the first restart, switch or usage-limit hand-over of an agent
+    0.9.2 started began FRESH with a hand-off prompt, where 0.9.2 resumed its transcript
+    (`claude --resume <transcript>`, 0.9.2's `_respawn`). Its census record holds the
+    session its board row names, as 0.9.2's hooks recorded it (`fleet._with_legacy_session`),
+    so it resumes, as 0.9.2 did, and keeps its session id."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _before_records()  # spawned by 0.9.2
+    transcript = _092_transcript(agent, tmp_path)
+    tmux.set_command(agent.pane_id, "claude")
+
+    if verb == "restart":
+        receipt = fleet_service.restart(project, agent.label)
+        resumed, started = receipt.resumed, receipt.started
+    else:
+        moved = fleet_service.switch(project, agent.label, reason="session limit")
+        resumed, started = moved.resumed, moved.started
+
+    command = _command(tmux)
+    assert resumed and _flag(command, "--resume") == str(transcript), command
+    assert "--session-id" not in command and started.session_id == agent.session_id
+    record = launch_seal.read(started.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and not record.legacy
+    assert record.session is not None and record.session.id == agent.session_id
+
+
+def test_the_doctor_offers_a_restart_only_for_an_exited_agent_the_restart_resumes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """R3 of 0.10.0, F4: the doctor's fleet-resume row read the board session alone, and
+    offered `fleet restart` for rows the restart then refused (no launch record) or started
+    fresh. It asks the restart's own question (`fleet.restart_resumes`), of the record as
+    the fleet's next read holds it, and writes nothing: a 0.9.2 agent the census has not
+    taken yet is offered, and one whose record is lost is not."""
+    legacy, lost = _coder(project), _coder(project)
+    for agent in (legacy, lost):
+        fleet_service.stop(project, agent.label)
+        _092_transcript(agent, tmp_path)
+    _as_092(legacy)  # spawned by 0.9.2: nothing here names it
+    _unrecorded(lost)  # its record lost since its spawn: the census takes no such row
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert f"`{_fleet('restart', project, legacy.label)}`" in check.detail, check.detail
+    assert lost.label not in check.detail, check.detail
+    assert check.detail.startswith("1 exited agent can be resumed"), check.detail
+    assert launch_seal.legacy_records(project.id) == [], "the doctor writes nothing"
+    restarted = fleet_service.restart(project, legacy.label)
+    assert restarted.resumed, "what it offered is what the restart does"
 
 
 def test_shutdown_takes_down_an_agent_that_ended_its_own_row(
@@ -16515,16 +16714,24 @@ def test_an_ended_row_with_no_record_lists_exited_not_lost(
 def test_a_fake_row_naming_a_live_window_of_its_project_kills_nothing(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    """Review r8 of #113, finding 9: a fake row INSERTed at a window the human opened in the
-    project's session (an editor), or at an agent whose own row was ended, had that window
-    killed by `fleet stop <fake>`. A row no record places reaches only a dead window."""
+    """Review r8 of #113, finding 9: a fake row INSERTed at an agent whose own row was ended
+    had that agent's window killed by `fleet stop <fake>`. The census takes no row at a pane
+    a record holds (`fleet._census_refusal`), so it reaches only a dead window.
+
+    The finding's other half, a fake at a window the human opened in the project's session
+    (an editor), is a row the census now takes, as it takes a 0.9.2 agent's: a row at a pane
+    no record holds is what a 0.9.2 asq left open across the upgrade, or a rollback, spawns,
+    and nothing in the store tells the two apart. Refused, every such agent read lost and
+    could not be told, stopped, restarted or switched (R3 of 0.10.0, F2 and F3). The broker
+    keeps the store read-only to every sandbox (``types.store_read_only``), so no sandboxed
+    agent can INSERT the fake, which 0.9.2's own `fleet stop` would have acted on too."""
     agent = _coder(project)
     session = _session_of(project).split(":", 1)[1]
     editor = tmux.spawn_window(session, name="vim", cwd=Path.home(), command=["vim"]).pane_id
     at_the_editor = _fake_row(project, agent, editor, label="coder-9")
-    with pytest.raises(FleetError, match="a live window is never killed"):
-        fleet_service.stop(project, at_the_editor.label)
-    _ended_in_the_store(agent)  # and an agent whose own row was ended
+    placed = fleet_service.resolve_place(at_the_editor)
+    assert isinstance(placed, fleet_service.Placed) and placed.record.legacy, "taken"
+    _ended_in_the_store(agent)  # an agent whose own row was ended
     at_the_agent = _fake_row(project, agent, agent.pane_id, label="coder-8")
     with pytest.raises(FleetError, match="a live window is never killed"):
         fleet_service.stop(project, at_the_agent.label)

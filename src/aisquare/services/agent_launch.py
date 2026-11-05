@@ -151,10 +151,10 @@ def start_broker(
 def prepare_sandbox(selected: ResolvedAgent) -> None:
     """Before an agent that sandboxes its tools is exec'd: make the store its profile
     names (``types.prepare_store``), which its sandbox would otherwise leave an empty
-    file in place of, and take the fleet's census of the rows spawned before launch
-    records were kept (``services.fleet.take_census``) if it was not. Nothing in a
-    sandbox can write the store (``types.store_read_only``), so the census is taken from
-    rows no sandbox wrote whenever it is taken."""
+    file in place of, and take into the fleet's census the rows an aisquare that keeps no
+    launch records spawned (``services.fleet.take_census``), as they stand before it runs.
+    Nothing in a sandbox can write the store (``types.store_read_only``), so the census is
+    taken from rows no sandbox wrote whenever it is taken."""
     from aisquare.core.agent_adapters.types import prepare_store, store_dir
 
     if selected.adapter.capabilities.sandboxes_tools:

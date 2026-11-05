@@ -489,10 +489,13 @@ def test_a_tree_no_launch_record_places_is_kept_and_said_as_reap_says_it(
     tree = tmp_path / "trees" / "coder-1"
     _git("worktree", "add", "-q", "-b", "fleet/alpha-x/coder-1", str(tree), cwd=alpha.root)
     cwd = tree if at == "its-tree" else alpha.root
-    fleet_service.take_census()  # before the row: a row spawned since, with no record
     with store_session() as store:
         row = store.upsert_fleet_agent(_agent(alpha, "coder-1", cwd=cwd, worktree=True))
         store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
+    # Its record lost since its spawn, which recorded its window: the census takes no such
+    # row (a row with no trace here is a 0.9.2 one, which it takes: R3 of 0.10.0, F2).
+    place = launch_seal.WindowPlace(tmux_socket="asq", pane_id="%1", created_at=row.created_at)
+    assert launch_seal.placed(row.id, place) is None
     assert isinstance(fleet_service.resolve_place(row), fleet_service.Unplaced), "the fixture"
 
     result = runner.invoke(app, ["project", "fresh", "-P", "alpha-x", "--yes"])

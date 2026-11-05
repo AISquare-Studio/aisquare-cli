@@ -397,20 +397,15 @@ def test_list_agents_many_answers_what_list_agents_answers(
 
     assert many.errors == {}
     for project in projects:
-        # The dead row has no launch record of its own session (the census made its record
-        # from the row: no session to look in): the read that ended it shows its lingering
-        # window as 💤 exited, and the next, finding it ended, does not (#113).
-        got = [s for s in many.agents.get(project.id, []) if s.agent.id != dead.id]
-        assert got == one_by_one[project.id], project.codename
+        assert many.agents.get(project.id, []) == one_by_one[project.id], project.codename
     [ended_now] = [s for s in many.agents[projects[0].id] if s.agent.id == dead.id]
     assert ended_now.state == "exited"
-    # Main asserted `["ended"]` here: an ended row whose window lingers shows as 💤. It is
-    # narrowed on purpose (r23, 10): this row's record is the census's, which names the
-    # session by its name and not by tmux's id (`WindowPlace.session_id`), and the listing
-    # looks an ended row up in the sessions its record names by id. Left out, by the single
-    # read and the tick alike; a real spawn's lingering window, recorded with its session's
-    # id, is 💤 in both (`test_the_tick_finds_the_window_of_an_ended_row...`, below).
-    assert one_by_one[projects[12].id] == [] == many.agents.get(projects[12].id, [])
+    # Main's assertion, as main has it: an ended row whose window lingers shows as 💤, the
+    # census's row too, whose record names its session by its name alone, not tmux's id
+    # (`fleet._census_sessions`). Narrowed here for #113, the 💤 row of a 0.9.2 agent that
+    # died showed once, then was gone while its window lingered (R1 of 0.10.0, 11047; R3, F7).
+    assert [s.agent.label for s in one_by_one[projects[12].id]] == ["ended"]
+    assert [s.agent.label for s in many.agents[projects[12].id]] == ["ended"]
     assert one_by_one[projects[11].id] == []
 
 

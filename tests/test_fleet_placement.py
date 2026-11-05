@@ -239,8 +239,9 @@ CALLERS: dict[str, frozenset[str]] = {
         }
     ),
     # Session names tmux itself listed, for `shutdown --all`'s sweep; or the census holds,
-    # whose panes alone are matched in it (`_running_ids`).
-    "_listed_session": frozenset({"_swept_sessions", "_running_ids"}),
+    # whose panes alone are matched in it (`_running_ids`, and the listing's view of a
+    # census row's window, `_census_sessions`: R1 of 0.10.0, 11047).
+    "_listed_session": frozenset({"_swept_sessions", "_running_ids", "_census_sessions"}),
 }
 
 _TARGETS = frozenset({"pane_id", "session", "name", "old", "recorded", "path"})

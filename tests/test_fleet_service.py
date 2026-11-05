@@ -2046,6 +2046,22 @@ def test_spawn_types_a_claude_prompt_once_its_session_has_started(
     assert _events(project, "note") == []
 
 
+def test_a_spawn_with_no_prompt_types_nothing(
+    tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+) -> None:
+    """The negative control of main 0.9.2's test_spawn_types_the_prompt_once_the_agent_is_up,
+    which its replacement above dropped (R1 of #113's release): a spawn given no prompt
+    types nothing, beside one given a prompt, which types it."""
+    _coder(project)
+    assert tmux.typed == [], "no prompt, nothing typed"
+    prompted = _coder(project, prompt="start on tsk_1")
+    assert (prompted.pane_id, "paste", "start on tsk_1") in tmux.typed, "a prompt is typed"
+
+
 def test_a_claude_spawn_whose_session_never_starts_types_nothing_and_files_the_note(
     tmux: FakeTmux,
     session_start_for_real: None,

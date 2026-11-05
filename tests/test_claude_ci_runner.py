@@ -199,6 +199,7 @@ def test_the_floors_hold_claude_codes_adapter_and_the_seam_and_report_the_rest()
     assert coverage_floors.problems(found, held) == sorted(missing)
     under = {claude: (90.5, 74.0), fleet: (74.0, 50.5)}
     said = coverage_floors.problems(found, under)
+    assert len(said) == len(set(said)), "each line once (tester 846e8c78's nit)"
     assert f"{claude}: line coverage 90.0% is under its floor 90.5%" in said
     assert f"{fleet}: branch coverage 50.0% is under its floor 50.5%" in said
     assert not any("codex.py" in line for line in said), "Codex's adapter is reported, not held"

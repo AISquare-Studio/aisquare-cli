@@ -107,7 +107,7 @@ def figures(report: Mapping[str, object]) -> dict[str, Figures]:
 def problems(found: Mapping[str, Figures], floors: Mapping[str, tuple[float, float]]) -> list[str]:
     """Why the coverage fails, one line each: a floored module missing, or under its floor."""
     out: list[str] = []
-    for path in sorted(p for p in (*found, *floors, *SEAM) if floored(p)):
+    for path in sorted({p for p in (*found, *floors, *SEAM) if floored(p)}):  # each once
         if path not in found:
             out.append(f"{path}: not measured at all")
             continue

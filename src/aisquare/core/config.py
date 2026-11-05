@@ -555,6 +555,24 @@ def split_denied_tools(args: Sequence[str]) -> tuple[set[str], list[str]]:
     return denied, kept
 
 
+def denied_tools_at(args: Sequence[str]) -> int | None:
+    """Where ``args``' first ``--disallowedTools`` (either spelling) stands, which is its
+    place among what :func:`split_denied_tools` keeps of them too (nothing before it is
+    taken): the index its one merged token goes back to, so a line that already carried the
+    role's flags keeps them in its own order. ``None`` when none comes before a bare ``--``."""
+    for index, arg in enumerate(args):
+        if arg == "--":
+            return None
+        if is_denied_tools_flag(arg):
+            return index
+    return None
+
+
+def is_denied_tools_flag(arg: str) -> bool:
+    """Whether ``arg`` is a ``--disallowedTools`` token (either spelling, ``=`` or not)."""
+    return arg.partition("=")[0] in _DISALLOWED_TOOLS
+
+
 def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
     """A reviewer a 0.6.0 or 0.7.0 save left with exactly ``["--restricted"]`` loads with today's.
 

@@ -55,7 +55,12 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
 from aisquare.core.agent_adapters import adapter_for_binary, agents_named
 from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
-from aisquare.core.config import FleetSettings, load_config
+from aisquare.core.config import (
+    FleetSettings,
+    denied_tools_at,
+    is_denied_tools_flag,
+    load_config,
+)
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.services import agent_launch, delivery, explainability_ops
@@ -760,6 +765,16 @@ def launch(
         if harness.flag_arg(agent_args, flag) is not None:
             binding_args = harness.without_flag(binding_args, flag)
     role_args = _with_shared_memory(resolution.binary, role_args, [*binding_args, *agent_args])
+    binding_first = selected.adapter.capabilities.binding_args_first
+    if binding_first and not bound_args and not fleet_decided and policy.applied:
+        # A line `team spawn` composed (`--no-bound-args`) already carries the role's flags,
+        # in 0.9.2's order: the policy's one token goes back where its `--disallowedTools`
+        # stood, so the pasted line runs what `team spawn --exec` runs (R1 F3).
+        at = denied_tools_at(ctx.args)
+        if at is not None:
+            token = [arg for arg in role_args if is_denied_tools_flag(arg)]
+            role_args = [arg for arg in role_args if not is_denied_tools_flag(arg)]
+            agent_args = [*agent_args[:at], *token, *agent_args[at:]]
     for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI
@@ -767,7 +782,6 @@ def launch(
         stderr_console().print(f"{role}: {note}", style="dim")
     # The binding's arguments ahead of the role's, as 0.9.2 launched Claude Code
     # (`capabilities.binding_args_first`), else the role's ahead of the binding's.
-    binding_first = selected.adapter.capabilities.binding_args_first
     owned_raw = [*binding_args, *role_args] if binding_first else [*role_args, *binding_args]
     try:
         # The binding's and this line's arguments less the `--disallowedTools` the policy

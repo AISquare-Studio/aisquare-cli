@@ -117,7 +117,12 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
     # Claude Code's CLAUDE_CONFIG_DIR stays as the shell or the binding wrote it.
     if selected.adapter.capabilities.exports_home_env:
         env[selected.adapter.home_env] = str(selected.config_dir)
-    if hub is not None:
+    # The hub, for an agent whose board calls go through its launch's broker (Codex's
+    # sandbox, `capabilities.sandboxes_tools`), which answers them on the launch's board.
+    # Claude Code resolves its board as 0.9.2 did, by each call's own directory: given the
+    # hub, `aisquare task add` run in another repository landed on the launch's board
+    # (R1 of #113's release, F2), where 0.9.2 refused it or used that repository's own.
+    if hub is not None and capabilities.sandboxes_tools:
         env.setdefault("AISQUARE_TEAM_HUB", str(hub))
     return parent_run
 

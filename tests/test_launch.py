@@ -1242,6 +1242,72 @@ def _briefed(name: str) -> str:
     return "\n".join(personas.briefing(personas.resolve(name))) + "\n"
 
 
+def test_a_hand_launched_claude_codes_board_is_each_calls_own_directorys(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1 of #113's release, F2: `aisquare launch` handed every agent AISQUARE_TEAM_HUB, the
+    launch's project root, so `aisquare task add` that a hand-launched Claude Code session ran
+    in another repository landed on the launch's board. 0.9.2 resolved each call by its own
+    directory, as again: refused in a repository that is no project of the user's, on that
+    project's own board in one that is."""
+    import subprocess
+
+    from aisquare.core.orchestrator import team_project
+    from aisquare.services import team as team_service
+
+    subprocess.run(["git", "init", "-q", str(work_dir)], check=True)
+    team_service.activate(work_dir)
+    result = runner.invoke(app, ["launch", "coder"])
+    assert result.exit_code == 0, result.output
+    assert "AISQUARE_TEAM_HUB" not in spy["env"], "Claude Code is given no hub"
+    agents_env = {key: value for key, value in spy["env"].items() if key.startswith("AISQUARE_")}
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    monkeypatch.chdir(other)
+
+    refused = runner.invoke(app, ["--json", "task", "add", "made in other"], env=agents_env)
+    assert refused.exit_code != 0 and "not one of your projects" in refused.output, refused.output
+    team_service.activate(other)
+    added = runner.invoke(app, ["--json", "task", "add", "made in other"], env=agents_env)
+    assert added.exit_code == 0, added.output
+    assert (
+        json.loads(added.stdout)["project_id"]
+        == team_project(other).id
+        != team_project(work_dir).id
+    )
+
+
+def test_a_sandboxed_agents_launch_still_carries_the_hub(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hub stays where the agent's sandbox needs it (`capabilities.sandboxes_tools`,
+    Codex's): its board calls go through the launch's broker, on the launch's board."""
+    import subprocess
+
+    from aisquare.services import team as team_service
+
+    subprocess.run(["git", "init", "-q", str(work_dir)], check=True)
+    team_service.activate(work_dir)
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "no-system.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "no-managed.toml")
+
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+
+    assert result.exit_code == 0, result.output
+    assert Path(spy["env"]["AISQUARE_TEAM_HUB"]).resolve() == work_dir.resolve()
+
+
 def test_launch_persona_on_codex_adds_it_to_the_operators_developer_instructions(
     runner: CliRunner,
     work_dir: Path,

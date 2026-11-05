@@ -110,9 +110,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `AISQUARE_LAUNCH_ID`, `AISQUARE_LAUNCH_AGENT` and `AISQUARE_LAUNCH_PID`; `accounts run`
   does not. The line `team spawn` prints is `<python> -P -m aisquare launch <role> --agent
   claude-code --command claude --no-bound-args --custom-role -- …`, where it was
-  `AISQUARE_ROLE=… claude …`; pasted, it prints launch's banner. A fleet window carries
-  its role binding's arguments in its own command line, the ones a restart replays; Claude
-  Code reads them in any order.
+  `AISQUARE_ROLE=… claude …`; pasted, it prints launch's banner.
+<!-- #94 (R8, reopened seq 11176): the line on a fleet window's binding arguments (back
+     first, as in 0.9.2) and the line that a Windows `aisquare launch` now waits for its
+     agent, from #94's DONE note. -->
 - **Model availability is cached per account:** after a Claude Code update, a model that
   was available stays cached for its 24 h, and only one that was refused is probed again.
   The first `team spawn` after upgrading from 0.9.2 probes once per account.

@@ -4210,6 +4210,24 @@ def test_an_agents_spawn_for_a_task_may_carry_a_command_after_its_kickoff(
     assert fleet_service.setting_command(line) is None and "/model fable" in line
 
 
+def test_another_binary_gets_no_model_flag(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Main 0.9.2's test, which #113 deleted, on the adapters (R1 of #113's release): the
+    pick a spawn remembers is Claude Code's alone, so a role bound to another program is
+    spawned with no ``--model`` and records none. 0.9.2 asked ``harness.is_default_agent``
+    of the binary; the head asks its adapter (``adapter_for_binary``): aider is no agent's."""
+    _coder(project, agent_args=["--model", "opus"])
+    monkeypatch.setenv("AISQUARE_BIN_CODER", str(_executable(tmp_path / "abin" / "aider")))
+    agent = _coder(project)
+    assert "--model" not in _command(tmux), "a remembered pick is Claude Code's alone"
+    assert agent.launch_spec is not None and agent.launch_spec.model is None
+
+
 def test_spawn_without_tmux_is_fleet_unavailable(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

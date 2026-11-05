@@ -10535,7 +10535,13 @@ def _model_choice(
         own, why = _own_runs(passed, chose, _configured(kind, role), kept)
         return _ModelChoice(role_args, extra, model_memory.Pick(), own, chose, kept, why)
     bound = harness.binding_args(role)
-    remembered = model_memory.remembered() if spec is None else model_memory.Pick()
+    # The owner's last pick names a model of the agent's own, so only a binary whose name
+    # runs that agent is given it, as main 0.9.2's `harness.is_default_agent` gate had it
+    # (its test_another_binary_gets_no_model_flag): a coder bound to aider by
+    # `AISQUARE_BIN_CODER` was spawned with `--model opus`, a pick made for Claude Code.
+    runs_it = adapter_for_binary(binary)
+    own_binary = runs_it is not None and runs_it.id == kind.id
+    remembered = model_memory.remembered() if spec is None and own_binary else model_memory.Pick()
     pinned = _configured(kind, role) if spec is None else model_memory.Pick()
     added: dict[str, str | None] = {}
     runs: dict[str, str | None] = {}

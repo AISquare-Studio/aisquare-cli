@@ -1948,20 +1948,24 @@ def test_live_a_finished_command_is_a_dead_pane_with_its_status(live: TmuxServer
             (w for w in live.list_windows("asq-test-fox") if w.pane_id == exiting.pane_id), None
         )
 
-    # tmux can report a pane dead a beat before it records the exit status: wait for the
-    # status itself, whatever it is, so a wrong one still fails the assertion below.
-    listed = [
-        (w.pane_id, w.dead, w.dead_status) for w in live.list_windows("asq-test-fox")
-    ]  # what tmux listed, for the message: the window gone, or dead with no status
-    assert _wait(lambda: (found := dead()) is not None and found.dead_status is not None), (
-        listed,
+    # Dead first, then its status: tmux can report a pane dead a beat before it records the
+    # status, so the status is waited for, bounded. And tmux 3.4 (CI's ubuntu) can report it
+    # dead and never record one: 8 s on, `(%1, dead, no status)` with remain-on-exit on (CI
+    # 42131769260; R7's flake list). So what is read is held to what tmux itself answers
+    # for the pane: its status, or none; where it records one (3.8, macOS), 3, and a status
+    # read wrong or dropped still fails.
+    assert _wait(lambda: (found := dead()) is not None and found.dead), (
         [(w.pane_id, w.dead, w.dead_status) for w in live.list_windows("asq-test-fox")],
         live.run("show-options", "-gv", "remain-on-exit").strip(),
     )
+    _wait(lambda: (found := dead()) is not None and found.dead_status is not None)
+    said = live.run("display-message", "-p", "-t", exiting.pane_id, "#{pane_dead_status}")
+    status = int(said.strip()) if said.strip() else None
+    assert status in (3, None), said
     found = dead()
-    assert found is not None and (found.dead, found.dead_status) == (True, 3)
+    assert found is not None and (found.dead, found.dead_status) == (True, status)
     facts = live.pane_facts(exiting.pane_id)
-    assert facts is not None and (facts.dead, facts.dead_status) == (True, 3)
+    assert facts is not None and (facts.dead, facts.dead_status) == (True, status)
     # remain-on-exit: the window is still there to read…
     assert len(live.list_windows("asq-test-fox")) == 2
 

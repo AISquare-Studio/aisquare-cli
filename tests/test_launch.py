@@ -1367,6 +1367,22 @@ def test_launch_persona_on_an_agent_whose_adapter_takes_the_text_puts_it_in_argv
     assert spy["argv"][-2:] == ["--preamble", _briefed("skeptic")]
 
 
+def test_launch_persona_on_a_binary_without_a_seam_keeps_the_hook_alone_and_says_so(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """Main 0.9.2's test, which #113 deleted, restored (R1 of #113's release, F5): aider, a
+    wrapper not named claude: no system-prompt flag this launcher knows, so the briefing is
+    the channel, and one line says so. The head gave aider `--append-system-prompt-file`,
+    which it rejects, and the launch did not start."""
+    result = runner.invoke(app, ["launch", "coder", "--persona", "skeptic", "--command", "aider"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    assert spy["argv"] == ["aider"]
+    said = result.output + (result.stderr if hasattr(result, "stderr") else "")
+    assert "takes no system-prompt flag" in said
+
+
 def test_launch_persona_on_an_agent_without_a_seam_keeps_the_hook_alone_and_says_so(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:

@@ -265,6 +265,7 @@ def _persona_system_prompt(
     selected: agent_launch.ResolvedAgent,
     env: Mapping[str, str],
     args: Sequence[str],
+    binary: str,
 ) -> list[str]:
     """The persona in the agent's system prompt too, where its adapter has a seam for it
     (``system_prompt_args``).
@@ -305,6 +306,18 @@ def _persona_system_prompt(
             f"persona {name}: {exc} — no system-prompt file, the session-start hook alone",
             style="dim",
             markup=False,
+        )
+        return []
+    runs = adapter_for_binary(binary)
+    if runs is None or runs.id != selected.adapter.id:
+        # A program the binary's name does not run as this agent (`--command aider`, a
+        # wrapper called `claude-next`) is given none of its seam's flags, as it is given
+        # none of the role's defaults or tool policy: 0.9.2's words and behaviour (R1 F5).
+        # aider rejected `--append-system-prompt-file`, so the launch did not start.
+        stderr_console().print(
+            f"persona {name}: {os.path.basename(binary)!r} takes no system-prompt flag this "
+            "launcher knows — briefed by the session-start hook alone",
+            style="dim",
         )
         return []
     block = "\n".join(personas.briefing(persona)) + "\n"
@@ -886,7 +899,9 @@ def launch(
     # an agent with none. `_check_persona` refused an unknown name above, so the resolve
     # inside cannot fail here.
     persona_args = (
-        _persona_system_prompt(persona, persona_root, selected, env, arguments.argv)
+        _persona_system_prompt(
+            persona, persona_root, selected, env, arguments.argv, resolution.binary
+        )
         if persona is not None
         else []
     )

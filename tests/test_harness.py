@@ -1646,6 +1646,60 @@ def test_spawn_exec_dead_proxy_fails_open(
     assert "untraced" in result.output
 
 
+def test_a_pasted_team_spawn_line_starts_claude_code_on_every_platform(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """R8 of #113's release (R1's (a)2): the printed-line tests here skip on Windows, where an
+    `sh` stub is no program, so no Windows run pasted a `team spawn` line. Main ran them
+    wherever a POSIX shell was on PATH, Git Bash on windows-latest included. This one's
+    stand-in `claude` is a `claude.cmd` there (tests/fakebin.py) that runs a real interpreter,
+    and the pasted line goes through `sh` as main's did: traced with the proxy refusing, the
+    agent starts untraced, as the role, with the role's tool policy and no session id."""
+    import subprocess
+    import sys
+
+    from tests import fakebin
+
+    _tracing_enabled("http://127.0.0.1:9")  # discard port: connection refused
+    runner, app = _cli()
+    printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    assert printed.exit_code == 0, printed.output
+    command = json.loads(printed.output)["command"]
+    shell = shutil.which("sh")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; the printed line is a sh line")
+    record = tmp_path / "ran.json"
+    script = tmp_path / "agent_stub.py"
+    script.write_text(
+        "import json, os, sys\n"
+        f"with open({str(record)!r}, 'w', encoding='utf-8') as out:\n"
+        "    json.dump({'argv': sys.argv[1:], 'env': dict(os.environ)}, out)\n",
+        encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    fakebin.executable_fake(
+        bin_dir,
+        "claude",
+        posix=f'exec "{sys.executable}" "{script}" "$@"',
+        windows=f'"{sys.executable}" "{script}" %*',
+        exit_code=None,
+    )
+    scripts_dir = Path(sysconfig.get_path("scripts"))
+    child_env = {
+        **os.environ,
+        "PATH": os.pathsep.join([str(bin_dir), str(scripts_dir), os.environ.get("PATH", "")]),
+    }
+    proc = subprocess.run(
+        [shell, "-c", command], capture_output=True, text=True, timeout=120, env=child_env
+    )
+    assert proc.returncode == 0, proc.stderr
+    ran = json.loads(record.read_text(encoding="utf-8"))
+    assert ran["env"]["AISQUARE_ROLE"] == "coder"
+    assert ran["env"]["AISQUARE_LAUNCH_AGENT"] == "claude-code"
+    assert "--session-id" not in ran["argv"], "untraced: no id is pinned"
+    assert any(arg.startswith("--disallowedTools") for arg in ran["argv"]), ran["argv"]
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="the printed command runs `aisquare launch`, which finds the agent with "

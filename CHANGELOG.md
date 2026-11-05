@@ -16,25 +16,23 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 
 **Upgrading:**
 - Run `aisquare upgrade`, or use asq's own *Update* button. From a shell, quit asq first
-  (and `aisquare serve` or `remote serve`), so no 0.9.2 asq starts agents after the
-  upgrade.
+  (and `aisquare serve` or `remote serve`): one left open runs 0.9.2 until it is started
+  again.
 - `aisquare upgrade` keeps your `config.toml`, hooks, accounts, their order and the
   default (rank 1). The store goes from 0.9.2's v43 to v50 on the first command after the
   upgrade, in about 0.3 s on a store of 10,000 board events. Each step adds a table or a
   column and nothing is removed: the rows you have are marked as Claude Code's, and your
   account order becomes the one order below, so nothing moves.
-- Agents already running keep working: their hooks call 0.10.0, and `fleet tell`, `stop`
-  and `ls` reach them.
-<!-- #91 (R5): the lines for a running agent's first restart, switch or hand-over, and for a
-     home that ran a pre-release build, from #91's DONE note; and the rollback's last
-     sentence and the first bullet's reason, if #91 changes what 0.10.0 does with an agent
-     0.9.2 started after the census. -->
+- Agents already running keep working: their hooks call 0.10.0, and `fleet ls`, `tell`,
+  `stop`, `restart`, `switch` and the usage-limit hand-over reach them, and any agent a
+  still-open 0.9.2 asq starts. A restart or switch resumes the agent's session, as 0.9.2's
+  did.
 - Going back with `aisquare upgrade --version 0.9.2` works on the v50 store: 0.9.2 opens
   it as it is, and everything 0.10.0 added stays for when you upgrade again. While on
   0.9.2, an account reorder or a new default is dropped when you upgrade again, and an
-  account you add is ranked last. An agent 0.9.2 spawns, restarts or switches is not one
-  0.10.0 can manage afterwards: stop them (`aisquare fleet shutdown`) before upgrading
-  again.
+  account you add is ranked last. Agents 0.9.2 spawns, restarts or switches meanwhile are
+  managed by 0.10.0 when you upgrade again. `aisquare upgrade --version 0.9.2` says what it
+  keeps and loses before it moves back.
 
 ### Codex support (beta)
 
@@ -85,7 +83,8 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `fleet gate` still goes to the other program as given.
 - **Each fleet agent has a launch record** in `~/.aisquare/launch-seals/`. Restart, switch,
   `fleet tell`, `stop`, `reap`, `shutdown` and `attach` act on the pane it names, never on
-  a store row alone, and a spawn whose record cannot be written starts nothing.
+  a store row alone, and a spawn whose record cannot be written starts nothing. An agent
+  0.9.2 started is given one from its row the first time 0.10.0 reads it.
 - **`redact` removes a credential whole**, and catches more: values under a quoted name,
   `github_pat_` and `xapp-` tokens, and a private key with no footer. Hand-off briefs and
   CI prompts are scrubbed with it.

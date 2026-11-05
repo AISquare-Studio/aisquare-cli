@@ -1618,9 +1618,12 @@ def test_every_interpreter_aisquare_starts_for_a_sandboxed_agent_is_isolated(
         REAL_RUN_BROKER(tmp_path / "b", {})
     ours = [argv for argv in started if "-m" in argv]
     assert len(ours) == 2 and all(argv[1:3] == ["-E", "-P"] for argv in ours), started
-    # The hand-over the agent's own hook starts (its argv is built inline there).
+    # The hand-over the agent's own hook starts: isolated for an agent that sandboxes its
+    # tools, `-P` alone for Claude Code as 0.9.2 ran it (R1 N1; `selfcli.argv_for_agent`).
     source = (ROOT / "src" / "aisquare" / "services" / "hooks.py").read_text(encoding="utf-8")
-    assert re.search(r"isolated_argv_for\(\s*\[\s*\"--quiet\", \"hook\", \"hand-over\"", source)
+    assert re.search(r"argv_for_agent\(\s*\[\s*\"--quiet\", \"hook\", \"hand-over\"", source)
+    assert selfcli.argv_for_agent([], sandboxes_tools=True)[1:3] == ["-E", "-P"]
+    assert selfcli.argv_for_agent([], sandboxes_tools=False)[1:3] == ["-P", "-m"]
 
     home = tmp_path / "codex-home"
     home.mkdir()

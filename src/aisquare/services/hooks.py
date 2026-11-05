@@ -671,8 +671,13 @@ def _hand_over_if_configured(failure: team_service.TurnFailure, plan: _HandOverP
     if not plan.go:
         return
     window = failure.notice.window if failure.notice is not None else "usage"
-    argv = selfcli.isolated_argv_for(
-        ["--quiet", "hook", "hand-over", session.id, "--reason", f"{window} limit"]
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    # `-E` where the agent sandboxes its tools, `-P` alone for Claude Code, as 0.9.2 ran it.
+    adapter = recorded_adapter(plan.agent.agent)
+    argv = selfcli.argv_for_agent(
+        ["--quiet", "hook", "hand-over", session.id, "--reason", f"{window} limit"],
+        sandboxes_tools=adapter is None or adapter.capabilities.sandboxes_tools,
     )
     try:
         _detach(argv)

@@ -1062,7 +1062,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     spawned = tmux.spawned[0]
     assert spawned["session"] == receipt.tmux_session and spawned["name"] == "manager"
     command = _command(tmux)
-    assert command[:7] == [sys.executable, "-E", "-P", "-m", "aisquare", "launch", "manager"]
+    assert command[:6] == [sys.executable, "-P", "-m", "aisquare", "launch", "manager"]
     assert _flag(command, "--permission-mode") == "auto"
     assert agent.session_id and _flag(command, "--session-id") == agent.session_id
     assert _flag(command, "--name") == "manager"
@@ -1367,7 +1367,7 @@ def test_spawn_refuses_an_unknown_role_but_accepts_a_bound_one(
     monkeypatch.setattr("aisquare.cli.launch._declared_roles", lambda: {"scribe"})
     receipt = fleet_service.spawn(project, "scribe")
     assert receipt.agent.role == "scribe" and receipt.agent.label == "scribe-1"
-    assert _command(tmux)[6] == "scribe"
+    assert _command(tmux)[5] == "scribe"
 
 
 def test_no_role_spawns_a_plain_claude_from_the_cli_as_from_the_dialog(
@@ -1381,7 +1381,7 @@ def test_no_role_spawns_a_plain_claude_from_the_cli_as_from_the_dialog(
     [agent] = fleet_service.list_agents(project)
     assert (agent.agent.role, agent.agent.label) == ("agent", "agent-1")
     assert agent.agent.cwd == project.root  # the plain role's default: no worktree
-    assert _command(tmux)[5:7] == ["launch", "agent"]  # past the launcher's `-E` (#113)
+    assert _command(tmux)[4:6] == ["launch", "agent"]
     assert harness.role_cycle("agent", "abcd1234", fleet=lambda verb: verb) == []
     assert "agent" not in harness.ROLE_PROFILES  # no mission, no ladder
     assert fleet_service.PLAIN_ROLE not in fleet_service.FLEET_ROLES
@@ -1640,7 +1640,7 @@ def test_spawn_records_no_session_for_a_binary_that_takes_no_session_id(
     )
     command = _command(tmux)
     assert receipt.agent.session_id is None and "--session-id" not in command
-    assert command[7:9] == ["--command", sys.executable], "an explicit --bin reaches launch"
+    assert command[6:8] == ["--command", sys.executable], "an explicit --bin reaches launch"
     assert receipt.agent.binary == sys.executable
     assert any("no board join" in note for note in receipt.notes)
     assert fleet_service.status_of(receipt.agent).detail == "no hooks"
@@ -2515,8 +2515,9 @@ def test_the_window_command_carries_the_safe_path_flag_and_not_a_variable(
     monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
     _coder(project)
     command = _command(tmux)
-    assert command[:5] == [sys.executable, "-E", "-P", "-m", "aisquare"]
-    assert command == selfcli.isolated_argv_for(command[5:]), "one builder for the fleet's"
+    # 0.9.2's `-P` alone for Claude Code (R1 N1): `-E` is a sandboxing agent's.
+    assert command[:4] == [sys.executable, "-P", "-m", "aisquare"]
+    assert command == selfcli.argv_for(command[4:]), "one builder for every self-invocation"
     env = tmux.spawned[0]["env"]
     assert isinstance(env, dict) and "PYTHONSAFEPATH" not in env
 

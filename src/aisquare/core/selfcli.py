@@ -82,6 +82,18 @@ def isolated_argv_for(args: Sequence[str], *, module: str = "aisquare") -> list[
     return [sys.executable, "-E", "-P", "-m", module, *args]
 
 
+def argv_for_agent(
+    args: Sequence[str], *, sandboxes_tools: bool, module: str = "aisquare"
+) -> list[str]:
+    """What aisquare runs on an agent's behalf (the fleet window's ``aisquare launch``, the
+    hand-over worker): :func:`isolated_argv_for` for an agent that sandboxes its tools
+    (``capabilities.sandboxes_tools``), whose sandbox may write a directory ``PYTHONPATH``
+    names; :func:`argv_for` otherwise, ``-P`` alone as 0.9.2 ran it, so an aisquare
+    importable only through ``PYTHONPATH`` still starts there (R1 of #113's release, N1)."""
+    invoke = isolated_argv_for if sandboxes_tools else argv_for
+    return invoke(args, module=module)
+
+
 def run(
     args: Sequence[str],
     *,

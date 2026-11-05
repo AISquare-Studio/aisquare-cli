@@ -5951,11 +5951,13 @@ def spawn(
         teams = selected.adapter.disable_native_teams()
         native += teams.args
         agent_launch.carry_settings(env, teams)
-    # `-E`: the window's `aisquare launch` ignores the tmux server's PYTHONPATH, which may
-    # name a directory a sandboxed agent writes, while the agent it execs keeps it (review
-    # r14 of #113, finding 4).
-    command = selfcli.isolated_argv_for(
-        ["launch", role, *flags, "--", *native, *model_args, *models.flags, *arguments.argv]
+    # `-E` for an agent that sandboxes its tools: the window's `aisquare launch` ignores the
+    # tmux server's PYTHONPATH, which may name a directory its sandbox writes, while the
+    # agent it execs keeps it (review r14 of #113, finding 4). Claude Code's window runs `-P`
+    # alone, as 0.9.2's did (`selfcli.argv_for_agent`).
+    command = selfcli.argv_for_agent(
+        ["launch", role, *flags, "--", *native, *model_args, *models.flags, *arguments.argv],
+        sandboxes_tools=selected.adapter.capabilities.sandboxes_tools,
     )
     # The hub as THIS process resolves it, blank for none: the window's
     # `launch` joins the project the spawner — and the UI's Explainability view

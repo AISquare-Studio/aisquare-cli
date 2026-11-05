@@ -4290,6 +4290,7 @@ def test_a_bound_scalar_flag_never_beats_the_windows_own_or_the_users(
 
     config = load_config()
     config.team.profiles["coder"] = RoleLaunchProfile(args=bound)
+    config.team.profiles["ui-tester"] = RoleLaunchProfile(args=bound)
     save_config(config)
     agent = fleet_service.spawn(project, "coder", worktree=False, **spawned).agent  # type: ignore[arg-type]
     command = _command(tmux)
@@ -4308,6 +4309,13 @@ def test_a_bound_scalar_flag_never_beats_the_windows_own_or_the_users(
     values = [argv[i + 1] for i, arg in enumerate(argv) if arg == flag]
     assert values[-1] == wins and values[0] == bound[1], (agent.label, argv)
     assert argv[1 : 1 + len(bound)] == bound, "first, as 0.9.2's launch put the binding"
+
+    # The role's defaults follow the binding, ahead of its tool policy, as on 0.9.2.
+    fleet_service.spawn(project, "ui-tester", worktree=False, **spawned)  # type: ignore[arg-type]
+    command = _command(tmux)
+    launched = CliRunner().invoke(app, command[command.index("launch") :])
+    assert launched.exit_code == 0, launched.output
+    assert ran["argv"][1 : 2 + len(bound)] == [*bound, "--chrome"], ran["argv"]
 
 
 def test_spawn_without_tmux_is_fleet_unavailable(

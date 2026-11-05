@@ -6054,7 +6054,9 @@ def spawn(
     leading: list[str] = []
     rest = list(arguments.argv)
     if binding_first:
-        bound_native = selected.adapter.native_args(list(bound))
+        # The binding's and the role's defaults (`--chrome`), where 0.9.2's launch put them:
+        # ahead of the role's tool policy and the window's own flags.
+        bound_native = selected.adapter.native_args([*bound, *defaults.args])
         if bound_native and rest[: len(bound_native)] == bound_native:
             leading, rest = bound_native, rest[len(bound_native) :]
             flags += [agent_launch.BOUND_IN_LINE_FLAG, str(len(leading))]

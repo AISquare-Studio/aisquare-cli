@@ -594,8 +594,9 @@ def fleet_settings(
 BOUND_IN_LINE_FLAG = "--bound-in-line"
 """What a fleet window passes its ``aisquare launch`` for an agent that keeps 0.9.2's argument
 order (``AgentCapabilities.binding_args_first``): the first N arguments after ``--`` are the
-role binding's, as the spawn read them (the ones a restart replays). The launch takes them as
-the binding it would have read itself, ahead of the role's flags and of the window's own, so a
+role binding's and the role's defaults, as the spawn read them (the ones a restart replays).
+The launch takes them as the binding it would have read itself, ahead of the role's tool
+policy and of the window's own flags, so a
 scalar flag the window or the user passes comes later and wins, as on 0.9.2 (R8 of #113's
 release: a bound ``--permission-mode plan`` placed last beat ``fleet spawn --permission-mode
 acceptEdits``, and a bound ``--name`` beat the fleet's label, on Claude Code 2.1.318)."""

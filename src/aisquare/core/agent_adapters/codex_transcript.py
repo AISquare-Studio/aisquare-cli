@@ -1278,6 +1278,7 @@ _FACT_MARKS = (
     b"require_escalated",
     b"with_escalated_permissions",
     b"aborted by user",
+    b"rejected due to unacceptable risk",
 )
 """Bytes one of which every line holding a fact holds; no other line is parsed, but the answer
 of a call held for its approval (:func:`_answer_line`)."""
@@ -1291,6 +1292,16 @@ _STOP_HOOK_RUN = re.compile(r'\bhook_run_id\s*=\s*"stop:')
 _ABORTED = re.compile(r"\A(?:Wall time: [^\n]*\n)?aborted by user(?: after [^\n]*)?\Z")
 """A call's answer when its turn was stopped: a function call's ``Wall time: 1.3 seconds\naborted
 by user``, the patch tool's ``aborted by user after 1.3s``."""
+_REVIEW_DENIED = re.compile(
+    r'\A[\w.]+ failed: CreateProcess \{ message: "Rejected\(\\"This action was rejected due to '
+    r"unacceptable risk\."
+)
+"""A call's answer when Codex's automatic reviewer (``--approve-for-me``, its guardian) denied it:
+``exec_command failed: CreateProcess { message: "Rejected(\"This action was rejected due to
+unacceptable risk.\nReason: …``, as 0.164.0 and 0.166.0 both write it, for a command that asked
+to leave the sandbox and for one the reviewer was asked about inside it (``rm -f``). Codex runs
+the command no further, and the turn goes on. A review that could not be completed (``Automatic
+approval review failed: …``) is no denial: Codex says it is none."""
 
 
 def _rollout_facts(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
@@ -1360,6 +1371,9 @@ def _rollout_facts(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
             if held is not None and _ABORTED.match(output):
                 found.append((position, TranscriptFact(stamp, FACT_DENIAL)))
                 refused = held if refused is None else refused
+            elif _REVIEW_DENIED.match(output):
+                # Denied by its automatic reviewer: its turn goes on, so it holds nothing.
+                found.append((position, TranscriptFact(stamp, FACT_DENIAL)))
     holds = [*asked.values(), *([refused] if refused is not None else [])]
     if holds:
         hold = min(holds)

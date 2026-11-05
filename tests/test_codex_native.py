@@ -782,11 +782,33 @@ def _refused_then_made(told: str, output: str, *, first: Any = None) -> None:
     assert made.returncode == 0 and "rewrote" in made.stdout, made.stdout + made.stderr
 
 
+def _asks_a_review(request: dict[str, Any]) -> bool:
+    """Whether ``request`` is Codex's automatic reviewer (``--approve-for-me``, its guardian)
+    asking for a verdict: its reply format is the reviewer's own JSON schema, with an
+    ``outcome`` (``codex_output_schema``). 0.164.0 sends it as the ``codex-auto-review`` model,
+    0.166.0 as the session's own model (recorded through this loopback, R7 of 0.10.0), so the
+    model says nothing; the schema is what the real service answers to."""
+    reply = request.get("text") or {}
+    shape = reply.get("format") or {} if isinstance(reply, dict) else {}
+    schema = shape.get("schema") or {} if isinstance(shape, dict) else {}
+    fields = schema.get("properties") or {} if isinstance(schema, dict) else {}
+    return shape.get("type") == "json_schema" and "outcome" in fields
+
+
+#: The reviewer's verdict as the real service gives it: every field its schema names.
+_ALLOW = {
+    "outcome": "allow",
+    "risk_level": "low",
+    "user_authorization": "high",
+    "rationale": "fixture",
+}
+
+
 class _Scripted(BaseHTTPRequestHandler):
     """A loopback Responses provider driven by the last user line: ``RUN <cmd>`` calls
     ``exec_command`` in the sandbox, ``ESC <cmd>`` asks for it outside (``sandbox_permissions
-    = require_escalated``), anything else is answered. Codex's automatic reviewer (model
-    ``codex-auto-review``) is told to allow. Each request lands in ``server.requests``."""
+    = require_escalated``), anything else is answered. Codex's automatic reviewer
+    (:func:`_asks_a_review`) is told to allow. Each request lands in ``server.requests``."""
 
     def do_POST(self) -> None:
         raw = self.rfile.read(int(self.headers["Content-Length"]))
@@ -798,9 +820,8 @@ class _Scripted(BaseHTTPRequestHandler):
         request = json.loads(raw)
         requests: list[dict[str, Any]] = self.server.requests  # type: ignore[attr-defined]
         requests.append(request)
-        if request.get("model") == "codex-auto-review":
-            verdict = {"outcome": "allow", "risk_level": "low", "rationale": "fixture"}
-            _answer(self, _message(json.dumps(verdict)))
+        if _asks_a_review(request):
+            _answer(self, _message(json.dumps(_ALLOW)))
             return
         items, said = request.get("input", []), _user_texts(request)
         verb, _, command = (said[-1] if said else "").partition(" ")
@@ -898,7 +919,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             return list(found.values())
 
         def reviews() -> int:
-            return sum(1 for request in requests if request.get("model") == "codex-auto-review")
+            return sum(1 for request in requests if _asks_a_review(request))
 
         # The defect, measured first: Codex's own workspace sandbox cannot open the store.
         env = {k: v for k, v in os.environ.items() if not k.startswith(("OPENAI_", "CODEX_"))}
@@ -4390,7 +4411,7 @@ def test_real_codex_manager_rewrites_its_state_file_from_its_sandbox_with_no_esc
             return list(found.values())
 
         def reviews() -> int:
-            return sum(1 for request in requests if request.get("model") == "codex-auto-review")
+            return sum(1 for request in requests if _asks_a_review(request))
 
         srv = fleet.server(config.fleet)
         try:

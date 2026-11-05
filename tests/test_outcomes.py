@@ -1043,6 +1043,51 @@ def test_a_codex_patch_refused_at_its_approval_is_a_refusal_however_it_was_calle
     assert _kinds(found[heredoc]) == [("p", "text"), ("d", "")]
 
 
+CODEX_REVIEW_DENIED = {
+    version: CODEX_FACTS.with_name(f"codex-review-denied-{version}.jsonl")
+    for version in ("0.164.0", "0.166.0")
+}
+"""Codex's own rollouts (``codex exec --approve-for-me``, a loopback provider whose automatic
+reviewer answers ``{"outcome": "deny", …}``), one per release the beta covers: ``ESC echo hello``
+(asking to leave the sandbox) and ``RUN rm -f nothing.txt`` (inside it, which Codex asks its
+reviewer about too), each denied. Trimmed to the turns' own records, the folder made
+``/work/alpha``."""
+
+
+@pytest.mark.parametrize("version", sorted(CODEX_REVIEW_DENIED))
+def test_a_command_codexs_automatic_reviewer_denied_is_a_denial(
+    tmp_path: Path, version: str
+) -> None:
+    """R7 of 0.10.0: under ``--approve-for-me`` Codex's automatic reviewer answers the
+    approval, and a command it denies is never run: a denial, as one the human refused at
+    the prompt is, whether it asked to leave the sandbox or not. Its turn goes on, so it is
+    no interrupt. Read the same off 0.164.0's rollout and 0.166.0's, by Codex's adapter."""
+    path = tmp_path / "rollout.jsonl"
+    path.write_text(CODEX_REVIEW_DENIED[version].read_text(encoding="utf-8"), encoding="utf-8")
+    facts = transcript_facts.read_facts([path], since=_at(1, 0), agents={path: "codex"})[path]
+    assert _kinds(facts) == [("p", "text"), ("d", ""), ("p", "text"), ("d", "")]
+
+
+def test_a_denial_by_codexs_reviewer_counts_in_the_weeks_outcomes(
+    machine: Machine, codex_home: Path
+) -> None:
+    """`aisquare outcomes` counts the reviewer's denials with the human's: the recorded
+    rollout's first turn (a patch), then 0.166.0's two denied commands in the same session."""
+    repo = machine.repo("alpha")
+    path = _codex_rollout(codex_home, repo, turns=1)
+    denied = CODEX_REVIEW_DENIED["0.166.0"].read_text(encoding="utf-8").splitlines()
+    with path.open("a", encoding="utf-8") as handle:
+        for n, line in enumerate(denied):
+            record = _moved(json.loads(line), {"/work/alpha": str(repo)})
+            record["timestamp"] = stamp(_at(27, 12, 1, n))
+            handle.write(json.dumps(record) + "\n")
+    usage_stats.sweep(now=NOW, tz=IST)
+
+    direction = _report(use_gh=False).direction
+
+    assert (direction.denied_permissions, direction.interrupts) == (2, 0)
+
+
 def test_a_codex_rollout_read_in_two_goes_finds_what_one_read_finds(tmp_path: Path) -> None:
     """Read incrementally, cut after any line or inside one, the rollout gives the same facts,
     none twice and none missed. A call at its approval is read again until its answer, and its

@@ -13,6 +13,7 @@ goldens below were rendered at 11cd75ab, the PR's head before the slot, by these
 from __future__ import annotations
 
 import io
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -131,7 +132,14 @@ def printed(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., str]]:
 
     def run(emit: Callable[..., None], *args: Any, **kwargs: Any) -> str:
         buffer = io.StringIO()
-        console = Console(file=buffer, width=160, color_system=None, markup=False, highlight=False)
+        console = Console(
+            file=buffer,
+            width=160,
+            color_system=None,
+            markup=False,
+            highlight=False,
+            legacy_windows=False,  # the boxes a modern terminal draws, on Windows too
+        )
         monkeypatch.setattr(common, "stdout_console", lambda: console)
         monkeypatch.setattr(accounts_cli, "stdout_console", lambda: console)
         emit(*args, **kwargs)
@@ -144,10 +152,22 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def _slot_dir(slot: int) -> Path:
+    return Path(f"/h/.aisquare/claude-accounts/{slot}")
+
+
+def _native(text: str) -> str:
+    """``text`` with the goldens' slot directories as this platform writes a ``Path``: the
+    same length, so the head's columns stand (backslashes on Windows)."""
+    for slot in (1, 2):
+        text = text.replace(f"/h/.aisquare/claude-accounts/{slot}", str(_slot_dir(slot)))
+    return text
+
+
 def _status(slot: int, agent: str) -> ClaudeAccountStatus:
     account = ClaudeAccount(
         slot=slot,
-        config_dir=Path(f"/h/.aisquare/claude-accounts/{slot}"),
+        config_dir=_slot_dir(slot),
         managed=True,
         agent=agent,
     )
@@ -228,9 +248,8 @@ def test_aisquare_accounts_reads_as_the_head_on_a_claude_only_machine(
     alone = AccountsOverview(
         claude=CLAUDE, accounts=[_status(1, "claude-code")], installs={"claude-code": CLAUDE}
     )
-    assert (
-        printed(accounts_cli._emit_overview, alone, with_usage=False) == HEAD_ACCOUNTS_CLAUDE_ONLY
-    )
+    said = printed(accounts_cli._emit_overview, alone, with_usage=False)
+    assert said == _native(HEAD_ACCOUNTS_CLAUDE_ONLY)
 
     both = AccountsOverview(
         claude=CLAUDE,
@@ -242,7 +261,7 @@ def test_aisquare_accounts_reads_as_the_head_on_a_claude_only_machine(
     assert said.splitlines()[1] == "✓ Codex (beta) 0.164.0 · /opt/bin/codex"
     # The table pads its agent column to the wider name; its words are the head's but the mark.
     expected = (
-        _flat(HEAD_ACCOUNTS_BOTH)
+        _flat(_native(HEAD_ACCOUNTS_BOTH))
         .replace("✓ Codex 0.164.0", "✓ Codex (beta) 0.164.0")
         .replace("2 Codex account 2", "2 Codex (beta) account 2")
     )
@@ -300,6 +319,11 @@ def test_every_agent_options_help_reads_as_the_head_but_for_codexs_mark() -> Non
     assert helps["accounts add"] == "Whose account: claude-code (the default) or codex (beta)."
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the golden is the page a POSIX terminal draws; every --agent help is pinned on "
+    "every platform by the test above",
+)
 def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> None:
     result = CliRunner().invoke(
         app,

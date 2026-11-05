@@ -625,6 +625,15 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then brew install tmux; else sudo apt-get install -y tmux; fi
           npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@${{ matrix.codex }}
           echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
+      - name: Time a fresh interpreter's first imports, as a launch's receiver starts one
+        # A macOS runner's first `python -E -P` of these modules is cold: the telemetry
+        # receiver missed its 15 s there (CI 42110645564). Timed twice, cold then warm.
+        if: runner.os == 'macOS'
+        run: |
+          for start in cold warm; do
+            echo "$start:"
+            /usr/bin/time -p python -E -P -c "import aisquare.services.native_telemetry, aisquare.services.fleet"
+          done
       - name: Exercise hooks, MCP, resume, usage and the interactive fleet
         run: |
           # The fixture owns its temporary hooks and trusts only those. Its

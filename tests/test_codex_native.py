@@ -828,7 +828,10 @@ class _Scripted(BaseHTTPRequestHandler):
         if verb not in {"RUN", "ESC"} or items[-1].get("type") == "function_call_output":
             _answer(self, _message("local fixture complete"))
             return
-        arguments = {"cmd": command}
+        # The whole command's output in one answer: a chain of board calls outlived exec's
+        # default yield on a loaded runner, Codex answered with what it had printed so far
+        # (4 of 5 calls, macOS CI 42110645564), and this provider never polls for the rest.
+        arguments: dict[str, Any] = {"cmd": command, "yield_time_ms": 120_000}
         if verb == "ESC":
             arguments["sandbox_permissions"] = "require_escalated"
             arguments["justification"] = "reach the aisquare board"

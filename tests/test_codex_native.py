@@ -2353,9 +2353,20 @@ def test_real_codex_over_the_line_moves_before_its_limit_once_no_exec_is_open(
                 coder.pane_id,
             )
             assert moved.agent == "codex" and moved.account_slot == roomy.slot, moved
-            with store_session() as store:
-                said = [e.text for e in store.recent_events(project.id, limit=40)]
-            assert any("(before limit)" in text for text in said), said
+
+            def said() -> list[str]:
+                with store_session() as store:
+                    return [e.text for e in store.recent_events(project.id, limit=40)]
+
+            # The switch says it on the board once its replacement is up, after the new row:
+            # read at the row alone, the board held only "agent orchestrator activated" (CI
+            # 42087473244, attempt 1, on 0.164.0; R7's flake list).
+            until(
+                lambda: any("(before limit)" in text for text in said()),
+                30,
+                f"the switched line (before limit), the board: {said()}",
+                moved.pane_id,
+            )
         finally:
             if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
                 srv.run("kill-server")

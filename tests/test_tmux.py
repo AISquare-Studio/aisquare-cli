@@ -1571,7 +1571,10 @@ requires_tmux = pytest.mark.skipif(
 _SOCKETS = itertools.count()
 #: Prints one coloured line, then becomes `cat` so typed and pasted text echoes back.
 CAT = ["sh", "-c", 'printf "\\033[31mred\\033[0m plain\\n"; exec cat']
-EXIT_3 = ["sh", "-c", "exit 3"]
+#: Exits 3 half a second in: a command that died the instant tmux started it raced tmux's
+#: own setup of its pane, and once in many runs on CI's tmux 3.4 no dead pane with a status
+#: was ever listed (CI 42120386762, py3.12-captain-off shard 4/4; R7's flake list).
+EXIT_3 = ["sh", "-c", "sleep 0.5; exit 3"]
 
 
 def _wait(predicate: Callable[[], bool], *, timeout: float = 8.0) -> bool:
@@ -1947,7 +1950,14 @@ def test_live_a_finished_command_is_a_dead_pane_with_its_status(live: TmuxServer
 
     # tmux can report a pane dead a beat before it records the exit status: wait for the
     # status itself, whatever it is, so a wrong one still fails the assertion below.
-    assert _wait(lambda: (found := dead()) is not None and found.dead_status is not None)
+    listed = [
+        (w.pane_id, w.dead, w.dead_status) for w in live.list_windows("asq-test-fox")
+    ]  # what tmux listed, for the message: the window gone, or dead with no status
+    assert _wait(lambda: (found := dead()) is not None and found.dead_status is not None), (
+        listed,
+        [(w.pane_id, w.dead, w.dead_status) for w in live.list_windows("asq-test-fox")],
+        live.run("show-options", "-gv", "remain-on-exit").strip(),
+    )
     found = dead()
     assert found is not None and (found.dead, found.dead_status) == (True, 3)
     facts = live.pane_facts(exiting.pane_id)

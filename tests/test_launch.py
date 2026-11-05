@@ -1032,6 +1032,32 @@ def test_a_role_bound_to_a_session_id_is_not_given_a_second_one(
     assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
 
 
+def test_on_windows_launch_waits_for_its_agent_and_ends_with_its_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R8 of #113's release: on windows-latest a pasted `team spawn` line (which runs `aisquare
+    launch`) gave its shell back at once, with status 2816: Windows has no exec, so
+    `os.execve` started the agent and ended the launcher. There the agent runs as a child,
+    a `.cmd` shim included, and the launcher ends with the agent's status."""
+    ran: list[tuple[list[str], dict[str, str]]] = []
+
+    def call(args: list[str], env: dict[str, str]) -> int:
+        ran.append((args, env))
+        return 7
+
+    import os
+    import subprocess
+    import sys
+
+    monkeypatch.setattr(subprocess, "call", call)
+    monkeypatch.setattr(os, "execve", lambda *args: pytest.fail("no exec on Windows"))
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(SystemExit) as ended:
+        launch_cli._exec(r"C:\npm\claude.cmd", ["claude", "--verbose"], {"PATH": "C:\\npm"})
+    assert ended.value.code == 7
+    assert ran == [([r"C:\npm\claude.cmd", "--verbose"], {"PATH": "C:\\npm"})]
+
+
 #: The variadic flags Claude Code 2.1.318 declares (`claude --help`): each takes every
 #: word after it that is not an option.
 VARIADIC = [["--add-dir", "/opt/b"], ["--allowedTools", "Bash"], ["--mcp-config", "/opt/m.json"]]

@@ -40,6 +40,8 @@ import hashlib
 import os
 import re
 import sqlite3
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -364,7 +366,15 @@ def _role_remote_control(role: str) -> bool:
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
-    """Replace this process with the agent (indirection so tests can intercept)."""
+    """Replace this process with the agent (indirection so tests can intercept).
+
+    Windows has no exec: there ``os.execve`` starts the agent and ends this process at once,
+    so the shell a pasted `team spawn` line ran in had its prompt back while the agent ran
+    detached, and saw an exit status that was never the agent's (R8 of #113's release, CI on
+    windows-latest; 0.9.2's printed line ran the agent from the shell itself). There the agent
+    runs as this process's child, a `.cmd` shim included, and its exit status is this one's."""
+    if sys.platform == "win32":
+        raise SystemExit(subprocess.call([binary, *argv[1:]], env=env))
     os.execve(binary, argv, env)
 
 

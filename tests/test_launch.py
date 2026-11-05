@@ -1024,12 +1024,72 @@ def test_a_role_bound_to_a_session_id_is_not_given_a_second_one(
     assert spy["argv"].count("--session-id") == 1, (
         f"two --session-id flags reached the agent: {spy['argv']}"
     )
-    # The role's own flags first (its tool policy), as `launch` composes every agent's
-    # (`agent_launch.prepare_arguments`, #113), then the binding's.
-    assert spy["argv"] == ["claude", *policy_args("coder"), "--session-id", "bound-id-1234"], spy[
+    # The binding's, then the role's own flags (its tool policy): main 0.9.2's order,
+    # kept for Claude Code (`binding_args_first`, R1 F3).
+    assert spy["argv"] == ["claude", "--session-id", "bound-id-1234", *policy_args("coder")], spy[
         "argv"
     ]
     assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
+
+
+#: The variadic flags Claude Code 2.1.318 declares (`claude --help`): each takes every
+#: word after it that is not an option.
+VARIADIC = [["--add-dir", "/opt/b"], ["--allowedTools", "Bash"], ["--mcp-config", "/opt/m.json"]]
+
+
+@pytest.mark.parametrize("bound", VARIADIC)
+def test_a_bound_variadic_flag_never_takes_the_lines_prompt(
+    bound: list[str], runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """R1 of #113's release, F3: with the role's flags in front of the binding's, a role bound
+    to a variadic flag ran into the line's prompt (`claude <policy> --add-dir /opt/b hello`),
+    which Claude Code read as one more directory, and the session started with no prompt.
+    Main 0.9.2 ran `claude --add-dir /opt/b <policy> hello`, its order kept for Claude Code."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings, save_config
+
+    save_config(AppConfig(team=TeamSettings(profiles={"coder": RoleLaunchProfile(args=bound)})))
+    result = runner.invoke(app, ["launch", "coder", "--", "hello"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", *bound, *policy_args("coder"), "hello"], spy["argv"]
+
+
+def test_a_literal_separator_in_a_binding_never_makes_the_roles_flags_prompt_text(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """The head's reason for leading with the role's flags, kept by another means: a binding
+    that ends Claude Code's options (`--`) is followed by prompt text, so the role's flags go
+    in front of its `--`, and the line's own arguments after it, as given."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings, save_config
+
+    bound = ["--verbose", "--", "bound text"]
+    save_config(AppConfig(team=TeamSettings(profiles={"coder": RoleLaunchProfile(args=bound)})))
+    result = runner.invoke(app, ["launch", "coder", "--", "more"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", "--verbose", *policy_args("coder"), "--", "bound text", "more"]
+
+
+def test_a_traced_launchs_session_id_stays_in_front_of_the_lines_separator(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pinned `--session-id` goes last, as on main 0.9.2, but never after a `--` the line
+    carries: there Claude Code would read it as its prompt."""
+    from aisquare.core.config import AppConfig, ExplainabilitySettings, save_config
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    with healthy_proxy() as proxy_url:
+        save_config(
+            AppConfig(explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url))
+        )
+        result = runner.invoke(app, ["launch", "coder", "--", "--verbose", "--", "a prompt"])
+
+    assert result.exit_code == 0, result.output
+    argv = spy["argv"]
+    assert "--session-id" in argv, "traced"
+    assert argv.index("--session-id") < argv.index("--") and argv[-2:] == ["--", "a prompt"], argv
 
 
 @pytest.mark.parametrize("bound", [["--continue"], ["--resume"]])
@@ -1073,7 +1133,7 @@ def test_a_role_bound_to_a_resume_is_not_pinned(
         f"pinned an id onto {bound[0]}, which names a session that does not exist "
         f"yet: {spy['argv']}"
     )
-    assert spy["argv"] == ["claude", *policy_args("coder"), *bound], spy["argv"]
+    assert spy["argv"] == ["claude", *bound, *policy_args("coder")], spy["argv"]
 
 
 def test_every_role_that_can_take_a_seat_has_a_harness_profile() -> None:
@@ -1133,10 +1193,11 @@ def test_launch_persona_exports_the_name_for_the_session_start_hook(
     # file, never as an argument (`ps` shows argv) — the same block the session-start
     # hook briefs, so the two channels cannot disagree (owner decision, gh #210).
     policy = policy_args("coder")
-    argv = spy["argv"]
-    assert argv[0] == "claude" and argv[-len(policy) :] == policy, argv
-    assert len(argv) == 3 + len(policy)
-    prompt = Path(argv[argv.index(claude_code.SYSTEM_PROMPT_FLAG) + 1])
+    # Main 0.9.2's order, kept for Claude Code (`binding_args_first`, R1 F3): the role's
+    # flags, then the persona's.
+    assert spy["argv"][: 2 + len(policy)] == ["claude", *policy, claude_code.SYSTEM_PROMPT_FLAG]
+    assert len(spy["argv"]) == 3 + len(policy)
+    prompt = Path(spy["argv"][-1])
     briefed = "\n".join(personas.briefing(personas.resolve("skeptic"))) + "\n"
     assert prompt.read_text(encoding="utf-8") == briefed
     assert "skeptic" in prompt.name and prompt.parent.name == "persona-prompts"

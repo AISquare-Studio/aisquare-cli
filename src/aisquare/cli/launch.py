@@ -765,12 +765,14 @@ def launch(
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
         stderr_console().print(f"{role}: {note}", style="dim")
+    # The binding's arguments ahead of the role's, as 0.9.2 launched Claude Code
+    # (`capabilities.binding_args_first`), else the role's ahead of the binding's.
+    binding_first = selected.adapter.capabilities.binding_args_first
+    owned_raw = [*binding_args, *role_args] if binding_first else [*role_args, *binding_args]
     try:
         # The binding's and this line's arguments less the `--disallowedTools` the policy
         # folded into its one token (`ToolPolicy.strip`).
-        arguments = agent_launch.prepare_arguments(
-            selected, [*role_args, *binding_args], agent_args
-        )
+        arguments = agent_launch.prepare_arguments(selected, owned_raw, agent_args)
         # A fleet window's model and effort are the fleet's one decision, on this line
         # already: no pin of the tmux server's environment, no configured effort the spawn
         # left out, is added to them here (`agent_launch.FLEET_DECIDED_FLAG`).
@@ -913,18 +915,42 @@ def launch(
     # Remote Control's flag sits between the role's and binding's arguments and the ones this
     # line was given (the operator's own win, as for every flag), where the two can be told
     # apart: the agent's reading of the first is a prefix of its reading of the whole.
-    owned = selected.adapter.native_args([*role_args, *binding_args])
+    owned = selected.adapter.native_args(owned_raw)
     held = len(owned) if arguments.argv[: len(owned)] == owned else len(arguments.argv)
-    argv = [
-        resolution.binary,
-        *model_args,
-        *pinned_id,
-        *launched,
-        *persona_args,
-        *arguments.argv[:held],
-        *remote_args,
-        *arguments.argv[held:],
-    ]
+    if binding_first:
+        # 0.9.2's order (review R1 of #113's release, F3): the binding's, the role's, the
+        # persona's, Remote Control's, the line's, the session id. The role's flags
+        # between a binding's variadic flag (`--add-dir <directories...>`) and the line's
+        # prompt keep that prompt the prompt; any of ours after a literal `--` is moved in
+        # front of it (`ordered_argv`).
+        bound = selected.adapter.native_args(binding_args)
+        cut = len(bound) if arguments.argv[: len(bound)] == bound else 0
+        argv = [
+            resolution.binary,
+            *model_args,
+            *launched,
+            *agent_launch.ordered_argv(
+                [
+                    (False, arguments.argv[:cut]),
+                    (True, arguments.argv[cut:held]),
+                    (True, persona_args),
+                    (True, remote_args),
+                    (False, arguments.argv[held:]),
+                    (True, pinned_id),
+                ]
+            ),
+        ]
+    else:
+        argv = [
+            resolution.binary,
+            *model_args,
+            *pinned_id,
+            *launched,
+            *persona_args,
+            *arguments.argv[:held],
+            *remote_args,
+            *arguments.argv[held:],
+        ]
     # The first message (P0-W1a, #122), last: the agent's positional prompt, after `--`
     # (`capabilities.positional_prompt`).
     # Read from a file and the file deleted, so the window's command, which tmux carries and

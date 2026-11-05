@@ -374,8 +374,14 @@ def spawn(
         defaults = selected.adapter.role_defaults(
             role_name, binary=selected.binary.binary, args=selected.profile.args
         )
+        # The binding's ahead of the role's defaults, as 0.9.2 spawned Claude Code
+        # (`capabilities.binding_args_first`), else the defaults first.
+        binding_first = selected.adapter.capabilities.binding_args_first
         arguments = agent_launch.prepare_arguments(
-            selected, [*defaults.args, *selected.profile.args]
+            selected,
+            [*selected.profile.args, *defaults.args]
+            if binding_first
+            else [*defaults.args, *selected.profile.args],
         )
         with harness.probe_notice(
             lambda: typer.echo(
@@ -467,22 +473,34 @@ def spawn(
         # carry and does not is part of what the paste will do. Under --json,
         # `notes` in the object says it.
         typer.echo(f"{role_name}: {note}", err=True)
-    # The policy's own flags lead, the binding's `--disallowedTools` folded into its one
-    # token: the order `launch` composes the printed line into (the role's flags first).
-    if resolution is None:
-        argv = [binary.binary, *policy.args, *policy.strip(arguments.argv)]
-        banner = f"{role_name}: untiered role — launching on the session default model"
-    else:
+    # The binding's `--disallowedTools` folded into the policy's one token. For an agent that
+    # keeps 0.9.2's order (`capabilities.binding_args_first`, Claude Code): the model and the
+    # effort, the binding's, the role's defaults and policy, as 0.9.2 spawned it (R1 F3), none
+    # of ours after a literal `--` (`agent_launch.ordered_argv`). Otherwise the policy leads.
+    model_args = (
+        agent_launch.resolved_model_args(selected, resolution, arguments)
+        if resolution is not None
+        else []
+    )
+    if binding_first:
+        bound = selected.adapter.native_args(list(selected.profile.args))
+        cut = len(bound) if arguments.argv[: len(bound)] == bound else len(arguments.argv)
         argv = [
             binary.binary,
-            *policy.args,
-            *policy.strip(
+            *agent_launch.ordered_argv(
                 [
-                    *agent_launch.resolved_model_args(selected, resolution, arguments),
-                    *arguments.argv,
+                    (True, model_args),
+                    (False, policy.strip(arguments.argv[:cut])),
+                    (True, policy.strip(arguments.argv[cut:])),
+                    (True, policy.args),
                 ]
             ),
         ]
+    else:
+        argv = [binary.binary, *policy.args, *policy.strip([*model_args, *arguments.argv])]
+    if resolution is None:
+        banner = f"{role_name}: untiered role — launching on the session default model"
+    else:
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
         profile = harness.ROLE_PROFILES.get(role_name)
         mission = profile.mission if profile else "pinned by AISQUARE_MODEL override"
@@ -656,7 +674,17 @@ def spawn(
                 # Pinned only on a spawn that is really traced: an untraced one
                 # has no Run to join, so touching its argv would be risk with
                 # no correlation to show for it.
-                argv = [argv[0], *identity.inject_args, *argv[1:]]
+                argv = (
+                    # Last, as 0.9.2 had it, never after a literal `--` (R1 F3).
+                    [
+                        argv[0],
+                        *agent_launch.ordered_argv(
+                            [(False, argv[1:]), (True, identity.inject_args)]
+                        ),
+                    ]
+                    if binding_first
+                    else [argv[0], *identity.inject_args, *argv[1:]]
+                )
                 # Same marker `aisquare launch` sets: it tells a spawn command
                 # run from INSIDE this session that the ANTHROPIC_* it can see
                 # are ours to clear, not the operator's own gateway — and it

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -371,6 +371,30 @@ class NativeArguments:
     model: str | None
     effort: str | None
     original_effort: str | None
+
+
+#: The literal that ends a native command line's options: what follows it is prompt text.
+END_OF_OPTIONS = "--"
+
+
+def ordered_argv(segments: Sequence[tuple[bool, Sequence[str]]]) -> list[str]:
+    """The arguments of ``segments`` in their order, each ``(ours, args)`` a run of AISquare's
+    own flags (``ours``) or of the operator's (the binding's, the line's), except that a run of
+    ours after the first literal ``--`` an operator's run carries goes in front of that ``--``:
+    after it, the agent would read our flags as its prompt
+    (``AgentCapabilities.binding_args_first``, 0.9.2's order with the head's guarantee)."""
+    head: list[str] = []
+    tail: list[str] = []
+    for ours, args in segments:
+        if tail:
+            (head if ours else tail).extend(args)
+        elif not ours and END_OF_OPTIONS in args:
+            cut = list(args).index(END_OF_OPTIONS)
+            head.extend(args[:cut])
+            tail.extend(args[cut:])
+        else:
+            head.extend(args)
+    return [*head, *tail]
 
 
 def prepare_arguments(

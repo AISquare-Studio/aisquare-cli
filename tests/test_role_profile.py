@@ -236,9 +236,9 @@ class TestLaunchWiring:
         result = runner.invoke(app, ["launch", "coder", "-p", "go"])
 
         assert result.exit_code == 0, result.output
-        # The role's own flags (its tool policy) lead, as `launch` composes every agent's
-        # (`agent_launch.prepare_arguments`, #113); the binding's, then the forwarded ones.
-        assert spy["argv"] == ["claude", *policy_args("coder"), "--model", "opus", "-p", "go"]
+        # The binding's, then the role's own flags (its tool policy), then the forwarded
+        # ones: main 0.9.2's order, kept for Claude Code (`binding_args_first`, R1 F3).
+        assert spy["argv"] == ["claude", "--model", "opus", *policy_args("coder"), "-p", "go"]
 
     def test_the_lines_own_model_and_effort_replace_the_bindings(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]

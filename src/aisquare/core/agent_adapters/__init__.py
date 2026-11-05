@@ -192,7 +192,9 @@ opt-in anonymous usage share, whose consent names Claude Code's alone; an agent 
 counted locally and left out of every shared batch), `remote_control` (it can be started so
 that another client continues the session, titled: Claude Code's `--remote-control`, #289; a
 launch that asks of an agent without says so and starts it as it was), `positional_prompt` (its first
-message on its command line, after `--`), `compact` (a `CompactCommand(line, instructions)`:
+message on its command line, after `--`), `binding_args_first` (a launch keeps 0.9.2's argument
+order: the binding's, the role's, the persona's, the line's, the session id last, AISquare's own
+flags in front of a literal `--`; otherwise AISquare's lead), `compact` (a `CompactCommand(line, instructions)`:
 the command that compacts the session at its idle prompt, which the quiet-point compaction types, bare
 where text after it would run as a prompt; its acknowledgement is the compaction's `SessionStart`
 where that comes at rest, else the transcript's record of it),

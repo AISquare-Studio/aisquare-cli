@@ -974,6 +974,33 @@ def test_spawn_exec_replaces_the_process(
     assert "--model" in argv and "--effort" in argv
 
 
+def test_spawn_exec_keeps_main_092s_argument_order(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 of #113's release, F3: `team spawn --exec` ran Claude Code as 0.9.2 did, its model
+    and effort first, then the binding's arguments, then the role's tool policy; the head led
+    with the policy. A bound variadic flag (`--add-dir <directories...>`) is followed by the
+    policy, never by what follows it."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings, save_config
+    from tests.role_policy import policy_args
+
+    bound = ["--add-dir", "/opt/b"]
+    save_config(AppConfig(team=TeamSettings(profiles={"coder": RoleLaunchProfile(args=bound)})))
+    calls: dict[str, list[str]] = {}
+
+    def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
+        calls["argv"] = argv
+
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
+    runner, app = _cli()
+    result = runner.invoke(app, ["team", "spawn", "coder", "--exec", "--no-probe"])  # type: ignore[arg-type]
+    assert result.exit_code == 0, result.output
+    argv = calls["argv"]
+    assert argv[1] == "--model" and argv[3] == "--effort", argv
+    assert argv[5:] == [*bound, *policy_args("coder")], argv
+
+
 def test_doctor_harness_check_warns_on_env_interference(
     isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

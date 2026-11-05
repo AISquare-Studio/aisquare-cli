@@ -418,6 +418,15 @@ class AgentCapabilities:
     """The first prompt is a positional argument, after ``--`` (Claude Code, Codex): a spawn's
     first message goes on its command line (``services.delivery.first_prompt_way``, through a
     file ``launch`` reads and deletes); otherwise the fleet types it."""
+    binding_args_first: bool = False
+    """A launch keeps the argument order Claude Code was launched with through 0.9.2
+    (``cli.launch``): the role binding's arguments, the role's own flags (its defaults and tool
+    policy), the persona's, Remote Control's, the line's, and the session id last. Each of
+    AISquare's own flags is moved in front of a literal ``--`` that the binding or the line
+    carries, so none becomes prompt text (``agent_launch.ordered_argv``). A binding's variadic
+    flag (``--add-dir <directories...>``) is then followed by the role's flags, never by the
+    line's prompt. Otherwise AISquare's flags all lead and the binding's follow them: of two
+    ``-c KEY=VALUE`` the later wins, so the binding's wins over the role's."""
     first_context_file_only: bool = False
     """Of its config dir's instruction files (:meth:`AgentAdapter.instruction_files` with no
     ``cwd``, in its precedence) the agent reads the first that is not blank alone (Codex's

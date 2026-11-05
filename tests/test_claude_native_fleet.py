@@ -19,14 +19,16 @@ from __future__ import annotations
 
 import json
 import shlex
+import time
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner, Result
 
 from aisquare.cli.app import app
-from aisquare.core import agents, selfcli
-from aisquare.services import fleet
+from aisquare.core import agents
+from aisquare.core.agent_adapters import claude_screen, get_adapter
+from aisquare.services import fleet, team
 from tests.test_claude_native import (  # noqa: F401 - `native` and `native_options` are fixtures
     AGENT,
     Native,
@@ -139,37 +141,100 @@ def test_real_claude_code_restart_of_a_running_agent_resumes_its_session(
     assert [e.kind for e in native.events()].count("restarted") == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "F3 (board seq 11086), pre-existing on 0.9.2: Claude Code 2.1.318 sends a resume's "
-        "command-line prompt without waiting for its SessionStart hooks, and drops the "
-        "context of aisquare's (about 1 s)"
-    ),
-)
+#: A board change between an agent's start and its restart, which its resume's snapshot holds.
+MOVED_ON = "the board moved on between the start and the restart"
+
+
 @options()
-def test_real_claude_code_restarted_with_a_line_gets_its_session_start_context(
+def test_real_claude_code_restarted_after_a_board_change_gets_the_fresh_board(
     native: Native,  # noqa: F811
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The resume line rides on the command line (0.9.0's delivery, kept: ruling 11087), and
-    Claude Code 2.1.318 sends it without waiting for its SessionStart hooks, whose context
-    is then lost. aisquare's hook takes about a second, which loses or wins by the machine's
-    speed; held at 1.5 s here, as in the plain-Claude repro, it loses every time, so this
-    reads XFAIL until Claude Code waits, and XPASS (red, strict) the day it does."""
-    slow = native.outside / "slow-session-start.sh"
-    slow.write_text(
-        "#!/bin/sh\n"
-        'case "$*" in *session-start*) sleep 1.5 ;; esac\n'
-        f'exec {shlex.join(selfcli.argv_for([]))} "$@"\n',
-        encoding="utf-8",
+    """Its resume line rides on its command line (0.9.0's delivery, ruling 11087), and Claude
+    Code 2.1.318 waits for its SessionStart all the same; what it does not add is a context
+    byte-identical to one the resumed conversation already holds (tester 846e8c78, seq
+    11202, correcting R6's F3). So a board that moved on since the start reaches the
+    resumed request in the resume's snapshot: this fails if aisquare's hook or the restart
+    loses it."""
+    receipt = native.spawn(prompt="before the restart")
+    row = receipt.agent
+    native.heard("before the restart")
+    native.until(lambda: native.state(row.session_id) == "waiting", 30, "idle", row.pane_id)
+    noted = runner.invoke(app, ["note", MOVED_ON], catch_exceptions=False)  # from its folder
+    assert noted.exit_code == 0, noted.output
+    asq_json(native, "fleet", "restart", row.label)
+    turn = native.heard("restarted and resumed")
+    resumed = turn.everything.split("SessionStart:resume hook success: <aisquare-team>", 1)
+    assert len(resumed) == 2, "the resume's context reached the model"
+    assert MOVED_ON in resumed[1].split("</aisquare-team>", 1)[0], "with the fresh board"
+
+
+@options(suggestions=True)
+def test_real_claude_code_spawned_with_no_message_is_told_at_its_suggestion_placeholder(
+    native: Native,  # noqa: F811
+) -> None:
+    """#92's P1 (ruled FIX): with prompt suggestions on, a fresh 2.1.318 session draws its
+    placeholder with the cursor on its first letter, which the box read as a draft ``T``, so
+    a tell to an agent spawned with no first message became a board note. It types now; a
+    draft the human left in the box is still never typed over."""
+    row = native.spawn().agent
+    pane = row.pane_id
+    native.until(lambda: native.session(row.session_id), 30, "its SessionStart", pane)
+    native.until(lambda: native.state(row.session_id) == "waiting", 30, "waiting", pane)
+    native.ready(pane)
+    time.sleep(1)  # the placeholder drawn
+    assert claude_screen.composer_text(native.srv.capture(pane).lines) == ""
+    told = asq_json(native, "fleet", "tell", row.label, "told at the placeholder")
+    assert told["typed"] == "yes", told
+    native.heard("told at the placeholder")
+    native.until(lambda: native.state(row.session_id) == "waiting", 30, "waiting", pane)
+    native.ready(pane)
+    native.srv.send_literal(pane, "my own draft")
+    native.until(
+        lambda: claude_screen.composer_text(native.srv.capture(pane).lines) == "my own draft",
+        10,
+        "the draft in its box",
+        pane,
     )
-    slow.chmod(0o755)
-    agents.remove_hooks(AGENT, native.config_dir)
-    monkeypatch.setattr(agents, "_aisquare_command", lambda *args, **kwargs: str(slow))
-    agents.install_hooks(AGENT, native.config_dir)
-    _, _, turn = _restart_running(native)
-    assert "SessionStart:resume hook success: <aisquare-team>" in turn.everything
+    kept = asq_json(native, "fleet", "tell", row.label, "never over the draft")
+    assert kept["typed"] == "no" and "draft" in kept["how"], kept
+    assert claude_screen.composer_text(native.srv.capture(pane).lines) == "my own draft"
+
+
+@options(idle_ms=2000)
+def test_real_claude_code_idle_notice_reaches_aisquare_and_rings_no_bell(
+    native: Native,  # noqa: F811
+) -> None:
+    """Claude Code's ``Notification`` of type ``idle_prompt`` (its prompt idle past
+    ``messageIdleNotifThresholdMs``, 60 s by default, 2 s here), round-tripped: a hook of the
+    operator's own beside aisquare's records what Claude Code sent, aisquare's adapter reads
+    it as the idle notice, and the board stays as it was, ``waiting`` with no bell and no feed
+    line (#153: nine bells in ten were these)."""
+    seen = native.outside / "notifications.jsonl"
+    path = native.config_dir / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    own = {"type": "command", "command": f"cat >> {shlex.quote(str(seen))}; echo >> {seen}"}
+    settings["hooks"]["Notification"].append({"hooks": [own]})
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    row = native.spawn(prompt="then sit idle").agent
+    native.heard("then sit idle")
+    native.until(lambda: native.state(row.session_id) == "waiting", 30, "waiting", row.pane_id)
+
+    def idle() -> dict[str, Any] | None:
+        lines = seen.read_text(encoding="utf-8").splitlines() if seen.exists() else []
+        sent = [json.loads(line) for line in lines if line.strip()]
+        return next((p for p in sent if p.get("notification_type") == "idle_prompt"), None)
+
+    payload = native.until(idle, 40, "Claude Code's idle notice", row.pane_id)
+    event = get_adapter(AGENT).decode_event(payload)
+    assert event is not None and (event.kind, event.notification_type) == (
+        "notification",
+        "idle_prompt",
+    )
+    assert event.session_id == row.session_id
+    assert team.classify_notification(event.notification_type, event.message) == "quiet"
+    time.sleep(2)  # aisquare's hook beside the operator's, done by now
+    assert native.state(row.session_id) == "waiting", "no bell"
+    assert not [e for e in native.events() if e.kind in ("attention", "notice")]
 
 
 @options()

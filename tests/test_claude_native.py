@@ -596,7 +596,9 @@ def scrub_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def native_options() -> dict[str, Any]:
     """What a test asks of the ``native`` fixture: ``trusted`` (the workspace's folder
     trusted on the account), ``allow`` (the tools its settings allow), ``permission_mode``
-    (every role's), ``first_prompt``."""
+    (every role's), ``first_prompt``, ``suggestions`` (Claude Code's prompt suggestions on,
+    its default where its rollout flag is), ``idle_ms`` (how long it waits at its prompt
+    before its ``idle_prompt`` notification: 60 s unless set)."""
     return {}
 
 
@@ -622,6 +624,17 @@ def native(
             trusted = (workspace,) if native_options.get("trusted", True) else ()
             allow = native_options.get("allow", ())
             write_config_dir(config_dir, stub, *trusted, allow=allow)
+            if native_options.get("suggestions"):
+                _merge_json(
+                    config_dir / "settings.json",
+                    env={"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "1"},
+                )
+            if "idle_ms" in native_options:
+                _merge_json(
+                    config_dir / ".claude.json",
+                    messageIdleNotifThresholdMs=native_options["idle_ms"],
+                )
+            settings = json.loads((config_dir / "settings.json").read_text(encoding="utf-8"))
             scrub_agent_env(monkeypatch)
             monkeypatch.chdir(workspace)  # the user's terminal, where the CLI finds the project
             monkeypatch.setenv("AISQUARE_HOME", str(store))
@@ -642,12 +655,19 @@ def native(
             save_config(config)
             project = team.activate(workspace)
             srv = fleet.server(config.fleet)
-            settings = claude_settings(stub, allow=allow)
             yield Native(project, srv, stub, config_dir, workspace, outside, binary, settings)
         finally:
             if srv is not None:
                 end_server(srv)
             shutil.rmtree(outside, ignore_errors=True)
+
+
+def _merge_json(path: Path, **fields: Any) -> None:
+    """``fields`` into the JSON object in ``path``, a mapping merged into its own."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for key, value in fields.items():
+        data[key] = {**data.get(key, {}), **value} if isinstance(value, dict) else value
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def end_server(srv: TmuxServer) -> None:
@@ -999,9 +1019,10 @@ def test_real_claude_code_fires_every_hook_aisquare_installs_and_each_reaches_th
     native.until(lambda: native.ended(row.session_id), 30, "SessionEnd", pane)
     seen["SessionEnd"] = "ended"
     # Resumed by hand: its SessionStart (source resume) takes the ended session back on the
-    # board before anything is typed. Whether 2.1.318 hands that hook's context to the
-    # model is a race it runs against its first request (F3, pinned deterministically in
-    # test_claude_native_fleet.py), so the board is what this reads.
+    # board before anything is typed. 2.1.318 waits for that hook and hands its context to
+    # the model unless the resumed conversation already holds the same text (a board
+    # unchanged since an earlier start's): test_claude_native_fleet.py's restart after a
+    # board change pins the context; this reads the board.
     command = shlex.join(
         [*selfcli.argv_for(["launch", "coder"]), "--", "--resume", str(row.session_id)]
     )

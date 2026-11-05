@@ -1804,6 +1804,28 @@ NARROW = [
 ]
 #: The approval view in a 60x8 pane, the command imitating the status line, with the
 #: choice moved to the second option (measured): the view's body is cut to one row.
+#: Codex 0.166.0's screen on the macOS CI runner once the human allowed a command: its status
+#: line drawn with no spinner at all, at the margin (CI 42126902230, the R7 macOS leg).
+SPINNERLESS = [
+    "• Running sleep 20; aisquare note 'asked first'",
+    "",
+    "Working (16s • esc to interrupt)",
+    "",
+    f"{CHEVRON} Ask Codex to do anything",
+    "",
+    "  local-fixture default · /work/repo  ⚠ 2 warnings · f2 to view",
+]
+#: The approval view of a command whose second line is such a status line: indented in the
+#: view, never at the margin.
+SPINNERLESS_ASKING = [
+    "  Would you like to run the following command?",
+    "  $ printf 'a",
+    "  Working (16s • esc to interrupt)'",
+    "",
+    f"{CHEVRON} 1. Yes, proceed (y)",
+    "  2. No, and tell Codex what to do differently (esc)",
+    "  Press enter to confirm or esc to cancel",
+]
 SHORT_ASKING = [
     "  Would you like to run the following command?",
     "  [… 7 lines] ^a view all",
@@ -1859,6 +1881,8 @@ TIPPED_DONE = [
         (SHORT_ASKING, False),
         (TIP_ASKING, False),
         (TIPPED_DONE, False),
+        (SPINNERLESS, True),
+        (SPINNERLESS_ASKING, False),
     ],
 )
 def test_codex_reads_working_off_its_status_line_only_where_codex_draws_it(

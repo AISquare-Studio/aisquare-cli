@@ -391,8 +391,13 @@ _EVENTS = {
 #: ``•`` in a terminal that reports truecolor (``COLORTERM``), and blinks ``•``/``◦``
 #: otherwise, as in a window whose spawner had no ``COLORTERM`` to pass on (headless, SSH,
 #: cron): measured under tmux, the glyph alternated on reads 0.3 s apart (review r4 of
-#: #113, finding 7).
-_STATUS_LINE = re.compile(r"[•◦] .+ \(\d+[hms](?: \d+[hms])* • esc to interrupt\)(?: · .*)?")
+#: #113, finding 7). And with no spinner at all, the header at the margin: 0.166.0 on the
+#: macOS CI runner, after a human allowed a command (CI 42126902230, R7), which read the
+#: agent asking still. Never indented: the approval view's own rows are, the command it
+#: asks about among them, which can hold these very words.
+_STATUS_LINE = re.compile(
+    r"(?:[•◦] )?[^\s•◦].* \(\d+[hms](?: \d+[hms])* • esc to interrupt\)(?: · .*)?"
+)
 #: What starts Codex's composer row, and every user prompt in its transcript above it:
 #: U+203A and a space.
 _CHEVRON = "\u203a "

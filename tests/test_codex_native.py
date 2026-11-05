@@ -1205,17 +1205,10 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             assert reviews() == reviewed and not answered(seen)
             srv.send_keys(pane, "y")
             # Working the moment the human allows, not when the command's PostToolUse
-            # fires at its end (review r2 of #113, finding 7): output once the view is gone
-            # reads working. The output is made as at the view above, by a resize, each read:
-            # on the macOS CI runner Codex drew "Working (1s" and nothing after it for 15 s
-            # (CI 42123077743), so its one burst could pass between two reads.
-            widths = iter([width, width - 1] * 40)
-
-            def working() -> bool:
-                srv.run("resize-window", "-t", pane, "-x", str(next(widths)))
-                return state(coder) == "working"
-
-            until(working, 15, "working once allowed", pane)
+            # fires at its end (review r2 of #113, finding 7): read off Codex's status line
+            # above its composer, which on the macOS CI runner Codex drew with no spinner
+            # (CI 42126902230; the adapter reads that line now).
+            until(lambda: state(coder) == "working", 15, "working once allowed", pane)
             assert not answered(seen), "the approved command still runs"
             until(lambda: answered(seen), 60, "the approved note ran", pane)
             assert "shared (note)" in outputs()[-1]

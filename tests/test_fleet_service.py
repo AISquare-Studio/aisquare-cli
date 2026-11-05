@@ -16523,6 +16523,24 @@ def test_a_092_agents_first_restart_or_switch_resumes_its_transcript(
     assert record.session is not None and record.session.id == agent.session_id
 
 
+def test_a_fork_of_a_092_agent_forks_its_transcript(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """R3 of 0.10.0, F1, for a hand-off's Fork: 0.9.2 forked a running agent's transcript
+    from its board session (`--resume <transcript> --fork-session`); its census record
+    holds that session too (`fleet._with_legacy_session`), so the fork is no fresh start."""
+    source = _coder(project)
+    _before_records()  # spawned by 0.9.2
+    transcript = _092_transcript(source, tmp_path)
+    tmux.set_command(source.pane_id, "claude")
+
+    receipt = fleet_service.hand_off(project, source.label)
+
+    command = _command(tmux)
+    assert (receipt.mode, receipt.resumed) == ("fork", True), receipt.notes
+    assert _flag(command, "--resume") == str(transcript) and "--fork-session" in command
+
+
 def test_the_doctor_offers_a_restart_only_for_an_exited_agent_the_restart_resumes(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
 ) -> None:

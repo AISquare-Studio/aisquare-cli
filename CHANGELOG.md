@@ -102,7 +102,7 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   by hand.
 - **New and changed commands:** `aisquare agents use <agent> [--project]` chooses the
   coding agent future launches run (a role's binding still wins). The captain
-  (experimental) hands Claude Code its MCP server inline (`--mcp-config <json>`), so
+  (experimental) passes its MCP server to Claude Code inline (`--mcp-config '<json>'`), so
   `~/.aisquare/captain/mcp.json` is no longer written and 0.9.2's copy is left where it is.
   `persona import --engine manager` gives Claude Code the strict form of its answer's
   schema (every field required, no other).
@@ -110,14 +110,20 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `AISQUARE_LAUNCH_ID`, `AISQUARE_LAUNCH_AGENT` and `AISQUARE_LAUNCH_PID`; `accounts run`
   does not. The line `team spawn` prints is `<python> -P -m aisquare launch <role> --agent
   claude-code --command claude --no-bound-args --custom-role -- …`, where it was
-  `AISQUARE_ROLE=… claude …`; pasted, it prints launch's banner.
+  `AISQUARE_ROLE=… claude …`; pasted, it prints launch's banner. A fleet window carries
+  its role binding's arguments in its own command line, the ones a restart replays; Claude
+  Code reads them in any order.
+- **Model availability is cached per account:** after a Claude Code update, a model that
+  was available stays cached for its 24 h, and only one that was refused is probed again.
+  The first `team spawn` after upgrading from 0.9.2 probes once per account.
 - **What else you may notice:**
   - Words: Codex is marked `(beta)` where agents are listed or chosen (`agents list`, the
     `--agent` helps, `aisquare accounts`' last line, `[--agent codex (beta)]`). Doctor's
     Codex row, which said support was planned for 0.10, reports Codex's own integration
     (doctor reads every agent's hook sites). `accounts trust` says *on every account that
-    can hold it*; usage pages say *the agents' transcripts*; a hand-off line made by hand
-    says *by its operator's `fleet switch`*; help texts say *the agent* or *Claude Code
+    can hold it*; usage pages say *the agents' transcripts*; a `fleet switch` without a
+    reason tells the replacement it was moved *by its operator's `fleet switch`*, not by a
+    usage limit; help texts say *the agent* or *Claude Code
     and Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose agent*,
     where it said *general-purpose Claude*. Remote's sheets and refusals for Ctrl-C, Ctrl-D
     and a second Esc speak of *the coding agent* and *the agent's rewind*. `persona import
@@ -135,11 +141,6 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     reads both. `config list` shows new defaults: `[agents] mcp` (off; on, each launch is
     handed aisquare's MCP server), `[agents.models]`, a role's `agent_args` and
     `[accounts] cross_agent_handover` (on).
-<!-- #94 (R8): R1's F2 (AISQUARE_TEAM_HUB on a hand launch), F3 (argv order, the fleet
-     window's command), F5 (a persona on a wrapper binary), C2-C5 (persona export's hint,
-     the captain's trust words), the Windows printed-command tests and the model probe's
-     cache, and #87's N1 (`-E` on Claude Code's fleet-window launcher and the hook
-     hand-over): their lines from #94's DONE note. -->
 <!-- #92 (R6): #87's N5 (a `fleet tell` to a Claude Code agent whose SessionStart this
      launch has not seen files a board note and types nothing), from #92's DONE note. -->
 <!-- R2: one line for each item SMOKE14 classifies CLAUDE-VISIBLE and the owner keeps. -->

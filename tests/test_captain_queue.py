@@ -862,15 +862,18 @@ def test_a_held_lock_is_a_refusal_the_owner_can_retry_and_a_write_failure_is_an_
 
 
 def test_the_whole_refresh_over_the_fixture_runs_under_a_second(fx: Fixture) -> None:
+    """The refresh's own work, measured as this process's CPU time: its sources are the
+    fixture's, in memory, so it waits on nothing, and the wall clock measured the runner's
+    load as well (2.75 s on a loaded py3.12 shard, CI 41888119902 attempt 1; main's test)."""
     _seed_three_projects(fx)
     for project in (fx.alpha, fx.beta, fx.gamma):
         for seq in range(100, 160):
             fx.ask(project, f"question number {seq % 7} about the fold", seq=seq)
     queue = fx.queue()
-    started = time.perf_counter()
+    started = time.process_time()
     queue.refresh()
-    elapsed = time.perf_counter() - started
-    assert elapsed < 1.0, f"refresh took {elapsed:.2f}s"
+    elapsed = time.process_time() - started
+    assert elapsed < 1.0, f"refresh took {elapsed:.2f}s of CPU"
     assert len(queue.items()) < 60  # the 180 repeats folded into a few rows
 
 

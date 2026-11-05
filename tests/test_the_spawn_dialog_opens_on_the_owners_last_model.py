@@ -37,6 +37,7 @@ from tests.test_ui_spawn import (
     settle,
     submit,
 )
+from tests.ui_workers import settle_until_held
 
 # The Spawn dialog suite's fixtures, bound here so pytest finds them for this module's tests.
 no_real_tmux = spawn_suite.no_real_tmux
@@ -179,7 +180,13 @@ def test_a_model_that_is_no_model_name_disables_spawn_and_says_why(
 ) -> None:
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         dialog.query_one("#spawn-model", Input).value = "opus --effort max"
-        await pilot.pause()
+        # The note is the field's Input.Changed handler's: read once it is up, not one
+        # pause() after the value, which a loaded Windows runner outran (CI 41840707223).
+        await settle_until_held(
+            pilot.app,
+            lambda: note(dialog, "#spawn-model-error") is not None,
+            what="the Model field's error note",
+        )
         return [note(dialog, "#spawn-model-error"), submit(dialog).disabled, advanced(dialog)]
 
     error, disabled, section = drive(git_project, scenario)

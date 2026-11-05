@@ -1220,7 +1220,12 @@ def _started(pids: Path) -> list[int]:
 
 
 def _gone(pid: int, *, within: float = 1.0) -> bool:
-    """Whether ``pid`` has ended (a zombie is given ``within`` to be reaped by init)."""
+    """Whether ``pid`` has ended within ``within`` seconds: there is no such process, or it is
+    a zombie, which has ended and only waits for what adopted it to collect its status. The
+    stand-in's ``sleep`` outlives its shell by an instant and is adopted by the init or the
+    subreaper above the test, which reaps on its own time: on a loaded Linux runner that took
+    more than the second this waited, and the import that ended it read as one that left it
+    running (CI 41840707223, attempt 1, py3.12 shard 1/4)."""
     deadline = time.monotonic() + within
     while True:
         try:
@@ -1229,9 +1234,48 @@ def _gone(pid: int, *, within: float = 1.0) -> bool:
             return True
         except PermissionError:
             return False
+        if _zombie(pid):
+            return True
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.02)
+
+
+def _zombie(pid: int) -> bool:
+    """Whether ``pid`` is a zombie, as the system says: ``/proc/<pid>/stat``'s state where
+    there is one (Linux), else ``ps -o stat=`` (macOS)."""
+    stat = Path(f"/proc/{pid}/stat")
+    try:
+        return stat.read_text(encoding="utf-8").rpartition(")")[2].split()[0] == "Z"
+    except (OSError, IndexError):
+        pass
+    shown = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
+    )
+    return shown.stdout.strip().startswith("Z")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a zombie is POSIX's")
+def test_a_process_that_ended_is_gone_however_long_its_reaper_takes() -> None:
+    """The flake's race, made to hold (R7 of 0.10.0): a child killed and never collected, as
+    the stand-in's ``sleep`` is until what adopted it reaps it, is gone at once; a running
+    one is not."""
+    running = subprocess.Popen(["sleep", "30"])
+    ended = subprocess.Popen(["sleep", "30"])
+    try:
+        ended.kill()
+        deadline = time.monotonic() + 10
+        while not _zombie(ended.pid) and time.monotonic() < deadline:
+            time.sleep(0.02)  # the kill lands: the premise, a zombie no one collected
+        assert _zombie(ended.pid), "the premise: an uncollected zombie"
+        started = time.monotonic()
+        assert _gone(ended.pid, within=5.0)
+        assert time.monotonic() - started < 1.0, "at once, not at the bound"
+        assert not _gone(running.pid, within=0.2)
+    finally:
+        for child in (running, ended):
+            child.kill()
+            child.wait()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the stand-in is a POSIX shell script")

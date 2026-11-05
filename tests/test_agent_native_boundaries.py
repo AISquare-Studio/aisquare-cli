@@ -611,7 +611,10 @@ def test_legacy_unverified_hooks_get_a_working_reconnect_instruction(tmp_path: P
     reconnect = agents_service.config_dir_command("connect", "codex", directory)
     assert check.fix and reconnect in check.fix
     assert "/hooks" in check.detail
-    assert subprocess.run(["sh", "-n", "-c", check.fix], timeout=3).returncode == 0
+    # A syntax check, over the moment `sh` exits: the bound only guards a hang. On a Windows
+    # runner `sh` is Git Bash's, whose first start there outlived 3 s (CI 42112073144,
+    # windows shard 6/10; R7's flake list).
+    assert subprocess.run(["sh", "-n", "-c", check.fix], timeout=60).returncode == 0
     agents.install_hooks("codex", directory)
     settings = json.loads(path.read_text())
     parts = shlex.split(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"])

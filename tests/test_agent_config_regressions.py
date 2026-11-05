@@ -721,9 +721,13 @@ def test_keychain_entitlement_changes_use_explicit_refresh(
     assert "Keychain" in help_text and "--refresh" in help_text
 
 
-def test_normal_probe_cache_writes_prune_expired_binary_scopes_and_keep_other_accounts(
+def test_normal_probe_cache_writes_prune_expired_scopes_and_keep_other_accounts(
     tmp_path: Path,
 ) -> None:
+    """A Claude Code update keeps an account's scope (R1 of #113's release, F9: keyed by the
+    binary, each update made its verdicts a miss and its paid probes ran again). An ordinary
+    probe's write still prunes a scope no write touched for the cache's TTL, and keeps
+    another account's live one."""
     binary = tmp_path / "claude"
     binary.write_text("version one")
     context = harness.ProbeContext(str(binary), {"CLAUDE_CONFIG_DIR": str(tmp_path / "account")})
@@ -733,15 +737,16 @@ def test_normal_probe_cache_writes_prune_expired_binary_scopes_and_keep_other_ac
     }
     try:
         harness._save_cache(result)
-        expired = harness._cache_path()
-        binary.write_text("version two, a newer binary")
-        assert harness._cache_path() != expired
-        harness._save_cache(result)
         current = harness._cache_path()
+        binary.write_text("version two, a newer binary")
+        assert harness._cache_path() == current, "an update is the same account's scope"
+        context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "gone-account")
+        harness._save_cache(result)
+        expired = harness._cache_path()
         context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "other-account")
         harness._save_cache(result)
         other = harness._cache_path()
-        assert other != current
+        assert len({current, expired, other}) == 3
         old = (datetime.now(UTC) - harness.CACHE_TTL - timedelta(hours=1)).timestamp()
         os.utime(expired, (old, old))
         context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "account")

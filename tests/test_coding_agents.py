@@ -187,9 +187,13 @@ def test_role_path_selects_the_executable_and_probe_account(tmp_path: Path) -> N
         context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "b")
         assert harness.account_scope() != first_account
         context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "a")
+        fingerprint = harness.binary_fingerprint()
         with binary.open("a", encoding="utf-8") as upgraded:  # an upgraded executable
             upgraded.write("\n")
-        assert harness.account_scope() != first_account
+        # The account's scope still (R1 of #113's release, F9: keyed by the executable, each
+        # update made the verdicts a miss); another claude, which a refusal records.
+        assert harness.account_scope() == first_account
+        assert harness.binary_fingerprint() != fingerprint
     finally:
         harness._PROBE_CONTEXT.reset(token)
 

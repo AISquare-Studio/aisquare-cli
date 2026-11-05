@@ -52,14 +52,17 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   the other agent's vendor, with credentials scrubbed out first.
 - **Sandboxed.** A Codex agent's sandbox writes nothing in the store: its board calls go
   through a broker that runs outside it.
+- **Reviewer denials.** Under `--approve-for-me`, a command Codex's automatic reviewer
+  denies counts as a denied permission in `aisquare outcomes`, as one you refuse at the
+  prompt does.
 - **Known limits.**
   - Codex runs a hook only once it is trusted. `agents connect`, `accounts add` and
     `aisquare upgrade` record that trust for you; where they cannot (a `config.toml`
     aisquare may not write, or the Codex plugin's hooks), trust aisquare's hooks in
     Codex's `/hooks`. Until then doctor says so, and the board sees nothing from that Codex.
-  - CI tests Codex 0.164.0, pinned. `install.sh` installs the current Codex (0.166.0 at
-    this release), which passed live smoke tests on macOS but is not in CI: treat releases
-    past 0.164.0 as untested, and tell us what breaks.
+  - CI tests Codex 0.164.0 and 0.166.0 (the current release, which `install.sh` installs),
+    both pinned, and the newest release nightly. Treat a release past 0.166.0 as untested
+    until the nightly says otherwise, and tell us what breaks.
   - Usage sharing covers Claude Code only: Codex sessions are counted on this machine and
     never shared, whatever your consent.
   - Not on Codex yet: Remote Control, `asq-statusline` and `share_settings`. A login kept

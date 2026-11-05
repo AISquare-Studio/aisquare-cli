@@ -613,8 +613,13 @@ def emit_agents(agents: list[AgentInfo]) -> None:
     if get_state().json_output:
         typer.echo(json.dumps([agent.model_dump(mode="json") for agent in agents]))
         return
+    from aisquare.core.agent_adapters import stage_mark_of
+
     table = Table(show_header=True, header_style="bold")
-    table.add_column("AGENT")
+    # A beta agent's row carries its mark under its id: the column keeps the width the ids
+    # alone give it, so every other row, Claude Code's on a machine with no Codex
+    # included, is drawn as before the mark.
+    table.add_column("AGENT", max_width=max([len("AGENT"), *(len(a.name) for a in agents)]))
     table.add_column("DETECTED")
     table.add_column("CONNECTED")
     table.add_column("INTEGRATION")
@@ -623,7 +628,7 @@ def emit_agents(agents: list[AgentInfo]) -> None:
     for agent in agents:
         context = ", ".join(str(path) for path in agent.config_paths) or "—"
         table.add_row(
-            agent.name,
+            agent.name + stage_mark_of(agent.name),
             "yes" if agent.detected else "no",
             "yes" if agent.connected else "no",
             agent.readiness.replace("_", " "),
@@ -631,12 +636,8 @@ def emit_agents(agents: list[AgentInfo]) -> None:
             context,
         )
     stdout_console().print(table)
-    from aisquare.core.agent_adapters import stage_mark_of
-
     for agent in agents:
         if agent.detected and agent.detail:
-            # A beta agent's mark here, not in the table: a wider AGENT cell would pad every
-            # row, Claude Code's on a machine without Codex included.
             named = agent.name + stage_mark_of(agent.name)
             stdout_console().print(f"{named}: {agent.detail}", markup=False)
 

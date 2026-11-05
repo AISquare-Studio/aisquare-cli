@@ -19,7 +19,7 @@ import typer
 from aisquare.cli.common import expected_config_write_errors, fail, local_time, parse_since
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, selfcli
-from aisquare.core.agent_adapters import DEFAULT_AGENT, recorded_adapter
+from aisquare.core.agent_adapters import DEFAULT_AGENT, agents_named, recorded_adapter
 from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import (
     ExplainabilitySettings,
@@ -287,7 +287,9 @@ def spawn(
     role_name: Annotated[
         str, typer.Argument(help="Role to launch (planner/coder/runner/validator/…).")
     ],
-    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    agent: Annotated[
+        str | None, typer.Option("--agent", help=f"Coding agent family ({agents_named()}).")
+    ] = None,
     agent_bin: Annotated[
         str | None,
         typer.Option(
@@ -941,7 +943,9 @@ def bind(
         str | None,
         typer.Argument(help="Role to pin. Omit to show the current bindings."),
     ] = None,
-    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    agent: Annotated[
+        str | None, typer.Option("--agent", help=f"Coding agent family ({agents_named()}).")
+    ] = None,
     agent_bin: Annotated[
         str | None,
         typer.Option("--bin", help="Executable this role launches, e.g. a wrapper script."),

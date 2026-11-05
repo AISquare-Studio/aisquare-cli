@@ -297,11 +297,11 @@ def test_its_release_stage_marks_its_name_wherever_an_agent_is_chosen_or_seen(
     from types import SimpleNamespace
 
     from aisquare.cli import accounts as accounts_cli
-    from aisquare.cli import fleet as fleet_cli
     from aisquare.cli.ui.spawn import SpawnDialog
     from aisquare.cli.ui.views import app_settings
     from aisquare.cli.ui.views.accounts import agent_title_text
     from aisquare.cli.ui.views.doctor import render_checks
+    from aisquare.core.agent_adapters import agents_named
     from aisquare.models import AccountsOverview, CheckStatus, ClaudeInstall, DoctorCheck
 
     mark = {"beta": " (beta)", "stable": ""}[third.release_stage]
@@ -319,8 +319,10 @@ def test_its_release_stage_marks_its_name_wherever_an_agent_is_chosen_or_seen(
     found = ClaudeInstall(installed=True, binary=f"/opt/bin/{third.binary}", version="1.0")
     overview = AccountsOverview(claude=ClaudeInstall(installed=True), installs={third.id: found})
     assert agent_title_text(third.id, overview).plain.startswith(f"{shown} 1.0 · /opt/bin/")
-    assert f", {third.id}{mark}" in fleet_cli.agents_named()
+    assert f", {third.id}{mark}" in agents_named()
     assert accounts_cli.whose_account_help().endswith(f" or {third.id}{mark}.")
+    # `aisquare accounts`' last line names the agents `accounts add --agent` takes.
+    assert f" | {third.id}{mark}]" in accounts_cli._other_agents_choice()
 
 
 def test_first_run_finds_connects_and_reads_it_as_the_one_agent_here(

@@ -471,6 +471,12 @@ def stage_mark_of(name: str) -> str:
     return stage_mark(adapter) if adapter is not None else ""
 
 
+def agents_named() -> str:
+    """Every agent by its id, a beta one's with its mark: ``claude-code, codex (beta)``. What
+    an ``--agent`` option's help lists, so a person choosing an agent sees its stage."""
+    return ", ".join(f"{adapter.id}{stage_mark(adapter)}" for adapter in adapters())
+
+
 def model_owner(model: str | None) -> str | None:
     """The agent whose own model ``model`` is: the one registered agent that claims it
     (``AgentAdapter.claims_model``: Claude Code's ``opus``, ``claude-opus-5-5``; Codex's

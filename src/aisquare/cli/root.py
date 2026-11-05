@@ -22,6 +22,7 @@ from aisquare.cli.common import (
     fail,
     resolve_pool,
 )
+from aisquare.core.agent_adapters import agents_named
 from aisquare.models import CheckStatus
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
@@ -44,7 +45,7 @@ def init(
     ] = False,
     agent: Annotated[
         list[str] | None,
-        typer.Option("--agent", help="Agent to connect; repeat for several."),
+        typer.Option("--agent", help=f"Agent to connect ({agents_named()}); repeat for several."),
     ] = None,
     no_onboard: Annotated[
         bool, typer.Option("--no-onboard", help="Skip project onboarding after setup.")

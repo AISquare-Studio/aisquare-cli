@@ -23,6 +23,7 @@ import typer
 from aisquare.cli.common import fail, resolve_pool
 from aisquare.cli.fleet import ProjectRef, SessionRef, _fail_fleet, _project
 from aisquare.core import personas as core
+from aisquare.core.agent_adapters import agents_named
 from aisquare.core.personas import Layer, Persona, PersonaError
 from aisquare.core.state import get_state
 from aisquare.services import fleet as fleet_service
@@ -652,8 +653,8 @@ def export(
         str | None,
         typer.Option(
             "--agent",
-            help="The coding agent whose skills --skill writes into (default: the one this "
-            "directory launches).",
+            help=f"The coding agent whose skills --skill writes into ({agents_named()}; "
+            "default: the one this directory launches).",
         ),
     ] = None,
     force: Annotated[bool, typer.Option("--force", help="Replace an existing target.")] = False,

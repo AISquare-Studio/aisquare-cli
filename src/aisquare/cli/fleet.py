@@ -31,8 +31,7 @@ from rich.text import Text
 from aisquare.cli.common import USAGE_ERROR, fail, format_reset, refuse_conflicting_scope
 from aisquare.cli.native_args import NativeForwardingCommand, PassthroughCommand
 from aisquare.core import harness
-from aisquare.core.agent_adapters import adapters
-from aisquare.core.agent_adapters.types import stage_mark
+from aisquare.core.agent_adapters import agents_named
 from aisquare.core.claude_accounts import agent_label
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
@@ -85,12 +84,6 @@ _STATE_CHIP = {
     "paused": "⏯ paused",
     "unknown": "· unknown",
 }
-
-
-def agents_named() -> str:
-    """Every agent by its id, a beta one's with its mark (``types.stage_mark``), for an
-    ``--agent`` option's help: ``claude-code, codex (beta)``."""
-    return ", ".join(f"{adapter.id}{stage_mark(adapter)}" for adapter in adapters())
 
 
 def _fail_fleet(exc: Exception) -> NoReturn:
@@ -240,7 +233,9 @@ def spawn(
             "sandbox); default per role.",
         ),
     ] = None,
-    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    agent: Annotated[
+        str | None, typer.Option("--agent", help=f"Coding agent family ({agents_named()}).")
+    ] = None,
     sandbox: Annotated[
         str | None,
         typer.Option(

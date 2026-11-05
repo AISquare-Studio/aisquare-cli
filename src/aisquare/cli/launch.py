@@ -53,7 +53,7 @@ from aisquare.cli.common import fail
 from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
-from aisquare.core.agent_adapters import adapter_for_binary
+from aisquare.core.agent_adapters import adapter_for_binary, agents_named
 from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.console import stderr_console
@@ -479,7 +479,9 @@ def launch(
             metavar="CMD",
         ),
     ] = None,
-    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    agent: Annotated[
+        str | None, typer.Option("--agent", help=f"Coding agent family ({agents_named()}).")
+    ] = None,
     bound_args: Annotated[
         bool,
         typer.Option(

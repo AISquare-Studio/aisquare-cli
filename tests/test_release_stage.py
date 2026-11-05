@@ -6,14 +6,16 @@ for Claude Code. Wherever a person chooses or sees an agent, the shared code wri
 tests/test_third_agent_seams.py shows a synthetic third agent's mark reaching those surfaces
 through the slot. This file pins the owner's other half of the bar for the release ("nothing
 that works today in claude code breaks"): with the slot in, what Claude Code shows is byte for
-byte what the head before it showed, and Codex's differs by its mark alone. The ``HEAD_``
-goldens below were rendered at 11cd75ab, the PR's head before the slot, by these same calls.
+byte what the head before it showed, and Codex's differs by its mark alone. Where a person
+lists or chooses agents (SMOKE14, seq 11065), Codex is named with its mark: ``agents list``'s
+row, ``aisquare accounts``' last line and every ``--agent`` help that chooses a coding agent.
+The ``HEAD_`` goldens below were rendered at 11cd75ab, the PR's head before the slot, by these
+same calls.
 """
 
 from __future__ import annotations
 
 import io
-import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,7 +46,6 @@ from aisquare.models import (
     ClaudeInstall,
     DoctorCheck,
 )
-from tests.rendered import ANSI
 
 MARK = " (beta)"
 
@@ -243,13 +244,17 @@ def test_doctors_rows_read_as_the_head_but_for_codexs_mark(
 def test_aisquare_accounts_reads_as_the_head_on_a_claude_only_machine(
     printed: Callable[..., str],
 ) -> None:
-    """A machine without Codex: the head's lines exactly. With Codex's accounts too, its
-    install line and its agent cell carry the mark, Claude Code's words none."""
+    """A machine without Codex: the head's lines exactly, Claude Code's install line and
+    table byte for byte, but for the last, whose list of the agents ``accounts add`` takes
+    marks Codex (SMOKE14, seq 11065). With Codex's accounts too, its install line and its
+    agent cell carry the mark, Claude Code's words none."""
     alone = AccountsOverview(
         claude=CLAUDE, accounts=[_status(1, "claude-code")], installs={"claude-code": CLAUDE}
     )
-    said = printed(accounts_cli._emit_overview, alone, with_usage=False)
-    assert said == _native(HEAD_ACCOUNTS_CLAUDE_ONLY)
+    head = _native(HEAD_ACCOUNTS_CLAUDE_ONLY).splitlines()
+    lines = printed(accounts_cli._emit_overview, alone, with_usage=False).splitlines()
+    assert lines[:-1] == head[:-1]
+    assert lines[-1] == head[-1].replace("[--agent codex]", "[--agent codex (beta)]")
 
     both = AccountsOverview(
         claude=CLAUDE,
@@ -264,16 +269,18 @@ def test_aisquare_accounts_reads_as_the_head_on_a_claude_only_machine(
         _flat(_native(HEAD_ACCOUNTS_BOTH))
         .replace("✓ Codex 0.164.0", "✓ Codex (beta) 0.164.0")
         .replace("2 Codex account 2", "2 Codex (beta) account 2")
+        .replace("[--agent codex]", "[--agent codex (beta)]")
     )
     assert _flat(said) == expected
-    assert said.count(MARK) == 2
+    assert said.count(MARK) == 3
 
 
 def test_aisquare_agents_reads_as_the_head_but_for_codexs_mark(
     printed: Callable[..., str],
 ) -> None:
-    """``agents connect``'s line marks Codex alone. ``agents list`` keeps its table as it was
-    (a wider cell would pad Claude Code's row too) and marks Codex's line under it."""
+    """``agents connect``'s line marks Codex alone. ``agents list`` lists Codex with its mark
+    (SMOKE14, seq 11065) on a line of its row under its id, the column as wide as the ids
+    alone make it: the header and Claude Code's row are the head's, byte for byte."""
     claude = AgentConnection(name="claude-code", hooks_installed=True, imported=2)
     codex = AgentConnection(name="codex", hooks_installed=True, imported=0)
     assert printed(common.emit_connected, claude) == HEAD_CONNECT_CLAUDE
@@ -284,7 +291,12 @@ def test_aisquare_agents_reads_as_the_head_but_for_codexs_mark(
         AgentInfo(name="claude-code", detected=True, connected=True, readiness="configured"),
         AgentInfo(name="codex", detected=False),
     ]
-    assert printed(common.emit_agents, infos) == HEAD_AGENTS_LIST
+    head = HEAD_AGENTS_LIST.splitlines()
+    lines = printed(common.emit_agents, infos).splitlines()
+    codex_row = head[4]
+    assert codex_row.startswith("│ codex ")
+    blank = "".join(char if char == "│" else " " for char in codex_row)
+    assert lines == [*head[:5], "│ (beta)" + blank[len("│ (beta)") :], *head[5:]]
     infos[1] = AgentInfo(name="codex", detected=True, detail="found at /opt/bin/codex")
     assert printed(common.emit_agents, infos).endswith("\ncodex (beta): found at /opt/bin/codex\n")
 
@@ -307,41 +319,74 @@ def _agent_helps() -> dict[str, str]:
     return helps
 
 
-def test_every_agent_options_help_reads_as_the_head_but_for_codexs_mark() -> None:
-    """Every ``--agent`` option's help: those that name no agent unchanged, and the two that
-    list them (``accounts add``/``default``, ``fleet switch``) with Codex's mark alone."""
+#: Where ``--agent`` chooses a coding agent, its help lists them, Codex with its mark
+#: (SMOKE14, seq 11065); ``captain since`` (a fleet agent's label) and ``hook event`` (the
+#: adapter a hook was installed by, which only a hook passes) choose none, and read as the head.
+AGENTS = "claude-code, codex (beta)"
+NOW_AGENT_HELPS = {
+    "init": f"Agent to connect ({AGENTS}); repeat for several.",
+    "launch": f"Coding agent family ({AGENTS}).",
+    "accounts default": "Whose account: claude-code (the default) or codex (beta).",
+    "accounts add": "Whose account: claude-code (the default) or codex (beta).",
+    "team spawn": f"Coding agent family ({AGENTS}).",
+    "team bind": f"Coding agent family ({AGENTS}).",
+    "fleet spawn": f"Coding agent family ({AGENTS}).",
+    "fleet switch": f"Coding agent to move it onto ({AGENTS}, …). No conversation moves "
+    "between agents: it starts fresh there with a hand-off brief of its work.",
+    "persona export": f"The coding agent whose skills --skill writes into ({AGENTS}; default: "
+    "the one this directory launches).",
+    "captain since": HEAD_AGENT_HELPS["captain since"],
+    "hook event": HEAD_AGENT_HELPS["hook event"],
+}
+
+
+def test_every_agent_options_help_names_codex_with_its_mark_and_claude_code_without() -> None:
+    """Every ``--agent`` option, none added or lost since the head: each that chooses a coding
+    agent names Codex once, with its mark, and Claude Code unmarked; the rest are the head's."""
     helps = _agent_helps()
     assert helps.keys() == HEAD_AGENT_HELPS.keys()
+    assert helps == NOW_AGENT_HELPS
     for path, said in helps.items():
-        assert said.replace(MARK, "") == HEAD_AGENT_HELPS[path], path
-        assert said.count(MARK) == (1 if "codex" in HEAD_AGENT_HELPS[path] else 0), path
+        lists = "codex" in said
+        assert said.count(MARK) == (1 if lists else 0), path
         assert "claude-code (beta)" not in said, path
-    assert helps["accounts add"] == "Whose account: claude-code (the default) or codex (beta)."
+        assert lists or said == HEAD_AGENT_HELPS[path], path
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="the golden is the page a POSIX terminal draws; every --agent help is pinned on "
-    "every platform by the test above",
-)
-def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> None:
-    result = CliRunner().invoke(
-        app,
-        ["accounts", "add", "--help"],
-        env={"COLUMNS": "100", "TERMINAL_WIDTH": "100"},
-        terminal_width=100,
+@pytest.fixture
+def help_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """typer draws ``--help`` on one console on every OS, as the goldens were drawn: 100
+    columns, no colour, and a modern terminal's boxes and width (Windows' legacy console takes
+    a column off and draws other boxes; CI forces a terminal, which styles the page)."""
+    import typer.rich_utils
+
+    monkeypatch.setattr(
+        typer.rich_utils,
+        "_get_rich_console",
+        lambda stderr=False: Console(
+            width=100,
+            color_system=None,
+            force_terminal=False,
+            legacy_windows=False,
+            highlight=False,
+            stderr=stderr,
+        ),
     )
+
+
+@pytest.mark.usefixtures("help_console")
+def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> None:
+    result = CliRunner().invoke(app, ["accounts", "add", "--help"])
     assert result.exit_code == 0, result.output
     # Each line as the head drew it, the padding Rich ends a plain line with aside (a box's
     # line ends in its border, so it is compared whole).
     head = [line.rstrip() for line in HEAD_ACCOUNTS_ADD_HELP.rstrip("\n").splitlines()]
-    # Styled where typer forces a terminal (GITHUB_ACTIONS): read with the styles taken off.
-    now = [line.rstrip() for line in ANSI.sub("", result.output).rstrip("\n").splitlines()]
-    assert len(now) == len(head)
+    now = [line.rstrip() for line in result.output.rstrip("\n").splitlines()]
+    assert len(now) == len(head), result.output
     for was, line in zip(head, now, strict=True):
         if "--agent  " in was:  # its help grew by the mark, and the box's padding shrank by it
-            assert _flat(line) == _flat(was).replace("or codex.", "or codex (beta).")
+            assert _flat(line) == _flat(was).replace("or codex.", "or codex (beta)."), line
         else:
-            assert line == was
-    root = CliRunner().invoke(app, ["--help"], env={"COLUMNS": "100"}, terminal_width=100)
-    assert root.exit_code == 0 and MARK not in ANSI.sub("", root.output)
+            assert line == was, result.output
+    root = CliRunner().invoke(app, ["--help"])
+    assert root.exit_code == 0 and MARK not in root.output

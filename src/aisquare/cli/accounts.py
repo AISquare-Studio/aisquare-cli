@@ -92,6 +92,18 @@ def whose_account_help() -> str:
     return f"Whose account: {' or '.join(named)}."
 
 
+def _other_agents_choice() -> str:
+    """`` [--agent codex (beta)]``: the other agents with account slots ``accounts add`` takes,
+    a beta one's with its mark (``types.stage_mark``); ``""`` with none."""
+    first = default_adapter()
+    others = [
+        f"{each.id}{stage_mark(each)}"
+        for each in adapters()
+        if each.accounts is not None and each is not first
+    ]
+    return f" [--agent {' | '.join(others)}]" if others else ""
+
+
 AgentOpt = Annotated[
     str | None,
     typer.Option(
@@ -333,8 +345,8 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
             console.print(f"{status.label}: {status.detail}", markup=False, style="yellow")
     console.print(
         Text(
-            "add one: aisquare accounts add [--agent codex] · open one: aisquare accounts run "
-            "<slot> · the Accounts page in asq does both",
+            f"add one: aisquare accounts add{_other_agents_choice()} · open one: aisquare "
+            "accounts run <slot> · the Accounts page in asq does both",
             style="dim",
         )
     )

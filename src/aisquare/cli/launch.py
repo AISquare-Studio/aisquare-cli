@@ -564,6 +564,16 @@ def launch(
             show_default=False,
         ),
     ] = None,
+    bound_in_line: Annotated[
+        int,
+        typer.Option(
+            agent_launch.BOUND_IN_LINE_FLAG,
+            help="The first N arguments after -- are the role binding's, as the fleet spawn "
+            "read them (what `fleet spawn` gives its window).",
+            min=0,
+            hidden=True,
+        ),
+    ] = 0,
     fleet_decided: Annotated[
         bool,
         typer.Option(
@@ -680,6 +690,13 @@ def launch(
     # Resolved even with no flag, so a bound role launches correctly without
     # the operator remembering to say anything.
     profile = selected.profile if bound_args else selected.profile.model_copy(update={"args": []})
+    # A fleet window's line opens with the role binding's arguments as its spawn read them
+    # (`agent_launch.BOUND_IN_LINE_FLAG`): here they are the binding's, as 0.9.2's launch read
+    # the binding itself, ahead of the role's flags and the window's own (R8, F-bound).
+    line = list(ctx.args)
+    if bound_in_line:
+        profile = profile.model_copy(update={"args": line[:bound_in_line]})
+        line = line[bound_in_line:]
     if profile.notice is not None:
         # No silent fail-soft: unreadable config means this role launches
         # UNBOUND — possibly on a different install than the operator believes.
@@ -770,17 +787,17 @@ def launch(
     # literal separator cannot turn them into prompt text. Explicit opt-outs
     # still win: role_defaults stands down when either spelling is present.
     defaults = selected.adapter.role_defaults(
-        role, binary=resolution.binary, args=[*profile.args, *ctx.args]
+        role, binary=resolution.binary, args=[*profile.args, *line]
     )
     # The role's tools and skill listing (`harness.tool_policy`), here as in `team spawn`
-    # and every fleet window (whose `extra_args` arrive in `ctx.args`): its safety list
+    # and every fleet window (whose `extra_args` arrive on its line): its safety list
     # holds whatever the config says, and every `--disallowedTools` the binding or this
     # line carries is merged into ONE token beside the role's own flags.
     policy = harness.tool_policy(
-        role, binary=resolution.binary, args=[*profile.args, *ctx.args], fleet=_fleet()
+        role, binary=resolution.binary, args=[*profile.args, *line], fleet=_fleet()
     )
     role_args = [*defaults.args, *policy.args]
-    binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    binding_args, agent_args = policy.strip(profile.args), policy.strip(line)
     # A model or an effort this line names replaces the binding's: a fleet window's own
     # (the spawn's `--model`, the Spawn dialog's field, a restart of what the agent runs
     # now) wins over the role's settings, and Claude Code was given both (#16).
@@ -793,7 +810,7 @@ def launch(
         # A line `team spawn` composed (`--no-bound-args`) already carries the role's flags,
         # in 0.9.2's order: the policy's one token goes back where its `--disallowedTools`
         # stood, so the pasted line runs what `team spawn --exec` runs (R1 F3).
-        at = denied_tools_at(ctx.args)
+        at = denied_tools_at(line)
         if at is not None:
             token = [arg for arg in role_args if is_denied_tools_flag(arg)]
             role_args = [arg for arg in role_args if not is_denied_tools_flag(arg)]
@@ -921,9 +938,9 @@ def launch(
     board = (project.root.name or project.id) if project is not None else "no board"
     remote_args = (
         _remote_control_args(
-            f"{board} · {_named(ctx.args) or role}",
+            f"{board} · {_named(line) or role}",
             resolution.binary,
-            [*profile.args, *role_args, *ctx.args],
+            [*profile.args, *role_args, *line],
             env,
         )
         if wanted

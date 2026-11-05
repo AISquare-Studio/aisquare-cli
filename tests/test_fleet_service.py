@@ -4255,6 +4255,61 @@ def test_another_binary_gets_no_model_flag(
     assert agent.launch_spec is not None and agent.launch_spec.model is None
 
 
+@pytest.mark.parametrize(
+    ("bound", "spawned", "flag", "wins"),
+    [
+        (
+            ["--permission-mode", "plan"],
+            {"permission_mode": "acceptEdits"},
+            "--permission-mode",
+            "acceptEdits",
+        ),
+        (["--permission-mode", "plan"], {}, "--permission-mode", "auto"),
+        (["--name", "bound-name"], {}, "--name", "coder-1"),
+    ],
+)
+def test_a_bound_scalar_flag_never_beats_the_windows_own_or_the_users(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    bound: list[str],
+    spawned: dict[str, str],
+    flag: str,
+    wins: str,
+) -> None:
+    """R8 of #113's release, reopened (seq 11176), on Claude Code 2.1.318: of a repeated
+    scalar flag Claude Code takes the last, and the window put its role binding's arguments
+    last, so `team bind coder --arg=--permission-mode --arg=plan` beat `fleet spawn
+    --permission-mode acceptEdits` (and the role's own `auto`), and a bound `--name` beat the
+    fleet's label. 0.9.2 put the binding first; so again (`BOUND_IN_LINE_FLAG`), through the
+    window's own `aisquare launch`."""
+    from importlib import import_module
+
+    from aisquare.core.config import RoleLaunchProfile, load_config, save_config
+
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(args=bound)
+    save_config(config)
+    agent = fleet_service.spawn(project, "coder", worktree=False, **spawned).agent  # type: ignore[arg-type]
+    command = _command(tmux)
+    window = command[command.index("--") + 1 :]
+    assert window[: len(bound)] == bound, "the binding opens the window's line"
+
+    ran: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        import_module("aisquare.cli.launch"),
+        "_exec",
+        lambda binary, argv, env: ran.update(argv=argv),
+    )
+    launched = CliRunner().invoke(app, command[command.index("launch") :])
+    assert launched.exit_code == 0, launched.output
+    argv = ran["argv"]
+    values = [argv[i + 1] for i, arg in enumerate(argv) if arg == flag]
+    assert values[-1] == wins and values[0] == bound[1], (agent.label, argv)
+    assert argv[1 : 1 + len(bound)] == bound, "first, as 0.9.2's launch put the binding"
+
+
 def test_spawn_without_tmux_is_fleet_unavailable(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

@@ -5549,8 +5549,16 @@ def spawn(
             beside = [*defaults.args, *unbound, *role_args, *extra]
             if slot_args and selected.adapter.native_choice(beside).model is None:
                 bound = unbound
+        # The binding's first for an agent that keeps 0.9.2's order (`binding_args_first`):
+        # the window's line opens with them (`agent_launch.BOUND_IN_LINE_FLAG`), so the
+        # window's own flags and the user's come later and win, as on 0.9.2 (R8, F-bound).
+        binding_first = selected.adapter.capabilities.binding_args_first
         arguments = agent_launch.prepare_arguments(
-            selected, [*defaults.args, *bound, *role_args], extra
+            selected,
+            [*bound, *defaults.args, *role_args]
+            if binding_first
+            else [*defaults.args, *bound, *role_args],
+            extra,
         )
         # Another agent's `[agents.models.<agent>]`, validated and in its own words, with no
         # `AISQUARE_MODEL_<ROLE>` (`_configured`); none for an agent with AISquare's ladders,
@@ -6043,8 +6051,15 @@ def spawn(
     # tmux server's PYTHONPATH, which may name a directory its sandbox writes, while the
     # agent it execs keeps it (review r14 of #113, finding 4). Claude Code's window runs `-P`
     # alone, as 0.9.2's did (`selfcli.argv_for_agent`).
+    leading: list[str] = []
+    rest = list(arguments.argv)
+    if binding_first:
+        bound_native = selected.adapter.native_args(list(bound))
+        if bound_native and rest[: len(bound_native)] == bound_native:
+            leading, rest = bound_native, rest[len(bound_native) :]
+            flags += [agent_launch.BOUND_IN_LINE_FLAG, str(len(leading))]
     command = selfcli.argv_for_agent(
-        ["launch", role, *flags, "--", *native, *model_args, *models.flags, *arguments.argv],
+        ["launch", role, *flags, "--", *leading, *native, *model_args, *models.flags, *rest],
         sandboxes_tools=selected.adapter.capabilities.sandboxes_tools,
     )
     # The hub as THIS process resolves it, blank for none: the window's

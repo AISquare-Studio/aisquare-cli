@@ -551,10 +551,19 @@ class Native:
         return found
 
     def agent_argv(self, pane: str) -> list[str]:
-        """The command line of the pane's Claude Code process, as ``ps`` shows it."""
+        """The command line of the pane's Claude Code process: its words exactly where
+        ``/proc`` has them (Linux), else as ``ps -ww`` prints them, split at spaces (macOS).
+        Without ``-ww`` procps cuts the line at 80 columns when no terminal is attached."""
         for pid in self.pane_pids(pane):
+            cmdline = Path(f"/proc/{pid}/cmdline")
+            if cmdline.exists():
+                with suppress(OSError):
+                    words = cmdline.read_bytes().decode().split("\0")[:-1]
+                    if words and Path(words[0]).name in ("claude", "claude.exe"):
+                        return " ".join(words).split()
+                continue
             args = subprocess.run(
-                ["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True
+                ["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True
             ).stdout.strip()
             words = args.split()
             if words and Path(words[0]).name in ("claude", "claude.exe"):
@@ -941,10 +950,11 @@ def test_real_claude_code_fires_every_hook_aisquare_installs_and_each_reaches_th
     native: Native,
 ) -> None:
     """Every event in the adapter's ``capabilities.hooks``, fired by real Claude Code and
-    seen on the board: SessionStart (startup, compact, resume, each handing its context
-    back to the model), UserPromptSubmit, Notification (its permission prompt, a bell),
-    Stop, StopFailure (an API error) and SessionEnd. A hook added to the adapter without
-    a round trip here fails the last assertion."""
+    seen on the board: SessionStart (startup and compact, each handing its context back to
+    the model, and a resume by hand of the ended session, which takes it back),
+    UserPromptSubmit, Notification (its permission prompt, a bell), Stop, StopFailure (an
+    API error) and SessionEnd. A hook added to the adapter without a round trip here fails
+    the last assertion."""
     seen: dict[str, str] = {}
     receipt = native.spawn(prompt="first [[bash touch asked.txt]]")
     row = receipt.agent
@@ -986,13 +996,22 @@ def test_real_claude_code_fires_every_hook_aisquare_installs_and_each_reaches_th
     native.type(pane, "/exit")
     native.until(lambda: native.ended(row.session_id), 30, "SessionEnd", pane)
     seen["SessionEnd"] = "ended"
-    restarted = fleet.restart(native.project, row.label)
-    assert restarted.started.session_id == row.session_id, "the same session, resumed"
-    native.ready(restarted.started.pane_id)
-    native.type(restarted.started.pane_id, "after the restart")
-    resumed = native.heard("after the restart")
-    assert "SessionStart:resume hook success: <aisquare-team>" in resumed.everything
+    # Resumed by hand: its SessionStart (source resume) takes the ended session back on the
+    # board before anything is typed. Whether 2.1.318 hands that hook's context to the
+    # model is a race it runs against its first request (F3, pinned deterministically in
+    # test_claude_native_fleet.py), so the board is what this reads.
+    command = shlex.join(
+        [*selfcli.argv_for(["launch", "coder"]), "--", "--resume", str(row.session_id)]
+    )
+    native.srv.run(
+        "new-session", "-d", "-s", "resumed", "-x", "120", "-y", "40",
+        "-c", str(native.workspace), command,
+    )  # fmt: skip
+    native.until(lambda: not native.ended(row.session_id), 30, "SessionStart resume")
+    assert native.prompts().count("after the compaction") == 1, "nothing typed yet"
+    native.ready("resumed")
+    native.type("resumed", "after the resume")
+    resumed = native.heard("after the resume")
     assert "after the compaction" in resumed.everything, "the conversation, resumed"
-    native.until(lambda: not native.ended(row.session_id), 20, "resumed")
     seen["SessionStart"] += ", resume"
     assert set(seen) == {spec.event for spec in get_adapter(AGENT).capabilities.hooks}, seen

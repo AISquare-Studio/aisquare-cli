@@ -10,9 +10,10 @@ Run ``AISQUARE_TEST_CLAUDE=1 pytest tests/test_claude_native_transcript.py``, in
   ledger, which agree with the stub's own count of requests and with what the Stop hooks
   recorded; its tail and the agent's last words; the conversation and its opening.
 - The screen reader on real dialogs: the permission chooser where Claude Code draws no name
-  on its box (a hand-started ``aisquare launch``) and in a fleet window (F2, a strict xfail),
-  and the ``/resume`` picker, a dialog nothing types into.
-- The npm install's version (F4, a strict xfail).
+  on its box (a hand-started ``aisquare launch``) and in a fleet window, whose named rule
+  2.1.318 leaves under it, where the captain's ``press`` answers it (R6 F2); the ``/resume``,
+  ``/model`` and ``/config`` pickers, which a ``fleet tell`` never types into (R6 F5).
+- The npm install's version, read off the package's native build (R6 F4).
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from aisquare.core.agent_adapters.types import (
     screen_of,
 )
 from aisquare.core.store import store_session
+from aisquare.services.captain import actions
 from tests.test_claude_native import (  # noqa: F401 - `native` and `native_options` are fixtures
     AGENT,
     HEARD,
@@ -202,79 +204,93 @@ def test_real_claude_code_permission_chooser_reads_as_a_prompt_with_its_keys(
     )  # fmt: skip
     _reads_the_chooser(_chooser_on(native, "hand"))
     native.srv.send_keys("hand", "1")  # what the captain's `press yes` sends
-    native.until(lambda: (native.workspace / "asked.txt").exists(), 20, "approved", "hand")
+    assert native.until(lambda: (native.workspace / "asked.txt").exists(), 20, "yes", "hand")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "F2 (board seq 11071), pre-existing on 0.9.2: with --name, Claude Code 2.1.318 "
-        "leaves its named box rule on the pane's last row under a dialog, and "
-        "claude_screen.dialog_region reads only what follows the last rule"
-    ),
-)
 @options(permission_mode="manual")
-def test_real_claude_code_permission_chooser_in_a_fleet_window_reads_as_a_prompt(
+def test_real_claude_code_permission_chooser_in_a_fleet_window_is_answered_by_the_captain(
     native: Native,  # noqa: F811
 ) -> None:
-    receipt = native.spawn(prompt="ask me [[bash touch asked.txt]]")
-    _reads_the_chooser(_chooser_on(native, receipt.agent.pane_id))
+    """R6 F2 (board seq 11071, ruled 11072): in a fleet window 2.1.318 leaves its box's
+    named rule under the chooser; its reader reads past it, and the captain's ``press yes``
+    approves the command, its ``press no`` refuses the next one."""
+    receipt = native.spawn(prompt=f"ask me [[bash touch {native.workspace / 'yes.txt'}]]")
+    label, pane = receipt.agent.label, receipt.agent.pane_id
+    rows = _chooser_on(native, pane)
+    assert native.until(lambda: native.screen(pane).rstrip().endswith(f"{label} ─"), 5, "rule")
+    _reads_the_chooser(rows)
+    yes = json.loads(actions.press(native.project.id, label, "yes", utterance="press yes"))
+    assert (yes["sent"], yes["answered"]) == ("1", True), yes
+    native.until(lambda: (native.workspace / "yes.txt").exists(), 20, "approved", pane)
+    native.until(lambda: native.state(receipt.agent.session_id) == "waiting", 30, "idle", pane)
+    native.ready(pane)
+    native.type(pane, f"and this [[bash touch {native.workspace / 'no.txt'}]]")
+    _chooser_on(native, pane)
+    native.until(lambda: native.state(receipt.agent.session_id) == "attention", 30, "bell", pane)
+    no = json.loads(actions.press(native.project.id, label, "no", utterance="press no"))
+    assert (no["sent"], no["answered"]) == ("Escape", True), no
+    native.until(lambda: "Do you want to proceed?" not in native.screen(pane), 20, "gone", pane)
+    time.sleep(1)
+    assert not (native.workspace / "no.txt").exists(), "a No runs nothing"
 
 
-def _at_the_resume_picker(on: Native) -> tuple[str, list[str]]:
-    """A coder whose turn ended, with the human's ``/resume`` picker open in its pane."""
+#: Claude Code's pickers a human opens at its idle prompt, and the words each one shows.
+PICKERS = {"/resume": "Resume session", "/model": "Select model", "/config": "Esc to clear"}
+
+
+def _at_a_picker(on: Native, picker: str) -> tuple[str, str, list[str]]:
+    """A coder whose turn ended, with the human's ``picker`` open in its pane."""
     receipt = on.spawn(prompt="a conversation to list")
     pane = receipt.agent.pane_id
     on.heard("a conversation to list")
     on.until(lambda: on.state(receipt.agent.session_id) == "waiting", 30, "idle", pane)
     on.ready(pane)
-    on.type(pane, "/resume")
-    on.until(lambda: "Resume session" in on.screen(pane), 20, "the picker", pane)
+    on.type(pane, picker)
+    on.until(lambda: PICKERS[picker] in on.screen(pane), 20, "the picker", pane)
     time.sleep(0.5)
-    return receipt.agent.label, on.rows(pane)
+    return receipt.agent.label, pane, on.rows(pane)
 
 
+@pytest.mark.parametrize("picker", sorted(PICKERS))
 @options()
-def test_real_claude_code_resume_picker_reads_as_a_dialog_not_ready_for_a_line(
+def test_real_claude_code_at_a_picker_is_told_through_the_board_and_how_to_close_it(
     native: Native,  # noqa: F811
+    picker: str,
 ) -> None:
-    _, rows = _at_the_resume_picker(native)
+    """R6 F5 (board seq 11092, ruled 11093): its hooks say waiting, its screen shows a
+    picker the human opened, where an Enter would act (a resume, a model switch). The
+    reader names it a dialog, nothing is typed, the tell is a board note that says what is
+    open and that Esc closes it; once closed, a tell types again."""
+    label, pane, rows = _at_a_picker(native, picker)
     reader = screen_of(get_adapter(AGENT))
     assert reader.ready_on_screen is not None and not reader.ready_on_screen(rows)
-    assert reader.prompt_on_screen is not None and not reader.prompt_on_screen(rows)
-    assert reader.modal_on_screen is not None
-    assert reader.modal_on_screen(rows) == "a dialog waiting for Enter or Esc", rows
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "F5 (board seq 11092), pre-existing on 0.9.2: fleet.tell's waiting branch pastes "
-        "into a Claude Code pane with no input box drawn and presses Enter once"
-    ),
-)
-@options()
-def test_real_claude_code_at_its_resume_picker_is_told_through_the_board(
-    native: Native,  # noqa: F811
-) -> None:
-    label, _ = _at_the_resume_picker(native)
+    named = reader.modal(rows)
+    assert named in ("a dialog waiting for Enter or Esc", "a numbered choice"), rows
     told = asq_json(native, "fleet", "tell", label, "not into the picker")
     assert told["typed"] == "no", told
+    assert f"its pane shows {named}" in told["how"] and "close it with Esc" in told["how"]
+    assert "not into the picker" not in native.screen(pane)
+    for _ in range(3):  # /config's first Esc clears its search, the next closes it
+        native.srv.send_keys(pane, "Escape")
+        time.sleep(1)
+        if reader.ready(native.rows(pane)):
+            break
+    native.ready(pane)
+    again = asq_json(native, "fleet", "tell", label, "now at its prompt")
+    assert again["typed"] == "yes", again
+    native.heard("now at its prompt")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "F4 (board seq 11090), pre-existing on 0.9.2: npm links claude to the package's "
-        "bin/claude.exe, and layout_version reads only bin/package.json"
-    ),
-)
 @options()
 def test_real_claude_code_npm_install_names_its_version(
     native: Native,  # noqa: F811
 ) -> None:
+    """R6 F4 (board seq 11090, ruled 11091): 2.x's npm build links ``claude`` to the
+    package's ``bin/claude.exe``; the version is read from the package's own manifest."""
     package = Path(native.binary).resolve().parents[1] / "package.json"
     if not package.is_file():
         pytest.skip(f"{native.binary} is not an npm install")
     version = json.loads(package.read_text(encoding="utf-8"))["version"]
     assert get_adapter(AGENT).layout_version(native.binary) == version
+    install = asq_global("--json", "accounts", "list")["claude"]
+    assert install["version"] == version, install

@@ -18,13 +18,16 @@ config dir of its own, a throwaway tmux server, no account, network or model spe
 from __future__ import annotations
 
 import json
+import shlex
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner, Result
 
 from aisquare.cli.app import app
+from aisquare.core import agents, selfcli
 from tests.test_claude_native import (  # noqa: F401 - `native` and `native_options` are fixtures
+    AGENT,
     Native,
     Turn,
     native,
@@ -100,7 +103,6 @@ def test_real_claude_code_pause_and_resume_bring_it_back_on_the_same_conversatio
     native.ready(back.pane_id)
     native.type(back.pane_id, "after the resume")
     turn = native.heard("after the resume")
-    assert "SessionStart:resume hook success" in turn.everything
     assert "before the pause" in turn.everything, "the same conversation"
 
 
@@ -147,7 +149,24 @@ def test_real_claude_code_restart_of_a_running_agent_resumes_its_session(
 @options()
 def test_real_claude_code_restarted_with_a_line_gets_its_session_start_context(
     native: Native,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The resume line rides on the command line (0.9.0's delivery, kept: ruling 11087), and
+    Claude Code 2.1.318 sends it without waiting for its SessionStart hooks, whose context
+    is then lost. aisquare's hook takes about a second, which loses or wins by the machine's
+    speed; held at 1.5 s here, as in the plain-Claude repro, it loses every time, so this
+    reads XFAIL until Claude Code waits, and XPASS (red, strict) the day it does."""
+    slow = native.outside / "slow-session-start.sh"
+    slow.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in *session-start*) sleep 1.5 ;; esac\n'
+        f'exec {shlex.join(selfcli.argv_for([]))} "$@"\n',
+        encoding="utf-8",
+    )
+    slow.chmod(0o755)
+    agents.remove_hooks(AGENT, native.config_dir)
+    monkeypatch.setattr(agents, "_aisquare_command", lambda *args, **kwargs: str(slow))
+    agents.install_hooks(AGENT, native.config_dir)
     _, _, turn = _restart_running(native)
     assert "SessionStart:resume hook success: <aisquare-team>" in turn.everything
 

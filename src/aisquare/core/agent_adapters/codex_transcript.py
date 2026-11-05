@@ -1299,9 +1299,36 @@ _REVIEW_DENIED = re.compile(
 """A call's answer when Codex's automatic reviewer (``--approve-for-me``, its guardian) denied it:
 ``exec_command failed: CreateProcess { message: "Rejected(\"This action was rejected due to
 unacceptable risk.\nReason: …``, as 0.164.0 and 0.166.0 both write it, for a command that asked
-to leave the sandbox and for one the reviewer was asked about inside it (``rm -f``). Codex runs
+to leave the sandbox and for one the reviewer was asked about inside it (``rm -f``), and as the
+error of a code-mode script that ran one (:func:`_script_error`). Codex runs
 the command no further, and the turn goes on. A review that could not be completed (``Automatic
 approval review failed: …``) is no denial: Codex says it is none."""
+
+
+_SCRIPT_FAILED = "Script failed\n"
+_SCRIPT_ERROR = "Script error:\n"
+
+
+def _script_error(payload: Mapping[str, Any]) -> str:
+    """The error a code-mode script (``exec``'s ``custom_tool_call_output``) failed with, as
+    Codex reports it, or ``""``: its answer is its own items, the first ``Script failed`` with
+    what the script printed under ``Output:``, the last ``Script error:`` and the error. A
+    command the automatic reviewer denied inside the script is that error, worded as a
+    function call's own answer (:data:`_REVIEW_DENIED`), on 0.164.0 and 0.166.0 alike; read
+    off the joined text, which opens ``Script failed``, it was no denial, and every call
+    GPT-6.1-Sol makes on 0.166.0 is such a script (R7's verify, F1). Never what a command
+    printed: that is in the first item, after ``Output:``, which a command could fill with the
+    words of a denial."""
+    items = payload.get("output")
+    if not isinstance(items, list) or len(items) < 2:
+        return ""
+    texts: list[str] = [
+        text if isinstance(item, dict) and isinstance(text := item.get("text"), str) else ""
+        for item in items
+    ]
+    if not texts[0].startswith(_SCRIPT_FAILED) or not texts[-1].startswith(_SCRIPT_ERROR):
+        return ""
+    return texts[-1].removeprefix(_SCRIPT_ERROR)
 
 
 def _rollout_facts(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
@@ -1371,7 +1398,7 @@ def _rollout_facts(file: Path, start: int) -> tuple[list[TranscriptFact], int]:
             if held is not None and _ABORTED.match(output):
                 found.append((position, TranscriptFact(stamp, FACT_DENIAL)))
                 refused = held if refused is None else refused
-            elif _REVIEW_DENIED.match(output):
+            elif _REVIEW_DENIED.match(output) or _REVIEW_DENIED.match(_script_error(payload)):
                 # Denied by its automatic reviewer: its turn goes on, so it holds nothing.
                 found.append((position, TranscriptFact(stamp, FACT_DENIAL)))
     holds = [*asked.values(), *([refused] if refused is not None else [])]

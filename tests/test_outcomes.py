@@ -1068,6 +1068,90 @@ def test_a_command_codexs_automatic_reviewer_denied_is_a_denial(
     assert _kinds(facts) == [("p", "text"), ("d", ""), ("p", "text"), ("d", "")]
 
 
+CODEX_CODE_MODE_REVIEW_DENIED = {
+    version: CODEX_FACTS.with_name(f"codex-code-mode-review-denied-{version}.jsonl")
+    for version in ("0.164.0", "0.166.0")
+}
+"""Codex's own rollouts in code mode (``[features] code_mode = true``, as GPT-6.1-Sol runs every
+call on 0.166.0), recorded by #93's verify (tester 8ec077b8): a loopback answers each prompt
+with an ``exec`` script that runs ``echo hello`` asking to leave the sandbox, then ``rm -f
+nothing.txt`` inside it; the automatic reviewer denies both. Trimmed to the turns' own
+records."""
+
+
+@pytest.mark.parametrize("version", sorted(CODEX_CODE_MODE_REVIEW_DENIED))
+def test_a_command_the_reviewer_denied_inside_a_code_mode_script_is_a_denial(
+    tmp_path: Path, version: str
+) -> None:
+    """R7's verify, F1: a code-mode script answers with its own items, ``Script failed`` (what
+    it printed, under ``Output:``) and then ``Script error:`` (the error), and the denial is the
+    error. Read off the joined text, which opens ``Script failed``, it was no denial."""
+    path = tmp_path / "rollout.jsonl"
+    path.write_text(
+        CODEX_CODE_MODE_REVIEW_DENIED[version].read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    facts = transcript_facts.read_facts([path], since=_at(1, 0), agents={path: "codex"})[path]
+    assert _kinds(facts) == [("p", "text"), ("d", ""), ("p", "text"), ("d", "")]
+
+
+def test_a_denials_words_a_command_printed_in_a_code_mode_script_are_no_denial(
+    tmp_path: Path,
+) -> None:
+    """The ``Output:`` item is what the script's commands printed: a command that prints the
+    words of a denial, in a script that then fails on something else or does not fail at all,
+    was denied nothing."""
+    recorded = [
+        json.loads(line)
+        for line in CODEX_CODE_MODE_REVIEW_DENIED["0.166.0"]
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    denial = next(
+        item["text"]
+        for record in recorded
+        if record["payload"].get("type") == "custom_tool_call_output"
+        for item in record["payload"]["output"]
+        if item["text"].startswith("Script error:")
+    ).removeprefix("Script error:\n")
+    printed = f"Script failed\nWall time 0.0 seconds\nOutput:\n{denial}\n"
+    answers = [
+        [
+            {"type": "input_text", "text": printed},
+            {"type": "input_text", "text": "Script error:\nboom"},
+        ],
+        [
+            {
+                "type": "input_text",
+                "text": f"Script completed\nWall time 0.0 seconds\nOutput:\n{denial}\n",
+            }
+        ],
+        # A script that completed, whatever an item after its output says.
+        [
+            {"type": "input_text", "text": "Script completed\nWall time 0.0 seconds\nOutput:\n"},
+            {"type": "input_text", "text": f"Script error:\n{denial}"},
+        ],
+    ]
+    path = tmp_path / "rollout.jsonl"
+    lines = []
+    for n, answer in enumerate(answers):
+        call = f"c{n}"
+        records = [
+            ("response_item", {"type": "message", "role": "user",
+                               "content": [{"type": "input_text", "text": f"PRINT {n}"}]}),
+            ("response_item", {"type": "custom_tool_call", "name": "exec", "call_id": call,
+                               "input": "text(await tools.exec_command({cmd:\"cat said.txt\"}));"}),
+            ("response_item", {"type": "custom_tool_call_output", "call_id": call,
+                               "output": answer}),
+        ]  # fmt: skip
+        lines += [
+            json.dumps({"timestamp": stamp(_at(27, 12, n, i)), "type": kind, "payload": payload})
+            for i, (kind, payload) in enumerate(records)
+        ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    facts = transcript_facts.read_facts([path], since=_at(1, 0), agents={path: "codex"})[path]
+    assert _kinds(facts) == [("p", "text")] * 3
+
+
 def test_a_denial_by_codexs_reviewer_counts_in_the_weeks_outcomes(
     machine: Machine, codex_home: Path
 ) -> None:

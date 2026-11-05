@@ -296,8 +296,20 @@ addopts = "-ra"
 faulthandler_timeout = 300
 
 [tool.coverage.run]
-# CI's py3.12 leg (`--cov`, ci.yml) and tests/coverage_floors.py, which combines its shards.
-source = ["aisquare"]
+# CI's py3.12 leg (`--cov`, ci.yml) and tests/coverage_floors.py, which combines its shards:
+# the modules it reports and floors alone. Measured whole, `aisquare` doubled the leg's time
+# (12.8-14.5 min a shard against 5-8) and two shards hit their timeout (run 42077682498).
+source_pkgs = [
+  "aisquare.core.agent_adapters",
+  "aisquare.services.fleet",
+  "aisquare.services.agent_launch",
+  "aisquare.services.handoff",
+  "aisquare.core.agents",
+  "aisquare.core.launch_seal",
+  "aisquare.services.claude_accounts",
+  "aisquare.core.claude_accounts",
+  "aisquare.services.store_broker",
+]
 branch = true
 relative_files = true
 

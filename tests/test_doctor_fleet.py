@@ -1046,6 +1046,31 @@ def test_claude_version_from_an_npm_layout(tmp_path: Path) -> None:
     assert diagnostics.claude_code_version(str(link)) == "2.1.9"
 
 
+def test_claude_version_from_the_npm_packages_native_build(tmp_path: Path) -> None:
+    """R6 F4: Claude Code 2.x's npm package ships a native binary, and npm links ``claude``
+    to its ``bin/claude.exe`` (2.1.318, measured), the package's ``package.json`` one folder
+    up: ``accounts list``, the Accounts page, Welcome and doctor showed no version for it,
+    as 0.9.2 did. A ``bin/`` under a manifest that is not Claude Code's reads none."""
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
+    package = tmp_path / "lib" / "node_modules" / "@anthropic-ai" / "claude-code"
+    (package / "bin").mkdir(parents=True)
+    (package / "bin" / "claude.exe").write_bytes(b"\x7fELF")
+    manifest = {"name": "@anthropic-ai/claude-code", "version": "2.1.318"}
+    (package / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+    link = tmp_path / "bin" / "claude"
+    link.parent.mkdir()
+    link.symlink_to(package / "bin" / "claude.exe")
+
+    assert diagnostics.claude_code_version(str(link)) == "2.1.318"
+
+    other = tmp_path / "other"
+    (other / "bin").mkdir(parents=True)
+    (other / "bin" / "claude").write_bytes(b"\x7fELF")
+    (other / "package.json").write_text(json.dumps({"name": "x", "version": "9"}), "utf-8")
+    assert diagnostics.claude_code_version(str(other / "bin" / "claude")) is None
+
+
 def test_claude_version_is_none_when_the_layout_is_unknown_or_damaged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

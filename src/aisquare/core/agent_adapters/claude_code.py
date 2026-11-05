@@ -138,6 +138,25 @@ class ClaudeCodePlugin:
 SKILL_NAMES_SETTINGS = '{"skillListingMaxDescChars": 1}'
 
 
+#: The npm package Claude Code ships in, whose native build npm links from its ``bin/``.
+_NPM_PACKAGE = "@anthropic-ai/claude-code"
+
+
+def _npm_package_version(root: Path) -> str | None:
+    """The ``version`` of the ``package.json`` in ``root`` when it is Claude Code's own npm
+    package's (its ``name`` says so), else ``None``; never raises."""
+    import json
+
+    try:
+        data = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or data.get("name") != _NPM_PACKAGE:
+        return None
+    version = data.get("version")
+    return version if isinstance(version, str) and version else None
+
+
 def _flag_value(args: Sequence[str], flag: str) -> str | None:
     """The value ``args`` give ``flag`` (``--flag value`` or ``--flag=value``), the last one;
     ``None`` when it is absent (an empty string when it stands last with no value)."""
@@ -329,15 +348,20 @@ class ClaudeCodeAdapter:
         """From the install layout, never ``claude --version``: the native installer links
         ``claude`` to ``…/share/claude/versions/<version>`` (the target's name IS the
         version); an npm install links it to ``…/node_modules/@anthropic-ai/claude-code/
-        cli.js`` with a ``package.json`` beside it. Anything else is ``None``: an honest
-        blank in the detail beats a guess."""
+        cli.js`` with a ``package.json`` beside it, or, the npm package's native build (2.x;
+        2.1.318 measured, R6 F4), to its ``bin/claude.exe``, the package's own
+        ``package.json`` one folder up. Anything else is ``None``: an honest blank in the
+        detail beats a guess."""
         try:
             real = Path(binary).resolve()
         except (OSError, RuntimeError):
             return None
         if _VERSION_DIR.match(real.name):
             return real.name
-        return package_version(str(real), depth=1)
+        beside = package_version(str(real), depth=1)
+        if beside is not None or real.parent.name != "bin":
+            return beside
+        return _npm_package_version(real.parent.parent)
 
     def hooks_switch(
         self, home: Path, settings_path: Path, args: Sequence[str] = ()

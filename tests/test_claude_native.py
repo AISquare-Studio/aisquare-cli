@@ -757,6 +757,8 @@ def test_real_claude_code_keeps_its_folder_trust_dialog_and_runs_the_argv_prompt
     assert native.stub.turns == [], "nothing reached the model"
     facts = native.srv.pane_facts(pane)
     assert facts is not None and not facts.dead, "the agent is still there"
+    told = fleet.tell(native.project, receipt.agent.label, "not into the dialog")
+    assert told.typed == "no" and "has not started" in told.how, told
     _trust(native, pane)
     native.heard("second line of it")
     native.until(lambda: prompt in native.prompts(), 20, "the prompt on the board", pane)

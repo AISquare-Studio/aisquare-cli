@@ -19,6 +19,7 @@ answers it (``prompt_showing``) and ``say`` names it.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -122,3 +123,64 @@ def test_the_permission_chooser_reads_with_its_keys_in_a_fleet_window_and_by_han
     assert shown.question == "Do you want to proceed?"
     assert screen.modal(CHOOSERS[what]) == "a numbered choice"
     assert not screen.ready(CHOOSERS[what])
+
+
+# --- #87's N5: a start the board has not seen -------------------------------------------------
+
+session_start_for_real = fleet_suite.session_start_for_real
+#: Claude Code's folder-trust dialog as a real pane showed it (the 4b fixture's).
+TRUST = next(
+    s["rows"]
+    for s in json.loads(SCREENS.read_text(encoding="utf-8"))["dialogs"]
+    if s["what"] == "the real trust dialog"
+)
+
+
+def _not_started(project: ProjectInfo, tmux: FakeTmux, rows: list[str]) -> Any:
+    """A Claude Code coder whose session the board names but whose SessionStart this launch
+    never recorded (its hooks broken or missing, a session from before this launch's
+    record), quiet, its pane showing ``rows``."""
+    agent = _coder(project)
+    assert agent.session_id is not None
+    _board_session(agent, "waiting", hooked=False)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.printed(agent.pane_id, ago=timedelta(minutes=1))
+    tmux.screens[agent.pane_id] = rows
+    return agent
+
+
+@pytest.mark.parametrize("what", sorted(what for what in IDLE if "draft" not in what))
+def test_a_claude_agent_whose_start_was_not_seen_is_typed_into_at_its_real_idle_prompt(
+    what: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    session_start_for_real: None,
+) -> None:
+    """#87's N5 (ruled 11142): no hook said it started, but its own screen reads its idle
+    prompt, so it is typed into as 0.9.2 did rather than only noted."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    agent = _not_started(project, tmux, IDLE[what])
+
+    told = fleet_service.tell(project, agent.label, "please rebase")
+
+    assert told.delivered and (agent.pane_id, "paste", "please rebase") in tmux.typed, told
+    assert _events(project, "note") == []
+
+
+def test_a_claude_agent_whose_start_was_not_seen_at_its_trust_dialog_gets_the_note(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    session_start_for_real: None,
+) -> None:
+    """The other side: its trust dialog is no prompt, and an Enter there exits it."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    agent = _not_started(project, tmux, TRUST)
+
+    told = fleet_service.tell(project, agent.label, "please rebase")
+
+    assert not told.delivered and "has not started" in told.how, told
+    assert tmux.typed == [] and _events(project, "note") == ["please rebase"]

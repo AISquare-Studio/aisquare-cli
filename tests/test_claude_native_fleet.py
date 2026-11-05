@@ -26,6 +26,7 @@ from typer.testing import CliRunner, Result
 
 from aisquare.cli.app import app
 from aisquare.core import agents, selfcli
+from aisquare.services import fleet
 from tests.test_claude_native import (  # noqa: F401 - `native` and `native_options` are fixtures
     AGENT,
     Native,
@@ -197,3 +198,27 @@ def _agents(listing: Any) -> list[dict[str, Any]]:
         if isinstance(listing.get(key), list):
             return listing[key]  # type: ignore[no-any-return]
     return []
+
+
+@options()
+def test_real_claude_code_whose_hooks_never_ran_is_told_at_its_idle_prompt(
+    native: Native,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#87's N5 (ruled 11142): its hooks name an aisquare that is gone (an install moved
+    since they were written), so no SessionStart reaches the board; its screen reads its
+    idle prompt, and a tell types there, as 0.9.2 did, rather than only filing a note."""
+    agents.remove_hooks(AGENT, native.config_dir)
+    gone = native.outside / "moved" / "aisquare"
+    monkeypatch.setattr(agents, "_aisquare_command", lambda *args, **kwargs: str(gone))
+    agents.install_hooks(AGENT, native.config_dir)
+    receipt = native.spawn(prompt="no hook hears this")
+    row = receipt.agent
+    native.heard("no hook hears this")
+    native.ready(row.pane_id)
+    assert native.session(row.session_id) is None, "no hook reached the board"
+    # With no board row its state is its pane's: waiting once it has been quiet a while.
+    native.until(lambda: fleet.status_of(row).state == "waiting", 30, "quiet", row.pane_id)
+    told = asq_json(native, "fleet", "tell", row.label, "typed with no hooks")
+    assert told["typed"] == "yes", told
+    native.heard("typed with no hooks")

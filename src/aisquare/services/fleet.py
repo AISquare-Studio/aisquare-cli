@@ -9332,6 +9332,19 @@ def _at_a_start_dialog(pane: PlacedPane, adapter: AgentAdapter | None) -> bool:
     return last.startswith(mark)
 
 
+def _ready_on_its_screen(pane: PlacedPane, adapter: AgentAdapter) -> bool:
+    """Whether the screen of ``pane`` POSITIVELY reads as the agent's prompt, ready for a
+    typed line, by its own reader (``AgentScreen.ready``), with no dialog of its own named on
+    it (``AgentScreen.modal``): Claude Code's idle input box, never its folder-trust dialog.
+    ``False`` for a screen tmux will not give; never raises."""
+    try:
+        rows = pane_screen.strip_escapes(pane.captured())
+    except TmuxError:
+        return False
+    screen = screen_of(adapter)
+    return screen.ready(rows) and screen.modal(rows) is None
+
+
 def _dialog_on_its_screen(pane: PlacedPane, adapter: AgentAdapter | None) -> str | None:
     """What a dialog of the agent's own on the screen of ``pane`` is, in the owner's words,
     where the agent's own reader names one (``AgentScreen.modal``): Claude Code's ``/resume``,
@@ -10111,10 +10124,14 @@ def tell(
         and orchestrator.team_enabled()
         and agent.session_id is not None
         and not started
+        and not _ready_on_its_screen(pane, adapter)
     ):
         # Quiet, and not at its prompt: Claude Code fires no hook at its folder-trust
         # dialog, whose default an Enter picks — `No, exit` (2.1.300). Only where the
-        # board sees its start: the board on, the row naming its session.
+        # board sees its start: the board on, the row naming its session. Its screen
+        # reading ready at its prompt is that prompt whatever its hooks said (none fired:
+        # broken or missing, a session from before this launch's record), and it is typed
+        # into as 0.9.2 did (#87's N5, ruled 11142).
         return TellResult(
             "no",
             noted(

@@ -486,7 +486,7 @@ def test_export_skill_user_writes_into_claudes_skills(
     assert (claude_dir / "skills" / "skeptic" / "SKILL.md").read_bytes() == (
         core.BUNDLED_DIR / "skeptic" / "SKILL.md"
     ).read_bytes()
-    assert "a skill Claude Code reads now" in result.stdout
+    assert "it is /skeptic in Claude Code now" in result.stdout  # main 0.9.2's words
     assert project.exit_code == 0, project.output
     assert (repo / ".claude" / "skills" / "mentor" / "SKILL.md").is_file()
     assert (code, payload["error"]) == (1, "usage")

@@ -194,7 +194,9 @@ that another client continues the session, titled: Claude Code's `--remote-contr
 launch that asks of an agent without says so and starts it as it was), `positional_prompt` (its first
 message on its command line, after `--`), `binding_args_first` (a launch keeps 0.9.2's argument
 order: the binding's, the role's, the persona's, the line's, the session id last, AISquare's own
-flags in front of a literal `--`; otherwise AISquare's lead), `compact` (a `CompactCommand(line, instructions)`:
+flags in front of a literal `--`; otherwise AISquare's lead), `skill_command` (what its user types
+to run an exported skill, `{name}` its name: Claude Code's `/{name}`, which `persona export` says),
+`compact` (a `CompactCommand(line, instructions)`:
 the command that compacts the session at its idle prompt, which the quiet-point compaction types, bare
 where text after it would run as a prompt; its acknowledgement is the compaction's `SessionStart`
 where that comes at rest, else the transcript's record of it),
@@ -231,7 +233,8 @@ and stops the wait for its start),
 `types.ScreenPrompt`, with `whole`, all it shows as one line, which reads the same for the
 same prompt redrawn and not for the next: `chooser`, its yes the digit of its first option that says Yes and its
 no; `yn`; `trust`, the folder-trust question, and `dialog`, any other of its own, both the
-owner's with no keys; `None` for none. The captain asks it of the pane's own agent before
+owner's with no keys, and `yes_option`, its first option that says Yes as drawn, the words the
+captain tells the owner to choose; `None` for none. The captain asks it of the pane's own agent before
 `press` sends a key or a paste types a line: Claude Code's input box, chooser and trust
 dialog, `claude_screen.prompt_showing`; Codex's dialogs as `dialog_on_screen` reads them,
 its approval view a chooser on `1` and `Escape`),

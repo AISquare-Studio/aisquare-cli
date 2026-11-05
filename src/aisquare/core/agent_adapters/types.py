@@ -109,6 +109,10 @@ class ScreenPrompt:
     the key hint) as one line, whitespace collapsed and the highlight dropped: the same
     prompt redrawn (the highlight moved, the pane resized) reads the same, and the next one,
     asking the same about another command, does not."""
+    yes_option: str | None = None
+    """Its first option that says Yes, in the words the screen draws it (Claude Code's
+    trust dialog: ``Yes, I trust this folder``): what the owner is told to choose where the
+    answer is theirs (``trust``), as 0.9.2's captain told it (R1 of #113's release)."""
 
 
 #: The ``aisquare hook`` subcommand any adapter can install: ``event --agent <id> --event
@@ -418,6 +422,10 @@ class AgentCapabilities:
     """The first prompt is a positional argument, after ``--`` (Claude Code, Codex): a spawn's
     first message goes on its command line (``services.delivery.first_prompt_way``, through a
     file ``launch`` reads and deletes); otherwise the fleet types it."""
+    skill_command: str | None = None
+    """What its user types to run an exported skill, ``{name}`` the skill's (Claude Code's
+    ``/{name}``): ``persona export --skill`` and asq's Export say it (0.9.2: "it is /skeptic in
+    Claude Code now"); ``None``, they say the agent reads the skill."""
     binding_args_first: bool = False
     """A launch keeps the argument order Claude Code was launched with through 0.9.2
     (``cli.launch``): the role binding's arguments, the role's own flags (its defaults and tool

@@ -207,6 +207,7 @@ class ClaudeCodeAdapter:
         # too (P0-W0, on 2.1.309 and 2.1.223): nothing typed, no Enter to lose (#295).
         positional_prompt=True,
         binding_args_first=True,
+        skill_command="/{name}",
         compact=CompactCommand("/compact", instructions=True),
         vocabulary=Vocabulary(
             env_prefixes=("ANTHROPIC",),

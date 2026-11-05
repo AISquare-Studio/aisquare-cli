@@ -445,9 +445,12 @@ def _refuse_dialog(agent: FleetAgent, pane: list[str], showing: str) -> NoReply:
     """The refusal for a pane that shows a dialog: what shows, and the one thing to do."""
     prompt = screen.prompt_showing(agent, pane)
     if prompt is not None and prompt.shape == "trust":
+        # The option to choose, in the agent's own words (0.9.2: "choose Yes, I trust this
+        # folder"), where its screen reader names it (`ScreenPrompt.yes_option`).
+        choose = f"choose {prompt.yes_option}" if prompt.yes_option else "trust it there"
         return NoReply(
             f"the captain is waiting for you to trust its folder {brain_dir()}: run "
-            "`aisquare captain` and trust it there (once)",
+            f"`aisquare captain` and {choose} (once)",
             timed_out=False,
         )
     return NoReply(

@@ -697,7 +697,14 @@ def export(
             }
         )
         return
-    reads = f" — a skill {adapter.label} reads now" if adapter is not None else ""
+    command = adapter.capabilities.skill_command if adapter is not None else None
+    reads = (
+        f" — it is {command.format(name=name)} in {adapter.label} now"
+        if adapter is not None and command is not None
+        else f" — a skill {adapter.label} reads now"
+        if adapter is not None
+        else ""
+    )
     typer.echo(f"✓ exported {name} to {result.path}{reads}")
     _warn_links(result.skipped_links)
 

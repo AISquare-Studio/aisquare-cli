@@ -547,7 +547,9 @@ def screen_prompt(rows: Sequence[str]) -> ScreenPrompt | None:
     words, region = found
     whole = " ".join(" ".join(region).replace(_CHEVRON.strip(), " ").split())
     if words.startswith(_TRUST_QUESTION):
-        return ScreenPrompt("trust", words, None, None, whole)
+        options = [match for match in map(_OPTION.match, region) if match is not None]
+        yes = next((m.group(2).strip() for m in options if m.group(2).startswith("Yes")), None)
+        return ScreenPrompt("trust", words, None, None, whole, yes)
     if _APPROVAL_KEYS.search(region[-1]):
         options = [match for match in map(_OPTION.match, region) if match is not None]
         yes = next((m.group(1) for m in options if m.group(2).startswith("Yes")), None)

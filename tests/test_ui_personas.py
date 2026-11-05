@@ -1068,7 +1068,9 @@ def test_export_sends_each_destination_and_the_toast_names_the_path(
     assert blocked is (destination == "#export-directory")  # a directory needs a path first
     assert export.calls == [{"args": ["pair"], "root": repo, "force": False, **expected}]
     toast = f"✓ exported pair to {written}"
-    if reader is not None:
+    if reader == "Claude Code":  # main 0.9.2's words, its `/<name>` (R1 of #113's release)
+        toast += " — it is /pair in Claude Code now"
+    elif reader is not None:
         toast += f" — a skill {reader} reads now"
     assert (toast, "information") in notices
 

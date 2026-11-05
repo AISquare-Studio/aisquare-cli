@@ -537,7 +537,13 @@ class PersonasTab(Vertical):
             return
         where = f"✓ exported {done.name} to {done.path}"
         if done.skill is not None and done.agent is not None:
-            where += f" — a skill {get_adapter(done.agent).label} reads now"
+            adapter = get_adapter(done.agent)
+            command = adapter.capabilities.skill_command
+            where += (
+                f" — it is {command.format(name=done.name)} in {adapter.label} now"
+                if command is not None
+                else f" — a skill {adapter.label} reads now"
+            )
         self.notify(where, timeout=8, markup=False)
         self.reload()
 

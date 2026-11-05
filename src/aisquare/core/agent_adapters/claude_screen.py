@@ -203,6 +203,17 @@ def dialog_region(rows: Sequence[str]) -> list[str]:
     return [row for row in region if row.strip()]
 
 
+def _yes_option(region: Sequence[str]) -> str | None:
+    """The first of ``region``'s options that says Yes, numbered (``1. Yes, …``) or not, the
+    highlight dropped (``ScreenPrompt.yes_option``)."""
+    for row in region:
+        match = OPTION.match(row)
+        text = match.group(3).strip() if match else row.replace(PROMPT_MARK, " ").strip()
+        if text.lower().startswith("yes"):
+            return text
+    return None
+
+
 def prompt_showing(lines: Sequence[str]) -> ScreenPrompt | None:
     """The prompt at the bottom of a pane, read by its structure, or ``None`` (T1b's question)."""
     rows = tail(lines)
@@ -215,7 +226,9 @@ def prompt_showing(lines: Sequence[str]) -> ScreenPrompt | None:
     footer = any(MODAL_FOOTER.search(row) for row in region[-2:])
     if footer and any(TRUST.search(row) for row in region):
         question = next((row.strip() for row in region if "Quick safety check" in row), "")
-        return ScreenPrompt("trust", question or "the trust dialog", None, None, whole)
+        return ScreenPrompt(
+            "trust", question or "the trust dialog", None, None, whole, _yes_option(region)
+        )
     numbered = [(index, match) for index, match in enumerate(map(OPTION.match, region)) if match]
     if footer and len(numbered) >= 2:
         digits = [match.group(2) for _, match in numbered]

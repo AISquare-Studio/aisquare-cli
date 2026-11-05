@@ -43,6 +43,7 @@ from aisquare.models import (
     ClaudeInstall,
     DoctorCheck,
 )
+from tests.rendered import ANSI
 
 MARK = " (beta)"
 
@@ -310,7 +311,8 @@ def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> N
     # Each line as the head drew it, the padding Rich ends a plain line with aside (a box's
     # line ends in its border, so it is compared whole).
     head = [line.rstrip() for line in HEAD_ACCOUNTS_ADD_HELP.rstrip("\n").splitlines()]
-    now = [line.rstrip() for line in result.output.rstrip("\n").splitlines()]
+    # Styled where typer forces a terminal (GITHUB_ACTIONS): read with the styles taken off.
+    now = [line.rstrip() for line in ANSI.sub("", result.output).rstrip("\n").splitlines()]
     assert len(now) == len(head)
     for was, line in zip(head, now, strict=True):
         if "--agent  " in was:  # its help grew by the mark, and the box's padding shrank by it
@@ -318,4 +320,4 @@ def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> N
         else:
             assert line == was
     root = CliRunner().invoke(app, ["--help"], env={"COLUMNS": "100"}, terminal_width=100)
-    assert root.exit_code == 0 and MARK not in root.output
+    assert root.exit_code == 0 and MARK not in ANSI.sub("", root.output)

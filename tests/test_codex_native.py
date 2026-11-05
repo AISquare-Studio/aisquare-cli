@@ -1177,7 +1177,9 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             coder, pane = restarted.started, restarted.started.pane_id
             until(lambda: at_rest(coder), 40, "waiting after the restart, at rest", pane)
             seen, reviewed = len(outputs()), reviews()
-            asked = f"ESC sleep 8; {cli} note 'asked first'"
+            # Long enough to be seen working once allowed: on the macOS CI runner Codex took
+            # 4 s from the `y` to its first "Working" (CI 42120386762), and 8 s left little.
+            asked = f"ESC sleep 20; {cli} note 'asked first'"
             assert fleet.tell(project, label, asked).delivered
 
             def asking() -> bool:
@@ -1204,9 +1206,9 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             srv.send_keys(pane, "y")
             # Working the moment the human allows, not when the command's PostToolUse
             # fires at its end (review r2 of #113, finding 7).
-            until(lambda: state(coder) == "working", 5, "working once allowed", pane)
+            until(lambda: state(coder) == "working", 15, "working once allowed", pane)
             assert not answered(seen), "the approved command still runs"
-            until(lambda: answered(seen), 30, "the approved note ran", pane)
+            until(lambda: answered(seen), 60, "the approved note ran", pane)
             assert "shared (note)" in outputs()[-1]
             until(lambda: state(coder) in {"working", "waiting"}, 20, "the bell cleared", pane)
             with store_session() as handle:

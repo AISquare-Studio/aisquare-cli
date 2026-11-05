@@ -41,7 +41,7 @@ from aisquare.core import claude_screen as screen_reader
 from aisquare.core import claude_sharing, codenames, harness, launch_seal, locking, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
-from aisquare.core.agent_adapters import adapter_for_binary
+from aisquare.core.agent_adapters import adapter_for_binary, adapters
 from aisquare.core.config import (
     REVIEWER_ARGS,
     AppConfig,
@@ -16357,6 +16357,55 @@ def test_the_census_takes_a_row_with_no_server_start_at_no_recorded_pane_but_two
         placed = fleet_service.resolve_place(row)
         assert isinstance(placed, fleet_service.Placed), placed
         assert placed.record.legacy and placed.pane.pane_id == "%40"
+
+
+def test_after_the_first_census_no_row_of_an_agent_that_sandboxes_its_tools_is_taken(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review r7 of #113, finding 1, as the census taken on read keeps it (found on a real
+    Codex, R7 of 0.10.0): once a launch record is kept, a row of an agent that sandboxes its
+    tools that no record names is one its sandbox could have INSERTed before its broker, at
+    any window, and it is refused; a row of an agent that does not (0.9.2's, Claude Code's) is
+    taken. Each named by its own agent's capability, not its name."""
+    agent = _coder(project)  # a record is kept from here
+    sandboxing = next(a for a in adapters() if a.capabilities.sandboxes_tools)
+    plain = next(a for a in adapters() if not a.capabilities.sandboxes_tools)
+    forged = _fake_row(project, agent, "%77", label="coder-9", agent=sandboxing.id)
+    placement = fleet_service.resolve_place(forged)
+    assert isinstance(placement, fleet_service.Unplaced), placement
+    assert "takes no row of an agent that sandboxes its tools" in placement.why
+    legacy = _fake_row(project, agent, "%78", label="coder-8", agent=plain.id)
+    assert isinstance(fleet_service.resolve_place(legacy), fleet_service.Placed)
+
+
+def test_the_first_census_takes_a_sandboxing_agents_row_and_its_replay_starts_fresh(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Before any record was kept the census takes every row, whatever its agent, as it
+    always did; but the session a census record of an agent that sandboxes its tools resumes
+    is never its board row's, a column its sandbox could write before its broker (review r4
+    of #113, finding 1): it starts fresh, where a 0.9.2 agent's resumes (R3 of 0.10.0, F1)."""
+    sandboxing = next(a for a in adapters() if a.capabilities.sandboxes_tools)
+    spawned = _coder(project)
+    with store_session() as store:
+        assert isinstance(store, SqliteStore)
+        store._conn.execute(
+            "UPDATE fleet_agent SET agent = ? WHERE id = ?", (sandboxing.id, spawned.id)
+        )
+        store._conn.commit()
+        row = store.get_fleet_agent(spawned.id)
+    assert row is not None and row.agent == sandboxing.id
+    _before_records()
+    _092_transcript(row, tmp_path)
+
+    placed = fleet_service.resolve_place(row)
+
+    assert isinstance(placed, fleet_service.Placed) and placed.record.legacy, placed
+    with store_session() as store:
+        session = store.get_session(row.session_id or "")
+    assert session is not None and session.transcript_path
+    kept = fleet_service._with_legacy_session(placed.record, row, session)
+    assert kept.session is None, "no board session for it"
 
 
 def test_a_legacy_agents_own_hook_leaves_it_placed(

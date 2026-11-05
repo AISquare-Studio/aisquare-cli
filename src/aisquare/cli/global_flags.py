@@ -180,8 +180,20 @@ def _declared(command: Any) -> set[str]:
     return declared
 
 
+def forwards_arguments(command: Any) -> bool:
+    """Whether ``command`` hands the words after it to the program it runs (``launch``,
+    ``accounts run``, ``exec``): it takes unknown options and extra arguments both.
+
+    ``ignore_unknown_options`` alone is not that. The ``accounts`` commands that take a slot
+    (``cli.accounts.SLOT_ARGS``) set it so that a negative slot (``-2``) reads as one, and a
+    ``--json`` after them is aisquare's own, as in 0.9.2: read as their slot, ``accounts
+    usage --json`` said "no Claude account is called '--json'" and exited 1."""
+    settings = getattr(command, "context_settings", None) or {}
+    return bool(settings.get("ignore_unknown_options") and settings.get("allow_extra_args"))
+
+
 def _inject(command: Any) -> None:
-    if getattr(command, "context_settings", {}).get("ignore_unknown_options"):
+    if forwards_arguments(command):
         # An arg-forwarding command (`launch`): everything after it belongs to
         # the program it execs. Injecting parseable flags would make click
         # consume --verbose/--json/-q (and --profile plus its value) OUT of

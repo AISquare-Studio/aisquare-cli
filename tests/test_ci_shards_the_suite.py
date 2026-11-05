@@ -36,10 +36,14 @@ _SAMPLE = ["tests/test_ci_concurrency.py", "tests/test_ci_checks_the_lock.py"]
 _SPLIT = re.compile(r"--splits \$\{\{ matrix\.shards \}\} --group \$\{\{ matrix\.shard \}\}")
 
 #: What every shard runs, the plain and the ambient step alike.
+#: The py3.12 leg measures coverage as it runs (tests/coverage_floors.py); every other
+#: leg's line reads as it did.
+COVERAGE = "${{ matrix.leg == 'py3.12' && '--cov --cov-report=' || '' }}"
 SHARD_PYTEST = (
     "pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }}"
     " --splitting-algorithm least_duration"
     ' --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"'
+    f" {COVERAGE}"
 )
 
 

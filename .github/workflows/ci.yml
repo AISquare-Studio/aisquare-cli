@@ -50,8 +50,15 @@ permissions:
 #   shards   reads what every shard collected and ran, and fails unless each leg's
 #            shards ran its collection exactly once (tests/shards.py).
 #   package  the sdist and wheel, built and smoke-tested.
+#   coverage combines the py3.12 leg's shards' coverage (`--cov` on that leg), reports
+#            core/agent_adapters and the shared seam, and holds their floors
+#            (tests/coverage_floors.py).
 #   codex    Codex's native integration on the pinned CLI (tests/run_codex_native.py):
 #            hooks, MCP, resume, usage and the interactive fleet, a loopback endpoint.
+#   claude   Claude Code's native suite on the pinned CLI, ubuntu and macOS
+#            (tests/run_claude_native.py): launch, every hook, the fleet, accounts,
+#            transcript and screen, on a loopback Messages stub. claude-latest runs it on
+#            the newest release, nightly and by hand.
 #   outbox-windows  the outbox's Windows error handling and durable retry receipts,
 #            on the one test file (tests/test_outbox_portability.py).
 #   ci-ok    passes only when every job above did: the one check for branch
@@ -248,7 +255,7 @@ jobs:
       # tests/test_ci_covers_the_ambient_environment.py pins.
       - name: Test (pytest)
         if: matrix.ambient == 'none'
-        run: pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
+        run: pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json" ${{ matrix.leg == 'py3.12' && '--cov --cov-report=' || '' }}
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
 
@@ -499,13 +506,24 @@ jobs:
           fi
 
           assert_proxy before
-          pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
+          pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json" ${{ matrix.leg == 'py3.12' && '--cov --cov-report=' || '' }}
           # Re-asserted on the far side, because a listener that died mid-suite
           # would otherwise leave a GREEN run that silently tested the other
           # ambient — and a job cannot notice that it tested the wrong thing.
           assert_proxy after
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
+
+      # The py3.12 leg's coverage data (`--cov` above) rides in its note's folder, as
+      # `<shard>.coverage` (no dot: upload-artifact leaves hidden files out), for the
+      # `coverage` job to combine; the shard check reads only the notes there.
+      - name: Keep this shard's coverage data for the coverage job
+        if: ${{ matrix.leg == 'py3.12' && !cancelled() }}
+        run: |
+          if [ -f .coverage ]; then
+            mkdir -p "$RUNNER_TEMP/shards/${{ matrix.leg }}"
+            mv .coverage "$RUNNER_TEMP/shards/${{ matrix.leg }}/${{ matrix.shard }}.coverage"
+          fi
 
       # Whatever the suite did, so a red shard's split is checked too. Its own
       # artifact per shard: the `shards` job merges them, one folder per leg.
@@ -543,6 +561,33 @@ jobs:
       - name: Check that each leg's shards ran its suite exactly once
         run: python3 -m tests.shards check "$RUNNER_TEMP/shards"
 
+  coverage:
+    # The py3.12 leg's four shards measured line and branch coverage (`--cov`); this
+    # combines them, puts per-module figures for core/agent_adapters and the shared seam
+    # in the run's summary, and fails when Claude Code's adapter (claude_*.py) or a seam
+    # module reads under its floor (tests/coverage_floors.py).
+    name: coverage (Claude Code's adapter and the seam)
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install "coverage>=7.10"
+      - name: Fetch every py3.12 shard's note and coverage data
+        uses: actions/download-artifact@v8
+        with:
+          pattern: shard-py3.12-*
+          path: ${{ runner.temp }}/shards
+          merge-multiple: true
+      - name: Report the figures and hold the floors
+        run: python -m tests.coverage_floors "$RUNNER_TEMP/shards/py3.12" --shards 4
+
   codex:
     name: Codex native integration (0.164.0)
     runs-on: ubuntu-latest
@@ -565,6 +610,76 @@ jobs:
           # Responses endpoint is loopback; no login, model spend or gateway.
           # The runner asserts the pinned version and a passing, unskipped test.
           python -m tests.run_codex_native
+
+  claude:
+    # Claude Code's native suite (tests/run_claude_native.py): the real `claude`, pinned to
+    # the version the owner runs, through the adapter seam exactly as a user drives it, on
+    # both OSes users run it on. A loopback Messages stub answers its turns (tool calls, a
+    # held turn, an API error, /compact): no account, network or model spend.
+    name: Claude Code native integration (2.1.318, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            ci/constraints.txt
+      - name: Install the CLI, tmux and Claude Code
+        run: |
+          uv pip install --system --compile-bytecode -c ci/constraints.txt -e ".[dev]"
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install tmux; else sudo apt-get install -y tmux; fi
+          npm install --global --prefix "$RUNNER_TEMP/claude" @anthropic-ai/claude-code@2.1.318
+          echo "$RUNNER_TEMP/claude/bin" >> "$GITHUB_PATH"
+      - name: Launch, hooks, fleet, accounts, transcript and screen on the real claude
+        run: |
+          # The runner asserts the pinned version, and that every module ran a test that
+          # passed and none failed.
+          python -m tests.run_claude_native
+
+  claude-latest:
+    # The same suite on Claude Code's newest release, nightly and by hand, so its drift
+    # shows here before a user meets it. It never decides a pull request: a new release
+    # would turn every PR red for a change no PR made, and the pinned `claude` job is the
+    # merge gate. It starts on every run because `ci-ok` needs every job and a skipped one
+    # fails it; off the nightly and a run by hand it does nothing and passes. On those two
+    # a red here turns the run red, which is the signal: move the pin, or fix the drift.
+    name: Claude Code native integration (latest, nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Not the nightly or a run by hand
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: echo "Claude Code's latest release is tested nightly and by hand, not on this ${{ github.event_name }}"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      - name: Set up Python
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install the CLI, tmux and Claude Code's latest release
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          python -m pip install -c ci/constraints.txt -e ".[dev]"
+          sudo apt-get install -y tmux
+          npm install --global --prefix "$RUNNER_TEMP/claude" @anthropic-ai/claude-code@latest
+          echo "$RUNNER_TEMP/claude/bin" >> "$GITHUB_PATH"
+      - name: Launch, hooks, fleet, accounts, transcript and screen on the latest claude
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python -m tests.run_claude_native --any-version
 
   package:
     name: package (${{ matrix.os }})
@@ -733,7 +848,7 @@ jobs:
     # than skip: a skipped job satisfies a required check. Anything but `success`
     # fails it, a skipped job included: nothing here is skipped on purpose.
     name: ci-ok
-    needs: [outbox-windows, lint, test, shards, codex, package]
+    needs: [outbox-windows, lint, test, shards, coverage, codex, claude, claude-latest, package]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

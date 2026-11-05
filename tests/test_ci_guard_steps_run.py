@@ -44,6 +44,7 @@ from typing import Any
 import pytest
 
 from tests.ci_matrix import ROOT, choose, workflow
+from tests.test_ci_shards_the_suite import COVERAGE
 
 
 def _no_bash_reason() -> str | None:
@@ -58,7 +59,7 @@ def _no_bash_reason() -> str | None:
 
 _RUNS_BASH = pytest.mark.skipif(_no_bash_reason() is not None, reason=_no_bash_reason() or "")
 
-_EXPRESSION = re.compile(r"\$\{\{\s*([A-Za-z_.]+)\s*\}\}")
+_EXPRESSION = re.compile(r"\$\{\{\s*(.+?)\s*\}\}")
 
 #: ``test``'s ambient steps are the ones gated on a leg whose ``ambient`` is not ``none``.
 AMBIENT_GATE = "matrix.ambient != 'none'"
@@ -254,6 +255,8 @@ class Ambient:
                 "matrix.shard": "1",
                 "matrix.shards": "4",
                 "matrix.leg": "leg",
+                # No ambient leg is py3.12's, the one that measures coverage.
+                COVERAGE.removeprefix("${{ ").removesuffix(" }}"): "",
                 "runner.temp": str(temp),
             },
         )

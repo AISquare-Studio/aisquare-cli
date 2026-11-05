@@ -70,6 +70,29 @@ def test_native_runner_rejects_green_pytest_runs_without_native_assertions(
             run_codex_native.run(["--version", "0.166.0"])
 
 
+def test_no_skips_fails_a_leg_where_a_native_test_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The macOS leg runs every native test (Codex's sandbox starts a command there): one that
+    skipped proves less than the leg says, and fails it; elsewhere a skip is a skip."""
+
+    def execute(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command == ["codex", "--version"]:
+            return subprocess.CompletedProcess(command, 0, stdout="codex-cli 0.166.0\n")
+        path = Path(next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml=")))
+        path.write_text(
+            '<testsuites><testsuite><testcase classname="tests.test_codex_native" name="ran"/>'
+            '<testcase classname="tests.test_codex_native" name="test_sandboxed"><skipped/>'
+            "</testcase></testsuite></testsuites>"
+        )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", execute)
+    assert run_codex_native.run(["--version", "0.166.0"]) == 0
+    with pytest.raises(RuntimeError, match="skipped where this leg runs them all: test_sandboxed"):
+        run_codex_native.run(["--version", "0.166.0", "--no-skips"])
+
+
 @pytest.mark.parametrize(
     "argv", [["--version", "0.164.0"], []], ids=["another release", "none named"]
 )
@@ -116,9 +139,13 @@ def test_ci_runs_the_native_suite_on_every_release_the_beta_holds_and_latest_nig
         run_codex_native.CODEX_VERSIONS
     )
     assert re.search(r"^ +npm install .+ @openai/codex@\$\{\{ matrix.codex \}\}$", native, re.M)
-    assert re.search(
-        r"^ +python -m tests.run_codex_native --version \$\{\{ matrix.codex \}\}$", native, re.M
-    )
+    run = r"^ +python -m tests.run_codex_native --version \$\{\{ matrix.codex \}\} "
+    assert re.search(run + r"\$\{\{ matrix.every_test \}\}$", native, re.M)
+    # The sandbox and reviewer tests skip on ubuntu (bwrap): 0.166.0 runs on macOS as well,
+    # where they run, and a skip there fails the leg (R7's verify, the manager's ruling).
+    mac = r'^ +- codex: "0.166.0"\n +os: macos-latest\n +every_test: "--no-skips"$'
+    assert re.search(mac, native, re.M), "the macOS leg, every test run"
+    assert re.search(r"^    runs-on: \$\{\{ matrix.os \}\}$", native, re.M)
     latest = _job(text, "codex-latest")
     assert re.search(r"^ +npm install .+ @openai/codex@latest$", latest, re.M)
     assert re.search(r"^ +run: python -m tests.run_codex_native --any-version$", latest, re.M)

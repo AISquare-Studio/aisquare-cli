@@ -56,7 +56,9 @@ permissions:
 #   codex    Codex's native integration (tests/run_codex_native.py) on each release the
 #            beta holds: 0.164.0, its floor, and 0.166.0, the current one; hooks, MCP,
 #            resume, usage, the automatic reviewer and the interactive fleet, a loopback
-#            endpoint. codex-latest runs it on the newest release, nightly and by hand.
+#            endpoint. 0.166.0 runs on macOS too, where the sandbox and reviewer tests run
+#            (they skip on ubuntu). codex-latest runs it on the newest release, nightly
+#            and by hand.
 #   claude   Claude Code's native suite on the pinned CLI, ubuntu and macOS
 #            (tests/run_claude_native.py): launch, every hook, the fleet, accounts,
 #            transcript and screen, on a loopback Messages stub. claude-latest runs it on
@@ -596,13 +598,21 @@ jobs:
     # Each release the Codex beta holds (tests/run_codex_native.py's CODEX_VERSIONS): the
     # floor and the current one, which a new user gets. Both are required: ci-ok needs
     # every leg. Moving the pin is a row here and one in CODEX_VERSIONS.
-    name: Codex native integration (${{ matrix.codex }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: Codex native integration (${{ matrix.codex }}${{ matrix.os == 'macos-latest' && ', macOS' || '' }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 30 || 20 }}
     strategy:
       fail-fast: false
       matrix:
         codex: ["0.164.0", "0.166.0"]
+        os: [ubuntu-latest]
+        include:
+          # The 7 tests of Codex's sandbox and its automatic reviewer skip on ubuntu, whose
+          # bwrap cannot bring up loopback; macOS's Seatbelt runs them, on the current
+          # release, and the leg fails if any is skipped (R7's verify, the manager's ruling).
+          - codex: "0.166.0"
+            os: macos-latest
+            every_test: "--no-skips"
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
@@ -612,7 +622,7 @@ jobs:
       - name: Install CLI, MCP and native terminal tools
         run: |
           python -m pip install -e ".[dev,serve]"
-          sudo apt-get install -y tmux
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install tmux; else sudo apt-get install -y tmux; fi
           npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@${{ matrix.codex }}
           echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
       - name: Exercise hooks, MCP, resume, usage and the interactive fleet
@@ -620,7 +630,7 @@ jobs:
           # The fixture owns its temporary hooks and trusts only those. Its
           # Responses endpoint is loopback; no login, model spend or gateway.
           # The runner asserts the leg's version and a passing, unskipped test.
-          python -m tests.run_codex_native --version ${{ matrix.codex }}
+          python -m tests.run_codex_native --version ${{ matrix.codex }} ${{ matrix.every_test }}
 
   codex-latest:
     # The same suite on Codex's newest release, nightly and by hand, so its drift shows

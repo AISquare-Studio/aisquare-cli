@@ -5,6 +5,8 @@
 ``tests/test_codex_native.py`` with ``AISQUARE_TEST_CODEX=1``, and fails unless a test ran
 that was not skipped, and none failed. ``--any-version`` is the nightly leg's: whatever
 ``latest`` installed, said in the log, so Codex's drift shows before a user meets it.
+``--no-skips`` is the macOS leg's: there Codex's sandbox starts a command, so its sandbox and
+automatic-reviewer tests run, and one skipped fails the leg.
 """
 
 from __future__ import annotations
@@ -42,6 +44,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="run on whatever codex is installed (the nightly leg on latest)",
     )
+    parser.add_argument(
+        "--no-skips",
+        action="store_true",
+        help="fail when any test skipped (the macOS leg, where Codex's sandbox runs them all)",
+    )
     asked = parser.parse_args(argv)
     version = installed_version()
     if not asked.any_version and version != asked.version:
@@ -74,6 +81,10 @@ def run(argv: Sequence[str] | None = None) -> int:
             raise RuntimeError(f"Native Codex tests failed in {NATIVE_MODULE.name}")
         if not any(case.find("skipped") is None for case in cases):
             raise RuntimeError(f"Native Codex tests all skipped in {NATIVE_MODULE.name}")
+        skipped = [case.get("name") for case in cases if case.find("skipped") is not None]
+        if asked.no_skips and skipped:
+            names = ", ".join(map(str, skipped))
+            raise RuntimeError(f"Native Codex tests skipped where this leg runs them all: {names}")
     return 0
 
 

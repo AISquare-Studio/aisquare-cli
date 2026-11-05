@@ -16330,6 +16330,32 @@ def test_the_census_takes_no_row_at_another_agents_pane_and_the_doctor_takes_non
     assert [r.id for r in launch_seal.legacy_records(project.id)] == [agent.id]
 
 
+def test_the_census_takes_a_row_with_no_server_start_at_no_recorded_pane_but_two_ended_ones(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The census's pane rule (`fleet._census_refusal`), at its edges. A row that names no
+    server start is at whichever server's pane its id is: one INSERTed with none at an agent
+    whose record names its server is refused all the same. Two rows both ENDED under one
+    pane id are taken both: agents that exited on two servers, from before the start was
+    recorded, which 0.9.2 listed and restarted (R5 of 0.10.0)."""
+    tmux.started = datetime.now(tz=UTC)
+    agent = _coder(project)
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and record.window is not None
+    assert record.window.server_started_at is not None, "the premise: its server is named"
+    fake = _fake_row(project, agent, agent.pane_id, label="coder-9", server_started_at=None)
+    assert isinstance(fleet_service.resolve_place(fake), fleet_service.Unplaced)
+    spawned = [_coder(project, label=label) for label in ("coder-old", "coder-older")]
+    old, older = (_as_092(row) for row in spawned)  # both 0.9.2's, before any census
+    ended = {"pane_id": "%40", "server_started_at": None, "ended_at": datetime.now(tz=UTC)}
+    with store_session() as store:
+        rows = [store.upsert_fleet_agent(row.model_copy(update=ended)) for row in (old, older)]
+    for row in rows:  # one read each: the second meets the first in the census
+        placed = fleet_service.resolve_place(row)
+        assert isinstance(placed, fleet_service.Placed), placed
+        assert placed.record.legacy and placed.pane.pane_id == "%40"
+
+
 def test_a_legacy_agents_own_hook_leaves_it_placed(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

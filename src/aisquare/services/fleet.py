@@ -1228,10 +1228,11 @@ def _census_records(
             ]
             refused = _refused_by_the_records(rows)
         missing = [row for row in rows if row.id not in refused and row.project_id in projects]
-        running = {
-            project_id: store.fleet_agents(project_id, live_only=True)
-            for project_id in {row.project_id for row in missing}
-        }
+        running = (
+            {project_id: store.fleet_agents(project_id, live_only=True) for project_id in projects}
+            if missing
+            else {}
+        )
     refused |= _census_refusal(missing, projects, running)
     made = {
         row.id: _legacy_record(row, projects[row.project_id])
@@ -1243,8 +1244,8 @@ def _census_records(
 
 def _refused_by_the_records(rows: Sequence[FleetAgent]) -> dict[str, str]:
     """Why the census takes none of the ``rows`` the launch records alone refuse, by row id
-    (:func:`_census_refusal`'s first two rules): asked before the store is opened, so a row
-    whose record is lost costs a listing nothing more."""
+    (:func:`_census_refusal`'s first rule): asked before the store is opened, so a row whose
+    record is lost costs a listing nothing more."""
     refused: dict[str, str] = {}
     indexed: dict[str, set[str]] = {}
     for row in rows:
@@ -1252,14 +1253,8 @@ def _refused_by_the_records(rows: Sequence[FleetAgent]) -> dict[str, str]:
             indexed[row.project_id] = {
                 entry.row_id for entry in launch_seal.project_windows(row.project_id)
             }
-        adapter = recorded_adapter(row.agent)
         if launch_seal.window_recorded(row.id) or row.id in indexed[row.project_id]:
             refused[row.id] = launch_seal.UNRECORDED
-        elif adapter is None or adapter.capabilities.sandboxes_tools:
-            refused[row.id] = (
-                f"{launch_seal.UNRECORDED}: the census takes no row of an agent that sandboxes "
-                "its tools, or of one this aisquare does not know"
-            )
     return refused
 
 
@@ -1268,7 +1263,8 @@ def _census_refusal(
     projects: Mapping[str, ProjectInfo],
     running: Mapping[str, Sequence[FleetAgent]],
 ) -> dict[str, str]:
-    """Why the census takes none of the ``rows`` it refuses, by row id. A row spawned by an
+    """Why the census takes none of the ``rows`` it refuses, by row id, ``running`` being
+    every project's live rows. A row spawned by an
     aisquare that keeps no records is taken as it stands: that aisquare made it, its hooks
     keep its session, and its restart replayed it from the row alone. What the census takes
     no row for, each a row no such aisquare made, whose record would be another's word:
@@ -1276,41 +1272,58 @@ def _census_refusal(
     - a row anything in the launch records names (its window, as its spawn recorded it,
       or its project's index of windows): a row whose record is lost since, which no census
       makes a record of (``launch_seal.read`` says so);
-    - a row of an agent that sandboxes its tools (``AgentCapabilities.sandboxes_tools``), or
-      of one this aisquare does not know: no aisquare that keeps no records ran one;
-    - a row at a pane another row's record, or the census, holds on the same server (by
-      its socket, the pane's id and the server's start, which 0.9.2 recorded too): one pane
-      is one agent's, and a row INSERTed at another's had ``fleet stop`` kill it (review r7
-      of #113, finding 1);
+    - a row at a pane another row's record (its window), its project's index or the
+      census holds on the same server (by
+      its socket and the pane's id, and the server's start where the row names one, as
+      0.9.2 did: a row that names none is at whichever server's pane that is): one pane is
+      one agent's, and a row INSERTed at another's had ``fleet stop`` kill it (review r7 of
+      #113, finding 1). Not between two rows both ended in the store: two agents that
+      exited under the same id on two servers (rows from before the start was recorded)
+      endanger no pane, and what acts on a dead window decides whose it is
+      (:func:`_lingering_windows`);
     - a running row under a label a running agent's record holds: ``fleet stop <label>``
       ended the decoy (r9, finding 7).
 
-    The first two are :func:`_refused_by_the_records`'; ``rows`` passed them."""
+    Whatever its agent, as the census taken once took every row. The first rule is
+    :func:`_refused_by_the_records`'; ``rows`` passed it."""
     refused: dict[str, str] = {}
-    # By the server's start too: every server numbers its panes from %0. A start neither
-    # side knows (tmux did not say) is taken for the same server, so such a pane is refused.
-    held_panes: dict[tuple[str, str, datetime | None], str] = {}
+    # Every server numbers its panes from %0: the holders of each (socket, pane), by the
+    # digest of the holder's row id (`launch_seal.digest`), with the start of its server.
+    held_panes: dict[tuple[str, str], list[tuple[datetime | None, str]]] = {}
+
+    def hold(socket: str, pane: str, started: datetime | None, holder: str) -> None:
+        held_panes.setdefault((socket, pane), []).append((started, holder))
+
+    for holder, window in launch_seal.recorded_windows():
+        hold(window.tmux_socket, window.pane_id, window.server_started_at, holder)
     for project_id in projects:
         for entry in launch_seal.project_windows(project_id):
-            held_panes.setdefault(
-                (entry.tmux_socket, entry.pane_id, entry.server_started_at), entry.row_id
-            )
+            started = entry.server_started_at
+            hold(entry.tmux_socket, entry.pane_id, started, launch_seal.digest(entry.row_id))
     for legacy in launch_seal.census_records():
-        place = legacy.window
-        if place is not None:
-            held_panes.setdefault(
-                (place.tmux_socket, place.pane_id, place.server_started_at), legacy.id
-            )
+        if (place := legacy.window) is not None:
+            started = place.server_started_at
+            hold(place.tmux_socket, place.pane_id, started, launch_seal.digest(legacy.id))
+    live = {launch_seal.digest(row.id) for rows_live in running.values() for row in rows_live}
     held_labels: dict[str, dict[str, str]] = {}
-    for project_id, live in running.items():
-        for other in live:
+    for project_id in {row.project_id for row in rows}:
+        for other in running.get(project_id, ()):
             record = launch_seal.read(other.id)
             if isinstance(record, launch_seal.LaunchRecord) and record.label:
                 held_labels.setdefault(project_id, {}).setdefault(record.label, other.id)
+
+    def holds_its_pane(row: FleetAgent) -> bool:
+        mine = launch_seal.digest(row.id)
+        return any(
+            holder != mine
+            and (row.server_started_at is None or started == row.server_started_at)
+            and (row.ended_at is None or holder in live)
+            for started, holder in held_panes.get((row.tmux_socket, row.pane_id), ())
+        )
+
     for row in rows:
-        pane = held_panes.get((row.tmux_socket, row.pane_id, row.server_started_at))
         label = held_labels.get(row.project_id, {}).get(row.label)
-        if pane is not None and pane != row.id:
+        if holds_its_pane(row):
             refused[row.id] = (
                 f"{launch_seal.UNRECORDED}: the census takes no row at a pane another "
                 "agent's launch record holds"

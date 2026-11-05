@@ -91,8 +91,7 @@ open. So a fleet row's launch is ONE record (:class:`LaunchRecord`), written in
   like any other, but that its session is the one its board row names, as that aisquare
   resumed it. A census taken once was the only way in, and every row spawned after it, a
   still-open 0.9.2 asq's or a rollback's, read lost (R3 of 0.10.0, F2 and F3). It takes
-  no row that anything here names (a row whose record is lost since), none of an agent
-  that sandboxes its tools (no aisquare that keeps no records ran one), none at a pane
+  no row that anything here names (a row whose record is lost since), none at a pane
   another row's record holds, and none under a label a running agent's record holds. Such
   a row is told nothing, and only a dead window of its is removed (r8, findings 1, 3 and
   9).
@@ -304,12 +303,16 @@ def seals_dir() -> Path:
     return paths.aisquare_home() / DIR_NAME
 
 
+def digest(agent_id: str) -> str:
+    """The digest of the row ``agent_id`` its record and window files are named by."""
+    return hashlib.sha256(agent_id.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def _path(agent_id: str) -> Path:
     """The record of the row ``agent_id``, named by the id's digest: the id is the
     store's, and joined into the path it could name a file the sandbox wrote (``..``, a
     separator, an absolute path)."""
-    name = hashlib.sha256(agent_id.encode("utf-8", "surrogatepass")).hexdigest()
-    return seals_dir() / f"{name}.json"
+    return seals_dir() / f"{digest(agent_id)}.json"
 
 
 def _window_path(agent_id: str) -> Path:
@@ -395,6 +398,29 @@ def _window(agent_id: str) -> WindowPlace | None:
         return WindowPlace.model_validate_json(_window_path(agent_id).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValidationError):
         return None
+
+
+_WINDOW_FILE = re.compile(r"([0-9a-f]{64})\.window\.json")
+
+
+def recorded_windows() -> list[tuple[str, WindowPlace]]:
+    """Every window a spawn recorded here (:func:`placed`), each with the digest of its row's
+    id (:func:`digest`); one that cannot be read is left out. Never raises."""
+    found: list[tuple[str, WindowPlace]] = []
+    try:
+        entries = list(seals_dir().iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        named = _WINDOW_FILE.fullmatch(entry.name)
+        if named is None:
+            continue
+        try:
+            place = WindowPlace.model_validate_json(entry.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValidationError):
+            continue
+        found.append((named.group(1), place))
+    return found
 
 
 def recorded(agent_id: str) -> bool:

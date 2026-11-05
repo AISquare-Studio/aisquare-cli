@@ -289,7 +289,9 @@ def test_send_keys_types_nothing_where_only_the_store_says_the_agent_is(
     Remote types (``fleet.placed_row``, review r5 of #113, finding 1): a row pointed at
     another pane of the user's, or one no launch record places, is 409 ``not_agent`` and
     nothing is typed, its own pane included. The control first: the row as its spawn wrote it
-    takes the key."""
+    takes the key. The row with no record names the agent's own pane under another label:
+    the census takes no row at a pane a record holds (``fleet._census_refusal``), while one
+    at a pane no record holds is taken as a 0.9.2 agent's is (R3 of 0.10.0, F2 and F3)."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
     send = live_writes().handlers["send-keys"]
     assert send({"agent": "coder-1", "keys": ["1"]})[0]["sent"] is True
@@ -300,17 +302,12 @@ def test_send_keys_types_nothing_where_only_the_store_says_the_agent_is(
             assert row is not None
             store.upsert_fleet_agent(row.model_copy(update={"pane_id": "%7"}))
     else:
-        unrecorded = FleetAgent(
-            id="agt_coder-2",
-            project_id=project.id,
-            label="coder-2",
-            role="coder",
-            pane_id="%7",
-            cwd=project.root,
-            created_at=BORN,
-        )
         with store_session() as store:  # in the store alone, as a sandbox could write it
-            store.upsert_fleet_agent(unrecorded)
+            agent = store.get_fleet_agent("agt_coder-1")
+            assert agent is not None
+            store.upsert_fleet_agent(
+                agent.model_copy(update={"id": "agt_coder-2", "label": "coder-2"})
+            )
     label = "coder-1" if tampered == "its pane rewritten" else "coder-2"
     with pytest.raises(RequestError) as refused:
         send({"agent": label, "text": "yes", "enter": True})

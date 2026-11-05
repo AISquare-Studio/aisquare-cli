@@ -212,6 +212,20 @@ def _recorded(agent: FleetAgent) -> FleetAgent:
     return agent
 
 
+def _hooked(agent: FleetAgent, project: ProjectInfo, transcript: str | None) -> None:
+    """``agent``'s record as a spawn in ``project`` wrote it, with the session its own hook
+    added (``launch_seal.observe``): what its restart resumes, and so what the doctor's
+    fleet-resume row offers by (``fleet.restart_resumes``, R3 of 0.10.0, F4)."""
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord), record
+    facts = launch_seal.SessionFacts(
+        id=agent.session_id or "", agent=record.agent, transcript=transcript
+    )
+    root = str(project.root)
+    update = {"project_root": root, "cwd": root, "session": facts}
+    assert launch_seal.write(record.model_copy(update=update)) is None
+
+
 def _seed(root: Path, *agents: FleetAgent) -> ProjectInfo:
     """A registered project at ``root`` with these ``fleet_agent`` rows — real store, temp home
     — each with the launch record its spawn wrote (:func:`_recorded`)."""
@@ -1483,6 +1497,8 @@ def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_
                 transcript_path=path,
             )
             store.upsert_session(session)
+    for agent in (resumable, no_transcript, still_live):
+        _hooked(agent, project, transcripts[agent.session_id or ""])
 
     [check] = diagnostics._check_resumable_agents()
 
@@ -1516,13 +1532,15 @@ def test_the_resume_line_reads_only_the_newest_row_under_each_label(
             update={"session_id": session_id, "created_at": now - timedelta(minutes=age)}
         )
 
-    _seed(
-        tmp_path / "repo",
+    rows = (
         row("coder-1", "%1", "ses_back", ended=True, age=10),
         row("coder-1", "%2", "ses_back", ended=False, age=5),  # restarted, resumed, live
         row("coder-2", "%3", "ses_twice", ended=True, age=10),
         row("coder-2", "%4", "ses_twice", ended=True, age=5),  # restarted, exited again
     )
+    _seed(tmp_path / "repo", *rows)
+    for each in rows:
+        _hooked(each, project, str(on_disk))
     with store_session() as store:
         for sid in ("ses_back", "ses_twice"):
             store.upsert_session(

@@ -1188,7 +1188,15 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             for _ in range(3):
                 time.sleep(1.2)
                 assert state(coder) == "attention"
-            assert fleet._activity_times(srv).get(pane) != first, "the view redraws"
+
+            def redrawn() -> bool:
+                """The view redraws, and reads attention while it does. Its output time is
+                the second tmux saw it, and on a loaded runner a redraw took past the 3.6 s
+                above (macOS CI 42113584607): waited for, bounded."""
+                assert state(coder) == "attention"
+                return fleet._activity_times(srv).get(pane) != first
+
+            until(redrawn, 20, "the view redraws", pane)
             assert reviews() == reviewed and not answered(seen)
             srv.send_keys(pane, "y")
             # Working the moment the human allows, not when the command's PostToolUse

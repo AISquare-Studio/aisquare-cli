@@ -4348,10 +4348,10 @@ def test_a_bindings_literal_separator_never_takes_a_replays_resume(
     _with_transcript(agent, transcript)
     if how == "restart":
         tmux.die(agent.pane_id, 1)
-        receipt = fleet_service.restart(project, agent.label)
+        resumed = fleet_service.restart(project, agent.label).resumed
     else:
-        receipt = fleet_service.switch(project, agent.label, to="3")
-    assert receipt.resumed is True
+        resumed = fleet_service.switch(project, agent.label, to="3").resumed
+    assert resumed is True
     command = _command(tmux)
     ran: dict[str, list[str]] = {}
     monkeypatch.setattr(

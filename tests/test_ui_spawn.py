@@ -2310,7 +2310,7 @@ def test_the_agent_select_offers_that_agents_accounts_and_the_spawn_names_both(
         return seen
 
     seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
-    assert seen[0] == ["(role's: Claude Code)", "Claude Code", "Codex"]
+    assert seen[0] == ["(role's: Claude Code)", "Claude Code", "Codex (beta)"]
     assert seen[1:3] == [["", "2"], "claude"]  # the role's agent: Claude Code's slot alone
     assert seen[3:] == [["", "5"], "codex"]  # Codex picked: its slot, its binary
     [(_, role, kwargs)] = spawns.calls
@@ -2417,7 +2417,7 @@ def test_the_roles_own_agent_is_named_and_followed_and_sent_as_none(
         return seen
 
     seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
-    assert seen == ["", "(role's: Codex)", ["", "5"], True]
+    assert seen == ["", "(role's: Codex (beta))", ["", "5"], True]
     assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)]  # the role decides
 
 
@@ -2445,7 +2445,7 @@ def test_typing_a_binary_never_asks_its_agent_on_the_ui_thread(
         await settle(pilot)
         return str(select(dialog, "agent")._options[0][0])
 
-    assert drive(git_project, scenario) == "(role's: Codex)"
+    assert drive(git_project, scenario) == "(role's: Codex (beta))"
     assert asked and not any(on_ui for _, on_ui in asked), asked
     assert len(asked) < len(typed), "once per pause, not per key"
     assert asked[-1][0] == typed
@@ -2543,7 +2543,7 @@ def test_opening_the_dialog_reads_no_usage_on_the_ui_thread_and_says_it_is_picki
     assert held[3] is False, "no permission controls for an agent not yet known"
     assert held[4] == [""], "no account of an agent not yet known"
     assert threads and ui_thread not in threads, "usage was read on the UI thread"
-    assert filled == ["(role's: Codex)", False, True, ["", "5"]]
+    assert filled == ["(role's: Codex (beta))", False, True, ["", "5"]]
 
 
 def test_a_picked_agent_needs_no_wait_for_the_roles_own(
@@ -2626,7 +2626,7 @@ def test_a_role_and_binary_already_being_asked_are_not_asked_a_second_time(
         release.set()
 
     assert asked_once == [key], "one ask for the key, however often it was asked for"
-    assert shown_agent == "(role's: Codex)"
+    assert shown_agent == "(role's: Codex (beta))"
 
 
 def test_a_preset_account_brings_its_agent_when_the_accounts_land_after_the_roles_agent(
@@ -3898,7 +3898,7 @@ def test_an_effort_the_owner_picks_while_the_roles_agent_is_asked_beats_one_owed
     finally:
         gate.set()
 
-    assert seen == ["(role's: picking…)", "(role's: Codex)", "low"]
+    assert seen == ["(role's: picking…)", "(role's: Codex (beta))", "low"]
     assert spawns.calls == [(git_project.id, "coder", {**UNTOUCHED, "effort": "low"})]
 
 

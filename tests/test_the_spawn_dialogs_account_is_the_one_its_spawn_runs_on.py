@@ -148,7 +148,7 @@ def test_the_label_of_the_dialogs_default_path_is_the_account_the_spawn_runs_on(
     assert agent_field == f"(role's: {_LABELS[ran.agent]})", "the Agent field names what ran"
 
 
-_LABELS = {"claude-code": "Claude Code", "codex": "Codex"}
+_LABELS = {"claude-code": "Claude Code", "codex": "Codex (beta)"}  # with its release stage's mark
 
 
 def _agent_field(dialog: SpawnDialog) -> str:
@@ -236,7 +236,7 @@ def test_the_dialogs_agent_field_says_the_agent_its_spawn_runs_crossing_or_kept_
     agent_field, label, sent = crossing
     receipt = fleet_service.spawn(project, "coder", **sent)
     assert (receipt.agent.agent, receipt.agent.account_slot) == ("codex", home["codex-a"].slot)
-    assert (agent_field, label) == ("(role's: Codex)", "(default: headroom · codex-a)")
+    assert (agent_field, label) == ("(role's: Codex (beta))", "(default: headroom · codex-a)")
 
     agent_field, label, sent = kept
     receipt = fleet_service.spawn(project, "coder", **sent)

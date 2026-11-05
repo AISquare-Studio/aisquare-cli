@@ -35,6 +35,7 @@ from textual.widgets import Button, Static
 
 from aisquare.cli.ui.sidebar import AccountsSelected
 from aisquare.core import selfcli
+from aisquare.core.agent_adapters import stage_mark_of
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import install_route, onboarding
 from aisquare.services.onboarding import FixCommand, FixResult, Runner
@@ -76,7 +77,8 @@ def render_checks(checks: list[DoctorCheck]) -> Text:
     """The `aisquare doctor` output as rich text (fixes indented under their check)."""
     text = Text()
     for check in checks:
-        text.append(f"{_SYMBOL[check.status]} {check.name}: ", style=_STYLE[check.status])
+        name = check.name + stage_mark_of(check.name)  # a beta agent's row, as the CLI's
+        text.append(f"{_SYMBOL[check.status]} {name}: ", style=_STYLE[check.status])
         text.append(f"{check.detail}\n")
         if check.fix and check.status is not CheckStatus.ok:
             text.append(f"    → {check.fix}\n", style="dim")

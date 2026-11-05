@@ -350,7 +350,7 @@ def test_a_codex_slot_renders_in_the_one_table_with_offline_usage_bars(
         }
 
     seen = drive(go, overview=overview)
-    assert seen["section"] and seen["title"].startswith("Codex 0.162.1") and seen["header"]
+    assert seen["section"] and seen["title"].startswith("Codex (beta) 0.162.1") and seen["header"]
     assert seen["in_table"], "every agent's rows are in the one table"
     assert f"{slot}  account {slot}" in seen["line"]
     assert seen["cells"]["agent"] == "Co"  # the first word of the name's column

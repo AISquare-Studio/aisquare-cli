@@ -631,9 +631,14 @@ def emit_agents(agents: list[AgentInfo]) -> None:
             context,
         )
     stdout_console().print(table)
+    from aisquare.core.agent_adapters import stage_mark_of
+
     for agent in agents:
         if agent.detected and agent.detail:
-            stdout_console().print(f"{agent.name}: {agent.detail}", markup=False)
+            # A beta agent's mark here, not in the table: a wider AGENT cell would pad every
+            # row, Claude Code's on a machine without Codex included.
+            named = agent.name + stage_mark_of(agent.name)
+            stdout_console().print(f"{named}: {agent.detail}", markup=False)
 
 
 def _hook_sites(agent: AgentInfo) -> str:
@@ -681,16 +686,17 @@ def emit_connected(connection: AgentConnection) -> None:
     if get_state().json_output:
         typer.echo(connection.model_dump_json())
         return
+    from aisquare.core.agent_adapters import stage_mark_of
+
     # Always installed: `connect` refuses rather than return a connection without hooks.
     noun = "entry" if connection.imported == 1 else "entries"
     imported = f"imported {connection.imported} {noun}"
+    named = connection.name + stage_mark_of(connection.name)  # a beta agent's, with its mark
     if connection.hooks_off is not None:
         from aisquare.core import agents as agent_core
 
         spec = agent_core.spec(connection.name)
-        stdout_console().print(
-            f"hooks installed for {connection.name}, but switched off — {imported}"
-        )
+        stdout_console().print(f"hooks installed for {named}, but switched off — {imported}")
         stderr_console().print(
             f"note: {connection.hooks_off} sets "
             f"{agent_core.HOOKS_OFF_SETTINGS.get(connection.name, 'every hook off')}, so "
@@ -699,7 +705,7 @@ def emit_connected(connection: AgentConnection) -> None:
             markup=False,
         )
     else:
-        stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
+        stdout_console().print(f"✓ connected {named} — hooks installed; {imported}")
     if connection.detail:
         stdout_console().print(connection.detail, markup=False)
 
@@ -1035,9 +1041,14 @@ def emit_doctor(checks: list[DoctorCheck]) -> None:
     if get_state().json_output:
         typer.echo(json.dumps([check.model_dump(mode="json") for check in checks]))
         return
+    from aisquare.core.agent_adapters import stage_mark_of
+
     console = stdout_console()
     for check in checks:
-        console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {check.detail}")
+        # An agent's row is named by its id; a beta agent's carries its mark, here and on
+        # asq's Doctor page, never in the JSON (install.sh reads a row's name and detail).
+        name = check.name + stage_mark_of(check.name)
+        console.print(f"{_CHECK_SYMBOL[check.status]} {name}: {check.detail}")
         if check.fix and check.status is not CheckStatus.ok:
             console.print(f"    → {check.fix}")
 

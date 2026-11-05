@@ -128,6 +128,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     WriteScope,
     fleet_extra_args,
+    staged_label,
     store_dir,
 )
 from aisquare.core.config import (
@@ -421,8 +422,9 @@ def _options(current: str, options: list[tuple[str, str]]) -> list[tuple[Text, s
 
 
 def _agent_choices() -> list[tuple[str, str]]:
-    """The agent selects' choices: "Use default" (the next rung decides), then each agent."""
-    return [("Use default", ""), *((a.label, a.id) for a in adapters())]
+    """The agent selects' choices: "Use default" (the next rung decides), then each agent, a
+    beta one's name with its mark (``types.stage_mark``)."""
+    return [("Use default", ""), *((staged_label(a), a.id) for a in adapters())]
 
 
 def agent_options(current: str) -> list[tuple[Text, str]]:

@@ -3646,7 +3646,7 @@ def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
     assert out["right"] <= out["screen"]
     table_width, shown_width = out["width"]
     assert out["scrolls"] == 0 and table_width <= shown_width and out["whole"]
-    assert out["marks"] == {1: "Cl", 4: "Co"} and out["tip"] == "Codex"
+    assert out["marks"] == {1: "Cl", 4: "Co"} and out["tip"] == "Codex (beta)"
     assert out["marked"] == [True] * 4  # rows mounted into a table of both agents carry the mark
 
 

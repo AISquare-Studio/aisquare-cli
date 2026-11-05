@@ -70,7 +70,8 @@ from aisquare.cli.ui.attach import ReturnTo
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
-from aisquare.core.agent_adapters import adapters, get_adapter
+from aisquare.core.agent_adapters import adapters, get_adapter, stage_mark_of
+from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import first_run, onboarding
@@ -258,7 +259,7 @@ def _install_text(text: Text, claude: ClaudeState, platform: str) -> None:
         return
     if none_installed(claude):
         every = list(adapters())
-        names = " or ".join(adapter.label for adapter in every)
+        names = " or ".join(staged_label(adapter) for adapter in every)
         if platform == "win32":
             text.append(
                 f"No coding agent is installed. The fleet runs inside WSL2; install {names}"
@@ -267,7 +268,7 @@ def _install_text(text: Text, claude: ClaudeState, platform: str) -> None:
         else:
             text.append(f"No coding agent is installed. Install {names} in a terminal:")
         for adapter in every:
-            text.append(f"\n  {adapter.label}:")
+            text.append(f"\n  {staged_label(adapter)}:")
             _routes(text, adapter.id, platform, "    ")
         text.append(
             "\nThis page notices it within a few seconds; with more than one installed, it "
@@ -617,7 +618,7 @@ class WelcomeView(VerticalScroll):
             with Horizontal(id="agent-choice", classes="row"):
                 for adapter in adapters():
                     yield Button(
-                        f"Use {adapter.label}",
+                        f"Use {staged_label(adapter)}",
                         id=agent_button(adapter.id),
                         name=adapter.id,
                         classes="use-agent",
@@ -1338,7 +1339,11 @@ class WelcomeView(VerticalScroll):
     def _paint_claude(self, *, waiting: bool) -> bool:
         claude = self.claude
         done = claude is not None and claude.ready
-        name = "Coding agent" if claude is None or none_installed(claude) else claude.label
+        name = (
+            "Coding agent"
+            if claude is None or none_installed(claude)
+            else claude.label + stage_mark_of(claude.agent)  # a beta agent's, with its mark
+        )
         title = Text(f"2  {name[:1].upper()}{name[1:]}", style="bold")
         if done:
             title.append("  ✓", style="green")

@@ -1,0 +1,321 @@
+"""Codex ships as beta in 0.10.0 through one adapter slot, and Claude Code reads as it did.
+
+``AgentAdapter.release_stage`` (``types.ReleaseStage``) is ``beta`` for Codex and ``stable``
+for Claude Code. Wherever a person chooses or sees an agent, the shared code writes
+``types.stage_mark`` after its name: `` (beta)`` for a beta agent, nothing for a stable one.
+tests/test_third_agent_seams.py shows a synthetic third agent's mark reaching those surfaces
+through the slot. This file pins the owner's other half of the bar for the release ("nothing
+that works today in claude code breaks"): with the slot in, what Claude Code shows is byte for
+byte what the head before it showed, and Codex's differs by its mark alone. The ``HEAD_``
+goldens below were rendered at 11cd75ab, the PR's head before the slot, by these same calls.
+"""
+
+from __future__ import annotations
+
+import io
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from rich.console import Console
+from typer.main import get_command
+from typer.testing import CliRunner
+
+from aisquare.cli import accounts as accounts_cli
+from aisquare.cli import common
+from aisquare.cli.app import app
+from aisquare.cli.ui.spawn import SpawnDialog
+from aisquare.cli.ui.views import app_settings
+from aisquare.cli.ui.views.doctor import render_checks
+from aisquare.core import claude_accounts as core
+from aisquare.core.agent_adapters import adapters, get_adapter, stage_mark_of
+from aisquare.core.agent_adapters.types import ReleaseStage, stage_mark, staged_label
+from aisquare.models import (
+    AccountsOverview,
+    AgentConnection,
+    AgentInfo,
+    CheckStatus,
+    ClaudeAccount,
+    ClaudeAccountStatus,
+    ClaudeIdentity,
+    ClaudeInstall,
+    DoctorCheck,
+)
+
+MARK = " (beta)"
+
+HEAD_SPAWN = [
+    ("(role's: Claude Code)", ""),
+    ("Claude Code", "claude-code"),
+    ("Codex", "codex"),
+]
+HEAD_SETTINGS = [("Use default", ""), ("Claude Code", "claude-code"), ("Codex", "codex")]
+HEAD_DOCTOR = (
+    "✓ python: Python 3.12.0\n"
+    "✓ claude-code: Claude Code: configured in /h/.claude\n"
+    "✓ codex: Codex not detected on this machine\n"
+)
+HEAD_ACCOUNTS_CLAUDE_ONLY = (
+    "✓ Claude Code 2.1.266 · /opt/bin/claude\n"
+    "slot  label         signed in as   plan  hooks  directory                     \n"
+    "1     plain claude  1@example.com  max   ✓      /h/.aisquare/claude-accounts/1\n"
+    "add one: aisquare accounts add [--agent codex] · open one: aisquare accounts run <slot> · "
+    "the Accounts page in asq does both\n"
+)
+HEAD_ACCOUNTS_BOTH = (
+    "✓ Claude Code 2.1.266 · /opt/bin/claude\n"
+    "✓ Codex 0.164.0 · /opt/bin/codex\n"
+    "slot  agent        label         signed in as   plan  hooks  directory                     \n"
+    "1     Claude Code  plain claude  1@example.com  max   ✓      /h/.aisquare/claude-accounts/1\n"
+    "2     Codex        account 2     2@example.com  max   ✓      /h/.aisquare/claude-accounts/2\n"
+    "add one: aisquare accounts add [--agent codex] · open one: aisquare accounts run <slot> · "
+    "the Accounts page in asq does both\n"
+)
+HEAD_AGENTS_LIST = (
+    "┏━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┓\n"
+    "┃ AGENT       ┃ DETECTED ┃ CONNECTED ┃ INTEGRATION   ┃ HOOKS IN ┃ CONTEXT ┃\n"
+    "┡━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━┩\n"
+    "│ claude-code │ yes      │ yes       │ configured    │ —        │ —       │\n"
+    "│ codex       │ no       │ no        │ not connected │ —        │ —       │\n"
+    "└─────────────┴──────────┴───────────┴───────────────┴──────────┴─────────┘\n"
+)
+HEAD_CONNECT_CLAUDE = "✓ connected claude-code — hooks installed; imported 2 entries\n"
+HEAD_CONNECT_CODEX = "✓ connected codex — hooks installed; imported 0 entries\n"
+#: Every ``--agent`` option's help, by its command's path.
+HEAD_AGENT_HELPS = {
+    "init": "Agent to connect; repeat for several.",
+    "launch": "Coding agent family.",
+    "accounts default": "Whose account: claude-code (the default) or codex.",
+    "accounts add": "Whose account: claude-code (the default) or codex.",
+    "team spawn": "Coding agent family.",
+    "team bind": "Coding agent family.",
+    "fleet spawn": "Coding agent family.",
+    "fleet switch": "Coding agent to move it onto (claude-code, codex, …). No conversation "
+    "moves between agents: it starts fresh there with a hand-off brief of its work.",
+    "persona export": "The coding agent whose skills --skill writes into (default: the one this "
+    "directory launches).",
+    "captain since": "One agent's events and its pane tail.",
+    "hook event": "The adapter that installed this hook.",
+}
+#: ``aisquare accounts add --help`` at 100 columns, each line's trailing padding aside: every
+#: line but ``--agent``'s, whose help is the one that names the agents.
+HEAD_ACCOUNTS_ADD_HELP = """\
+
+ Usage: root accounts add [OPTIONS]
+
+ Add an account: a fresh slot, signed in through the agent's own login.
+
+ Claude Code's first session signs in; ``--agent codex`` runs ``codex login``
+ in the slot's own ``CODEX_HOME``. Either way the slot's hooks are connected after.
+
+╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
+│ --agent             AGENT  Whose account: claude-code (the default) or codex.                    │
+│ --verbose   -v             Enable verbose output.                                                │
+│ --quiet     -q             Suppress non-essential output.                                        │
+│ --json                     Emit machine-readable JSON on stdout. Put --json before the           │
+│                            subcommand to also get usage errors (unknown command/option) as JSON. │
+│ --profile           NAME   Configuration profile to use.                                         │
+│ --no-color                 Disable coloured output.                                              │
+│ --help      -h             Show this message and exit.                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+"""
+
+
+@pytest.fixture
+def printed(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., str]]:
+    """What a CLI emitter prints, through one 160-column console with no colour, as the
+    goldens were rendered."""
+
+    def run(emit: Callable[..., None], *args: Any, **kwargs: Any) -> str:
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=160, color_system=None, markup=False, highlight=False)
+        monkeypatch.setattr(common, "stdout_console", lambda: console)
+        monkeypatch.setattr(accounts_cli, "stdout_console", lambda: console)
+        emit(*args, **kwargs)
+        return buffer.getvalue()
+
+    yield run
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _status(slot: int, agent: str) -> ClaudeAccountStatus:
+    account = ClaudeAccount(
+        slot=slot,
+        config_dir=Path(f"/h/.aisquare/claude-accounts/{slot}"),
+        managed=True,
+        agent=agent,
+    )
+    return ClaudeAccountStatus(
+        account=account,
+        label=core.label(account),
+        identity=ClaudeIdentity(email=f"{slot}@example.com"),
+        signed_in=True,
+        subscription="max",
+        hooks_installed=True,
+    )
+
+
+CLAUDE = ClaudeInstall(installed=True, binary="/opt/bin/claude", version="2.1.266")
+CODEX = ClaudeInstall(installed=True, binary="/opt/bin/codex", version="0.164.0")
+
+
+def test_claude_code_is_stable_and_codex_beta_in_their_own_adapters() -> None:
+    """The one line each, so the release that takes Codex out of beta flips one word; a stable
+    agent's mark is nothing at all, and every registered agent declares a stage."""
+    assert get_adapter("claude-code").release_stage == "stable"
+    assert get_adapter("codex").release_stage == "beta"
+    stages: dict[ReleaseStage, str] = {"stable": "", "beta": MARK}
+    for adapter in adapters():
+        assert stage_mark(adapter) == stages[adapter.release_stage], adapter.id
+        assert staged_label(adapter) == adapter.label + stages[adapter.release_stage]
+        assert stage_mark_of(adapter.id) == stage_mark(adapter)
+    assert stage_mark_of("no-such-agent") == ""
+
+
+def test_the_spawn_and_settings_agent_pickers_read_as_the_head_but_for_codexs_mark() -> None:
+    picking = SimpleNamespace(_role_agent=lambda role, binary: "claude-code")
+    spawn = SpawnDialog._agent_options(picking, "coder", "")  # type: ignore[arg-type]
+    assert spawn[:2] == HEAD_SPAWN[:2]  # Claude Code's own rows, byte for byte
+    assert spawn == [*HEAD_SPAWN[:2], ("Codex (beta)", "codex")]
+    on_codex = SimpleNamespace(_role_agent=lambda role, binary: "codex")
+    assert SpawnDialog._agent_options(on_codex, "coder", "")[0][0] == "(role's: Codex (beta))"  # type: ignore[arg-type]
+    settings = app_settings._agent_choices()
+    assert settings == [*HEAD_SETTINGS[:2], ("Codex (beta)", "codex")]
+
+
+def test_doctors_rows_read_as_the_head_but_for_codexs_mark(
+    printed: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The row's name, in ``aisquare doctor`` and asq's Doctor page; ``--json`` keeps every
+    name and detail as they were (install.sh reads ``Codex: unverified in`` off the detail)."""
+    checks = [
+        DoctorCheck(name="python", status=CheckStatus.ok, detail="Python 3.12.0"),
+        DoctorCheck(
+            name="claude-code",
+            status=CheckStatus.ok,
+            detail="Claude Code: configured in /h/.claude",
+        ),
+        DoctorCheck(
+            name="codex", status=CheckStatus.ok, detail="Codex not detected on this machine"
+        ),
+    ]
+    marked = HEAD_DOCTOR.replace("✓ codex:", "✓ codex (beta):")
+    assert printed(common.emit_doctor, checks) == marked
+    assert render_checks(checks).plain == marked
+    head_lines, lines = HEAD_DOCTOR.splitlines(), marked.splitlines()
+    assert lines[:2] == head_lines[:2]  # python's row and Claude Code's, unchanged
+
+    monkeypatch.setattr(common, "get_state", lambda: SimpleNamespace(json_output=True))
+    capsys.readouterr()
+    common.emit_doctor(checks)
+    said = capsys.readouterr().out
+    assert MARK not in said and '"name": "codex"' in said
+
+
+def test_aisquare_accounts_reads_as_the_head_on_a_claude_only_machine(
+    printed: Callable[..., str],
+) -> None:
+    """A machine without Codex: the head's lines exactly. With Codex's accounts too, its
+    install line and its agent cell carry the mark, Claude Code's words none."""
+    alone = AccountsOverview(
+        claude=CLAUDE, accounts=[_status(1, "claude-code")], installs={"claude-code": CLAUDE}
+    )
+    assert (
+        printed(accounts_cli._emit_overview, alone, with_usage=False) == HEAD_ACCOUNTS_CLAUDE_ONLY
+    )
+
+    both = AccountsOverview(
+        claude=CLAUDE,
+        accounts=[_status(1, "claude-code"), _status(2, "codex")],
+        installs={"claude-code": CLAUDE, "codex": CODEX},
+    )
+    said = printed(accounts_cli._emit_overview, both, with_usage=False)
+    assert said.splitlines()[0] == HEAD_ACCOUNTS_BOTH.splitlines()[0]  # Claude Code's install
+    assert said.splitlines()[1] == "✓ Codex (beta) 0.164.0 · /opt/bin/codex"
+    # The table pads its agent column to the wider name; its words are the head's but the mark.
+    expected = (
+        _flat(HEAD_ACCOUNTS_BOTH)
+        .replace("✓ Codex 0.164.0", "✓ Codex (beta) 0.164.0")
+        .replace("2 Codex account 2", "2 Codex (beta) account 2")
+    )
+    assert _flat(said) == expected
+    assert said.count(MARK) == 2
+
+
+def test_aisquare_agents_reads_as_the_head_but_for_codexs_mark(
+    printed: Callable[..., str],
+) -> None:
+    """``agents connect``'s line marks Codex alone. ``agents list`` keeps its table as it was
+    (a wider cell would pad Claude Code's row too) and marks Codex's line under it."""
+    claude = AgentConnection(name="claude-code", hooks_installed=True, imported=2)
+    codex = AgentConnection(name="codex", hooks_installed=True, imported=0)
+    assert printed(common.emit_connected, claude) == HEAD_CONNECT_CLAUDE
+    assert printed(common.emit_connected, codex) == HEAD_CONNECT_CODEX.replace(
+        "codex —", "codex (beta) —"
+    )
+    infos = [
+        AgentInfo(name="claude-code", detected=True, connected=True, readiness="configured"),
+        AgentInfo(name="codex", detected=False),
+    ]
+    assert printed(common.emit_agents, infos) == HEAD_AGENTS_LIST
+    infos[1] = AgentInfo(name="codex", detected=True, detail="found at /opt/bin/codex")
+    assert printed(common.emit_agents, infos).endswith("\ncodex (beta): found at /opt/bin/codex\n")
+
+
+def _agent_helps() -> dict[str, str]:
+    helps: dict[str, str] = {}
+
+    def walk(command: Any, path: tuple[str, ...]) -> None:
+        for param in command.params:
+            if "--agent" in getattr(param, "opts", ()):
+                helps[" ".join(path)] = param.help or ""
+        if hasattr(command, "list_commands"):
+            context = type(command).context_class(command)
+            for name in command.list_commands(context):
+                sub = command.get_command(context, name)
+                if sub is not None:
+                    walk(sub, (*path, name))
+
+    walk(get_command(app), ())
+    return helps
+
+
+def test_every_agent_options_help_reads_as_the_head_but_for_codexs_mark() -> None:
+    """Every ``--agent`` option's help: those that name no agent unchanged, and the two that
+    list them (``accounts add``/``default``, ``fleet switch``) with Codex's mark alone."""
+    helps = _agent_helps()
+    assert helps.keys() == HEAD_AGENT_HELPS.keys()
+    for path, said in helps.items():
+        assert said.replace(MARK, "") == HEAD_AGENT_HELPS[path], path
+        assert said.count(MARK) == (1 if "codex" in HEAD_AGENT_HELPS[path] else 0), path
+        assert "claude-code (beta)" not in said, path
+    assert helps["accounts add"] == "Whose account: claude-code (the default) or codex (beta)."
+
+
+def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> None:
+    result = CliRunner().invoke(
+        app,
+        ["accounts", "add", "--help"],
+        env={"COLUMNS": "100", "TERMINAL_WIDTH": "100"},
+        terminal_width=100,
+    )
+    assert result.exit_code == 0, result.output
+    # Each line as the head drew it, the padding Rich ends a plain line with aside (a box's
+    # line ends in its border, so it is compared whole).
+    head = [line.rstrip() for line in HEAD_ACCOUNTS_ADD_HELP.rstrip("\n").splitlines()]
+    now = [line.rstrip() for line in result.output.rstrip("\n").splitlines()]
+    assert len(now) == len(head)
+    for was, line in zip(head, now, strict=True):
+        if "--agent  " in was:  # its help grew by the mark, and the box's padding shrank by it
+            assert _flat(line) == _flat(was).replace("or codex.", "or codex (beta).")
+        else:
+            assert line == was
+    root = CliRunner().invoke(app, ["--help"], env={"COLUMNS": "100"}, terminal_width=100)
+    assert root.exit_code == 0 and MARK not in root.output

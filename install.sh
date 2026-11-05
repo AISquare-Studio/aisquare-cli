@@ -3148,7 +3148,7 @@ have to be handed to sh explicitly):
 Options
   -y, --yes            Never prompt, and do not launch the UI at the end.
       --agent NAME     Coding agent to install and connect: claude-code (the
-                       default), codex, or both. Repeat it to name both.
+                       default), codex (beta), or both. Repeat it to name both.
       --no-agent       Skip coding agent installation and hooks.
       --no-system-deps Skip tmux, gh and git, and ask about no optional extra.
                        An extra named with --with still installs, with the

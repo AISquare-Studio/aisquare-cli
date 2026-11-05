@@ -41,6 +41,7 @@ from aisquare.core.agent_adapters.types import (
     PluginInstall,
     PriceTable,
     PromptRecord,
+    ReleaseStage,
     SandboxWrites,
     ScreenPrompt,
     SkillDirs,
@@ -679,6 +680,9 @@ def _hooks_file_spellings(settings_path: Path) -> list[str]:
 class CodexAdapter:
     id = "codex"
     label = "Codex"
+    #: Beta in 0.10.0, its first release: "stable" once a release has passed with no
+    #: complaint (the owner, 2026-11-05). The one line that takes the marks away.
+    release_stage: ReleaseStage = "beta"
     binary = "codex"
     home_env = "CODEX_HOME"
     home_name = ".codex"

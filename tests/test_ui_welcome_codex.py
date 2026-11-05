@@ -117,7 +117,7 @@ def test_with_neither_installed_both_install_commands_are_named() -> None:
     assert "No coding agent is installed" in text
     assert accounts_core.INSTALL_COMMAND in text and codex_adapter.INSTALL_COMMAND in text
     assert text.index("Claude Code:") < text.index(accounts_core.INSTALL_COMMAND)
-    assert text.index("Codex:") < text.index(codex_adapter.INSTALL_COMMAND)
+    assert text.index("Codex (beta):") < text.index(codex_adapter.INSTALL_COMMAND)
     # Control: Claude Code chosen by name (not choosable) names its own install only.
     _title, claude_only = hosted(Machine(claude=[MISSING]), _look)
     assert codex_adapter.INSTALL_COMMAND not in claude_only

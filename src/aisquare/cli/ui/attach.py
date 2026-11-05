@@ -69,6 +69,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.confirm_button import Arming
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import DEFAULT_AGENT, adapter_for_binary, adapters, get_adapter
+from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.config import RoleLaunchProfile, load_config
 from aisquare.core.names import name_key
 from aisquare.models import AccountsOverview, ClaudeAccountStatus, FleetAgentStatus, ProjectInfo
@@ -612,7 +613,10 @@ class NewBindScreen(ModalScreen[str | None]):
             with Horizontal(classes="picker-row"):
                 yield Label("Agent")
                 yield Select(
-                    [("(the binary's)", BINARYS_AGENT), *((a.label, a.id) for a in adapters())],
+                    [
+                        ("(the binary's)", BINARYS_AGENT),
+                        *((staged_label(a), a.id) for a in adapters()),
+                    ],
                     value=bound.agent
                     if bound.agent and any(bound.agent == a.id for a in adapters())
                     else BINARYS_AGENT,

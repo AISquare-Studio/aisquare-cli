@@ -864,7 +864,7 @@ def test_accounts_list_and_usage_show_both_agents_with_codex_read_offline(
 
     listed = runner.invoke(app, ["accounts", "list"])
     assert listed.exit_code == 0, listed.output
-    assert "Codex · /opt/bin/codex" in listed.stdout
+    assert "Codex (beta) · /opt/bin/codex" in listed.stdout  # its release stage's mark
     row = next(line for line in listed.stdout.splitlines() if "me@example.com" in line)
     assert "Codex" in row and "plus" in row
 

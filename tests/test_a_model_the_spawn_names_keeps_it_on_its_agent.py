@@ -238,7 +238,7 @@ def test_the_dialogs_codex_model_keeps_its_agent_field_and_its_spawn_on_codex(
 
     assert sent["model"] == "gpt-5.4"
     assert (receipt.agent.agent, receipt.agent.account_slot) == ("codex", home["codex-a"].slot)
-    assert (field, label) == ("(role's: Codex)", "(default: headroom · codex-a)")
+    assert (field, label) == ("(role's: Codex (beta))", "(default: headroom · codex-a)")
 
 
 def test_a_refusal_for_an_agent_a_model_chose_names_the_model_and_its_agent(

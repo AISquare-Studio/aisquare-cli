@@ -35,7 +35,7 @@ from aisquare.cli.ui.views.welcome import claude_text
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import register, unregister
-from aisquare.core.agent_adapters.types import AgentAdapter
+from aisquare.core.agent_adapters.types import AgentAdapter, stage_mark, staged_label
 from aisquare.core.selfcli import CliResult
 from aisquare.models import ClaudeAccount, ClaudeUsage
 from aisquare.services import agents as agents_service
@@ -119,6 +119,8 @@ def test_connect_writes_the_agents_own_handlers_and_disconnect_takes_them_out(
     connected = runner.invoke(app, ["agents", "connect", third.id, "--config-dir", str(home)])
 
     assert connected.exit_code == 0, connected.output
+    # Its id with its release stage's mark: the Gemini-shaped one's beta, the fake's nothing.
+    assert f"✓ connected {third.id}{stage_mark(third)} — hooks installed" in connected.output
     handlers = _handlers(third, home)
     assert len(handlers) == len(third.capabilities.hooks)
     by_command = {spec.event: spec for spec in third.capabilities.hooks}
@@ -282,7 +284,43 @@ def test_welcome_offers_its_own_installers_on_each_platform(third: AgentAdapter)
     # Step 2 with nothing installed names every registered agent's routes, this one's too.
     state = first_run.probe_fleet(which=on_path(), sign_in=False)
     shown = claude_text(state, platform="linux").plain
-    assert f"{third.label}:" in shown and third.install_routes[0].command in shown
+    assert f"{staged_label(third)}:" in shown and third.install_routes[0].command in shown
+
+
+def test_its_release_stage_marks_its_name_wherever_an_agent_is_chosen_or_seen(
+    third: AgentAdapter,
+) -> None:
+    """0.10.0's R4: a third agent's ``release_stage`` reaches every surface where an agent is
+    chosen or seen through ``types.stage_mark``, never through its name. The Gemini-shaped one
+    ships ``beta``, as a new agent does, and reads `` (beta)`` after its name in each; the
+    fake is ``stable`` and reads nothing new, as Claude Code (tests/test_release_stage.py)."""
+    from types import SimpleNamespace
+
+    from aisquare.cli import accounts as accounts_cli
+    from aisquare.cli import fleet as fleet_cli
+    from aisquare.cli.ui.spawn import SpawnDialog
+    from aisquare.cli.ui.views import app_settings
+    from aisquare.cli.ui.views.accounts import agent_title_text
+    from aisquare.cli.ui.views.doctor import render_checks
+    from aisquare.models import AccountsOverview, CheckStatus, ClaudeInstall, DoctorCheck
+
+    mark = {"beta": " (beta)", "stable": ""}[third.release_stage]
+    assert stage_mark(third) == mark and staged_label(third) == f"{third.label}{mark}"
+    shown = staged_label(third)
+    # Spawn's agent picker, and the role's own agent at its top; Settings' agent selects.
+    picking = SimpleNamespace(_role_agent=lambda role, binary: third.id)
+    options = SpawnDialog._agent_options(picking, "coder", "")  # type: ignore[arg-type]
+    assert options[0][0] == f"(role's: {shown})" and (shown, third.id) in options
+    assert (shown, third.id) in app_settings._agent_choices()
+    # Doctor's row of it, by its id; the JSON keeps the id bare (install.sh reads it).
+    row = DoctorCheck(name=third.id, status=CheckStatus.ok, detail="not detected")
+    assert render_checks([row]).plain == f"✓ {third.id}{mark}: not detected\n"
+    # The Accounts page's section of it, and the `--agent` helps that list the agents.
+    found = ClaudeInstall(installed=True, binary=f"/opt/bin/{third.binary}", version="1.0")
+    overview = AccountsOverview(claude=ClaudeInstall(installed=True), installs={third.id: found})
+    assert agent_title_text(third.id, overview).plain.startswith(f"{shown} 1.0 · /opt/bin/")
+    assert f", {third.id}{mark}" in fleet_cli.agents_named()
+    assert accounts_cli.whose_account_help().endswith(f" or {third.id}{mark}.")
 
 
 def test_first_run_finds_connects_and_reads_it_as_the_one_agent_here(

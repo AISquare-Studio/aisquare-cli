@@ -62,6 +62,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     PriceTable,
     PromptRecord,
+    ReleaseStage,
     SandboxWrites,
     ScreenPrompt,
     SharedMemory,
@@ -621,6 +622,8 @@ class FakeAccounts:
 class FakeAgentAdapter:
     id = "fake-agent"
     label = "Fake Agent"
+    #: Stable: a third agent that leaves beta reads as Claude Code does, with no mark.
+    release_stage: ReleaseStage = "stable"
     binary = "fakeagent"
     home_env = "FAKE_AGENT_HOME"
     home_name = ".fakeagent"

@@ -140,6 +140,27 @@ class InstallRoute:
     platforms: frozenset[str] = frozenset()
 
 
+ReleaseStage = Literal["stable", "beta"]
+"""How far aisquare's support for an agent has come (:attr:`AgentAdapter.release_stage`):
+``stable``, or ``beta`` while a release asks its users to report what breaks. Leaving beta
+is that one line of the agent's adapter."""
+
+
+def stage_mark(adapter: AgentAdapter) -> str:
+    """What every shared surface writes after an agent's name where a person chooses or sees
+    that agent (Spawn's agent picker, the Accounts page and ``aisquare accounts``, doctor's
+    agent rows, Welcome, ``aisquare agents``, an ``--agent`` option's help): ``" (beta)"``
+    for a ``beta`` agent, and ``""`` for a ``stable`` one, whose name reads exactly as it
+    did before the slot (``tests/test_release_stage.py`` holds Claude Code's to that)."""
+    stage = adapter.release_stage
+    return "" if stage == "stable" else f" ({stage})"
+
+
+def staged_label(adapter: AgentAdapter) -> str:
+    """``adapter.label`` with its :func:`stage_mark`: ``Codex (beta)``, ``Claude Code``."""
+    return adapter.label + stage_mark(adapter)
+
+
 LastingKind = Literal["mcp", "plugin"]
 
 
@@ -1489,7 +1510,8 @@ class AgentAdapter(Protocol):
     """One terminal agent, in the terms the shared services ask in.
 
     Identity and installation: ``id`` (the board's and the config's name), ``label``,
-    ``binary``, ``home_env``/``home_name`` with :meth:`config_dir`, ``install_hint`` with
+    ``release_stage``, ``binary``, ``home_env``/``home_name`` with :meth:`config_dir`,
+    ``install_hint`` with
     ``install_routes``, ``version_args`` with :func:`version_in`, :meth:`lasting_installs`.
     Hooks: ``settings_name`` (the hooks file in the config dir), ``capabilities.hooks`` with
     :func:`hook_args` and :meth:`hook_entry`, ``hooks_off_setting`` with
@@ -1509,6 +1531,9 @@ class AgentAdapter(Protocol):
 
     id: str
     label: str
+    release_stage: ReleaseStage
+    """``stable``, or ``beta`` (:data:`ReleaseStage`): a beta agent's name carries
+    :func:`stage_mark` wherever a person chooses or sees it, a stable one's nothing."""
     binary: str
     home_env: str
     home_name: str

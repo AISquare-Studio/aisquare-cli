@@ -86,7 +86,7 @@ from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import get_adapter, stage_mark_of
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
@@ -790,11 +790,12 @@ def _sign_in_prompt(agent: str) -> str:
 
 
 def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
-    """Another agent's section title: ``Codex 0.162.1 · /path``, or how to install it."""
+    """Another agent's section title: ``Codex (beta) 0.162.1 · /path`` (a beta agent's name
+    with its mark, ``types.stage_mark``), or how to install it."""
     if core.kind(agent).legacy_slots:
         return claude_title_text(overview)
     found = overview.installs.get(agent)
-    name = core.agent_label(agent)
+    name = core.agent_label(agent) + stage_mark_of(agent)
     text = Text()
     if found is None or not found.installed:
         text.append(f"{name} is not installed", style="bold red")
@@ -1255,7 +1256,7 @@ class AccountRow(Vertical, can_focus=True):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
             elif column.key == "agent":
-                cell.tooltip = core.agent_label(account.agent)
+                cell.tooltip = core.agent_label(account.agent) + stage_mark_of(account.agent)
             elif column.key.endswith("-resets"):
                 # The distance in the cell; the whole reset, clock time and all, on hover.
                 window = column.key.removesuffix("-resets")
@@ -1430,7 +1431,7 @@ class AccountsView(Vertical):
                 # one table above, in the one order.
                 with Vertical(id=f"{agent}-section", classes="agent-section"):
                     yield Static(
-                        Text(core.agent_label(agent), style="bold"),
+                        Text(core.agent_label(agent) + stage_mark_of(agent), style="bold"),
                         id=f"{agent}-title",
                         classes="section-title",
                     )

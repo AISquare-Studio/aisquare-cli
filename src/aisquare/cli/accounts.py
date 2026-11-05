@@ -37,7 +37,8 @@ from aisquare.cli.fleet import not_interactive_reason
 from aisquare.cli.native_args import PassthroughCommand
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import adapters, default_adapter, get_adapter, stage_mark_of
+from aisquare.core.agent_adapters.types import stage_mark
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import (
@@ -75,11 +76,27 @@ ProjectOpt = Annotated[
         metavar="PROJECT",
     ),
 ]
+
+
+def whose_account_help() -> str:
+    """``--agent``'s help: the default agent, then every other agent with account slots, by
+    their ids, a beta one's with its mark (``types.stage_mark``): ``Whose account:
+    claude-code (the default) or codex (beta).``"""
+    first = default_adapter()
+    named = [f"{first.id}{stage_mark(first)} (the default)"]
+    named += [
+        f"{each.id}{stage_mark(each)}"
+        for each in adapters()
+        if each.accounts is not None and each is not first
+    ]
+    return f"Whose account: {' or '.join(named)}."
+
+
 AgentOpt = Annotated[
     str | None,
     typer.Option(
         "--agent",
-        help="Whose account: claude-code (the default) or codex.",
+        help=whose_account_help(),
         metavar="AGENT",
     ),
 ]
@@ -243,7 +260,7 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
     for agent, found in overview.installs.items():
         if core.kind(agent).legacy_slots or not (found.installed or agent in agents):
             continue
-        name = core.agent_label(agent)
+        name = core.agent_label(agent) + stage_mark_of(agent)
         if found.installed:
             version = f" {found.version}" if found.version else ""
             console.print(Text.assemble(("✓ ", "green"), f"{name}{version} · {found.binary}"))
@@ -282,7 +299,11 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
             label.append(" (disabled)", style="dim")
         cells: list[Text | str] = [
             str(status.account.slot),
-            *([core.agent_label(status.account.agent)] if several else []),
+            *(
+                [core.agent_label(status.account.agent) + stage_mark_of(status.account.agent)]
+                if several
+                else []
+            ),
             label,
             who,
             status.subscription or _DASH,

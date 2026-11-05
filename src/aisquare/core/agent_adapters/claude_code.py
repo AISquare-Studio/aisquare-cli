@@ -38,6 +38,7 @@ from aisquare.core.agent_adapters.types import (
     PluginInstall,
     PriceTable,
     PromptRecord,
+    ReleaseStage,
     SandboxWrites,
     SessionFlags,
     SkillDirs,
@@ -156,6 +157,7 @@ def _lowered(value: str | None) -> str | None:
 class ClaudeCodeAdapter:
     id = "claude-code"
     label = "Claude Code"
+    release_stage: ReleaseStage = "stable"
     binary = "claude"
     home_env = "CLAUDE_CONFIG_DIR"
     home_name = ".claude"

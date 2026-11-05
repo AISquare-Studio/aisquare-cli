@@ -190,6 +190,7 @@ from aisquare.core.agent_adapters import (
     get_adapter,
     recorded_adapter,
 )
+from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.config import FleetRoleSettings, load_config
 from aisquare.core.personas import Persona
 from aisquare.core.store import store_session
@@ -792,10 +793,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def _agent_options(self, role: str, binary: str) -> list[tuple[str, str]]:
         """``(role's: <its agent>)`` — :data:`PICKING` while it is asked — then every agent this
-        version knows."""
+        version knows, a beta one's name with its mark (``types.stage_mark``)."""
         agent = self._role_agent(role, binary)
-        own = get_adapter(agent).label if agent is not None else PICKING
-        return [(f"(role's: {own})", ROLE_AGENT), *((a.label, a.id) for a in adapters())]
+        own = staged_label(get_adapter(agent)) if agent is not None else PICKING
+        return [(f"(role's: {own})", ROLE_AGENT), *((staged_label(a), a.id) for a in adapters())]
 
     # --- layout -----------------------------------------------------------------------
 

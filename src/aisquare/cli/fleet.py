@@ -31,6 +31,8 @@ from rich.text import Text
 from aisquare.cli.common import USAGE_ERROR, fail, format_reset, refuse_conflicting_scope
 from aisquare.cli.native_args import NativeForwardingCommand, PassthroughCommand
 from aisquare.core import harness
+from aisquare.core.agent_adapters import adapters
+from aisquare.core.agent_adapters.types import stage_mark
 from aisquare.core.claude_accounts import agent_label
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
@@ -83,6 +85,12 @@ _STATE_CHIP = {
     "paused": "⏯ paused",
     "unknown": "· unknown",
 }
+
+
+def agents_named() -> str:
+    """Every agent by its id, a beta one's with its mark (``types.stage_mark``), for an
+    ``--agent`` option's help: ``claude-code, codex (beta)``."""
+    return ", ".join(f"{adapter.id}{stage_mark(adapter)}" for adapter in adapters())
 
 
 def _fail_fleet(exc: Exception) -> NoReturn:
@@ -512,7 +520,7 @@ def switch(
         str | None,
         typer.Option(
             "--agent",
-            help="Coding agent to move it onto (claude-code, codex, …). No conversation moves "
+            help=f"Coding agent to move it onto ({agents_named()}, …). No conversation moves "
             "between agents: it starts fresh there with a hand-off brief of its work.",
             metavar="AGENT",
         ),

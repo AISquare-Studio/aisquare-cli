@@ -74,6 +74,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     PriceTable,
     PromptRecord,
+    ReleaseStage,
     SandboxWrites,
     SharedMemory,
     SharePart,
@@ -758,6 +759,8 @@ class GeminiShapedAccounts:
 class GeminiShapedAdapter:
     id = AGENT
     label = "Gemini-shaped"
+    #: Beta, as a new agent ships: its name carries the mark wherever one is chosen or seen.
+    release_stage: ReleaseStage = "beta"
     binary = "gemini"
     home_env = HOME_ENV
     home_name = CONFIG

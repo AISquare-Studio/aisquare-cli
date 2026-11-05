@@ -73,7 +73,12 @@ launch; its transcript is read through its `records`, a record a later line comp
 included, on whichever page that line is; its usage is the windows its plan has (`UsageWindow`), whichever limits shown
 beside its account; its permissions step `auto` down to `ask` without a reviewer of its own
 (`approves_for_me`); its telemetry is its `telemetry_reader`'s; its screen its `screen`'s,
-or none. Welcome offers its `install_routes`,
+or none. Its `release_stage` (a `ReleaseStage`, `stable` or `beta`) is how far aisquare's
+support for it has come: wherever a person chooses or sees an agent (Spawn's agent picker,
+the Accounts page and `aisquare accounts`, doctor's agent rows, Welcome, `aisquare agents`,
+an `--agent` option's help) a `beta` agent's name carries `stage_mark` (`staged_label`,
+`stage_mark_of` by id) and a `stable` one's reads as it did, so leaving beta is that one
+line. Welcome offers its `install_routes`,
 `agents connect <id>` is the doctor's one-click fix for it (`onboarding.KNOWN_FIXES`' one
 agent row), `core.agents.install_hooks` writes its `hook_entry`, and upgrade and uninstall
 find its homes (the ones it was connected in, its default, its `~/<home_name>*` siblings and
@@ -394,7 +399,7 @@ first run, with no edit to a shared file.
 
 from aisquare.core.agent_adapters.claude_code import ClaudeCodeAdapter
 from aisquare.core.agent_adapters.codex import CodexAdapter
-from aisquare.core.agent_adapters.types import AgentAdapter, executable_name
+from aisquare.core.agent_adapters.types import AgentAdapter, executable_name, stage_mark
 
 _ADAPTERS: dict[str, AgentAdapter] = {}
 
@@ -456,6 +461,14 @@ def adapter_for_binary(binary: str) -> AgentAdapter | None:
     it. Anything else (``claude2``, ``claude-next``, ``aider``) is no agent's by name."""
     name = executable_name(binary)
     return next((adapter for adapter in adapters() if name == adapter.binary), None)
+
+
+def stage_mark_of(name: str) -> str:
+    """The :func:`~aisquare.core.agent_adapters.types.stage_mark` of the agent ``name`` is the
+    id of (``" (beta)"``), ``""`` for a stable one and for a name no adapter has: a doctor
+    row's or an account's agent, read by its id."""
+    adapter = _ADAPTERS.get(name)
+    return stage_mark(adapter) if adapter is not None else ""
 
 
 def model_owner(model: str | None) -> str | None:

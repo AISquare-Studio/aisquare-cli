@@ -69,7 +69,8 @@ DONE = "native fixture done"
 COMPACTING = "<summary>"
 SUMMARY = "<summary>native fixture summary of the conversation</summary>"
 #: A directive in a prompt: ``[[bash <command>]]``, ``[[write <path> <text>]]``,
-#: ``[[hold]]`` (the turn waits until the test releases it), ``[[fail]]`` (an API error).
+#: ``[[hold]]`` (the turn waits until the test releases it), ``[[stall]]`` (its first words
+#: stream, the rest wait the same), ``[[fail]]`` (an API error).
 DIRECTIVE = re.compile(r"\[\[(\w+)(?: ([^\]]*))?\]\]")
 
 pytestmark = pytest.mark.skipif(
@@ -169,6 +170,8 @@ def _texts(content: Any) -> list[str]:
 class Turn:
     """One request of the agent's main loop, as the stub read it."""
 
+    path: str
+    """Where it was posted: ``/v1/messages``, under the prefix of a slot's base URL."""
     model: str
     system: str
     said: str
@@ -194,7 +197,7 @@ def _strings(value: Any) -> Iterator[str]:
             yield from _strings(item)
 
 
-def _turn(body: dict[str, Any]) -> Turn:
+def _turn(body: dict[str, Any], path: str = "/v1/messages") -> Turn:
     system = body.get("system")
     system_text = "\n".join(_texts(system)) if isinstance(system, list) else str(system or "")
     said, results = "", []
@@ -208,7 +211,7 @@ def _turn(body: dict[str, Any]) -> Turn:
                 inner = block.get("content")
                 results.append("\n".join(_texts(inner)) if not isinstance(inner, str) else inner)
         break
-    return Turn(str(body.get("model") or ""), system_text, said, results, body)
+    return Turn(path, str(body.get("model") or ""), system_text, said, results, body)
 
 
 class Stub(ThreadingHTTPServer):
@@ -290,7 +293,7 @@ class _Messages(BaseHTTPRequestHandler):
             self._send(404, b"{}")
             return
         model = str(body.get("model") or "claude-native-fixture")
-        turn = _turn(body)
+        turn = _turn(body, path)
         if not body.get("tools") or turn.said.startswith("[SUGGESTION MODE"):
             with self.server.lock:
                 self.server.side.append(body)
@@ -313,6 +316,9 @@ class _Messages(BaseHTTPRequestHandler):
         elif verb == "write":
             path_, _, text = rest.partition(" ")
             reply = tool_reply(model, "Write", {"file_path": path_, "content": text + "\n"})
+        elif verb == "stall":
+            self._stall(model)
+            return
         elif verb == "fail":
             error = {
                 "type": "error",
@@ -327,6 +333,25 @@ class _Messages(BaseHTTPRequestHandler):
                 self.server.holding.clear()
             reply = text_reply(model, f"{HEARD}: {rest or verb or 'ok'}")
         self._reply(body, model, reply, "")
+
+    def _stall(self, model: str) -> None:
+        """A reply whose first words stream at once and the rest only once the test releases
+        it (:meth:`Stub.release`): a turn the human can interrupt mid-answer."""
+        whole = text_reply(model, f"{HEARD}: stalled")
+        head, _, rest = whole.partition(b"event: content_block_stop")
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        self.wfile.write(head)
+        self.wfile.flush()
+        self.server.holding.set()
+        released = self.server.gate.acquire(timeout=60)
+        self.server.holding.clear()
+        if released:
+            with suppress(OSError):  # interrupted: Claude Code has hung up
+                self.wfile.write(b"event: content_block_stop" + rest)
 
     def _reply(self, body: dict[str, Any], model: str, streamed: bytes, text: str) -> None:
         if body.get("stream"):
@@ -348,10 +373,11 @@ class _Messages(BaseHTTPRequestHandler):
 # --- the fixture ----------------------------------------------------------------------------
 
 
-def claude_settings(stub: Stub, *, allow: tuple[str, ...] = ()) -> dict[str, Any]:
-    """A config dir's ``settings.json`` that runs Claude Code on the stub, quietly."""
+def claude_settings(stub: Stub, *, allow: tuple[str, ...] = (), prefix: str = "") -> dict[str, Any]:
+    """A config dir's ``settings.json`` that runs Claude Code on the stub, quietly, its
+    requests posted under ``prefix`` (a slot's, to tell slots apart)."""
     settings: dict[str, Any] = {
-        "env": {"ANTHROPIC_BASE_URL": stub.url, **QUIET_ENV},
+        "env": {"ANTHROPIC_BASE_URL": stub.url + prefix, **QUIET_ENV},
         "apiKeyHelper": f"echo {_KEY}",
     }
     if allow:
@@ -373,13 +399,26 @@ def claude_json(*trusted: Path) -> dict[str, Any]:
 
 
 def write_config_dir(
-    config_dir: Path, stub: Stub, *trusted: Path, allow: tuple[str, ...] = ()
+    config_dir: Path,
+    stub: Stub,
+    *trusted: Path,
+    allow: tuple[str, ...] = (),
+    prefix: str = "",
+    email: str | None = None,
 ) -> None:
+    """A config dir as a sign-in leaves it, less the login: its ``settings.json`` on the stub
+    and its ``.claude.json``, naming ``email`` as who it is signed in as."""
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "settings.json").write_text(
-        json.dumps(claude_settings(stub, allow=allow), indent=2), encoding="utf-8"
-    )
-    (config_dir / ".claude.json").write_text(json.dumps(claude_json(*trusted)), encoding="utf-8")
+    settings = claude_settings(stub, allow=allow, prefix=prefix)
+    (config_dir / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    state = claude_json(*trusted)
+    if email is not None:
+        state["oauthAccount"] = {
+            "emailAddress": email,
+            "organizationName": "AISquare",
+            "accountUuid": "0e5f5d3c-6a39-4f3a-9b7e-native000000",
+        }
+    (config_dir / ".claude.json").write_text(json.dumps(state), encoding="utf-8")
 
 
 @dataclass
@@ -575,6 +614,7 @@ def native(
             allow = native_options.get("allow", ())
             write_config_dir(config_dir, stub, *trusted, allow=allow)
             scrub_agent_env(monkeypatch)
+            monkeypatch.chdir(workspace)  # the user's terminal, where the CLI finds the project
             monkeypatch.setenv("AISQUARE_HOME", str(store))
             monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
             monkeypatch.setattr(

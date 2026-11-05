@@ -142,12 +142,18 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     reads both. `config list` shows new defaults: `[agents] mcp` (off; on, each launch is
     handed aisquare's MCP server), `[agents.models]`, a role's `agent_args` and
     `[accounts] cross_agent_handover` (on).
-<!-- #92 (R6): #87's N5 (a `fleet tell` to a Claude Code agent whose SessionStart this
-     launch has not seen files a board note and types nothing), from #92's DONE note. -->
 <!-- R2: one line for each item SMOKE14 classifies CLAUDE-VISIBLE and the owner keeps. -->
 
 ### Fixed
 
+- A fleet Claude Code agent's permission prompt is read again on Claude Code 2.1.318, which
+  leaves a named rule under the dialog, so the captain's press answers it.
+- `fleet tell` never types into a dialog a waiting Claude Code agent shows (`/resume`,
+  `/model`, `/config`): a board note names the dialog and says Esc closes it.
+- A Claude Code agent whose start the board never saw (its hooks broken) is told at its
+  prompt once its screen reads ready, as 0.9.2 did.
+- `aisquare accounts`, the Accounts page, Welcome and doctor show an npm-installed Claude
+  Code 2.x's version again.
 - Claude Code 2.1.312's *You've hit your 5-hour limit* notice is read again, so the limit
   marks its account and the hand-over moves the agent. A weekly notice whose reset is a
   date is read too.

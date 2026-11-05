@@ -7380,6 +7380,11 @@ def _release_remote_home() -> None:
     started in those seconds, finding the home let go, pushed every notification beside
     them. The last of those servers lets it go as it ends
     (:func:`_release_remote_home_once_wound_down`).
+
+    Let go under :data:`_lock`, which a start holds to claim the home: let go after it, a
+    start in between found no claim of this process's, the lock file still held by it, and
+    told the user another Remote was on "in another shell" (R7, CI 42113584607: Remote turned
+    on again the moment the last one was done with a phone's write).
     """
     global _home_claim
     with _lock:
@@ -7388,8 +7393,8 @@ def _release_remote_home() -> None:
         if any(stopped.winding_down for stopped in _winding_down):
             return
         claim, _home_claim = _home_claim, None
-    if claim is not None:
-        _release_remote_claim(claim)
+        if claim is not None:
+            _release_remote_claim(claim)
 
 
 def _release_remote_home_once_wound_down(server: _Server) -> None:

@@ -1038,17 +1038,22 @@ def test_on_windows_launch_waits_for_its_agent_and_ends_with_its_status(
     """R8 of #113's release: on windows-latest a pasted `team spawn` line (which runs `aisquare
     launch`) gave its shell back at once, with status 2816: Windows has no exec, so
     `os.execve` started the agent and ended the launcher. There the agent runs as a child,
-    a `.cmd` shim included, and the launcher ends with the agent's status."""
-    ran: list[tuple[list[str], dict[str, str]]] = []
-
-    def call(args: list[str], env: dict[str, str]) -> int:
-        ran.append((args, env))
-        return 7
-
+    a `.cmd` shim included, and the launcher ends with the agent's status. It ignores Ctrl-C
+    while it waits: as KeyboardInterrupt, `subprocess.call` would kill the agent (seq 11176)."""
     import os
+    import signal
     import subprocess
     import sys
 
+    ran: list[tuple[list[str], dict[str, str]]] = []
+    handlers: list[tuple[int, object]] = []
+
+    def call(args: list[str], env: dict[str, str]) -> int:
+        assert handlers == [(signal.SIGINT, signal.SIG_IGN)], "Ctrl-C ignored before the wait"
+        ran.append((args, env))
+        return 7
+
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.append((sig, handler)))
     monkeypatch.setattr(subprocess, "call", call)
     monkeypatch.setattr(os, "execve", lambda *args: pytest.fail("no exec on Windows"))
     monkeypatch.setattr(sys, "platform", "win32")

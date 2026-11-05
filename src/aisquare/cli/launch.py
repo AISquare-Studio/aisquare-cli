@@ -39,6 +39,7 @@ import contextlib
 import hashlib
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -374,6 +375,11 @@ def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     windows-latest; 0.9.2's printed line ran the agent from the shell itself). There the agent
     runs as this process's child, a `.cmd` shim included, and its exit status is this one's."""
     if sys.platform == "win32":
+        # A Ctrl-C reaches every process on the console (CTRL_C_EVENT). It is the agent's:
+        # Claude Code takes its own Ctrl-C. Raised here as KeyboardInterrupt, it would make
+        # `subprocess.call` kill the agent it is waiting on, so the launcher ignores it
+        # (review of #94, seq 11176).
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         raise SystemExit(subprocess.call([binary, *argv[1:]], env=env))
     os.execve(binary, argv, env)
 

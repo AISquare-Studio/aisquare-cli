@@ -2068,6 +2068,33 @@ def test_a_move_back_to_a_deny_by_extra_args_release_names_the_tools_a_role_rega
     assert kept["tools_regained"] == [], "its extra_args deny them there too"
 
 
+def test_a_move_back_before_the_account_rank_says_what_it_keeps_and_loses_of_the_store(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 of 0.10.0, F5: `upgrade --version 0.9.2` from 0.10.0 said nothing of the store it
+    leaves 0.9.2. One line says what it keeps (every row, agent and setting: 0.9.2 opens
+    the v50 store as it is) and what it loses (an order or a default set there, and an
+    account added there ranks last, at the next upgrade), in the plan and under --yes. A
+    move between releases that keep the order the same way, or forward, says nothing."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.10.1")
+    warning = (
+        "⚠ 0.9.2 opens this home's store as it is and keeps every row, agent and setting; "
+        "but an account order or default you set while on 0.9.2 is not kept when you "
+        "upgrade again, and an account you add there is ranked last"
+    )
+
+    planned = runner.invoke(app, ["upgrade", "--version", "0.9.2"])
+    machine.new_version = "0.9.2"
+    ran = runner.invoke(app, ["upgrade", "--version", "0.9.2", "--yes"])
+    across = runner.invoke(app, ["upgrade", "--version", "0.10.0"])
+    forward = runner.invoke(app, ["upgrade", "--version", "0.10.2"])
+
+    assert warning in " ".join(planned.stdout.split()), planned.stdout
+    assert warning in " ".join(ran.stdout.split()), "--yes skips the plan, not what it costs"
+    for quiet in (across, forward):
+        assert "opens this home's store" not in quiet.stdout, quiet.stdout
+
+
 def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:
     """A fleet row the board lists as live, as `fleet spawn` records one."""
     root.mkdir(parents=True, exist_ok=True)

@@ -225,9 +225,9 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
 
 
 def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False) -> None:
-    """The live fleet, a Remote on elsewhere, the role bindings a move back ignores and what
-    it reads otherwise in config.toml, said before anything is installed: in the plan, and
-    under --yes.
+    """The live fleet, a Remote on elsewhere, the role bindings a move back ignores, what it
+    reads otherwise in config.toml and what it keeps and loses of the store, said before
+    anything is installed: in the plan, and under --yes.
 
     Under ``--one-click`` the fleet and a Remote on elsewhere are said as facts, with no advice
     to stop, shut down or turn off anything: keeping the agents running is what asq's ⬆ update
@@ -246,6 +246,8 @@ def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False
         _say(f"⚠ {plan.tools_warning}")
     if plan.config_warning is not None:
         _say(f"⚠ {plan.config_warning}")
+    if plan.store_warning is not None:
+        _say(f"⚠ {plan.store_warning}")
 
 
 def _emit_report(report: lifecycle_service.UpgradeReport) -> None:

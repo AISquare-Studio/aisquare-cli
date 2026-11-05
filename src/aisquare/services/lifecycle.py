@@ -504,6 +504,27 @@ class UpgradePlan:
         )
 
     @property
+    def store_warning(self) -> str | None:
+        """What a move back to a release before :data:`FIRST_ACCOUNT_RANK` keeps and loses of
+        this home's store, or ``None`` for any other run.
+
+        That release opens the store this one migrated as it is, every row of it kept, and
+        what this one added stays for the way forward again. What it writes there that this
+        one reads elsewhere is the cost: the accounts' order, kept here in its own table, so
+        a reorder or a new default made there is not read again, and an account added there
+        ranks last (R3 of 0.10.0, F5: the move back said nothing of either). Said, as
+        :attr:`config_warning` is, rather than refused."""
+        if self.target is None or not self.backwards:
+            return None
+        if install_route.is_newer(FIRST_ACCOUNT_RANK, self.target) is not True:
+            return None
+        return (
+            f"{self.target} opens this home's store as it is and keeps every row, agent and "
+            f"setting; but an account order or default you set while on {self.target} is not "
+            "kept when you upgrade again, and an account you add there is ranked last"
+        )
+
+    @property
     def command(self) -> str:
         return install_route.command_line(self.argv)
 
@@ -1284,6 +1305,9 @@ FIRST_REFRESH_HOOKS = "0.8.0"
 LAST_WHOLE_CONFIG = "0.8.0"
 #: The first release that reads ``env_files`` (``team bind --env-file``): 0.8.0 ignores it.
 FIRST_ENV_FILES = "0.8.1"
+#: The first release whose store keeps the accounts' order in a table of its own
+#: (``account_rank``, store v50): a release before it orders them by what it writes itself.
+FIRST_ACCOUNT_RANK = "0.10.0"
 
 
 def refresh_hooks_argv(agent: str = HOOK_AGENT) -> tuple[str, ...]:

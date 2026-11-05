@@ -16591,6 +16591,32 @@ def test_a_dead_092_agent_stays_listed_after_a_project_rename_and_its_restart_re
     assert legacy.window is not None and legacy.window.session == "asq-quiet-lynx"
 
 
+def test_a_dead_092_agent_stays_listed_after_092_renamed_its_session_where_the_census_was_not_told(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R5's verify, G1, its rollback path: 0.9.2's own `project rename` renames the tmux
+    session and knows no census, so the census's name for it finds nothing on the server.
+    The listing asks tmux which session holds the census row's pane, lists that, and the
+    census takes its name from there (``fleet._census_session_moved``)."""
+    agent = _coder(project)
+    _before_records()
+    fleet_service.list_agents(project)  # the census, under the session's name then
+    old = _session_of(project).split(":", 1)[1]
+    tmux.rename_session(old, "asq-renamed-by-092")  # tmux alone, as 0.9.2 renames it
+    tmux.die(agent.pane_id, 0)
+
+    reads = [
+        [s.state for s in fleet_service.list_agents(project) if s.agent.id == agent.id]
+        for _ in range(3)
+    ]
+    restarted = fleet_service.restart(project, agent.label)
+
+    assert reads == [["exited"]] * 3, reads
+    assert restarted.replaced.id == agent.id and agent.pane_id in tmux.killed
+    [legacy] = launch_seal.legacy_records(project.id)
+    assert legacy.window is not None and legacy.window.session == "asq-renamed-by-092"
+
+
 @pytest.mark.parametrize("verb", ["restart", "switch"])
 def test_a_092_agents_first_restart_or_switch_resumes_its_transcript(
     verb: str,

@@ -1558,15 +1558,19 @@ def _sessions_of(placements: Sequence[Placement]) -> list[PlacedSession]:
     return list(found.values())
 
 
-def _census_sessions(placements: Sequence[Placement]) -> list[PlacedSession]:
+def _census_sessions(
+    placements: Sequence[Placement],
+) -> list[tuple[PlacedSession, PlacedPane]]:
     """The sessions the placed rows' census records name by their name alone (a census
-    record keeps no tmux id for its session), each once, by server and name: listed by that
-    name, as :func:`_running_ids` lists them, so an ENDED census row's dead window is found
-    in its session's list as a recorded row's is. Looked for nowhere else, the 💤 row of a
-    0.9.2 agent that died showed once and was gone from the next read while its window
-    lingered, and a restart left that window behind (R1 of 0.10.0, seq 11047; R3, F7).
-    Read only: what acts on the window acts on its pane's id, on its record's server."""
-    found: dict[tuple[_Address, str], PlacedSession] = {}
+    record keeps no tmux id for its session), each once, by server and name, with the pane
+    of one row placed there: listed by that name, as :func:`_running_ids` lists them, so an
+    ENDED census row's dead window is found in its session's list as a recorded row's is.
+    Looked for nowhere else, the 💤 row of a 0.9.2 agent that died showed once and was gone
+    from the next read while its window lingered, and a restart left that window behind (R1
+    of 0.10.0, seq 11047; R3, F7). A name that finds nothing is asked again of the pane
+    (:func:`_census_session_moved`). Read only: what acts on the window acts on its pane's
+    id, on its record's server."""
+    found: dict[tuple[_Address, str], tuple[PlacedSession, PlacedPane]] = {}
     for placement in _placed_only(placements):
         place = placement.record.window
         if not placement.record.legacy or place is None or place.session_id or not place.session:
@@ -1574,9 +1578,22 @@ def _census_sessions(placements: Sequence[Placement]) -> list[PlacedSession]:
         address = placement.pane.address
         found.setdefault(
             (address, place.session),
-            _listed_session(address, place.session, placement.pane.config),
+            (_listed_session(address, place.session, placement.pane.config), placement.pane),
         )
     return list(found.values())
+
+
+def _census_session_moved(session: PlacedSession, pane: PlacedPane) -> list[WindowInfo]:
+    """The windows of the session tmux says holds ``pane`` (:meth:`PlacedPane.holding_session`)
+    when no session of ``session``'s name is on its server: one renamed where the census was
+    not told, by 0.9.2's own `project rename` while rolled back (R5's verify, G1). The census
+    takes its name from here (``launch_seal.rename_census_session``), so the next read lists
+    it by name again. Nothing when the pane is gone, or tmux will not say."""
+    held = pane.holding_session()
+    if held is None or held.name == session.name:
+        return []
+    launch_seal.rename_census_session(session.address.name, session.name, held.name)
+    return held.panes()
 
 
 def _indexed_sessions(project_id: str, config: FleetSettings) -> list[PlacedSession]:
@@ -3914,8 +3931,11 @@ def _observe(
                 found = every.get(session.name)
                 for listed in found if found is not None else session.panes():
                     windows[listed.pane_id] = listed
-            for session in _census_sessions(placements):
-                for named in every.get(session.name, ()):
+            for session, member in _census_sessions(placements):
+                named_now = every.get(session.name)
+                if named_now is None:
+                    named_now = _census_session_moved(session, member)
+                for named in named_now:
                     windows.setdefault(named.pane_id, named)
             output_at = times if live else {}
         else:
@@ -3924,8 +3944,8 @@ def _observe(
                 for session in _sessions_of(placements)
                 for window in session.panes()
             }
-            for session in _census_sessions(placements):
-                for named in session.panes():
+            for session, member in _census_sessions(placements):
+                for named in session.panes() or _census_session_moved(session, member):
                     windows.setdefault(named.pane_id, named)
             output_at = _activity_times(srv) if live else {}
         said = [w.server_started for w in windows.values() if w.server_started is not None]

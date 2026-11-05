@@ -13,7 +13,10 @@ Code pane ends with its **input box** — a rule, the ``❯`` input line (a dim 
 sit on it), a rule, then footer lines. A dialog **replaces** that box. So with the box drawn
 nothing below the transcript is a dialog, whatever the conversation above it quotes — a
 reply that reports a stuck prompt quotes chooser lines and footers, and that is the
-captain's job — and with no box drawn, only the lines that replaced it are read:
+captain's job — and with no box drawn, only the lines that replaced it are read. A rule
+with nothing after it opens nothing: Claude Code 2.1.318 leaves its box's top rule, which
+carries the agent's ``--name``, on the pane's last row under a dialog drawn over the box
+(every fleet window; measured, SMOKE R6 F2), so the lines read are those above it:
 
 - a **numbered chooser**: options ``1.``, ``2.``… with exactly one highlighted by the mark,
   and a footer naming Esc or Enter on the last two lines; *yes* is the digit of the first
@@ -53,7 +56,9 @@ name (T2b, 13383): the fleet launches every agent with --name, and Claude Code d
 there — a long rule, one space, the name, one space, a short closing run, nothing else."""
 INPUT_LINE = re.compile(r"^\s*" + PROMPT_MARK)
 OPTION = re.compile(r"^\s*(" + PROMPT_MARK + r"\s*)?(\d)[.)]\s+(\S.*)$")
-MODAL_FOOTER = re.compile(r"Esc to cancel|Enter to confirm")
+MODAL_FOOTER = re.compile(r"Esc to (?:cancel|clear)|Enter to confirm")
+"""A dialog's footer: ``Esc to cancel``, ``Enter to confirm`` and, on 2.1.318's ``/config``
+(``Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear``), ``Esc to clear``."""
 YES_NO = re.compile(r"[\[(]\s*[yY](?:es)?\s*/\s*[nN](?:o)?\s*[\])]\s*[:?]?\s*$")
 TRUST = re.compile(r"Quick safety check|Yes, I trust this folder")
 RATING = re.compile(r"How is Claude doing this session")
@@ -197,10 +202,14 @@ def _undimmed(row: str) -> str:
 
 
 def dialog_region(rows: Sequence[str]) -> list[str]:
-    """The lines a dialog would occupy: what follows the last rule (or all of ``rows``)."""
-    rules = [index for index, row in enumerate(rows) if RULE.match(row)]
-    region = list(rows[rules[-1] + 1 :]) if rules else list(rows)
-    return [row for row in region if row.strip()]
+    """The lines a dialog would occupy: what follows the last rule that has something after
+    it (or all of ``rows``). A rule on the last rows opens nothing: the top rule of the box a
+    dialog was drawn over, left there by Claude Code 2.1.318 (the module's docstring)."""
+    shown = [row for row in rows if row.strip()]
+    while shown and RULE.match(shown[-1]):
+        shown.pop()
+    rules = [index for index, row in enumerate(shown) if RULE.match(row)]
+    return shown[rules[-1] + 1 :] if rules else shown
 
 
 def _yes_option(region: Sequence[str]) -> str | None:

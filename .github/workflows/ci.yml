@@ -174,8 +174,10 @@ jobs:
     # About twice a shard's time on a slow runner: 5-9 minutes on Linux, 7-9 on
     # Windows, whose runners vary more (1.8 times, run 40240227553). A test past
     # pyproject's faulthandler_timeout prints every thread's stack first, and
-    # --durations names each shard's slowest tests.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 15 }}
+    # --durations names each shard's slowest tests. The py3.12 leg measures coverage
+    # (`--cov`), which made its shards' suites 9.5-12 minutes on the runners against 5-8
+    # (run 42087473244), and 15 cut three of them at 99%: it gets Windows' 25.
+    timeout-minutes: ${{ (matrix.os == 'windows-latest' || matrix.leg == 'py3.12') && 25 || 15 }}
     strategy:
       fail-fast: false
       # Each leg's suite as `shards` jobs: `leg` x `shard`, each leg's settings added

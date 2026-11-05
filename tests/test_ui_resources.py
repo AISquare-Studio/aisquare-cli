@@ -24,7 +24,7 @@ from aisquare.cli.ui.views import resources as resources_view
 from aisquare.cli.ui.views.resources import SAMPLE_WORKER, ResourcesView
 from aisquare.services.fleet_top import AgentUse, TopReport
 from tests.test_ui_settings_hub import GOOD
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -174,7 +174,12 @@ def test_a_hidden_page_samples_nothing_and_shown_again_resumes(
         await pilot.pause(0.3)
         hidden_later = sampler.calls
         view.display = True
-        await pilot.pause(0.3)
+        # Shown again, its Show event starts the timer and samples on a worker thread: read
+        # once that sample came, not one 0.3 s pause later, which a loaded runner outran
+        # (116 > 116, py3.12 shard 3/4, CI 42116492406; R7's flake list).
+        await settle_until_held(
+            view.app, lambda: sampler.calls > hidden_later, what="a sample, the page shown again"
+        )
         await settle_page(view.app)
         return while_open, hidden_at, hidden_later, sampler.calls
 

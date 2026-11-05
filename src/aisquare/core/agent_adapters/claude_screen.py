@@ -161,7 +161,10 @@ def composer_text(lines: Sequence[str]) -> str | None:
     Read BEFORE escapes are stripped: Claude Code draws its own words in an empty box dim
     (SGR 2), a placeholder in a fresh session (``Try "edit <filepath> to..."``) and a
     suggestion after a turn (``check the board again``), measured on 2.1.309 (P0-W0). Read
-    after the strip, they were drafts. Dim runs are dropped, then the mark and the
+    after the strip, they were drafts. With its prompt suggestions on (2.1.318, its default
+    where its rollout flag is), a fresh session's placeholder starts with the cursor on its
+    first letter, one reverse-video cell, then the dim rest (``\x1b[7mT\x1b[0;2mry "edit…``):
+    that cell is the placeholder's too (#92's P1). Dim runs are dropped, then the mark and the
     no-break space Claude Code puts after it, and the box's lines are joined with a space:
     a long draft wraps there, and a line break typed into it reads the same. ``""`` is an
     empty box (P0-W1a's delivery reads it; W2's draft guard will).
@@ -179,10 +182,16 @@ def composer_text(lines: Sequence[str]) -> str | None:
 
 
 _SGR = re.compile(r"\x1b\[([0-9;:]*)m")
+_CURSOR_ON_DIM = re.compile(r"\x1b\[7m([^\x1b])\x1b\[((?:[0-9:]*;)*2(?:;[0-9:]*)*)m")
+"""The cursor, one reverse-video cell, on the first letter of a dim run that follows it at
+once: Claude Code 2.1.318's fresh placeholder under prompt suggestions. A cursor anywhere
+else (after a draft, inside one) is no such cell: what follows it is not dim."""
 
 
 def _undimmed(row: str) -> str:
-    """``row`` with every dim run (SGR 2, until SGR 0 or 22) and then every escape removed."""
+    """``row`` with every dim run (SGR 2, until SGR 0 or 22), the cursor cell that opens one
+    (:data:`_CURSOR_ON_DIM`) included, and then every escape removed."""
+    row = _CURSOR_ON_DIM.sub(lambda m: f"\x1b[{m.group(2)}m{m.group(1)}", row)
     kept: list[str] = []
     dim = False
     position = 0

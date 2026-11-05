@@ -157,6 +157,34 @@ def test_the_composer_reads_a_draft_and_never_claude_codes_own_dim_words() -> No
     assert screen.composer_text(["Quick safety check", f" {MARK} No, exit"]) is None, "no box"
 
 
+#: Claude Code 2.1.318's input line, escapes kept, as R6's tester captured it (#92's P1).
+_PLACEHOLDER_WITH_CURSOR = f'\x1b[39m{MARK}\xa0\x1b[7mT\x1b[0;2mry "edit <filepath> to..."\x1b[0m '
+
+
+@pytest.mark.parametrize(
+    ("line", "read"),
+    [
+        (_PLACEHOLDER_WITH_CURSOR, ""),
+        (f"\x1b[39m{MARK}\xa0\x1b[7m \x1b[0m                           ", ""),
+        (f"\x1b[39m{MARK}\xa0my draft\x1b[7m \x1b[0m", "my draft"),
+        (f"\x1b[39m{MARK}\xa0my dr\x1b[7ma\x1b[0mft", "my draft"),
+        (f"\x1b[39m{MARK}\xa0T\x1b[7m \x1b[0m", "T"),
+        (f"\x1b[39m{MARK}\xa0/com\x1b[7mp\x1b[0;2mact\x1b[0m", "/com"),
+    ],
+    ids=["fresh placeholder", "after a turn", "draft", "cursor inside", "one letter", "ghost"],
+)
+def test_the_cursor_on_the_fresh_placeholders_first_letter_is_no_draft(
+    line: str, read: str
+) -> None:
+    """#92's P1: with prompt suggestions on, a fresh 2.1.318 session draws its placeholder with
+    the cursor, one reverse-video cell, on its first letter, and the box read ``T``, a draft, so
+    every tell to an agent spawned with no first message became a board note (8/8 measured).
+    The cell that opens a dim run is the placeholder's; a cursor after or inside a draft, or
+    on a dim completion after one, leaves the draft as typed."""
+    rule = "─" * 60
+    assert screen.composer_text([rule, line, rule, "  ⏵⏵ auto mode on"]) == read
+
+
 def test_the_wait_for_the_box_hands_the_agents_screen_its_rows_as_plain_text(
     tmp_path: Path,
 ) -> None:

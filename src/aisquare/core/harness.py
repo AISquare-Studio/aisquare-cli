@@ -599,6 +599,10 @@ class ProbeResult(BaseModel):
     resolved_id: str | None = None
     reason: str | None = None
     checked_at: datetime
+    binary: str | None = None
+    """The ``claude`` the probe ran (:func:`binary_fingerprint`): a verdict of unavailable is
+    asked again once another one runs, which may know a new alias; a verdict of available
+    keeps its 24 hours across a Claude Code update (R1 of #113's release, F9)."""
 
 
 def probing_enabled() -> bool:
@@ -681,12 +685,11 @@ def account_scope() -> str:
         from aisquare.core import agents, claude_accounts
         from aisquare.models import ClaudeAccount
 
-        resolved = executable_path(context.binary, context.env)
-        executable = Path(resolved or context.binary)
-        identity: list[object] = ["claude-code", str(executable.resolve()), resolved is not None]
-        with contextlib.suppress(OSError):
-            stat = executable.stat()
-            identity += [stat.st_mtime_ns, stat.st_size]
+        # The account's, never the binary's: keyed by the `claude` executable (its path,
+        # mtime and size), every Claude Code update made each account's verdicts a miss, and
+        # its paid probes ran again (R1 of #113's release, F9). The binary that answered is
+        # recorded in each verdict instead (`ProbeResult.binary`, `cached_probe`).
+        identity: list[object] = ["claude-code"]
         # The directory this probe's claude runs under, as it reads it: not
         # `default_account`'s, which maps a managed slot back to the plain account.
         raw = context.env.get(claude_accounts.CONFIG_DIR_VAR, "").strip()
@@ -799,11 +802,33 @@ def _save_cache(cache: dict[str, ProbeResult]) -> None:
         pass  # the cache is disposable; failing to write it must not surface
 
 
+def binary_fingerprint() -> str | None:
+    """The ``claude`` this probe context runs, as its path (resolved) and its file's mtime
+    and size say: another one after a Claude Code update. ``None`` outside a probe context."""
+    context = _PROBE_CONTEXT.get()
+    if context is None:
+        return None
+    resolved = executable_path(context.binary, context.env)
+    executable = Path(resolved or context.binary)
+    identity: list[object] = [str(executable.resolve()), resolved is not None]
+    with contextlib.suppress(OSError):
+        stat = executable.stat()
+        identity += [stat.st_mtime_ns, stat.st_size]
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:20]
+
+
 def cached_probe(alias: str) -> ProbeResult | None:
-    """The fresh cached probe for ``alias``, or ``None`` (missing or stale)."""
+    """The fresh cached probe for ``alias``, or ``None`` (missing or stale). A verdict of
+    unavailable that another ``claude`` gave is stale (:attr:`ProbeResult.binary`): the one
+    that runs now may serve the alias. One that names no binary (written before verdicts
+    said) keeps its 24 hours."""
     result = _load_cache().get(alias)
     if result is None:
         return None
+    if not result.available and result.binary is not None:
+        now = binary_fingerprint()
+        if now is not None and now != result.binary:
+            return None
     checked_at = result.checked_at
     if checked_at.tzinfo is None:
         # A hand-edited cache file can carry a naive stamp; the subtraction
@@ -989,6 +1014,7 @@ def _probe_and_cache(alias: str) -> ProbeResult:
     result = probe_model(alias)
     if not result.conclusive:
         return result  # never cache "we could not tell" — retry next time
+    result = result.model_copy(update={"binary": binary_fingerprint()})
     cache = _load_cache()
     cache[alias] = result
     _save_cache(cache)

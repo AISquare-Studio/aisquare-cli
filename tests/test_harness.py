@@ -1282,6 +1282,46 @@ def test_a_probe_on_a_managed_slot_keys_that_slots_cache(isolated_home: Path) ->
     assert scope(on_slot) != slot_scope
 
 
+def test_a_claude_code_update_keeps_the_accounts_verdicts_and_asks_its_refusals_again(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 of #113's release, F9: the cache was keyed by the `claude` executable too (its path,
+    mtime and size), so every Claude Code update made each account's verdicts a miss and its
+    paid probes ran again: 2 or 3 per account per update (the ladders' fable and sonnet, and
+    opus where fable is refused). Keyed by the account alone, an update keeps what was
+    available for its 24 hours and asks again only what was refused, which a newer CLI may
+    serve: 0, or 1 where fable was refused. `team spawn --refresh` still forgets it all."""
+    from tests import fakebin
+
+    bin_dir = tmp_path / "bin"
+    claude = fakebin.executable_fake(bin_dir, "claude", posix="exit 0", windows="exit /b 0")
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    asked: list[str] = []
+
+    def probe(alias: str) -> harness.ProbeResult:
+        asked.append(alias)
+        return harness.ProbeResult(
+            alias=alias, available=alias != "fable", checked_at=datetime.now(tz=UTC)
+        )
+
+    monkeypatch.setattr(harness, "probe_model", probe)
+    context = harness.ProbeContext("claude", env)
+    with harness.probe_context(context):  # one spawn
+        scope = harness.account_scope()
+        harness._probe_and_cache("opus")
+        harness._probe_and_cache("fable")
+    with harness.probe_context(context):  # the next, on the same claude
+        assert harness.cached_probe("fable") is not None, "the same claude: its refusal holds"
+    claude.write_text(claude.read_text(encoding="utf-8") + "\n# 2.1.319\n", encoding="utf-8")
+
+    with harness.probe_context(context):  # the first spawn after the update
+        assert harness.account_scope() == scope, "an update is the same account"
+        kept = harness.cached_probe("opus")
+        assert kept is not None and kept.available, "what was available holds its 24 hours"
+        assert harness.cached_probe("fable") is None, "what was refused is asked again"
+    assert asked == ["opus", "fable"], "no probe ran for the update itself"
+
+
 def test_spawn_refresh_forgets_this_accounts_verdicts_only(isolated_home: Path) -> None:
     """--refresh promises a re-check after an entitlement change; bypassing
     reads only re-verified the ladder being walked, leaving other roles'

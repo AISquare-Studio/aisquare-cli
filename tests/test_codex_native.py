@@ -1190,12 +1190,15 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 assert state(coder) == "attention"
 
             def redrawn() -> bool:
-                """The view redraws, and reads attention while it does. Its output time is
-                the second tmux saw it, and on a loaded runner a redraw took past the 3.6 s
-                above (macOS CI 42113584607): waited for, bounded."""
+                """The view redraws, and reads attention while it does. On the macOS CI
+                runner Codex drew the view once and not again (CI 42116492406), so the redraw
+                is the one every terminal app makes when its window is resized (SIGWINCH):
+                output the pane's time shows, with no turn begun. Waited for, bounded."""
                 assert state(coder) == "attention"
                 return fleet._activity_times(srv).get(pane) != first
 
+            width = int(srv.run("display-message", "-p", "-t", pane, "#{window_width}").strip())
+            srv.run("resize-window", "-t", pane, "-x", str(width - 1))
             until(redrawn, 20, "the view redraws", pane)
             assert reviews() == reviewed and not answered(seen)
             srv.send_keys(pane, "y")

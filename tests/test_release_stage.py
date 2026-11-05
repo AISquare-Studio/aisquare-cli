@@ -390,3 +390,39 @@ def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> N
             assert line == was, result.output
     root = CliRunner().invoke(app, ["--help"])
     assert root.exit_code == 0 and MARK not in root.output
+
+
+#: ``aisquare metrics show`` with no turns, as 0.9.2 printed it (6a77e650's cli/common.py).
+HEAD_092_NO_TURNS = (
+    "No turns recorded yet. Connect Claude Code: aisquare agents connect claude-code\n"
+)
+
+
+@pytest.mark.parametrize("codex_here", ["none", "home", "binary"])
+def test_the_empty_metrics_line_names_codex_only_where_it_is_and_marks_it(
+    printed: Callable[..., str], monkeypatch: pytest.MonkeyPatch, codex_here: str
+) -> None:
+    """The connect hint names a stable agent always and a beta one only on a machine that has
+    it (its home or a context file, or its binary on PATH), through the adapter's stage and
+    ``core.agents``' detection, never a name. So a machine without Codex reads 0.9.2's line
+    byte for byte (seq 11130), and one with Codex names both, Codex with its mark."""
+    from aisquare.core import agents as agent_core
+    from aisquare.models import MetricsSummary
+
+    monkeypatch.setattr(
+        agent_core, "detected", lambda spec: codex_here == "home" and spec.name == "codex"
+    )
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: f"/opt/bin/{name}" if codex_here == "binary" and name == "codex" else None,
+    )
+    said = printed(common.emit_metrics_summary, MetricsSummary(turns=0))
+    if codex_here == "none":
+        assert said == HEAD_092_NO_TURNS
+        assert common.connect_hint() == "Connect Claude Code: aisquare agents connect claude-code"
+    else:
+        assert said == (
+            "No turns recorded yet. Connect your coding agent: aisquare agents connect "
+            "claude-code or aisquare agents connect codex (beta)\n"
+        )

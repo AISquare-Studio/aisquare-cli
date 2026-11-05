@@ -46,7 +46,7 @@ from aisquare.models import (
 )
 
 if TYPE_CHECKING:  # the ledger's model only, never loaded for another command
-    from aisquare.core.agent_adapters.types import HookTrustLeft
+    from aisquare.core.agent_adapters.types import AgentAdapter, HookTrustLeft
     from aisquare.services.token_ledger import SessionLedger
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
@@ -742,12 +742,27 @@ def emit_onboard(report: OnboardReport) -> None:
 
 def connect_hint() -> str:
     """What an empty prompt, turn or token listing tells the user to run: ``agents connect``
-    for every agent whose hooks aisquare installs (Claude Code, Codex), never one by name."""
+    for each agent whose hooks aisquare installs, never one by name. A stable agent is named
+    always, as 0.9.2 named Claude Code installed or not; a beta one only once it is on this
+    machine (its home, a context file or its binary on PATH), with its mark. One agent named
+    reads as 0.9.2's line, ``Connect Claude Code: aisquare agents connect claude-code``, so a
+    machine without Codex reads as it did (tests/test_release_stage.py)."""
+    from aisquare.core import agents as agent_core
     from aisquare.core.agent_adapters import adapters
+    from aisquare.core.agent_adapters.types import stage_mark
 
-    hooked = [adapter.id for adapter in adapters() if adapter.capabilities.hooks]
+    def here(adapter: AgentAdapter) -> bool:
+        found = agent_core.spec(adapter.id)
+        if found is not None and agent_core.detected(found):
+            return True
+        return agent_core.on_path(adapter.id) is not None
+
+    hooked = [adapter for adapter in adapters() if adapter.capabilities.hooks]
+    named = [a for a in hooked if a.release_stage == "stable" or here(a)] or hooked
+    if len(named) == 1:
+        return f"Connect {named[0].label}: aisquare agents connect {named[0].id}"
     return "Connect your coding agent: " + " or ".join(
-        f"aisquare agents connect {agent}" for agent in hooked
+        f"aisquare agents connect {agent.id}{stage_mark(agent)}" for agent in named
     )
 
 

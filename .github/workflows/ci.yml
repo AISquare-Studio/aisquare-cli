@@ -53,8 +53,10 @@ permissions:
 #   coverage combines the py3.12 leg's shards' coverage (`--cov` on that leg), reports
 #            core/agent_adapters and the shared seam, and holds their floors
 #            (tests/coverage_floors.py).
-#   codex    Codex's native integration on the pinned CLI (tests/run_codex_native.py):
-#            hooks, MCP, resume, usage and the interactive fleet, a loopback endpoint.
+#   codex    Codex's native integration (tests/run_codex_native.py) on each release the
+#            beta holds: 0.164.0, its floor, and 0.166.0, the current one; hooks, MCP,
+#            resume, usage, the automatic reviewer and the interactive fleet, a loopback
+#            endpoint. codex-latest runs it on the newest release, nightly and by hand.
 #   claude   Claude Code's native suite on the pinned CLI, ubuntu and macOS
 #            (tests/run_claude_native.py): launch, every hook, the fleet, accounts,
 #            transcript and screen, on a loopback Messages stub. claude-latest runs it on
@@ -591,9 +593,16 @@ jobs:
         run: python -m tests.coverage_floors "$RUNNER_TEMP/shards/py3.12" --shards 4
 
   codex:
-    name: Codex native integration (0.164.0)
+    # Each release the Codex beta holds (tests/run_codex_native.py's CODEX_VERSIONS): the
+    # floor and the current one, which a new user gets. Both are required: ci-ok needs
+    # every leg. Moving the pin is a row here and one in CODEX_VERSIONS.
+    name: Codex native integration (${{ matrix.codex }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        codex: ["0.164.0", "0.166.0"]
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
@@ -604,14 +613,45 @@ jobs:
         run: |
           python -m pip install -e ".[dev,serve]"
           sudo apt-get install -y tmux
-          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@0.164.0
+          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@${{ matrix.codex }}
           echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
       - name: Exercise hooks, MCP, resume, usage and the interactive fleet
         run: |
           # The fixture owns its temporary hooks and trusts only those. Its
           # Responses endpoint is loopback; no login, model spend or gateway.
-          # The runner asserts the pinned version and a passing, unskipped test.
-          python -m tests.run_codex_native
+          # The runner asserts the leg's version and a passing, unskipped test.
+          python -m tests.run_codex_native --version ${{ matrix.codex }}
+
+  codex-latest:
+    # The same suite on Codex's newest release, nightly and by hand, so its drift shows
+    # here before a user meets it, as claude-latest does for Claude Code: it decides no
+    # pull request (the pinned legs are the merge gate), starts on every run because ci-ok
+    # needs every job, and off the nightly and a run by hand does nothing and passes. On
+    # those two a red here turns the run red: move the pins, or fix the drift.
+    name: Codex native integration (latest, nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Not the nightly or a run by hand
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: echo "Codex's latest release is tested nightly and by hand, not on this ${{ github.event_name }}"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      - name: Set up Python
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install CLI, MCP, tmux and Codex's latest release
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          python -m pip install -e ".[dev,serve]"
+          sudo apt-get install -y tmux
+          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@latest
+          echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
+      - name: Hooks, MCP, resume, usage and the interactive fleet on the latest codex
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python -m tests.run_codex_native --any-version
 
   claude:
     # Claude Code's native suite (tests/run_claude_native.py): the real `claude`, pinned to
@@ -850,7 +890,7 @@ jobs:
     # than skip: a skipped job satisfies a required check. Anything but `success`
     # fails it, a skipped job included: nothing here is skipped on purpose.
     name: ci-ok
-    needs: [outbox-windows, lint, test, shards, coverage, codex, claude, claude-latest, package]
+    needs: [outbox-windows, lint, test, shards, coverage, codex, codex-latest, claude, claude-latest, package]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

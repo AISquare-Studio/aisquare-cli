@@ -30,7 +30,7 @@ def test_native_runner_rejects_green_pytest_runs_without_native_assertions(
 ) -> None:
     def execute(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if command == ["codex", "--version"]:
-            return subprocess.CompletedProcess(command, 0, stdout=run_codex_native.CODEX_VERSION)
+            return subprocess.CompletedProcess(command, 0, stdout="codex-cli 0.166.0\n")
         assert kwargs["env"]["AISQUARE_TEST_CODEX"] == "1"  # type: ignore[index]
         assert any(arg.endswith("test_codex_native.py") for arg in command)
         path = Path(next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml=")))
@@ -64,31 +64,65 @@ def test_native_runner_rejects_green_pytest_runs_without_native_assertions(
     monkeypatch.delenv("AISQUARE_TEST_CODEX", raising=False)
     monkeypatch.setattr(subprocess, "run", execute)
     if message is None:
-        assert run_codex_native.run() == 0
+        assert run_codex_native.run(["--version", "0.166.0"]) == 0
     else:
         with pytest.raises(RuntimeError, match=message):
-            run_codex_native.run()
+            run_codex_native.run(["--version", "0.166.0"])
 
 
-def test_native_runner_refuses_a_different_codex_version(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "argv", [["--version", "0.164.0"], []], ids=["another release", "none named"]
+)
+def test_native_runner_refuses_a_codex_it_was_not_told_to_run(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leg runs the release it installed and names (``--version``, one of the beta's), or
+    says it runs whatever is there (``--any-version``, the nightly's); a leg that names
+    neither, or another release than the one it got, proves nothing and fails."""
     calls: list[list[str]] = []
 
     def execute(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="codex-cli 0.0.0")
+        return subprocess.CompletedProcess(command, 0, stdout="codex-cli 0.166.0")
 
     monkeypatch.setattr(subprocess, "run", execute)
-    with pytest.raises(RuntimeError, match="Expected codex-cli"):
-        run_codex_native.run()
-    assert calls == [["codex", "--version"]]
+    if argv:
+        with pytest.raises(RuntimeError, match=re.escape("Expected Codex 0.164.0, got '0.166.0'")):
+            run_codex_native.run(argv)
+        assert calls == [["codex", "--version"]]
+    else:
+        with pytest.raises(SystemExit):
+            run_codex_native.run(argv)
+        assert calls == []
 
 
-def test_ci_requires_the_native_runner_and_the_same_version_pin() -> None:
+def _job(text: str, name: str) -> str:
+    found = re.search(rf"^  {name}:\n(.*?)(?=^  [\w-]+:|\Z)", text, re.M | re.S)
+    assert found, name
+    return found[1]
+
+
+def test_ci_runs_the_native_suite_on_every_release_the_beta_holds_and_latest_nightly() -> None:
+    """R7 of 0.10.0: the ``codex`` job is a matrix of the beta's releases
+    (``run_codex_native.CODEX_VERSIONS``: the floor and the current one), each installed and
+    named to the runner, both required by ``ci-ok``; ``codex-latest`` runs the newest release
+    nightly and by hand with ``--any-version``, and decides no other run."""
     text = _strip_comments(
         (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
     )
-    native = re.search(r"^  codex:\n(.*?)(?=^  \w+:|\Z)", text, re.M | re.S)
-    assert native
-    assert re.search(r"^          python -m tests.run_codex_native$", native[1], re.M)
-    install = re.search(r"^          npm install .+ @openai/codex@(\S+)$", native[1], re.M)
-    assert install and f"codex-cli {install[1]}" == run_codex_native.CODEX_VERSION
+    native = _job(text, "codex")
+    matrix = re.search(r"^        codex: \[(.*)\]$", native, re.M)
+    assert matrix and tuple(v.strip(' "') for v in matrix[1].split(",")) == (
+        run_codex_native.CODEX_VERSIONS
+    )
+    assert re.search(r"^ +npm install .+ @openai/codex@\$\{\{ matrix.codex \}\}$", native, re.M)
+    assert re.search(
+        r"^ +python -m tests.run_codex_native --version \$\{\{ matrix.codex \}\}$", native, re.M
+    )
+    latest = _job(text, "codex-latest")
+    assert re.search(r"^ +npm install .+ @openai/codex@latest$", latest, re.M)
+    assert re.search(r"^ +run: python -m tests.run_codex_native --any-version$", latest, re.M)
+    gate = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    assert latest.count(f"if: {gate}") >= 4, "every step but the notice runs only then"
+    needs = re.search(r"^    needs: \[(.*)\]$", _job(text, "ci-ok"), re.M)
+    assert needs and {"codex", "codex-latest"} <= {n.strip() for n in needs[1].split(",")}

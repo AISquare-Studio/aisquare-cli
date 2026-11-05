@@ -15,18 +15,26 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 0.9.2; what changes for every user is listed below.**
 
 **Upgrading:**
-- Run `aisquare upgrade`, or take the update `asq` offers.
-- The store migrates from v43 to v50 on first open, by itself. Each step adds a table or a
-  column and drops nothing: the rows you have are marked as Claude Code's, and the account
-  order you have becomes the one order below, so nothing moves.
-- Agents left running across the upgrade keep running, and `fleet tell`, `stop`, `reap` and
-  `shutdown` act on them as before. A restart, switch or hand-over of one starts it fresh
-  with a hand-off prompt instead of resuming its conversation. Agents spawned from 0.10.0
-  on resume as before.
-- <!-- R3: the rollback, to be confirmed by R3's note (read from the code, not measured). -->
-  Going back to 0.9.2 keeps the v50 store as it is: 0.9.2 opens it as current and never
-  reads what 0.10.0 added. Codex slots and Codex agents mean nothing to it. Stop the agents
-  0.9.2 spawned before you upgrade again, since 0.10.0 cannot restart or switch them.
+- Run `aisquare upgrade`, or use asq's own *Update* button. From a shell, quit asq first
+  (and `aisquare serve` or `remote serve`), so no 0.9.2 asq starts agents after the
+  upgrade.
+- `aisquare upgrade` keeps your `config.toml`, hooks, accounts, their order and the
+  default (rank 1). The store goes from 0.9.2's v43 to v50 on the first command after the
+  upgrade, in about 0.3 s on a store of 10,000 board events. Each step adds a table or a
+  column and nothing is removed: the rows you have are marked as Claude Code's, and your
+  account order becomes the one order below, so nothing moves.
+- Agents already running keep working: their hooks call 0.10.0, and `fleet tell`, `stop`
+  and `ls` reach them.
+<!-- #91 (R5): the lines for a running agent's first restart, switch or hand-over, and for a
+     home that ran a pre-release build, from #91's DONE note; and the rollback's last
+     sentence and the first bullet's reason, if #91 changes what 0.10.0 does with an agent
+     0.9.2 started after the census. -->
+- Going back with `aisquare upgrade --version 0.9.2` works on the v50 store: 0.9.2 opens
+  it as it is, and everything 0.10.0 added stays for when you upgrade again. While on
+  0.9.2, an account reorder or a new default is dropped when you upgrade again, and an
+  account you add is ranked last. An agent 0.9.2 spawns, restarts or switches is not one
+  0.10.0 can manage afterwards: stop them (`aisquare fleet shutdown`) before upgrading
+  again.
 
 ### Codex support (beta)
 
@@ -87,6 +95,13 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   most 64 KiB. Over SSH, a launch takes the Mac's last usage readings as floors. Doctor
   has *fleet server env* and *accounts sharing* rows, and `aisquare upgrade` says *hooks
   already current* for a hooks file it left alone.
+- What you may see in output: `aisquare accounts` names `[--agent codex]` in its last
+  line. `--json` output gains keys and loses none: `agent`, `detail` and `installs` in
+  `accounts`; `agent` and `exit_command` in `fleet ls`; a session's `agent` and
+  `native_session_id` in `fleet ls` and `board`; `price_lists` in `metrics tokens`. `config list` shows new defaults: `[agents] mcp`
+  (off; on, each launch is handed aisquare's MCP server), `[agents.models]`, a role's
+  `agent_args`, and `[accounts] cross_agent_handover` (on). Doctor's Codex row, which said
+  support was planned for 0.10, now reports Codex's integration as `codex (beta)`.
 <!-- R1-R3: one line for each item they classify CLAUDE-VISIBLE and the owner keeps. -->
 
 ### Fixed

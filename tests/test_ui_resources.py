@@ -174,9 +174,12 @@ def test_a_hidden_page_samples_nothing_and_shown_again_resumes(
         await pilot.pause(0.3)
         hidden_later = sampler.calls
         view.display = True
-        # Shown again, its Show event starts the timer and samples on a worker thread: read
-        # once that sample came, not one 0.3 s pause later, which a loaded runner outran
-        # (116 > 116, py3.12 shard 3/4, CI 42116492406; R7's flake list).
+        # Shown again, its Show event (the pilot's pause lets the screen refresh that sends
+        # it) starts the timer and samples on a worker thread: then read once that sample
+        # came, which a loaded runner took past the 0.3 s (116 > 116, py3.12 shard 3/4, CI
+        # 42116492406; R7's flake list). Without the pause, waiting on workers alone, the
+        # page was never shown again on CI (42123077743, 42129324547).
+        await pilot.pause(0.3)
         await settle_until_held(
             view.app, lambda: sampler.calls > hidden_later, what="a sample, the page shown again"
         )

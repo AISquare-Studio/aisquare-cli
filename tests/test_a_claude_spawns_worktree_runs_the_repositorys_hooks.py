@@ -654,7 +654,7 @@ def test_forgetting_a_root_under_another_agents_name_is_refused_naming_the_comma
 ) -> None:
     """Reopen 1, item 2: `disconnect claude-code --forget-root` forgot Codex's root, and so did
     `disconnect nosuch`."""
-    import shlex
+    from aisquare.core.shell_line import command_line
 
     root = _root(tmp_path / "work")
 
@@ -662,7 +662,8 @@ def test_forgetting_a_root_under_another_agents_name_is_refused_naming_the_comma
     unknown = _cli("--json", "agents", "disconnect", "nosuch", "--forget-root", str(root), "--yes")
 
     assert other.exit_code == 1
-    forget = shlex.join(["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)])
+    # Quoted as this OS's shell reads it (`shell_line`), as the refusal prints it.
+    forget = command_line(["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)])
     assert " ".join(other.output.split()) == (
         f"✗ {root} was recorded by a Codex agent, not claude-code: forget it with {forget}"
     )
@@ -682,17 +683,21 @@ def test_the_command_printed_for_a_root_no_agent_of_this_release_recorded_works_
     """Reopen 1, item 2: such a root's line said `disconnect unknown`, a placeholder. The line
     and the list print one command for it, naming this release's agent that sandboxes its
     tools, and that command, pasted, forgets it."""
-    import shlex
+    from aisquare.core.shell_line import command_line
 
     _post_checkout(project, tmp_path, "husky")
     root = _root(project.root.parent, agent=agent)
-    forget = shlex.join(["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)])
+    # What the shell reads the printed line as: these words, quoted as this OS's shell reads
+    # them (`shell_line`), so the pasted command is this argv.
+    argv = ["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)]
+    forget = command_line(argv)
 
     [said] = _said(fleet_service.spawn(project, "coder", worktree=True))
     listed = _cli("agents", "status", "--roots")
-    pasted = _cli(*shlex.split(forget)[1:], "--yes")
+    pasted = _cli(*argv[1:], "--yes")
 
-    assert "unknown" not in said and said.endswith(f"`{forget}` forgets it"), said
+    assert "disconnect unknown" not in said, said
+    assert said.endswith(f"`{forget}` forgets it"), said
     assert f"forget it: {forget}" in listed.stdout, listed.stdout
     assert pasted.exit_code == 0, pasted.output
     with store_session() as store:

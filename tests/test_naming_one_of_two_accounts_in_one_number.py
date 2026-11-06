@@ -483,3 +483,83 @@ def test_the_list_shows_the_agents_form_only_where_a_number_is_shared(
     assert "codex:5" in slots and "claude-code:5" in slots, result.stdout
     assert {"1", "2", "3", "4"} <= set(slots), "a number of one account reads as it did"
     assert "5" not in slots
+
+
+# --- #100's reopen 3 (seq 11320) -------------------------------------------------------------
+
+
+def test_team_bind_of_a_bare_shared_number_is_refused_with_codex_5_signed_in(
+    collided: Pair,  # noqa: F811
+    runner: CliRunner,
+) -> None:
+    """B3-1: Codex 5 signed in and first in the order, so the role's agent read Codex and the
+    bare 5 narrowed to Codex 5: a ✓, and then every launch of the role refused the 5 the
+    binding stored with no agent. Refused now, whoever is signed in, as `accounts` refuses."""
+    team_service.activate(Path.cwd())
+
+    text = runner.invoke(app, ["team", "bind", "coder", "--account", "5"])
+    as_json = runner.invoke(app, ["--json", "team", "bind", "coder", "--account", "5"])
+
+    assert text.exit_code == 1, text.output
+    assert "Name one as codex:5 or claude-code:5" in _said(text)
+    payload = json.loads(as_json.stdout)
+    assert (payload["error"], payload["ref"]) == ("ambiguous_account", "5"), payload
+    assert payload["detail"].startswith("slot 5 is two accounts")
+    assert "coder" not in load_config().team.profiles, "nothing bound"
+
+
+@pytest.mark.parametrize("agent", [CODEX, CLAUDE])
+def test_team_bind_with_agent_stores_what_it_resolved_and_the_launch_runs_it(
+    collided: Pair,  # noqa: F811
+    runner: CliRunner,
+    agent: str,
+) -> None:
+    """B3-1: --agent narrows it; the binding keeps that agent with the number, so the role's
+    launch runs exactly that account (and 0.9.2, after a rollback, reads the number as it
+    always did)."""
+    team_service.activate(Path.cwd())
+
+    result = runner.invoke(app, ["team", "bind", "coder", "--agent", agent, "--account", "5"])
+
+    assert result.exit_code == 0, result.output
+    profile = load_config().team.profiles["coder"]
+    assert (profile.agent, profile.account) == (agent, "5")
+    launch = agent_launch.resolve("coder", measure=False)
+    assert launch.adapter.id == agent
+    picked = service.choose(profile.account, role="coder", agent=launch.adapter.id).account
+    assert picked is not None and (picked.agent, picked.slot) == (agent, 5)
+
+
+def test_an_email_on_both_agents_is_no_binding_without_agent(
+    signed: Pair, runner: CliRunner
+) -> None:
+    _codex, claude = signed
+    _claude_sign_in(claude, "codex@example.com")  # one person's address on both agents
+    team_service.activate(Path.cwd())
+
+    result = runner.invoke(
+        app, ["--json", "team", "bind", "coder", "--account", "codex@example.com"]
+    )
+
+    assert json.loads(result.stdout)["error"] == "ambiguous_account", result.stdout
+
+
+def test_a_launch_naming_two_accounts_by_one_alias_says_the_ambiguity_under_json(
+    signed: Pair, runner: CliRunner
+) -> None:
+    """B3-2, the launch's second branch (after `choose`): two "work"s an older build stored,
+    which `--agent` does not narrow (an alias names an account, not an agent's)."""
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        store.set_claude_account_alias(5, "work")
+        store.set_agent_account_alias(CODEX, 5, "work")
+
+    result = runner.invoke(
+        app, ["--json", "launch", "agent", "--agent", CLAUDE, "--account", "work"]
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert (payload["error"], payload["ref"]) == ("ambiguous_account", "work"), payload
+    assert payload["detail"].startswith("'work' names codex:5 and claude-code:5"), payload

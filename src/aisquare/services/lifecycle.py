@@ -1256,7 +1256,8 @@ def _keep_the_numbers(plan: UpgradePlan) -> str | None:
         return None
     return (
         f"{plan.destination} may give an account you add there the number of another agent's "
-        f"account, which this release then lists last: not kept at {'; '.join(unkept)}"
+        f"account, which this release then lists last: its number was not kept, as "
+        f"{'; '.join(unkept)}"
     )
 
 

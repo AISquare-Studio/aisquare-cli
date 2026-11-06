@@ -652,7 +652,7 @@ def reserve_number(account: ClaudeAccount) -> list[str]:
                 body = {"slot": account.slot, "agent": account.agent, "reserved": True}
                 path.write_text(json.dumps(body) + "\n", encoding="utf-8")
         except OSError as exc:
-            failed.append(f"{path} ({exc.strerror or exc})")
+            failed.append(f"{path} could not be written ({exc.strerror or exc})")
     return failed
 
 

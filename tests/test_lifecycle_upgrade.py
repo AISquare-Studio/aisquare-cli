@@ -4197,28 +4197,46 @@ def test_a_move_back_keeps_the_number_of_a_codex_account_with_no_read_before_it(
     assert "not kept at" not in ran.stdout, "every number kept: nothing to say"
 
 
+@pytest.mark.parametrize("failing", ["write", "list"])
 def test_a_move_back_says_a_number_it_could_not_keep_and_moves_back_all_the_same(
-    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failing: str,
 ) -> None:
+    """A2's best effort, said in a sentence (#100's reopen 3, B3-3): a reserve that cannot be
+    written (here its folder is a file), or accounts that cannot be listed."""
     from aisquare.core import claude_accounts as accounts_core
 
     monkeypatch.setattr(lifecycle, "__version__", "0.10.1")
-    reserve = _codex_account_an_earlier_build_made()
-    monkeypatch.setattr(
-        accounts_core,
-        "reserve_every_number",
-        lambda: [f"{reserve} (Permission denied)"],
-    )
+    _codex_account_an_earlier_build_made()
+    if failing == "write":
+        blocked = tmp_path / "a-file"
+        blocked.write_text("", encoding="utf-8")
+        monkeypatch.setattr(accounts_core, "_legacy_number_paths", lambda account: [blocked / "5"])
+    else:
+
+        def unlistable() -> list[Any]:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(accounts_core, "all_managed_accounts", unlistable)
     machine.new_version = "0.9.2"
 
     ran = runner.invoke(app, ["upgrade", "--version", "0.9.2", "--yes"])
 
     assert ran.exit_code == 0, ran.output
     assert len(machine.installs) == 1, "the move went on"
-    assert (
+    said = " ".join(ran.stdout.split())
+    lead = (
         "· 0.9.2 may give an account you add there the number of another agent's account, "
-        f"which this release then lists last: not kept at {reserve} (Permission denied)"
-    ) in " ".join(ran.stdout.split())
+        "which this release then lists last: its number was not kept, as "
+    )
+    if failing == "write":
+        assert f"{lead}{blocked / '5'} could not be written (" in said, said
+    else:
+        assert f"{lead}the accounts could not be listed (Permission denied)" in said, said
 
 
 def test_a_claude_only_move_back_writes_nothing_in_its_accounts_folder(

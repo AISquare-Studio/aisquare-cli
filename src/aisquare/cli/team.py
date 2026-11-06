@@ -1110,6 +1110,12 @@ def bind(
                 # Claude Code's bindings take any slot, as they did before Codex had slots;
                 # a number two agents' accounts hold is the role's agent's (#100's reopen, D).
                 any_slot = claude_accounts_core.kind(whose).legacy_slots
+                if agent is None:
+                    # With no --agent the binding names no agent, so every later launch reads
+                    # the account with none: one two agents' accounts answer to (a number, or
+                    # one email on both) is refused now, whoever is signed in, rather than
+                    # bound with a ✓ and refused at every launch (#100's reopen 3, B3-1).
+                    claude_accounts_service.resolve(account)
                 try:
                     claude_accounts_service.resolve(account, agent=None if any_slot else whose)
                 except claude_accounts_service.AmbiguousAccount:

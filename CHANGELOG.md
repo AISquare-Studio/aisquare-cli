@@ -47,6 +47,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - **Accounts.** `aisquare accounts add --agent codex` adds a slot and runs `codex login` in
   it. Usage is read off each account's own sessions, and an agent at its limit can move to
   the Codex account with the most room.
+- **Your own Codex home** (`~/.codex`, or `$CODEX_HOME`) is one of your accounts only once
+  aisquare has taken it on: connected (`agents connect codex`, `install.sh --agent codex`),
+  an account of Codex added (`accounts add --agent codex`), signed in from Welcome, or
+  arranged by its number (`accounts alias|default|move|order|disable 0`). Until then it
+  takes no launch that nothing pins and no hand-over crosses to it, so a Claude Code user
+  with Codex merely installed and logged in launches and waits for a limit's reset as on
+  0.9.2. `--account 0` still names it.
+- **Doctor** grades the Codex home your shell names (`CODEX_HOME`) only when Codex is your
+  selected agent, and a Codex home only aisquare's records name (0.7.0's `agents connect
+  codex`) only where Codex is installed: with no Codex here, its row reads ok, as on 0.9.2.
 - **Hand-off across agents.** `fleet switch --agent <agent>`, or *Hand off from* in the
   Spawn dialog, starts the other agent fresh with a brief of the work. The brief goes to
   the other agent's vendor, with credentials scrubbed out first.
@@ -111,6 +121,15 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `~/.aisquare/captain/mcp.json` is no longer written and 0.9.2's copy is left where it is.
   `persona import --engine manager` gives Claude Code the strict form of its answer's
   schema (every field required, no other).
+- **aisquare's own git runs none of the repository's hooks** or file-system monitor, so a
+  hook a sandboxed agent wrote in the tree never runs outside its sandbox. The one
+  exception is 0.9.2's: a Claude Code `fleet spawn --worktree` in a project where no Codex
+  agent has run makes its worktree with the repository's hooks (husky's or lefthook's
+  `post-checkout`). In a project a Codex agent has run in, a Claude Code spawn's worktree
+  runs none.
+- **`persona import <name>`** looks where 0.9.2 looked first, in its order (Claude Code's
+  `~/.claude/skills`, then the repository's `.claude/skills`), then in the other agents'
+  skill folders; `persona import --list` lists them in that order.
 - **Every `aisquare launch`** (by hand, `team spawn`, a fleet window) gives the agent
   `AISQUARE_LAUNCH_ID`, `AISQUARE_LAUNCH_AGENT` and `AISQUARE_LAUNCH_PID`; `accounts run`
   does not. The line `team spawn` prints is `<python> -P -m aisquare launch <role> --agent
@@ -118,6 +137,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `AISQUARE_ROLE=… claude …`; pasted, it prints launch's banner.
 - **On Windows, `aisquare launch`** (and a pasted `team spawn` line) now waits for its
   agent and exits with its status; Ctrl-C goes to the agent.
+- **On Windows, `aisquare upgrade` and `aisquare uninstall`** name every session started
+  with `aisquare launch` that is still running (each holds aisquare's files open, so a
+  reinstall or removal beside it fails on files in use) and say to end it first, as they
+  do for an asq; the uninstall refuses with `launcher_running`, and the `--json` plans
+  list them under `launchers`.
 - **Model availability is cached per account:** after a Claude Code update, a model that
   was available stays cached for its 24 h, and only one that was refused is probed again.
   The first `team spawn` after upgrading from 0.9.2 probes once per account.
@@ -140,7 +164,8 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     `agent` and `exit_command` in `fleet ls`; a session's `agent` and `native_session_id`
     in `fleet ls` and `board`; `agent` in `upgrade`'s and `uninstall`'s rows (and `plugin`
     in uninstall's plugin rows) and in `persona export`; `killed` in `fleet stop`;
-    `price_lists` in `metrics tokens`; and `exit_command` in Remote's needs cards.
+    `price_lists` in `metrics tokens`; `launchers` in `upgrade`'s and `uninstall`'s
+    plans; and `exit_command` in Remote's needs cards.
   - Files: `launch-seals/` is new; `agents.json` gains `hook_files_made`; a saved
     `config.toml` gains an empty `[fleet.roles.<role>.agent_args]` table per role. 0.9.2
     reads both. `config list` shows new defaults: `[agents] mcp` (off; on, each launch is
@@ -152,6 +177,7 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     the agent's own fields below it in charge). *App settings* gains *captain's agent*
     under the captain's box and *hand off across agents* among the accounts' rules. The
     Settings hub's *Usage & stats* reads *all your agents' sessions*.
+<!-- R2 delta run (SMOKE14 items 2-5, 9 with the owner's sign-ins): its lines, if any. -->
 
 ### Fixed
 
@@ -186,6 +212,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - Turning Remote on again just as the last one stops is no longer refused with *another
   Remote is on for this ~/.aisquare*.
 - `agents disconnect` and uninstall remove a hooks file aisquare created and left empty.
+- An agent Codex 0.166.0 draws with no spinner in its status line reads working once you
+  allow its command, not asking until the command ends.
+- A Codex launch whose resolver is slow keeps its native telemetry (its local receiver no
+  longer looks up its own name).
 
 ## [0.9.2] - 2026-11-03
 

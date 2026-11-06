@@ -13,6 +13,7 @@ wherever it is.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -23,7 +24,6 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.config import load_config, save_config
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import diagnostics
-from tests.test_install_script_functions import sh
 
 CODEX = "codex"
 
@@ -69,7 +69,13 @@ def _codex_rows() -> list[DoctorCheck]:
 
 def _install_sh_amber(rows: list[DoctorCheck]) -> list[str]:
     """What install.sh's ``doctor_amber`` lists for a doctor payload of ``rows`` (an ok row
-    beside them), which ``summary`` then counts as expected, actionable or unexpected."""
+    beside them), which ``summary`` then counts as expected, actionable or unexpected. A POSIX
+    script: where its tests skip themselves (Windows), so does this half, the doctor's rows
+    asserted before it."""
+    if sys.platform == "win32":
+        pytest.skip("install.sh is a POSIX shell script (its own tests skip here too)")
+    from tests.test_install_script_functions import sh
+
     payload = json.dumps(
         [
             {"name": "home", "status": "ok", "detail": "x", "fix": None},

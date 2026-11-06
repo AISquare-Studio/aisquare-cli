@@ -5,6 +5,9 @@ version, then runs every ``tests/test_claude_native*.py`` module with
 ``AISQUARE_TEST_CLAUDE=1``, and fails unless each module ran at least one test that was
 not skipped, and none failed. ``--any-version`` is the scheduled leg's: whatever ``latest``
 installed, said in the log, so Claude Code's drift shows before a user meets it.
+``--no-skips`` is every Claude leg's: each runs the whole suite on an npm install, so one
+test that skipped proves less than the leg says, and fails it, named (review r40 of #113,
+finding 14). A strict ``xfail`` is an expected failure, not a skip.
 """
 
 from __future__ import annotations
@@ -49,6 +52,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="run on whatever claude is installed (the scheduled leg on latest)",
     )
+    parser.add_argument(
+        "--no-skips",
+        action="store_true",
+        help="fail when any test skipped (every Claude leg: each runs them all)",
+    )
     asked = parser.parse_args(argv)
     version = installed_version()
     if not asked.any_version and version != CLAUDE_VERSION:
@@ -81,6 +89,16 @@ def run(argv: Sequence[str] | None = None) -> int:
                 raise RuntimeError(f"Native Claude Code tests failed in {module.name}")
             if not any(case.find("skipped") is None for case in own):
                 raise RuntimeError(f"Native Claude Code tests all skipped in {module.name}")
+            skipped = [
+                str(case.get("name"))
+                for case in own
+                if (mark := case.find("skipped")) is not None and mark.get("type") != "pytest.xfail"
+            ]
+            if asked.no_skips and skipped:
+                raise RuntimeError(
+                    f"Native Claude Code tests skipped in {module.name}, where this leg runs "
+                    f"them all: {', '.join(skipped)}"
+                )
     return 0
 
 

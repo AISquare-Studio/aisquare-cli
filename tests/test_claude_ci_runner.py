@@ -80,6 +80,46 @@ def test_native_runner_rejects_green_pytest_runs_without_native_assertions(
             run_claude_native.run([])
 
 
+def test_no_skips_fails_a_leg_where_one_native_test_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each Claude leg runs the whole suite, so one test that skipped while the rest of its
+    module passed proves less than the leg says, and fails it, named; a strict xfail is no
+    skip (review r40 of #113, finding 14). Without the flag, as before: only a module that
+    skipped every test fails."""
+
+    def execute(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command == ["claude", "--version"]:
+            return subprocess.CompletedProcess(command, 0, stdout="2.1.318 (Claude Code)\n")
+        path = Path(next(arg.split("=", 1)[1] for arg in command if arg.startswith("--junitxml=")))
+        cases = ""
+        for module in run_claude_native.NATIVE_MODULES:
+            name = f"tests.{module.stem}"
+            cases += f'<testcase classname="{name}" name="ran"/>'
+            cases += (
+                f'<testcase classname="{name}" name="test_f">'
+                '<skipped type="pytest.xfail" message="strict"/></testcase>'
+            )
+            if module.stem == "test_claude_native_transcript":
+                cases += (
+                    f'<testcase classname="{name}" name="test_npm">'
+                    '<skipped type="pytest.skip" message="not an npm install"/></testcase>'
+                )
+        path.write_text(f"<testsuites><testsuite>{cases}</testsuite></testsuites>")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", execute)
+    assert run_claude_native.run([]) == 0
+    with pytest.raises(
+        RuntimeError, match=r"test_claude_native_transcript\.py, where this leg runs"
+    ):
+        run_claude_native.run(["--no-skips"])
+    try:
+        run_claude_native.run(["--no-skips"])
+    except RuntimeError as exc:
+        assert str(exc).endswith(": test_npm"), "named, and the xfail is not"
+
+
 def test_native_runner_refuses_another_claude_unless_any_version_is_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -106,7 +146,7 @@ def test_the_native_suite_is_every_claude_native_module() -> None:
 
 def test_ci_runs_the_pinned_claude_on_ubuntu_and_macos_with_the_runner() -> None:
     job = _job("claude")
-    assert re.search(r"^          python -m tests\.run_claude_native$", job, re.M), job
+    assert re.search(r"^          python -m tests\.run_claude_native --no-skips$", job, re.M), job
     install = re.search(r"npm install .+ @anthropic-ai/claude-code@(\S+)$", job, re.M)
     assert install and install[1] == run_claude_native.CLAUDE_VERSION
     assert f"({run_claude_native.CLAUDE_VERSION}," in job, "the job's name says the pin"
@@ -124,7 +164,7 @@ def test_the_latest_leg_runs_nightly_and_by_hand_and_passes_untested_elsewhere()
         "github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'"
     )
     assert all(step["if"] == nightly for step in steps[1:]), steps
-    assert steps[-1]["run"] == "python -m tests.run_claude_native --any-version"
+    assert steps[-1]["run"] == "python -m tests.run_claude_native --any-version --no-skips"
     assert "@anthropic-ai/claude-code@latest" in steps[-2]["run"]
     triggers = workflow()[True]  # YAML 1.1 reads the `on:` key as True
     assert "schedule" in triggers and "workflow_dispatch" in triggers

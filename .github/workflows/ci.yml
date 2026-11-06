@@ -707,8 +707,8 @@ jobs:
       - name: Launch, hooks, fleet, accounts, transcript and screen on the real claude
         run: |
           # The runner asserts the pinned version, and that every module ran a test that
-          # passed and none failed.
-          python -m tests.run_claude_native
+          # passed, none failed and none skipped.
+          python -m tests.run_claude_native --no-skips
 
   claude-latest:
     # The same suite on Claude Code's newest release, nightly and by hand, so its drift
@@ -740,7 +740,7 @@ jobs:
           echo "$RUNNER_TEMP/claude/bin" >> "$GITHUB_PATH"
       - name: Launch, hooks, fleet, accounts, transcript and screen on the latest claude
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: python -m tests.run_claude_native --any-version
+        run: python -m tests.run_claude_native --any-version --no-skips
 
   package:
     name: package (${{ matrix.os }})

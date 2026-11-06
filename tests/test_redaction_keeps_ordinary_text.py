@@ -54,7 +54,6 @@ KEPT_NAMES = [
     "token_type",
     "num_keys",
     # more of the kind
-    "jsonwebtoken",
     "tokenizer",
     "input_tokens",
     "token_endpoint",
@@ -68,6 +67,19 @@ KEPT_NAMES = [
     "key",
     "PWD",
     "OLDPWD",
+    # pagination cursors (reopen 1, F2)
+    "NextToken",
+    "nextPageToken",
+    "pageToken",
+    "NextContinuationToken",
+    "continuationToken",
+    "syncToken",
+    "next_page_token",
+    "paginationToken",
+    "cursorToken",
+    "nexttoken",
+    # a segment does not start after a digit: ``auth`` here is not one
+    "x509auth",
 ]
 
 #: The ruling's credential names, and more of the kind: joined, suffixed, cased each way.
@@ -111,6 +123,28 @@ REMOVED_NAMES = [
     "token_value",
     "password_hash",
     "password_confirmation",
+    "api_key_v2_prod",
+    "DB_PASSWORD_PROD_V2",
+    # one word, in one case (reopen 1, F1)
+    "PGPASSWORD",
+    "MYSQLPASSWORD",
+    "REDISPASSWORD",
+    "newpassword",
+    "oldpassword",
+    "currentpassword",
+    "confirmpassword",
+    "JWTSECRET",
+    "jwtsecret",
+    "WEBHOOKSECRET",
+    "OAUTHTOKENSECRET",
+    "mytoken",
+    "npmtoken",
+    "hftoken",
+    "GITHUBTOKEN",
+    # the binary forms (reopen 1, F1)
+    "SecretBinary",
+    "secret_binary",
+    "SecretBytes",
 ]
 
 
@@ -143,6 +177,20 @@ def test_a_quoted_credential_name_takes_its_value_and_keeps_the_name(name: str) 
         ("better-auth", ">=1.0.0 <2"),
         ("next-auth", "latest"),
         ("next-auth", "workspace:*"),
+        ("jsonwebtoken", "^9.0.2"),
+        # reopen 1, F2: dist-tags and the spec protocols
+        ("next-auth", "beta"),
+        ("next-auth", "canary"),
+        ("next-auth", "nightly"),
+        ("next-auth", "experimental"),
+        ("better-auth", "github:better-auth/better-auth#main"),
+        ("@octokit/auth-token", "catalog:"),
+        ("my-token", "git+https://github.com/org/my-token.git"),
+        ("my-token", "git://github.com/org/my-token.git"),
+        ("x-auth", "https://registry.example.com/x-auth/-/x-auth-1.0.0.tgz"),
+        ("x-auth", "https://github.com/org/x-auth#v1.2.0"),
+        ("x-auth", "patch:x-auth@1.0.0#./x.patch"),
+        ("x-auth", "portal:../x-auth"),
     ],
 )
 def test_a_package_whose_name_ends_in_a_credentials_word_keeps_its_version(
@@ -157,7 +205,16 @@ def test_a_package_whose_name_ends_in_a_credentials_word_keeps_its_version(
 
 def test_a_credential_name_with_a_value_that_is_not_a_version_is_still_taken() -> None:
     """The version's shape is the start of the value, not a value that holds digits."""
-    for value in ("hunter2.0rocks", "4abc.def", "v" + SECRET):
+    for value in (
+        "hunter2.0rocks",
+        "4abc.def",
+        "v" + SECRET,
+        "beta" + SECRET,
+        "github-" + SECRET,
+        # an http(s) URL that is neither a tarball's nor a git ref's: a webhook, a signed download
+        "https://hooks.slack.com/services/T0000/B0000/" + SECRET,
+        "https://cdn.example.com/x-1.0.0.tgz?X-Amz-Signature=" + SECRET,
+    ):
         text = f'{{"auth": "{value}"}}'
         assert redact(text, RedactionLevel.standard) == f'{{"auth": {MARKER}}}', value
 
@@ -183,6 +240,17 @@ def test_a_credential_name_with_a_value_that_is_not_a_version_is_still_taken() -
         (f"{HEADER}\n{BODY[0]}\nthen prose after it", f"{MARKER}\nthen prose after it"),
         (f"KEY={HEADER} {BODY[0]} end of it", f"KEY={MARKER} end of it"),
         (f"./docs/keys.md:3:{HEADER}\n./b.sh:12:if", f"./docs/keys.md:3:{HEADER}\n./b.sh:12:if"),
+        # reopen 1: a long word, or a path, after a header is prose: it does not read as base64
+        (
+            f"{HEADER}\ninternationalization breaks when I paste the key",
+            f"{HEADER}\ninternationalization breaks when I paste the key",
+        ),
+        (
+            f"{HEADER}\n/srv/projects/deploy/keys is where it lives",
+            f"{HEADER}\n/srv/projects/deploy/keys is where it lives",
+        ),
+        # and a run of 30 that does, with prose after it on its line, is the key's
+        (f"{HEADER}\n{BODY[0][:30]} is the start of it", f"{MARKER} is the start of it"),
     ],
 )
 def test_a_header_with_no_footer_loses_its_body_and_the_prose_after_it_stays(
@@ -254,6 +322,15 @@ def test_a_line_of_one_word_after_a_keys_lines_is_read_as_its_last_line() -> Non
     text = f"{HEADER}\n{BODY[0]}\nthanks\nwhat now?"
 
     assert _both(text) == (f"{MARKER}\nwhat now?",) * 2
+
+
+def test_the_clips_notice_stays_after_a_dek_info_line_it_cut() -> None:
+    """An RFC 1421 line runs to its end, and the clip's notice is not the line's: the text still
+    says it was cut (reopen 1)."""
+    mark = insights._TRUNCATION_MARK
+    text = f"{HEADER}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CB{mark}"
+
+    assert _both(text) == (f"{MARKER}{mark}",) * 2
 
 
 @pytest.mark.parametrize(
@@ -335,6 +412,15 @@ CHANGED = {
         "  expires_in: number;\n}"
     ),
     "sql": f"SELECT id FROM users WHERE reset_token = {MARKER};",
+    # C, reopen 1 (F1): names written as one word, and Secrets Manager's binary secret
+    "psql env": (f'subprocess.run(["psql", url], env={{**os.environ, "PGPASSWORD": {MARKER}}})'),
+    "launch.json env": f'{{"env": {{"PGPASSWORD": {MARKER}, "PGUSER": "postgres"}}}}',
+    "npm token by name": f'{{"mytoken": {MARKER}, "hftoken": {MARKER}}}',
+    "secrets manager binary": (
+        # =: ``secretsmanager:`` reads as an unquoted name, as in "iam policy"
+        f'{{"ARN": "arn:aws:secretsmanager:{MARKER}", '
+        f'"SecretBinary": {MARKER}, "VersionStages": ["AWSCURRENT"]}}'
+    ),
 }
 
 

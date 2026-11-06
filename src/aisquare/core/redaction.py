@@ -107,35 +107,41 @@ def _cased(words: tuple[str, ...]) -> str:
     return "(?:" + "|".join(sorted(forms, key=lambda form: (-len(form), form))) + ")"
 
 
-#: Words that make a QUOTED name a credential's name when they END it, as its last segment:
-#: ``refresh_token``, ``clientSecret``, ``DB_PASSWORD``, ``x-auth-token``. A segment starts where
-#: the name does, after a ``_``, ``-`` or ``.``, or at an upper-case letter after a lower-case one
-#: (``accessToken``). Not ``tokens``: ``max_tokens`` counts them; nor the end of a longer word,
-#: which ``jsonwebtoken`` (a package, in a ``package.json``) is.
-_NAME_WORDS = ("token", "secret", "password", "passwd", "credential", "credentials", "auth")
+#: Words that make a QUOTED name a credential's name when they END it: as its last segment
+#: (``refresh_token``, ``clientSecret``, ``DB_PASSWORD``, ``x-auth-token``), or as the end of a
+#: name written as one word (``PGPASSWORD``, ``newpassword``, ``JWTSECRET``, ``npmtoken``). A
+#: segment starts where the name does, after a ``_``, ``-`` or ``.``, or at an upper-case letter
+#: after a lower-case one (``accessToken``). Not ``tokens``: ``max_tokens`` counts them. A package
+#: whose name ends in one (``jsonwebtoken``) is told by its value, :data:`_PACKAGE_SPEC`.
+_NAME_ENDINGS = ("token", "secret", "password", "passwd", "credential", "credentials")
 
-#: The same words written onto one of these without a separator: ``accesstoken``,
-#: ``ACCESSTOKEN``, ``dbpassword``, ``clientsecret``, ``apitoken``, ``authtoken``.
-_NAME_JOINED = (
-    "access", "refresh", "auth", "api", "id", "bearer", "session", "csrf", "xsrf", "oauth",
-    "app", "client", "user", "admin", "root", "db", "master", "bot",
-)  # fmt: skip
+#: Words that count only as a WHOLE segment: ``basic_auth``, ``basicAuth`` and ``auth`` (Docker's
+#: ``config.json`` keeps a registry login under it), never ``oauth``; ``db_pwd``, ``DB_PWD`` and
+#: ``pwd``, never ``OLDPWD``, and not ``PWD`` alone, the shell's working directory in a dump of
+#: the environment.
+_NAME_SEGMENTS = ("auth", "pwd")
 
 #: What ``key`` must follow to name a credential: ``api_key``, ``apiKey``, ``x-api-key``,
 #: ``ACCESS_KEY``, ``secretKey``, ``private_key``. ``key`` alone names a map's key, a sort key or a
 #: translation's (``"key": "button.save"``), and ``key_count`` and ``num_keys`` count them.
 _KEY_KINDS = ("api", "access", "secret", "private")
 
+#: The segment before a pagination cursor's ``Token``: ``NextToken`` (every paginated AWS CLI
+#: output), ``nextPageToken`` and ``pageToken`` (Google's APIs), ``NextContinuationToken``,
+#: ``continuationToken``, ``syncToken``. A cursor says where a list goes on, not who may read it.
+_CURSOR_WORDS = ("next", "page", "continuation", "pagination", "cursor", "sync")
+
 #: Segments that may FOLLOW the credential word and leave the name a credential's: a version
 #: (``api_key_v2``, ``token2``), an environment (``STRIPE_SECRET_KEY_LIVE``, ``DB_PASSWORD_PROD``),
 #: or the form the value takes (``SECRET_KEY_BASE``, ``token_value``, ``password_hash``,
-#: ``password_confirmation``). Any other segment after it says the value is something ABOUT the
-#: credential: ``auth_token_url``, ``token_type``, ``password_policy``, ``api_key_header``.
+#: ``password_confirmation``, AWS Secrets Manager's ``SecretBinary``). Any other segment after it
+#: says the value is something ABOUT the credential: ``auth_token_url``, ``token_type``,
+#: ``password_policy``, ``api_key_header``.
 _NAME_SUFFIXES = (
     "value", "val", "base", "b64", "base64", "hex", "raw", "plain", "plaintext", "str", "string",
-    "enc", "encoded", "encrypted", "hash", "hashed", "digest", "confirm", "confirmation",
-    "prod", "production", "dev", "development", "staging", "stage", "test", "live", "local",
-    "sandbox",
+    "binary", "bin", "bytes", "blob", "enc", "encoded", "encrypted", "hash", "hashed", "digest",
+    "confirm", "confirmation", "prod", "production", "dev", "development", "staging", "stage",
+    "test", "live", "local", "sandbox",
 )  # fmt: skip
 
 #: Where a segment starts: where the name does, or after a ``_``, ``-``, ``.`` or a quote.
@@ -150,29 +156,56 @@ def _camel(words: tuple[str, ...]) -> str:
     return "(?:" + "|".join(sorted(forms, key=lambda form: (-len(form), form))) + ")"
 
 
+def _not_after(words: tuple[str, ...]) -> str:
+    """Not straight after one of ``words`` as the segment before: ``nextPage|Token``,
+    ``next_page_|token``, ``NEXT|TOKEN``, ``nexttoken``. Each a lookbehind of a fixed width."""
+    forms = sorted({form for word in words for form in (word, word.capitalize(), word.upper())})
+    return "".join(f"(?<!{re.escape(form + sep)})" for form in forms for sep in ("", "_", "-", "."))
+
+
 #: A quoted name that IS a credential's name, read from the credential word that ends it (R9k):
 #: the rule starts at that word, and the part of the name before it stays in the output as it
-#: was. ``PWD`` alone is the shell's working directory in a dump of the environment, and is not
-#: one; ``pwd`` and ``DB_PWD`` are. Case-sensitive, for the camelCase starts.
+#: was. Case-sensitive, for the camelCase starts.
 _CREDENTIAL_NAME = (
-    # a segment's start first, which prose fails at all but the first letter of each word
-    "(?:" + _SEGMENT + "|" + _CAMEL + "(?=[A-Z]))"
-    + "(?:"
+    "(?:"
+    # a word that ends the name's segment, or the name written as one word
+    # (the cursor's lookbehinds only where a token starts: prose has a t at every few letters)
+    + "(?=[tTsSpPcC])(?:(?=" + _cased(("token",)) + ")" + _not_after(_CURSOR_WORDS)
+    + _cased(("token",))
+    + "|" + _cased(tuple(word for word in _NAME_ENDINGS if word != "token")) + ")"
+    # a word that is a whole segment, and key after its kind: at a segment's start, which prose
+    # fails at all but the first letter of each word
+    + "|(?:" + _SEGMENT + "|" + _CAMEL + "(?=[A-Z]))(?:"
     + "(?:" + _SEGMENT + _cased(_KEY_KINDS) + "|" + _CAMEL + _camel(_KEY_KINDS) + ")"
     + "[_.-]?" + _cased(("key",))
-    + "|" + _SEGMENT + _cased(_NAME_JOINED) + _cased(_NAME_WORDS)
-    + "|" + _SEGMENT + _cased(_NAME_WORDS) + "|" + _CAMEL + _camel(_NAME_WORDS)
-    + "|" + _SEGMENT + "(?:pwd|Pwd)|(?<=[A-Za-z0-9][_.-])PWD|" + _CAMEL + "(?:Pwd|PWD)"
+    + "|" + _SEGMENT + "(?:auth|Auth|AUTH|pwd|Pwd)|(?<=[A-Za-z0-9][_.-])PWD"
+    + "|" + _CAMEL + _camel(_NAME_SEGMENTS)
+    + ")"
     + ")(?:[_.-](?:" + _cased(_NAME_SUFFIXES) + "|[vV]?[0-9]++)"
     + "|" + _camel(_NAME_SUFFIXES) + "|V[0-9]++|[0-9]++)*+"
 )  # fmt: skip
 
-#: A value that is a package's version, not a secret: ``"next-auth": "^4.24.5"`` and
-#: ``"@octokit/auth-token": "~4.0"`` in a ``package.json``, ``latest``, ``workspace:*``.
-_VERSION_VALUE = (
-    r"""\\*+["'](?:(?:[~^=]|[<>]=?)?[ \t]*v?[0-9]++\.[0-9xX*]|latest\\*+["']"""
-    r"|(?:workspace|npm|file|link):)"
-)
+#: npm's dist-tags, which a ``package.json`` may give for a version: ``"next-auth": "beta"``.
+_DIST_TAGS = ("latest", "next", "beta", "alpha", "canary", "rc", "experimental", "nightly")
+#: The protocols of a package spec that is not a version: ``"better-auth": "github:org/repo#main"``,
+#: ``"@octokit/auth-token": "catalog:"``, ``workspace:*``, ``git+https://…``.
+_SPEC_PROTOCOLS = (
+    "workspace", "npm", "file", "link", "catalog", "patch", "portal", "github", "gitlab",
+    "bitbucket", "git",
+)  # fmt: skip
+
+#: A value that is a package's spec, not a secret: a version (``"next-auth": "^4.24.5"``,
+#: ``"~4.0"``, ``">=1.2 <2"``), a dist-tag, a spec protocol, or an http(s) URL to a tarball or to
+#: a git ref (``…/x-1.0.0.tgz``, ``…/repo#v1.2``). An http(s) URL that is neither (a webhook's,
+#: a signed download's) is still a value like any other.
+_PACKAGE_SPEC = (
+    r"""\\*+["'](?:(?:[~^=]|[<>]=?)?[ \t]*v?[0-9]++\.[0-9xX*]"""
+    + "|(?:" + "|".join(_DIST_TAGS) + r""")\\*+["']"""
+    + "|(?:" + "|".join(_SPEC_PROTOCOLS) + "):"
+    + r"|git\+[a-z]++:"
+    + r"""|https?://[^\s"'#\\]*+(?:#|(?<=\.tgz)\\*+["']|(?<=\.tar\.gz)\\*+["'])"""
+    + ")"
+)  # fmt: skip
 
 
 #: Credential shapes, matched on shape rather than on context. Order matters
@@ -210,13 +243,14 @@ _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # the same line: in JSON a secret is a string, and ``"input_tokens": 12`` is not one, nor
     # is the next line after ``== "token":`` in code. And only under a name that IS a
     # credential's (:data:`_CREDENTIAL_NAME`), not one that holds the word: ``"max_tokens":
-    # "8192"``, ``"auth_token_url": "https://…"`` and ``"password_policy": "…"`` are kept, as
-    # 0.9.2 kept every quoted name (R9k).
+    # "8192"``, ``"auth_token_url": "https://…"``, ``"password_policy": "…"`` and a pagination
+    # cursor (``"NextToken": "…"``) are kept, as 0.9.2 kept every quoted name, and so is a
+    # package's spec (:data:`_PACKAGE_SPEC`) (R9k).
     (
         re.compile(
             "(" + _CREDENTIAL_NAME + ")"
             r"""(\\*+["'][ \t]*[:=][ \t]*)"""
-            "(?!" + _VERSION_VALUE + ")"
+            "(?!" + _PACKAGE_SPEC + ")"
             "(" + _QUOTED_VALUE + ")"
         ),
         r"\1\2" + MARKER,
@@ -294,14 +328,21 @@ _BODY_RUN = 20
 #: (``Proc-Type:``, ``DEK-Info:``). The first run that is none of these, a word of prose after the
 #: header, ends it: ``grep '-----BEGIN RSA PRIVATE KEY-----' finds nothing`` has no body, and is
 #: kept whole. Possessive throughout, and each run is read once: linear.
-_LONG_RUN = _BASE64 + "{" + str(_BODY_RUN) + ",}+"
+#: A long run is a key's only if it reads like base64 data: mixed case, a digit, ``+`` or ``=``.
+#: ``internationalization`` and ``/home/me/projects/deploy/keys`` after a header are prose. A
+#: random base64 run of 20 characters has none of those with a chance of 2 x (27/64)^20, about
+#: 6e-8 (one of 64 characters, about 1e-24), and the short runs (a line alone, a cut) need no test.
+_LONG_RUN = (
+    "(?![a-z/]*+(?![A-Za-z0-9+/=]))(?![A-Z/]*+(?![A-Za-z0-9+/=]))"
+    + _BASE64 + "{" + str(_BODY_RUN) + ",}+"
+)  # fmt: skip
 _CUT_RUN = _BASE64 + "++(?=\\\\*+\u2026)"
 #: One run of a key's body, with what stands before it.
 _PEM_BODY_RUN = (
     "(?:"
     # a run that starts a line
     + _GAP + "*+" + _LINE_BREAK + "(?:" + _GAP + "|" + _LINE_BREAK + ")*+"
-    + "(?:(?:Proc-Type|DEK-Info):[^\\r\\n\\\\\"']*+"
+    + "(?:(?:Proc-Type|DEK-Info):[^\\r\\n\\\\\"'\u2026]*+"
     + "|" + _LONG_RUN
     + "|" + _CUT_RUN
     + "|" + _BASE64 + "++(?=" + _GAP + "*+(?:" + _LINE_BREAK + "|\\\\*+\\Z)|\\\\*+[\"'])"

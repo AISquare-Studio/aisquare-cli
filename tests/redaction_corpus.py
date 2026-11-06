@@ -16,6 +16,8 @@ GOOGLE_ACCESS = "ya29" + ".a0AfB_byC1d2E3f4G5h6I7j8K9l0M1n2O3p4Q5r6S7t8U9v0"
 NPM = "npm" + "_" + "abcdefghijklmnopqrstuvwxyz0123456789"
 WHSEC = "whsec" + "_" + "abc123def456ghi789"
 OPENSSH_LINE = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdzc2gtcn"
+NPM_LIKE = "npm" + "_" + "Zq8vR2mXk4Lp9Tn3Ab1Cd2Ef3Gh4Ij5Kl6Mn7"
+HF = "hf" + "_" + "Zq8vR2mXk4Lp9Tn3Ab1Cd2Ef3Gh4Ij5"
 
 #: (where it comes from, the text). Grouped as the brief asked: JSON configs, API docs, shell
 #: sessions, stack traces, and code that names token, key and secret variables.
@@ -220,4 +222,32 @@ CORPUS: tuple[tuple[str, str], ...] = (
         "  expires_in: number;\n}",
     ),
     ("sql", "SELECT id FROM users WHERE reset_token = 'abc123def456';"),
+    # --- reopen 1 (tester-r9i, seq 11384): what the first cut missed or took ----------------
+    (
+        "aws cli pagination",
+        '{"Parameters": [{"Name": "/app/db-host", "Type": "String"}], '
+        '"NextToken": "eyJDb250aW51YXRpb25Ub2tlbiI6IG51bGx9"}',
+    ),
+    ("google pagination", '{"items": [], "nextPageToken": "CAoQAA"}'),
+    (
+        "package specs",
+        '{"dependencies": {"next-auth": "beta", "better-auth": '
+        '"github:better-auth/better-auth#main", "@octokit/auth-token": "catalog:"}}',
+    ),
+    (
+        "psql env",
+        'subprocess.run(["psql", url], env={**os.environ, "PGPASSWORD": "hunter2hunter2"})',
+    ),
+    ("launch.json env", '{"env": {"PGPASSWORD": "postgres123", "PGUSER": "postgres"}}'),
+    ("npm token by name", f'{{"mytoken": "{NPM_LIKE}", "hftoken": "{HF}"}}'),
+    (
+        "secrets manager binary",
+        '{"ARN": "arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-AbCdEf", '
+        '"SecretBinary": "eyJwYXNzd29yZCI6ICJodW50ZXIyIn0=", "VersionStages": ["AWSCURRENT"]}',
+    ),
+    (
+        "a long word after a header",
+        f"{HEADER}\ninternationalization breaks when I paste the key",
+    ),
+    ("a path after a header", f"{HEADER}\n/home/me/projects/deploy/keys is where it lives"),
 )

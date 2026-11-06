@@ -593,4 +593,5 @@ def test_the_home_folder_is_spelled_as_a_person_writes_it(
     monkeypatch.setattr(Path, "home", lambda: home)
     assert fleet_service._home_spelled(home) == "~"
     assert fleet_service._home_spelled(home / "work" / "repo") == "~/work/repo"
-    assert fleet_service._home_spelled(Path("/opt/elsewhere")) == "/opt/elsewhere"
+    elsewhere = Path("/opt/elsewhere")
+    assert fleet_service._home_spelled(elsewhere) == str(elsewhere), "as this OS writes it"

@@ -12,16 +12,20 @@ its workspace, each directory added, each configured writable root; never the te
 directories every sandbox writes, nor aisquare's own home), at the least the folder it ran in.
 
 The record is ``team_meta``'s ``sandbox-root:<path>`` keys, valued with the agent and when it
-was recorded. No project's purge reaches them (``project fresh``, ``project forget``): only
-``uninstall --purge``, which deletes the store, clears them. A repository is touched by a root
-it is inside, or that is inside it (a worktree's).
+was recorded. It stays on this machine: ``team_meta`` is neither exported nor synced. No
+project's purge reaches them (``project fresh``, ``project forget``); ``aisquare agents status
+--roots`` lists them, ``aisquare agents disconnect <agent> --forget-root <path>`` forgets one
+(#101), and ``uninstall --purge``, which deletes the store, clears them all. A repository is
+touched by a root it is inside (a session in a parent folder guards every repository under
+it), or that is inside it (a worktree's).
 """
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -54,23 +58,51 @@ def record(store: ContextStore, agent: str, roots: Iterable[Path]) -> list[Path]
     return recorded
 
 
+@dataclass(frozen=True)
+class Root:
+    """A recorded root: where ``agent`` could write, recorded ``at`` (``None`` when its value
+    cannot be read: still a root, as only such an agent records one)."""
+
+    path: Path
+    agent: str
+    at: datetime | None
+
+
+def entries(store: ContextStore) -> list[Root]:
+    """Every recorded root, by its path."""
+    found: list[Root] = []
+    for key, value in store.list_meta(PREFIX).items():
+        agent, at = "", None
+        try:
+            data = json.loads(value)
+            agent = str(data.get("agent") or "")
+            at = datetime.fromisoformat(str(data.get("at")))
+        except (ValueError, AttributeError, TypeError):
+            pass
+        found.append(Root(Path(key.removeprefix(PREFIX)), agent, at))
+    return sorted(found, key=lambda root: str(root.path))
+
+
 def recorded(store: ContextStore) -> dict[Path, str]:
     """Every recorded root, with the agent recorded there."""
-    found: dict[Path, str] = {}
-    for key, value in store.list_meta(PREFIX).items():
-        try:
-            agent = str(json.loads(value).get("agent") or "")
-        except (ValueError, AttributeError):
-            agent = ""
-        found[Path(key.removeprefix(PREFIX))] = agent
-    return found
+    return {root.path: root.agent for root in entries(store)}
 
 
-def touching(tree: Path, roots: Mapping[Path, str]) -> tuple[Path, str] | None:
-    """The first of ``roots`` that ``tree`` is inside, or that is inside ``tree``, with its
-    agent; ``None`` for none."""
+def touching(tree: Path, roots: Sequence[Root]) -> Root | None:
+    """The first of ``roots`` that ``tree`` is inside, or that is inside ``tree``; ``None``
+    for none."""
     real = _real(tree)
-    for root, agent in sorted(roots.items(), key=lambda item: str(item[0])):
-        if real == root or real.is_relative_to(root) or root.is_relative_to(real):
-            return root, agent
+    for root in roots:
+        if real == root.path or real.is_relative_to(root.path) or root.path.is_relative_to(real):
+            return root
     return None
+
+
+def forget(store: ContextStore, path: Path) -> Root | None:
+    """Forget the record of ``path`` (made absolute and real); the root forgotten, or ``None``
+    where none was recorded."""
+    real = _real(path)
+    found = next((root for root in entries(store) if root.path == real), None)
+    if found is not None:
+        store.delete_meta(f"{PREFIX}{real}")
+    return found

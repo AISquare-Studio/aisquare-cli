@@ -13,6 +13,7 @@ from pathlib import Path
 
 from aisquare.core import agents as agent_core
 from aisquare.core import paths
+from aisquare.core import sandbox_roots as sandbox_roots_core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
@@ -841,3 +842,24 @@ def refresh_hooks(name: str, config_dir: Path | None = None) -> bool:
     if written:
         agent_core.set_connected(name, True, config_dir)
     return written
+
+
+def sandbox_roots() -> list[sandbox_roots_core.Root]:
+    """The folders an agent that sandboxes its tools recorded it could write
+    (``core.sandbox_roots``); none on a machine with no store yet."""
+    from aisquare.core import paths, sandbox_roots
+    from aisquare.core.store import store_session
+
+    if not paths.db_path().exists():
+        return []
+    with store_session() as store:
+        return list(sandbox_roots.entries(store))
+
+
+def forget_sandbox_root(path: Path) -> bool:
+    """Forget the recorded folder ``path`` (``core.sandbox_roots.forget``); whether one was."""
+    from aisquare.core import sandbox_roots
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        return sandbox_roots.forget(store, path) is not None

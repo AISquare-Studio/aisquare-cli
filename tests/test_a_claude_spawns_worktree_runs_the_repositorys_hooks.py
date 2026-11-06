@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from aisquare.core import claude_accounts as core
-from aisquare.core import workspace
+from aisquare.core import sandbox_roots, workspace
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession
@@ -325,7 +325,7 @@ def test_project_fresh_does_not_forget_where_a_codex_agent_could_write(
 
     assert not marker.exists(), "the hook the Codex agent may have changed did not run"
     [said] = _said(receipt)
-    assert "a Codex agent has run in this project" in said
+    assert f"a Codex agent ran in {os.path.realpath(project.root)} (" in said, said
 
 
 @posix
@@ -456,3 +456,141 @@ def test_recording_where_it_writes_never_stops_a_launch(
 
     monkeypatch.setattr(agent_launch, "store_session", unwritable)
     agent_launch.record_sandbox_roots(selected, ["codex"])  # says nothing, raises nothing
+
+
+# --- the record's line, and a way out short of a purge (#101, seq 11281) ------------------------
+
+
+@posix
+def test_project_forget_does_not_forget_where_a_codex_agent_could_write(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """11281's MX3: `project forget --purge` deletes the project's sessions and rows through
+    another path than fresh; the record of where the agent could write is kept."""
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+    from aisquare.core.orchestrator import team_project
+
+    marker = _post_checkout(project, tmp_path, "linked-script")
+    _codex_session_start(tmp_path, project.root)
+    forgot = CliRunner().invoke(app, ["project", "forget", str(project.root), "--purge"])
+    assert forgot.exit_code == 0, forgot.output
+    again = team_project(project.root)
+    with store_session() as store:
+        store.onboard_project(again)
+        assert not store.team_sessions(again.id), "forget took the Codex session"
+
+    receipt = fleet_service.spawn(again, "coder", worktree=True)
+
+    assert not marker.exists()
+    assert len(_said(receipt)) == 1
+
+
+@posix
+def test_a_root_of_an_agent_this_release_cannot_read_still_guards(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """11281's MX2: only an agent that sandboxes its tools records a root, so one this release
+    does not know (a later release's, after a rollback) still guards."""
+    marker = _post_checkout(project, tmp_path, "husky")
+    with store_session() as store:
+        store.set_meta(
+            f"sandbox-root:{os.path.realpath(project.root.parent)}",
+            json.dumps({"agent": "gemini-cli", "at": "2026-11-05T10:00:00+00:00"}),
+        )
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True)
+
+    assert not marker.exists()
+    [said] = _said(receipt)
+    assert "an agent that sandboxes its tools ran in" in said, said
+    assert "--forget-root" in said
+
+
+@posix
+def test_the_line_names_the_folder_the_agent_ran_in_and_how_to_forget_it(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """11281's F2: a session in a parent folder guards every repository under it; the line
+    names that folder, the agent and the day, never "this project", and the command that
+    forgets it."""
+    import shlex
+
+    parent = Path(os.path.realpath(project.root.parent))
+    _post_checkout(project, tmp_path, "husky")
+    _codex_session_start(tmp_path, parent)
+
+    [said] = _said(fleet_service.spawn(project, "coder", worktree=True))
+
+    assert "this project" not in said
+    assert f"a Codex agent ran in {parent} (2" in said, said
+    forget = shlex.join(["aisquare", "agents", "disconnect", "codex", "--forget-root", str(parent)])
+    assert said.endswith(f"`{forget}` forgets it"), said
+
+
+@posix
+def test_agents_status_lists_the_roots_and_disconnect_forgets_one(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """The way out short of `uninstall --purge`: list with `agents status --roots`, forget one
+    with `agents disconnect <agent> --forget-root <path>`, asked first or --yes. Forgotten,
+    a worktree there runs its hooks again (no session of the agent's is in the project)."""
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+
+    runner = CliRunner()
+    parent = Path(os.path.realpath(project.root.parent))
+    marker = _post_checkout(project, tmp_path, "husky")
+    _codex_session_start(tmp_path, parent)
+
+    listed = runner.invoke(app, ["agents", "status", "--roots"])
+    as_json = json.loads(
+        runner.invoke(app, ["--json", "agents", "status", "codex", "--roots"]).stdout
+    )
+    unasked = runner.invoke(app, ["agents", "disconnect", "codex", "--forget-root", str(parent)])
+    with store_session() as store:
+        assert parent in sandbox_roots.recorded(store), "refused off a terminal without --yes"
+    forgot = runner.invoke(
+        app, ["agents", "disconnect", "codex", "--forget-root", str(parent), "--yes"]
+    )
+    missing = runner.invoke(
+        app, ["agents", "disconnect", "codex", "--forget-root", str(parent), "--yes"]
+    )
+
+    assert listed.exit_code == 0 and str(parent) in listed.stdout and "codex" in listed.stdout
+    assert [entry["path"] for entry in as_json] == [str(parent)]
+    assert as_json[0]["agent"] == "codex" and as_json[0]["recorded_at"]
+    assert unasked.exit_code != 0 and "needs --yes" in unasked.output
+    assert forgot.exit_code == 0 and f"forgot {parent}" in forgot.stdout
+    assert missing.exit_code != 0 and "no folder is recorded" in missing.output
+    with store_session() as store:
+        assert sandbox_roots.recorded(store) == {}
+        for session in store.team_sessions(project.id):
+            assert session.agent != "codex"
+    receipt = fleet_service.spawn(project, "coder", worktree=True)
+    assert marker.exists(), "forgotten, and no Codex session here: the hooks run"
+    assert _said(receipt) == []
+
+
+def test_the_home_folder_is_spelled_as_a_person_writes_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = Path(os.path.realpath(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: home)
+    assert fleet_service._home_spelled(home) == "~"
+    assert fleet_service._home_spelled(home / "work" / "repo") == "~/work/repo"
+    assert fleet_service._home_spelled(Path("/opt/elsewhere")) == "/opt/elsewhere"

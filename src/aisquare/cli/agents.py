@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -41,8 +42,19 @@ def scan() -> None:
 @app.command("status")
 def status(
     name: Annotated[str | None, typer.Argument(help="Agent to inspect (default: all).")] = None,
+    roots: Annotated[
+        bool,
+        typer.Option(
+            "--roots",
+            help="List the folders an agent that sandboxes its tools could write, where a "
+            "fleet worktree runs none of a repository's hooks.",
+        ),
+    ] = False,
 ) -> None:
     """Show integration health for one agent, or all of them."""
+    if roots:
+        _list_roots(name)
+        return
     try:
         agents = agents_service.status(name)
     except KeyError:
@@ -83,8 +95,26 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
 
 
 @app.command("disconnect")
-def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
+def disconnect(
+    name: AgentName,
+    config_dir: ConfigDir = None,
+    forget_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--forget-root",
+            help="Forget, and nothing else, that an agent that sandboxes its tools could write "
+            "this folder (`agents status --roots`): a fleet worktree in a repository there runs "
+            "its hooks again. Asks first; --yes off a terminal.",
+        ),
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Forget the root without asking.")
+    ] = False,
+) -> None:
     """Disconnect an agent (its already-imported context is kept)."""
+    if forget_root is not None:
+        _forget_root(forget_root, yes=yes)
+        return
     refusal = agents_service.access(name, config_dir).disconnect
     if refusal is not None:
         # Before anything is touched: hooks it cannot take out keep their record too.
@@ -173,3 +203,69 @@ def _hooks_text(name: str, config_dir: Path | None) -> bytes | None:
         return spec.settings_path.read_bytes()
     except (OSError, KeyError, ValueError):
         return None
+
+
+def _list_roots(name: str | None) -> None:
+    """``agents status --roots``: every recorded folder (``core.sandbox_roots``), of ``name``'s
+    agent alone when named."""
+    found = [root for root in agents_service.sandbox_roots() if name is None or root.agent == name]
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "path": str(root.path),
+                        "agent": root.agent or None,
+                        "recorded_at": root.at.isoformat() if root.at is not None else None,
+                    }
+                    for root in found
+                ]
+            )
+        )
+        return
+    console = stdout_console()
+    if not found:
+        console.print("no folder is recorded: every fleet worktree runs its repository's hooks")
+        return
+    console.print(
+        "folders an agent that sandboxes its tools could write; a fleet worktree in a repository "
+        "inside one, or holding one, runs none of its hooks:",
+        markup=False,
+    )
+    for root in found:
+        when = root.at.astimezone().date().isoformat() if root.at is not None else "?"
+        console.print(f"  {root.path}  {root.agent or '?'}  {when}", markup=False)
+    console.print(
+        "forget one: aisquare agents disconnect <agent> --forget-root <path>", markup=False
+    )
+
+
+def _forget_root(path: Path, *, yes: bool) -> None:
+    """``agents disconnect … --forget-root PATH``: forget that recorded folder, asked first."""
+    real = Path(path).expanduser().resolve()
+    known = next((root for root in agents_service.sandbox_roots() if root.path == real), None)
+    if known is None:
+        fail(
+            f"no folder is recorded at {real} — see: aisquare agents status --roots",
+            error="no_such_root",
+            ref=str(real),
+        )
+    if not yes:
+        if get_state().json_output or not sys.stdin.isatty():
+            fail(
+                f"forgetting {real} needs --yes off a terminal",
+                error="confirmation_required",
+                ref=str(real),
+            )
+        if not typer.confirm(
+            f"Forget that {known.agent or 'an agent that sandboxes its tools'} could write "
+            f"{real}? A fleet worktree in a repository there runs its hooks again.",
+            default=False,
+        ):
+            stdout_console().print("nothing forgotten", markup=False)
+            return
+    agents_service.forget_sandbox_root(real)
+    if get_state().json_output:
+        typer.echo(json.dumps({"forgotten": str(real), "agent": known.agent or None}))
+        return
+    stdout_console().print(f"✓ forgot {real}", markup=False)

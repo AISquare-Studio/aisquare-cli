@@ -64,6 +64,7 @@ from aisquare.core import (
     prompt_origin,
     sandbox_roots,
     selfcli,
+    shell_line,
 )
 from aisquare.core import load as load_core
 from aisquare.core import memory as memory_core
@@ -2525,13 +2526,13 @@ def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> str | 
         why = f"{adapter.label} sandboxes its tools"
     else:
         ran: set[str | None] | None
-        root: tuple[Path, str] | None = None
+        root: sandbox_roots.Root | None = None
         try:
             with store_session() as store:
                 # Where such an agent recorded it may write, for good (`core.sandbox_roots`:
                 # kept by `project fresh`, and naming a folder of several repositories), then
                 # the project's own sessions and rows, ended ones too (#99).
-                root = sandbox_roots.touching(project.root, sandbox_roots.recorded(store))
+                root = sandbox_roots.touching(project.root, sandbox_roots.entries(store))
                 agents = {row.agent for row in store.fleet_agents(project.id)}
                 agents.update(session.agent for session in store.team_sessions(project.id))
             ran = set(agents)
@@ -2544,14 +2545,10 @@ def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> str | 
         ]
         if ran is None:
             why = "the store could not say whether an agent that sandboxes its tools ran here"
-        elif root is not None:
-            # Only an agent that sandboxes its tools records a root: one whose agent cannot
-            # be read is such an agent's still.
-            known = recorded_adapter(root[1]) if root[1] else None
-            label = known.label if known is not None else "sandboxed"
-            why = f"a {label} agent has run in this project"
         elif sandboxed:
             why = f"a {sandboxed[0].label} agent has run in this project"
+        elif root is not None:
+            return _ran_in_a_recorded_root(root)
         else:
             return None
     return (
@@ -2559,6 +2556,42 @@ def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> str | 
         "could have changed would run outside its sandbox (a project where none has run runs "
         "them)"
     )
+
+
+def _ran_in_a_recorded_root(root: sandbox_roots.Root) -> str:
+    """The spawn's line where a recorded root alone guards the repository (#101): the folder
+    such an agent ran in, which may be a parent of the project or the home folder, never
+    called "this project"; the agent, when it was recorded, and the command that forgets it.
+    Only an agent that sandboxes its tools records a root: one whose agent this release
+    cannot read (a later release's, after a rollback) is such an agent's still."""
+    known = recorded_adapter(root.agent) if root.agent else None
+    who = f"a {known.label} agent" if known is not None else "an agent that sandboxes its tools"
+    when = f" ({root.at.astimezone().date().isoformat()})" if root.at is not None else ""
+    forget = shell_line.command_line(
+        [
+            "aisquare",
+            "agents",
+            "disconnect",
+            root.agent or "unknown",
+            "--forget-root",
+            str(root.path),
+        ]
+    )
+    return (
+        f"made its worktree without the repository's hooks: {who} ran in "
+        f"{_home_spelled(root.path)}{when}, and a hook it could have changed would run outside "
+        f"its sandbox; `{forget}` forgets it"
+    )
+
+
+def _home_spelled(path: Path) -> str:
+    """``path`` with the home folder spelled ``~``, as a person writes it."""
+    home = Path(os.path.realpath(Path.home()))
+    if path == home:
+        return "~"
+    if path.is_relative_to(home):
+        return f"~/{path.relative_to(home).as_posix()}"
+    return str(path)
 
 
 def _git_ok(cwd: Path, *args: str) -> str:

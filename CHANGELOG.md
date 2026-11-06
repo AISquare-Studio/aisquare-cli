@@ -47,14 +47,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   command that takes an account accepts. To bind a role to one,
   `aisquare team bind <role> --agent claude-code --account 5` is the form 0.9.2 still
   reads after a rollback, and a role bound to an agent reads 5 as that agent's.
-  `team bind` takes a binding only where the role's launch would run it, from any folder:
+  `team bind` takes a change only where the role's launch would run it, from any folder:
   so `--agent claude-code` with a Codex account's number, or a later `--agent` or `--bin`
-  that the bound account does not belong to, is refused, with the reason every launch of
-  that binding would give. `aisquare accounts list` shows a shared number as
-  `codex:5` or `claude-code:5`; a number one account holds reads as before. A Codex
-  account keeps its number from 0.9.2 once 0.10.0 has read the accounts (any
-  `aisquare accounts` command, a launch, asq) or moved back to 0.9.2. Upgrading to 0.10.0
-  keeps it too, where aisquare's hooks are connected.
+  on a role whose bound account is another agent's, is refused, with the reason every
+  launch of that binding would give. A bind of `--env` or `--arg` alone is never refused
+  for the role's account, as on 0.9.2, even while that account is removed or signed out.
+  `aisquare accounts list` shows a shared number as `codex:5` or `claude-code:5`; a
+  number one account holds reads as before. A Codex account keeps its number from 0.9.2
+  once 0.10.0 has read the accounts (any `aisquare accounts` command, a launch, asq) or
+  moved back to 0.9.2. Upgrading to 0.10.0 keeps it too, where aisquare's hooks are
+  connected.
 
 ### Codex support (beta)
 
@@ -252,10 +254,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     the agent's own fields below it in charge). *App settings* gains *captain's agent*
     under the captain's box and *hand off across agents* among the accounts' rules. The
     Settings hub's *Usage & stats* reads *all your agents' sessions*.
-  - On a machine with Codex accounts, a role bound to an account runs that account's agent
-    from any folder, whatever the project's default agent
-    (`aisquare agents use … --project`): the binding outranks the folder, which decides
-    only where the binding names nothing.
+  - On a machine with Codex accounts, the project's default agent
+    (`aisquare agents use … --project`) decides only where nothing named does: a role
+    bound to an account, and a launch's own `--account`, run that account's agent from any
+    folder, and a role bound to a program no agent's name claims (`--bin claude2`) runs it
+    as the default agent's wrapper, as 0.9.2 did, from any folder.
 <!-- R2 delta run (SMOKE14 items 2-5, 9 with the owner's sign-ins): its lines, if any. -->
 
 ### Fixed

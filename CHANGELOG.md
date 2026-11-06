@@ -254,8 +254,14 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   names N: 0.9.2's named the default account, which it did not run. `-e KEY=VALUE`
   (`--env`) sets that variable for the agent, as 0.9.2 did, wherever it stands among the
   spawn's options, and a restart sets it again. `-c BIN` (`--command`) runs BIN, as
-  `--bin` does. Claude Code's own `-c` (`--continue`) goes after `--` or spelled out; a
-  bare one is refused before any window opens, where 0.9.2 opened the window first.
+  `--bin` does. An agent 0.9.2 spawned with `-a N` or `--command BIN` keeps them too: its
+  `fleet restart`, `fleet switch` (to the account it names) and fork run that account and
+  binary, as 0.9.2's own restart did, and its row names them. 0.9.2 kept `-c BIN` as
+  `BIN` alone, so such an agent restarts on the default binary with `BIN` among its
+  arguments: spawn it again with `-c BIN` to run BIN. Claude Code's own `-c`
+  (`--continue`) goes after `--` or spelled out; a bare one is refused before any window
+  opens, where 0.9.2 opened the window first. `--first-prompt-file`, the fleet's own, is
+  refused among a spawn's arguments; `--prompt` gives a first message.
 - A locked login Keychain asks once at startup, not twice. Ids made in the same
   millisecond sort in the order they were made. A store aisquare may not write is no
   longer called damaged.

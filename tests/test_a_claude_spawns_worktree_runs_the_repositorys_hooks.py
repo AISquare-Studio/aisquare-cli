@@ -425,3 +425,34 @@ def test_a_hooks_folder_git_cannot_name_has_hooks(
 
     monkeypatch.setattr("aisquare.core.workspace.subprocess.run", answering)
     assert workspace.repository_has_hooks(tmp_path)
+
+
+def test_recording_where_it_writes_never_stops_a_launch(
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adapter that cannot say what its sandbox writes still records the folder it starts
+    in; a store that cannot be written costs the record, never the launch."""
+    from aisquare.core import sandbox_roots
+    from aisquare.services import agent_launch
+
+    here = tmp_path / "here"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    selected = agent_launch.resolve("coder", agent="codex")
+
+    def cannot_say(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("its config would not parse")
+
+    monkeypatch.setattr(type(selected.adapter), "sandbox_writes", cannot_say)
+    agent_launch.record_sandbox_roots(selected, ["codex"])
+    with store_session() as store:
+        assert Path(os.path.realpath(here)) in sandbox_roots.recorded(store)
+
+    def unwritable() -> Iterator[None]:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(agent_launch, "store_session", unwritable)
+    agent_launch.record_sandbox_roots(selected, ["codex"])  # says nothing, raises nothing

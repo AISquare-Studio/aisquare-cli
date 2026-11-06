@@ -397,6 +397,17 @@ def test_the_hook_refresh_an_upgrade_runs_keeps_the_number_with_no_read_before_i
     assert _add_on_092().slot == codex.slot + 1
 
 
+@pytest.fixture
+def a_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For `fleet spawn`, a fleet server on every OS (Windows' runners have no tmux, which
+    the spawn asks for before the account): the fleet tests' fake."""
+    from aisquare.services import fleet as fleet_service
+    from tests.test_fleet_service import FakeTmux
+
+    fake = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: fake)
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -406,6 +417,7 @@ def test_the_hook_refresh_an_upgrade_runs_keeps_the_number_with_no_read_before_i
     ],
     ids=["launch", "team-bind", "fleet-spawn"],
 )
+@pytest.mark.usefixtures("a_tmux")
 def test_a_json_refusal_outside_accounts_carries_the_ambiguity_too(
     signed: Pair, runner: CliRunner, argv: list[str]
 ) -> None:

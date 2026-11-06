@@ -336,6 +336,7 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "worktree": False,
         "permission_mode": "acceptEdits",
         "binary": "claude-nightly",
+        "wrapper": None,  # --command / -c: a program run AS the agent (#105's reopen 2)
         "agent": None,
         "sandbox": None,
         "approval_policy": None,

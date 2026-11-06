@@ -55,7 +55,7 @@ from rich.text import Text
 from aisquare.cli.common import fail
 from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import experimental, harness, orchestrator, paths, personas
+from aisquare.core import experimental, harness, launchers, orchestrator, paths, personas
 from aisquare.core.agent_adapters import adapter_for_binary, agents_named
 from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
 from aisquare.core.config import (
@@ -380,7 +380,12 @@ def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
         # `subprocess.call` kill the agent it is waiting on, so the launcher ignores it
         # (review of #94, seq 11176).
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-        raise SystemExit(subprocess.call([binary, *argv[1:]], env=env))
+        # Waiting, it holds this install's files open: recorded, so an upgrade or an
+        # uninstall beside it refuses rather than fail on files in use (review r40 of #113,
+        # finding 7; ``core.launchers``).
+        with launchers.waiting(Path(binary).stem):
+            status = subprocess.call([binary, *argv[1:]], env=env)
+        raise SystemExit(status)
     os.execve(binary, argv, env)
 
 

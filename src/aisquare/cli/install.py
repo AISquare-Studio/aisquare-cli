@@ -98,6 +98,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "remote": plan.remote,
         # The asq UIs live on this home: the upgrade refuses while one runs.
         "asqs": list(plan.asqs),
+        # The `aisquare launch` sessions holding the install's files (Windows): the same.
+        "launchers": list(plan.launchers),
         # The roles a move back ignores the file-bound variables of, each with its keys.
         "env_files_dropped": list(plan.env_files_dropped),
         # The roles a move back launches with tools their safety list denies here.
@@ -585,6 +587,10 @@ def _upgrade(
         # The command goes in the MESSAGE: `fail` shows a human nothing else; there is none
         # for a pin the route cannot pick (a later review of #257).
         command = f" Upgrade it with: {plan.command}" if plan.argv else ""
+        # A reinstall run by hand beside a launcher that waits fails on files in use
+        # (Windows'): which to end first (review r40 of #113, finding 7).
+        held = lifecycle_service.launchers_refusal("upgrade", plan.launchers, again="run it")
+        command += f" {held}" if held else ""
         fail(
             f"aisquare does not upgrade this install itself ({plan.reason}).{command}",
             error="upgrade_unsupported_route",
@@ -624,7 +630,11 @@ def _upgrade(
     if plan.asqs_refusal is not None and yes and not dry_run:
         # Refused, not warned of as the fleet and a Remote are (#17): left running, an asq
         # runs the old release over the new one's files, two releases on one home.
-        fail(plan.asqs_refusal, error="asq_running", detail=", ".join(plan.asqs))
+        fail(
+            plan.asqs_refusal,
+            error="asq_running" if plan.asqs else "launcher_running",
+            detail=", ".join((*plan.asqs, *plan.launchers)),
+        )
     if dry_run or not yes:
         _emit_plan(plan)
         if dry_run or json_output:
@@ -766,6 +776,7 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
         "fleet_error": plan.fleet_error,
         "remote": plan.remote,
         "asqs": list(plan.asqs),
+        "launchers": list(plan.launchers),
         "refusal": None if refusal is None else {"error": refusal.error, "message": str(refusal)},
     }
 

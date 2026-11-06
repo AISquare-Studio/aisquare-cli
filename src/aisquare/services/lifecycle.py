@@ -362,6 +362,10 @@ class UpgradePlan:
     asqs: tuple[str, ...] = ()
     """The asq UIs live on this home, named (:func:`running_asqs`): the upgrade refuses while
     one runs (:attr:`asqs_refusal`)."""
+    launchers: tuple[str, ...] = ()
+    """The sessions started with ``aisquare launch`` that wait on their agents, holding this
+    install's files open, named (:func:`running_launchers`): Windows', whatever the route, as
+    a reinstall there is run by hand and fails on files in use (:attr:`launchers_refusal`)."""
     pin_refused: bool = False
     """Whether :attr:`reason` is that ``--version`` cannot pick a release for this route
     (``install_route.pin_refusal``): Homebrew's, a checkout's or a local source's."""
@@ -431,8 +435,14 @@ class UpgradePlan:
 
     @property
     def asqs_refusal(self) -> str | None:
-        """Why the upgrade will not run while :attr:`asqs` do, or ``None`` when none does."""
-        return asqs_refusal("upgrade", self.asqs)
+        """Why the upgrade will not run while :attr:`asqs` do, or ``None`` when none does; else
+        while :attr:`launchers` wait (:attr:`launchers_refusal`)."""
+        return asqs_refusal("upgrade", self.asqs) or self.launchers_refusal
+
+    @property
+    def launchers_refusal(self) -> str | None:
+        """Why the reinstall cannot run while :attr:`launchers` wait, or ``None``."""
+        return launchers_refusal("upgrade", self.launchers)
 
     @property
     def config_warning(self) -> str | None:
@@ -704,6 +714,7 @@ def upgrade_plan(
         fleet_error=fleet_error,
         remote=remote,
         asqs=asqs,
+        launchers=running_launchers(),
         config_defaults_lost=lost,
         env_files_dropped=dropped,
         tools_regained=regained,
@@ -1490,6 +1501,10 @@ class UninstallPlan:
     asqs: tuple[str, ...] = ()
     """The asq UIs live on this home, named (:func:`running_asqs`). One refuses the run, as a
     Remote on does."""
+    launchers: tuple[str, ...] = ()
+    """The sessions started with ``aisquare launch`` that wait on their agents, named
+    (:func:`running_launchers`). One refuses the run, as an asq does: it holds the program's
+    files open, which Windows will not let the uninstall remove."""
     statuslines: tuple[Path, ...] = ()
     """The config directories whose ``statusLine`` aisquare set (``accounts statusline``,
     #287): removed with the hooks, a wrapped one put back as the user had it, so no status
@@ -1643,6 +1658,9 @@ class UninstallPlan:
         refused_for_asqs = asqs_refusal("uninstall", self.asqs)
         if refused_for_asqs is not None:
             return UninstallRefused(refused_for_asqs, error="asq_running")
+        refused_for_launchers = launchers_refusal("uninstall", self.launchers)
+        if refused_for_launchers is not None:
+            return UninstallRefused(refused_for_launchers, error="launcher_running")
         if self.purge and self.purge_refusal is not None:
             return UninstallRefused(
                 f"--purge will not delete {self.home}: {self.purge_refusal}",
@@ -2164,6 +2182,51 @@ def running_asqs() -> tuple[str, ...]:
     return tuple(instance.label for instance in instances.other_instances(prune=False))
 
 
+def running_launchers() -> tuple[str, ...]:
+    """The sessions started with ``aisquare launch`` that wait on their agents on this home,
+    named (``core.launchers``): ``aisquare launch of claude (pid 4242)``. Only where the
+    platform has no exec (Windows) does a launcher wait, holding this install's python, its
+    ``.pyd`` files and ``aisquare.exe`` open for the session (review r40 of #113, finding 7).
+    Read only, as :func:`running_asqs` is."""
+    from aisquare.core import launchers
+
+    return tuple(launcher.label for launcher in launchers.running())
+
+
+_LAUNCHER_COST = {
+    "upgrade": "{they} {holds} this install's files open, so replacing them fails on files in use",
+    "uninstall": "{they} {holds} the program's files open, so removing them fails on files in use",
+}
+"""What each command would meet beside a launcher that waits (:func:`launchers_refusal`)."""
+
+
+def launchers_refusal(
+    command: str, launchers: Sequence[str], *, again: str | None = None
+) -> str | None:
+    """Why ``aisquare <command>`` (``upgrade`` or ``uninstall``) will not run while
+    ``launchers`` wait (:func:`running_launchers`), naming them and saying to end them first,
+    as :func:`asqs_refusal` says of an asq; ``None`` when none does."""
+    if not launchers:
+        return None
+    one = len(launchers) == 1
+    they = "it" if one else "they"
+    cost = _LAUNCHER_COST.get(command, "{they} would be left running").format(
+        they=they, holds="holds" if one else "hold"
+    )
+    waiting = (
+        "a session started with `aisquare launch` is"
+        if one
+        else f"{len(launchers)} sessions started with `aisquare launch` are"
+    )
+    again = again or f"run `aisquare {command}` again"
+    named = ", ".join(launchers)
+    return (
+        f"{waiting} waiting on {'its agent' if one else 'their agents'} on this home "
+        f"({named}): {cost}. End {'it' if one else 'them'} first (leave the agent), then "
+        f"{again}."
+    )
+
+
 _ASQ_COST = {
     "upgrade": (
         "the install would be replaced under {it}, and {they} would go on running the old "
@@ -2351,6 +2414,7 @@ def _uninstall_plan(purge: bool) -> UninstallPlan:
         account_homes=account_homes,
         remote=running_remote(),
         asqs=running_asqs(),
+        launchers=running_launchers(),
     )
 
 

@@ -33,6 +33,7 @@ from tests.test_claude_native import (  # noqa: F401 - `native` and `native_opti
     AGENT,
     Native,
     Turn,
+    _merge_json,
     native,
     native_options,
     options,
@@ -327,3 +328,27 @@ def test_real_claude_code_whose_reply_ends_in_a_yes_no_question_is_told_at_its_i
     told = asq_json(native, "fleet", "tell", row.label, "told after the question")
     assert told["typed"] == "yes", told
     native.heard("told after the question")
+
+
+@options()
+def test_real_claude_code_is_told_a_word_wider_than_its_input_box(
+    native: Native,  # noqa: F811
+) -> None:
+    """#95, the manager's finding: Claude Code wraps a word wider than its box inside the word
+    (a long path), and the render check read the space it was joined with as a human's draft
+    beside ours: the tell was refused, its text left unsent in the box. It types and is heard,
+    under Claude Code's idle-return hint (``new task? /clear to save … tokens``, its idle and
+    token thresholds lowered so it shows) as without it."""
+    told_text = "see /var/tmp/" + "-x" * 70 + "/notes.md now"
+    _merge_json(
+        native.config_dir / "settings.json",
+        env={"CLAUDE_CODE_IDLE_THRESHOLD_MINUTES": "0", "CLAUDE_CODE_IDLE_TOKEN_THRESHOLD": "1"},
+    )
+    row = native.spawn(prompt="before the long word").agent
+    native.heard("before the long word")
+    native.until(lambda: native.state(row.session_id) == "waiting", 30, "idle", row.pane_id)
+    native.ready(row.pane_id)
+    native.until(lambda: "to save" in native.screen(row.pane_id), 40, "the hint", row.pane_id)
+    told = asq_json(native, "fleet", "tell", row.label, told_text)
+    assert told["typed"] == "yes", told
+    assert told_text in native.heard("/notes.md now").said

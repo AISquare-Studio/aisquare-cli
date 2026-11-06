@@ -249,17 +249,24 @@ def holds(composer: str | None, text: str) -> bool:
     """Whether the input box (``composer``, :func:`screen.composer_text`) holds ``text`` as it
     was pasted and nothing else: all of it, a part of it a wrapped box shows, or Claude
     Code's chip for a long paste. A box a human cleared, or typed into, holds something
-    else, and is never pressed again."""
+    else, and is never pressed again.
+
+    Compared with the whitespace out, as the box can show it neither way: its rows are read
+    joined with a space, and Claude Code wraps a word that is wider than its box inside the
+    word (a long path, a URL), so a space was read where there is none; and where it wraps
+    at a space, it draws none. Compared with each run of whitespace read as one space, a tell
+    holding such a word read as a human's draft beside ours, and was never sent: measured on
+    Claude Code 2.1.318, as 0.9.2 read it too (#95, the manager's tell to a busy coder)."""
     if not composer:
         return False
     if _PASTE_CHIP.match(composer):
         return not _PASTE_CHIP.sub("", composer, count=1).strip()
-    shown, ours = _flat(composer), _flat(text)
+    shown, ours = _squashed(composer), _squashed(text)
     return shown == ours or (len(shown) >= min(len(ours), 40) and shown in ours)
 
 
-def _flat(text: str) -> str:
-    return " ".join(text.split())
+def _squashed(text: str) -> str:
+    return "".join(text.split())
 
 
 def _box(server: TmuxServer, pane_id: str) -> list[str] | None:

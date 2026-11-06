@@ -83,13 +83,13 @@ def test_a_jwt_started_in_the_middle_of_a_word_is_not_one() -> None:
 # --- finding 3a: a private key cut short ---------------------------------------------------------
 
 
-def test_a_private_key_cut_short_is_removed_from_its_header_to_the_end() -> None:
+def test_a_private_key_cut_short_is_removed_from_its_header_to_the_end_of_its_body() -> None:
     body = "\n".join("MIIEowIBAAKCAQEA" + f"{n:02d}" + "x" * 46 for n in range(4))
     text = f"head -3 id_rsa\n{HEADER}\n{body}\n"
 
     shown, strict = _both(text)
 
-    assert shown == strict == f"head -3 id_rsa\n{MARKER}"
+    assert shown == strict == f"head -3 id_rsa\n{MARKER}\n"
 
 
 # --- finding 3b: a JSON-quoted name --------------------------------------------------------------

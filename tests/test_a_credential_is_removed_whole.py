@@ -199,7 +199,8 @@ FOOTER = "-----END RSA PRIVATE KEY-----"
 
 def test_a_header_with_no_footer_costs_no_more_than_reading_the_text() -> None:
     """The tester's case: 7,000 headers and no footer in 2 MB took minutes (16 s in 400 KB).
-    A header with no footer is a key cut short, and is removed to the end of the text (r24 3a)."""
+    A header with no footer is a key cut short, and is removed with the body after it (r24 3a;
+    since R9k, the body alone and not the rest of the text)."""
     pad = "x" * 250
     text = "".join(f"{HEADER}\n{pad}\n" for _ in range(7_000))
     assert len(text) > 1_900_000
@@ -209,7 +210,7 @@ def test_a_header_with_no_footer_costs_no_more_than_reading_the_text() -> None:
 
     elapsed = _clock() - started
     assert elapsed < budget(5.0), f"{elapsed:.2f} s"
-    assert shown == MARKER, "the first header takes the text, and no later one has a footer"
+    assert shown == f"{MARKER}\n" * 7_000, "each header takes its own body, and no more"
 
 
 def test_headers_after_a_block_whose_footer_is_the_last_cost_no_more_either() -> None:
@@ -220,7 +221,7 @@ def test_headers_after_a_block_whose_footer_is_the_last_cost_no_more_either() ->
     shown = redact(text, RedactionLevel.standard)
 
     assert _clock() - started < budget(5.0)
-    assert shown == f"{MARKER}\n{MARKER}", "the block, then the first header that has no footer"
+    assert shown == f"{MARKER}\n" + f"{MARKER}\n" * 7_000, "the block, then each header alone"
 
 
 def test_many_headers_and_one_footer_are_one_block() -> None:
@@ -240,18 +241,17 @@ def test_a_block_is_one_marker_whatever_it_holds_inside() -> None:
 
 
 def _as_the_regular_expression_would(text: str) -> str:
-    """``PEM_BLOCK.sub`` over ``text``, and then from the first header it left (one with no
-    footer after it) to the end: the rule as it was, with a block cut short taken whole."""
-    removed = PEM_BLOCK.sub(MARKER, text)
-    cut = redaction._PEM_BEGIN.search(removed)
-    return removed if cut is None else removed[: cut.start()] + MARKER
+    """``PEM_BLOCK.sub`` over ``text``, and then each header it left (one with no footer after
+    it) with its key's body (``_PEM_HEADER_ALONE``): the rule as it was, with a block cut short
+    taken to the end of its body."""
+    return redaction._PEM_HEADER_ALONE.sub(MARKER, PEM_BLOCK.sub(MARKER, text))
 
 
 @pytest.mark.parametrize("seed", range(300))
 def test_the_linear_pass_removes_what_the_regular_expression_did(seed: int) -> None:
     """The rule was ``PEM_BLOCK.sub``; its replacement must give the same text for any text
-    made of headers, footers, other lines and unrelated dashes, and take the rest of the text
-    from a header that has no footer."""
+    made of headers, footers, other lines and unrelated dashes, and take a header that has no
+    footer with its body."""
     rng = random.Random(seed)
     pieces = [
         HEADER,
@@ -267,7 +267,10 @@ def test_the_linear_pass_removes_what_the_regular_expression_did(seed: int) -> N
         "body line",
         "\n",
         " ",
+        "\\n",
+        "> ",
         "x" * rng.randrange(1, 40),
+        "MIIEowIBAAKCAQEAx7Fk9sQmPq3vN2wZ"[: rng.randrange(1, 33)],
     ]
     text = "".join(
         rng.choice(pieces) + rng.choice(["", "\n", " "]) for _ in range(rng.randrange(0, 40))
@@ -283,16 +286,19 @@ def test_the_linear_pass_removes_what_the_regular_expression_did(seed: int) -> N
         (f"{HEADER}\nMIIEowIBAAKCAQEA", MARKER),
         (f"head -3 id_rsa\n{HEADER}\nMIIEowIBAAKCAQEA\nQ29kZSBpcw==", f"head -3 id_rsa\n{MARKER}"),
         (f"{FOOTER} then {HEADER}\nMIIE", f"{FOOTER} then {MARKER}"),
-        (f"{HEADER}\na\n{FOOTER}\nkeep {HEADER}\nb\nand this", f"{MARKER}\nkeep {MARKER}"),
-        (f"{HEADER}\n{HEADER}\nMIIE", MARKER),
+        (
+            f"{HEADER}\na\n{FOOTER}\nkeep {HEADER}\nb\nand this",
+            f"{MARKER}\nkeep {MARKER}\nand this",
+        ),
+        (f"{HEADER}\n{HEADER}\nMIIE", f"{MARKER}\n{MARKER}"),
         ("-----BEGIN PRIVATE KEY-----\nMIIE", MARKER),
         ("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIE", MARKER),
     ],
 )
-def test_a_header_with_no_footer_is_removed_to_the_end_of_the_text(text: str, shown: str) -> None:
+def test_a_header_with_no_footer_is_removed_with_its_body(text: str, shown: str) -> None:
     """``head -3 id_rsa``, a paste or a tool result clipped, a prompt cut at the contract's
     bound: the header and the first lines of the key. Removing the header alone ships the body
-    (r24 3a)."""
+    (r24 3a); removing the rest of the text took the prose after it (R9k)."""
     assert redaction._without_pem_blocks(text) == shown
     assert redact(text, RedactionLevel.standard) == shown
     assert redact(text, RedactionLevel.strict) == shown
@@ -347,6 +353,17 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     "dashes-and-dots": lambda size: "-." * (size // 2),
     "alnum": lambda size: "a" * size,
     "headers-only": lambda size: (HEADER + "\n") * (size // (len(HEADER) + 1)),
+    # R9k: a header with no footer takes its key's body, run by run
+    "pem-lone-header-short-lines": lambda size: HEADER + "\nabcdefgh" * (size // 9),
+    "pem-lone-header-escaped-short-lines": lambda size: HEADER + "\\nabcdefgh" * (size // 10),
+    "pem-lone-header-spaced-short-runs": lambda size: HEADER + " abcdefgh" * (size // 9),
+    "pem-lone-headers-with-bodies": lambda size: (HEADER + "\n" + "A" * 64 + "\n") * (size // 97),
+    "pem-lone-header-gaps": lambda size: HEADER + "\n" + "\"' +,>" * (size // 6) + "abc",
+    # R9k: a quoted name is a credential's by the word that ends it
+    "quoted-name-suffix-runs": lambda size: ('"api_key' + "_prod" * 8 + '" ') * (size // 50),
+    "quoted-names-joined-unclosed": lambda size: '"accesstoken": "' * (size // 16),
+    "quoted-names-camel": lambda size: "aToken" * (size // 6),
+    "quoted-name-version-values": lambda size: '"auth": "^1.' * (size // 12),
 }
 
 #: Four sizes, each four times the one before, the last 2 MB.

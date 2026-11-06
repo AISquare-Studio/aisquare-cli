@@ -31,7 +31,10 @@ THE LEVELS, and why they split where they do:
 FALSE POSITIVES ARE A REAL COST here, not a nuisance: every over-match is a
 sentence the collective-intelligence dataset cannot learn from. The patterns are
 therefore keyed to credential SHAPES that do not occur in prose, and
-``test_ordinary_prose_is_returned_unchanged`` is the guard against creep.
+``test_ordinary_prose_is_returned_unchanged`` is the guard against creep. Where a
+shape cannot tell, SECURITY COMES FIRST (R9k, reopen 2): a value under a quoted name
+that mentions a token, a secret, a password or a key is removed even when it is not
+one, and a key's lines are taken past whatever prefix a listing printed before them.
 
 Every pattern is linear-time by construction — possessive runs, no nested quantifiers,
 and a start only where its token could start (see :data:`_CREDENTIAL_RULES`) — because this
@@ -42,6 +45,7 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left
+from collections.abc import Callable
 
 from aisquare.models import RedactionLevel
 
@@ -101,42 +105,20 @@ _QUOTED_VALUE = (
 
 
 def _cased(words: tuple[str, ...]) -> str:
-    """``words`` as an alternation of how a name writes them: ``token``, ``Token`` and ``TOKEN``,
+    """``words`` as an alternation of how a name writes them: ``prod``, ``Prod`` and ``PROD``,
     the longest first, so a word is never read as a shorter one it starts with."""
     forms = {form for word in words for form in (word, word.capitalize(), word.upper())}
     return "(?:" + "|".join(sorted(forms, key=lambda form: (-len(form), form))) + ")"
 
 
-#: Words that make a QUOTED name a credential's name when they END it: as its last segment
-#: (``refresh_token``, ``clientSecret``, ``DB_PASSWORD``, ``x-auth-token``), or as the end of a
-#: name written as one word (``PGPASSWORD``, ``newpassword``, ``JWTSECRET``, ``npmtoken``). A
-#: segment starts where the name does, after a ``_``, ``-`` or ``.``, or at an upper-case letter
-#: after a lower-case one (``accessToken``). Not ``tokens``: ``max_tokens`` counts them. A package
-#: whose name ends in one (``jsonwebtoken``) is told by its value, :data:`_PACKAGE_SPEC`.
-_NAME_ENDINGS = ("token", "secret", "password", "passwd", "credential", "credentials")
+def _camel(words: tuple[str, ...]) -> str:
+    """``words`` as a camelCase segment writes them: ``Prod`` and ``PROD``."""
+    forms = {form for word in words for form in (word.capitalize(), word.upper())}
+    return "(?:" + "|".join(sorted(forms, key=lambda form: (-len(form), form))) + ")"
 
-#: Words that count only as a WHOLE segment: ``basic_auth``, ``basicAuth`` and ``auth`` (Docker's
-#: ``config.json`` keeps a registry login under it), never ``oauth``; ``db_pwd``, ``DB_PWD`` and
-#: ``pwd``, never ``OLDPWD``, and not ``PWD`` alone, the shell's working directory in a dump of
-#: the environment.
-_NAME_SEGMENTS = ("auth", "pwd")
 
-#: What ``key`` must follow to name a credential: ``api_key``, ``apiKey``, ``x-api-key``,
-#: ``ACCESS_KEY``, ``secretKey``, ``private_key``. ``key`` alone names a map's key, a sort key or a
-#: translation's (``"key": "button.save"``), and ``key_count`` and ``num_keys`` count them.
-_KEY_KINDS = ("api", "access", "secret", "private")
-
-#: The segment before a pagination cursor's ``Token``: ``NextToken`` (every paginated AWS CLI
-#: output), ``nextPageToken`` and ``pageToken`` (Google's APIs), ``NextContinuationToken``,
-#: ``continuationToken``, ``syncToken``. A cursor says where a list goes on, not who may read it.
-_CURSOR_WORDS = ("next", "page", "continuation", "pagination", "cursor", "sync")
-
-#: Segments that may FOLLOW the credential word and leave the name a credential's: a version
-#: (``api_key_v2``, ``token2``), an environment (``STRIPE_SECRET_KEY_LIVE``, ``DB_PASSWORD_PROD``),
-#: or the form the value takes (``SECRET_KEY_BASE``, ``token_value``, ``password_hash``,
-#: ``password_confirmation``, AWS Secrets Manager's ``SecretBinary``). Any other segment after it
-#: says the value is something ABOUT the credential: ``auth_token_url``, ``token_type``,
-#: ``password_policy``, ``api_key_header``.
+#: Segments that may follow ``auth`` and leave the name a credential's: a version (``auth2``), an
+#: environment (``auth_prod``), or the form the value takes (``auth_b64``, ``authValue``).
 _NAME_SUFFIXES = (
     "value", "val", "base", "b64", "base64", "hex", "raw", "plain", "plaintext", "str", "string",
     "binary", "bin", "bytes", "blob", "enc", "encoded", "encrypted", "hash", "hashed", "digest",
@@ -149,40 +131,56 @@ _SEGMENT = r"(?<![A-Za-z0-9])"
 #: Where a camelCase segment starts: an upper-case letter after a lower-case one or a digit.
 _CAMEL = r"(?<=[a-z0-9])"
 
-
-def _camel(words: tuple[str, ...]) -> str:
-    """``words`` as a camelCase segment writes them: ``Token`` and ``TOKEN``."""
-    forms = {form for word in words for form in (word.capitalize(), word.upper())}
-    return "(?:" + "|".join(sorted(forms, key=lambda form: (-len(form), form))) + ")"
-
-
-def _not_after(words: tuple[str, ...]) -> str:
-    """Not straight after one of ``words`` as the segment before: ``nextPage|Token``,
-    ``next_page_|token``, ``NEXT|TOKEN``, ``nexttoken``. Each a lookbehind of a fixed width."""
-    forms = sorted({form for word in words for form in (word, word.capitalize(), word.upper())})
-    return "".join(f"(?<!{re.escape(form + sep)})" for form in forms for sep in ("", "_", "-", "."))
-
-
-#: A quoted name that IS a credential's name, read from the credential word that ends it (R9k):
-#: the rule starts at that word, and the part of the name before it stays in the output as it
-#: was. Case-sensitive, for the camelCase starts.
-_CREDENTIAL_NAME = (
-    "(?:"
-    # a word that ends the name's segment, or the name written as one word
-    # (the cursor's lookbehinds only where a token starts: prose has a t at every few letters)
-    + "(?=[tTsSpPcC])(?:(?=" + _cased(("token",)) + ")" + _not_after(_CURSOR_WORDS)
-    + _cased(("token",))
-    + "|" + _cased(tuple(word for word in _NAME_ENDINGS if word != "token")) + ")"
-    # a word that is a whole segment, and key after its kind: at a segment's start, which prose
-    # fails at all but the first letter of each word
-    + "|(?:" + _SEGMENT + "|" + _CAMEL + "(?=[A-Z]))(?:"
-    + "(?:" + _SEGMENT + _cased(_KEY_KINDS) + "|" + _CAMEL + _camel(_KEY_KINDS) + ")"
-    + "[_.-]?" + _cased(("key",))
-    + "|" + _SEGMENT + "(?:auth|Auth|AUTH|pwd|Pwd)|(?<=[A-Za-z0-9][_.-])PWD"
-    + "|" + _CAMEL + _camel(_NAME_SEGMENTS)
-    + ")"
-    + ")(?:[_.-](?:" + _cased(_NAME_SUFFIXES) + "|[vV]?[0-9]++)"
+#: ``auth`` as the segment that ends a quoted name (R9k): Docker's ``config.json`` keeps a
+#: registry's login under ``"auth"``, and ``basic_auth``, ``basicAuth`` and ``x-auth`` hold one.
+#: Not a word of the rule's name (:data:`_SECRET_NAME`) anywhere in a name, as the others are:
+#: ``author``, ``oauth``, ``authority`` and ``authProvider`` name no credential. The part of the
+#: name before it stays in the output as it was.
+_AUTH_NAME = (
+    "(?=[aA])(?:" + _SEGMENT + "(?:auth|Auth|AUTH)|" + _CAMEL + "(?:Auth|AUTH))"
+    + "(?:[_.-](?:" + _cased(_NAME_SUFFIXES) + "|[vV]?[0-9]++)"
     + "|" + _camel(_NAME_SUFFIXES) + "|V[0-9]++|[0-9]++)*+"
+)  # fmt: skip
+
+#: Quoted names that hold a credential's word and are documented as something else. These, and
+#: only these, keep their value by NAME (R9k, reopen 2): each whole, and in the case its API
+#: writes it, so ``page_token`` and ``PAGE_TOKEN`` (a Facebook Page's access token is kept under
+#: them) are not ``pageToken``, and ``usage.max_tokens`` is not ``max_tokens``.
+_NOT_CREDENTIALS = (
+    # how many tokens a model may write: Anthropic's Messages API and OpenAI's (max_tokens),
+    # OpenAI's Chat Completions (max_completion_tokens), and OpenAI's Responses API and
+    # Google's Gemini (max_output_tokens)
+    "max_tokens", "max_completion_tokens", "max_output_tokens",
+    # OAuth 2.0's token response (RFC 6749, 5.1): the token's kind, "Bearer"
+    "token_type",
+    # how many tokens a text holds, as a model's usage record counts them
+    "token_count",
+    # Hugging Face's tokenizer_config.json and a model's config: which tokenizer
+    "tokenizer",
+    # where a paged list goes on: AWS's APIs and CLI (NextToken), Amazon S3's ListObjectsV2
+    # (ContinuationToken, NextContinuationToken), Azure's SDKs (continuationToken), Google's
+    # APIs (pageToken, nextPageToken), Google Calendar's (syncToken, nextSyncToken), Google
+    # Drive's changes (startPageToken), and Microsoft Graph's delta queries and pages
+    # (deltaToken, skipToken)
+    "NextToken", "ContinuationToken", "NextContinuationToken", "continuationToken",
+    "pageToken", "nextPageToken", "syncToken", "nextSyncToken", "startPageToken",
+    "deltaToken", "skipToken",
+    # the rules a new password must meet: Auth0's connection options (password_policy)
+    "password_policy",
+    # where a token is asked for, not the token: an OAuth client's settings (auth_token_url),
+    # Google's OAuth client file, client_secret.json (token_uri, auth_uri), and OpenID Connect's
+    # client registration (RFC 7591), how the client signs in (token_endpoint_auth_method)
+    "auth_token_url", "token_uri", "auth_uri", "token_endpoint_auth_method",
+)  # fmt: skip
+
+#: A quoted name that takes its string value: one that holds a credential's word anywhere, as the
+#: rule for an unquoted name reads it (:data:`_SECRET_NAME`, case-insensitive), or ends in
+#: ``auth`` (:data:`_AUTH_NAME`), and is not one of :data:`_NOT_CREDENTIALS` (R9k, reopen 2).
+_QUOTED_CREDENTIAL_NAME = (
+    "(?i:" + _NAME_START
+    + "(?!(?<=[\"'])(?-i:" + "|".join(_NOT_CREDENTIALS) + ")" + r"""\\*+["'])"""
+    + _SECRET_NAME + ")"
+    + "|" + _AUTH_NAME
 )  # fmt: skip
 
 #: npm's dist-tags, which a ``package.json`` may give for a version: ``"next-auth": "beta"``.
@@ -195,9 +193,9 @@ _SPEC_PROTOCOLS = (
 )  # fmt: skip
 
 #: A value that is a package's spec, not a secret: a version (``"next-auth": "^4.24.5"``,
-#: ``"~4.0"``, ``">=1.2 <2"``), a dist-tag, a spec protocol, or an http(s) URL to a tarball or to
-#: a git ref (``…/x-1.0.0.tgz``, ``…/repo#v1.2``). An http(s) URL that is neither (a webhook's,
-#: a signed download's) is still a value like any other.
+#: ``"~4.0"``, ``">=1.2 <2"``, ``"^4.x"``), a dist-tag, a spec protocol, or an http(s) URL to a
+#: tarball or to a git ref (``…/x-1.0.0.tgz``, ``…/repo#v1.2``). An http(s) URL that is neither (a
+#: webhook's, a signed download's) is still a value like any other.
 _PACKAGE_SPEC = (
     r"""\\*+["'](?:(?:[~^=]|[<>]=?)?[ \t]*v?[0-9]++\.[0-9xX*]"""
     + "|(?:" + "|".join(_DIST_TAGS) + r""")\\*+["']"""
@@ -206,6 +204,34 @@ _PACKAGE_SPEC = (
     + r"""|https?://[^\s"'#\\]*+(?:#|(?<=\.tgz)\\*+["']|(?<=\.tar\.gz)\\*+["'])"""
     + ")"
 )  # fmt: skip
+
+#: A whole value that stands for one and is not one: a placeholder (``<YOUR_API_KEY>``), a
+#: model's special tokens (``</s>``, ``<unk>``, ``[CLS]``, ``[MASK]``), a template's reference
+#: (``${localEnv:GITHUB_TOKEN}``, ``${{ secrets.NPM_TOKEN }}``, ``{{access_token}}``), and
+#: ``true``, ``false``, ``null`` and Python's ``None``. No issued credential is written so.
+_PLACEHOLDER_BODY = (
+    r"""<[^"'\\<>\n]*+>"""
+    r"""|\$\{[^"'\\\n]*+(?<=\})"""
+    r"""|\{\{[^"'\\\n]*+(?<=\}\})"""
+    r"|\[[A-Z][A-Z0-9_]*+\]"
+    r"|true|false|null|True|False|None|TRUE|FALSE|NULL"
+)
+_PLACEHOLDER = (
+    r'(?:\\*+"(?:' + _PLACEHOLDER_BODY + r')\\*+"'
+    + r"|\\*+'(?:" + _PLACEHOLDER_BODY + r")\\*+')"
+    + r"(?=[\s,;}\])\\]|\Z)"
+)  # fmt: skip
+
+
+def _in_its_quotes(found: re.Match[str]) -> str:
+    """A quoted name's value replaced INSIDE its quotes: ``"password": "[redacted]"``, so JSON
+    stays JSON, as 0.9.2 wrote a token it took from inside a value (R9k, reopen 2). The quotes
+    are the value's own, with the backslashes before them where the JSON sits in a string."""
+    name, separator, value = found.group(1, 2, 3)
+    opening = len(value) - len(value.lstrip("\\")) + 1
+    inside = value[:-1]
+    closing = 1 + min(opening - 1, len(inside) - len(inside.rstrip("\\")))
+    return name + separator + value[:opening] + MARKER + value[-closing:]
 
 
 #: Credential shapes, matched on shape rather than on context. Order matters
@@ -223,7 +249,7 @@ _PACKAGE_SPEC = (
 #: rule starts only where its token could start (a prefix after :data:`_START`, a JWT at the
 #: start of a run of its alphabet), so two attempts never read the same run. The PEM rule
 #: is not a regular expression for this reason: see :func:`_without_pem_blocks`.
-_CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+_CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], ...] = (
     # NAME=value / NAME: value where the name says "secret". The name is kept —
     # "EXPLAINABILITY_API_KEY=[redacted]" still tells a reader a key was in play,
     # which a bare marker does not. A value in quotes is removed to the quote that closes it
@@ -241,19 +267,21 @@ _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # quote that closes the name is part of the separator, and a backslash before it where the
     # JSON sits inside a string (``{\"password\": \"…\"}``). Only a QUOTED value is taken, on
     # the same line: in JSON a secret is a string, and ``"input_tokens": 12`` is not one, nor
-    # is the next line after ``== "token":`` in code. And only under a name that IS a
-    # credential's (:data:`_CREDENTIAL_NAME`), not one that holds the word: ``"max_tokens":
-    # "8192"``, ``"auth_token_url": "https://…"``, ``"password_policy": "…"`` and a pagination
-    # cursor (``"NextToken": "…"``) are kept, as 0.9.2 kept every quoted name, and so is a
-    # package's spec (:data:`_PACKAGE_SPEC`) (R9k).
+    # is the next line after ``== "token":`` in code. SECURITY FIRST (R9k, reopen 2): a name
+    # that holds a credential's word anywhere takes its value (:data:`_QUOTED_CREDENTIAL_NAME`),
+    # as the PR's rule did, and a name that only mentions one (``"login.password":
+    # "Password"``, ``"gen-token": "node …"``) loses an ordinary value with it: fidelity lost in
+    # a feature that is off by default, never a secret shipped. The only values kept are a
+    # documented field's (:data:`_NOT_CREDENTIALS`), a package's spec (:data:`_PACKAGE_SPEC`)
+    # and a value that stands for one (:data:`_PLACEHOLDER`). The value's quotes stay.
     (
         re.compile(
-            "(" + _CREDENTIAL_NAME + ")"
+            "(" + _QUOTED_CREDENTIAL_NAME + ")"
             r"""(\\*+["'][ \t]*[:=][ \t]*)"""
-            "(?!" + _PACKAGE_SPEC + ")"
+            "(?!" + _PACKAGE_SPEC + "|" + _PLACEHOLDER + ")"
             "(" + _QUOTED_VALUE + ")"
         ),
-        r"\1\2" + MARKER,
+        _in_its_quotes,
     ),
     # Authorization: Bearer <token> / Authorization: Basic <blob>
     (
@@ -311,11 +339,11 @@ _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----")
 _PEM_END = re.compile(r"-----END [A-Z ]{0,32}PRIVATE KEY-----")
 
 #: A key's body, base64, as the lines after a header with no footer hold it. ``_BASE64`` is its
-#: alphabet; a line break is a real one or an escaped one (``\n`` where the key sits in a JSON or
-#: a code string); between two runs on a line may stand spaces, quotes, ``+`` and ``,`` (a key
-#: written as a string concatenation, a line quoted with ``>``).
+#: alphabet; a line break is a real one, an escaped one (``\n`` where the key sits in a JSON or a
+#: code string) or HTML's ``<br>``; between two runs on a line may stand spaces, quotes, ``+`` and
+#: ``,`` (a key written as a string concatenation, a line quoted with ``>``).
 _BASE64 = r"[A-Za-z0-9+/=]"
-_LINE_BREAK = r"(?:\r\n?|\n|\\+[rn])"
+_LINE_BREAK = r"(?:\r\n?|\n|\\+[rn]|<[bB][rR][ \t]*+/?>)"
 _GAP = r"""(?:\\+["']|[ \t"'+,>])"""
 #: The run that is a key's whatever stands before it: no word of prose is this long.
 _BODY_RUN = 20
@@ -323,7 +351,8 @@ _BODY_RUN = 20
 #: the header, run by run, and no further. A run is the key's when it is :data:`_BODY_RUN`
 #: characters or longer; when the ``…`` of a clip follows it, or half an escape and the ``…``
 #: (``core.insights`` clips before it scrubs); when a line, or a string, is that run alone (the
-#: last, short line of a key, a body that ``head`` or the end of the text cut); when it ends the
+#: last, short line of a key, a body that ``head`` or the end of the text cut; in HTML, the run
+#: before a tag, or before what the clip left of one, ``<b…``); when it ends the
 #: text after a long run on its line; and the RFC 1421 lines of a legacy encrypted key
 #: (``Proc-Type:``, ``DEK-Info:``). The first run that is none of these, a word of prose after the
 #: header, ends it: ``grep '-----BEGIN RSA PRIVATE KEY-----' finds nothing`` has no body, and is
@@ -332,31 +361,72 @@ _BODY_RUN = 20
 #: ``internationalization`` and ``/home/me/projects/deploy/keys`` after a header are prose. A
 #: random base64 run of 20 characters has none of those with a chance of 2 x (27/64)^20, about
 #: 6e-8 (one of 64 characters, about 1e-24), and the short runs (a line alone, a cut) need no test.
+#: An identifier of 20 letters or more in both cases that starts the line after a header
+#: (``AuthenticationFailedException: …``) reads as one, and goes with the header: accepted.
 _LONG_RUN = (
     "(?![a-z/]*+(?![A-Za-z0-9+/=]))(?![A-Z/]*+(?![A-Za-z0-9+/=]))"
     + _BASE64 + "{" + str(_BODY_RUN) + ",}+"
 )  # fmt: skip
 _CUT_RUN = _BASE64 + "++(?=\\\\*+\u2026)"
-#: One run of a key's body, with what stands before it.
-_PEM_BODY_RUN = (
-    "(?:"
-    # a run that starts a line
-    + _GAP + "*+" + _LINE_BREAK + "(?:" + _GAP + "|" + _LINE_BREAK + ")*+"
-    + "(?:(?:Proc-Type|DEK-Info):[^\\r\\n\\\\\"'\u2026]*+"
-    + "|" + _LONG_RUN
-    + "|" + _CUT_RUN
-    + "|" + _BASE64 + "++(?=" + _GAP + "*+(?:" + _LINE_BREAK + "|\\\\*+\\Z)|\\\\*+[\"'])"
-    + ")"
-    # a run on the header's line, or on the line of a run before it
-    + "|" + _GAP + "*+(?:" + _LONG_RUN + "(?:" + _GAP + "*+" + _BASE64 + "++\\Z)?|" + _CUT_RUN + ")"
-    + ")"
-)  # fmt: skip
+#: A listing's gutter before each line, read by its number (R9k, reopen 2): ``cat -n`` and
+#: ``nl`` (``     2\t``, ``     2  ``), ``less -N`` (``      2 ``), Claude Code's Read tool
+#: (``     2→``), an editor's or ``bat``'s (``  2 | ``, ``  2 │ ``), and ``grep -n`` reading one
+#: file (``2:``, and ``2-`` for a line of context).
+_NUMBER_GUTTER = "[ \\t]*+[0-9]++(?:[ \\t]*+[\u2192|\u2502]|[ \\t]++|[:-])" + _GAP + "*+"
+#: ``grep`` over files: the file's name as the header's line gave it, then the line's number
+#: (``id_rsa:2:``), or none (``id_rsa:``, without ``-n``); ``-`` for a line of context. Another
+#: file's line (``./b.sh:12:``) is not the key's.
+_FILE_GUTTER = "(?P=file)[:-](?:[0-9]++[:-])?" + _GAP + "*+"
+
+
+def _body_run(gutter: str) -> str:
+    """One run of a key's body, with what stands before it. ``gutter`` is what may stand at the
+    start of each of the key's lines before its run, where a listing printed one."""
+    return (
+        "(?:"
+        # a run that starts a line
+        + _GAP + "*+" + _LINE_BREAK + "(?:" + _GAP + "|" + _LINE_BREAK + ")*+"
+        + ("(?:" + gutter + ")?+" if gutter else "")
+        + "(?:(?:Proc-Type|DEK-Info):[^\\r\\n\\\\\"'<\u2026]*+"
+        + "|" + _LONG_RUN
+        + "|" + _CUT_RUN
+        + "|" + _BASE64 + "++(?=" + _GAP + "*+(?:" + _LINE_BREAK + "|<|\\\\*+\\Z)|\\\\*+[\"'])"
+        + ")"
+        # a run on the header's line, or on the line of a run before it
+        + "|" + _GAP + "*+(?:" + _LONG_RUN + "(?:" + _GAP + "*+" + _BASE64 + "++\\Z)?"
+        + "|" + _CUT_RUN + ")"
+        + ")"
+    )  # fmt: skip
+
+
+#: One run of a key's body, with what stands before it, where no gutter stands before its lines.
+_PEM_BODY_RUN = _body_run("")
 _PEM_BODY = re.compile(_PEM_BODY_RUN + "*+")
+#: The same where the header's line has a number before it (:data:`_NUMBER_GUTTER`).
+_PEM_BODY_NUMBERED = re.compile(_body_run(_NUMBER_GUTTER) + "*+")
+#: The same where it has a file's name before it (:data:`_FILE_GUTTER`): read from the name on.
+_PEM_BODY_FILED = re.compile(
+    "(?P<file>[^\\s:\"'\\\\>]{1,255}?)[:-](?:[0-9]++[:-])?" + _GAP + "*+"
+    + _PEM_BEGIN.pattern + _body_run(_FILE_GUTTER) + "*+"
+)  # fmt: skip
 #: A header with no footer and a body after it, as one pattern: what the linear pass removes for
-#: one, for whoever asks it of a text (the tests' reference does). A header with NO body after it
-#: (``grep`` quoting one, a doc naming one, the clip cutting right after its line) holds nothing
-#: secret, and is kept, as 0.9.2 kept it (R9k, H1).
+#: one at the start of its line, for whoever asks it of a text (the tests' reference does). A
+#: header with NO body after it (``grep`` quoting one, a doc naming one, the clip cutting right
+#: after its line) holds nothing secret, and is kept, as 0.9.2 kept it (R9k, H1).
 _PEM_HEADER_ALONE = re.compile(_PEM_BEGIN.pattern + _PEM_BODY_RUN + "++")
+
+#: How far before a header the start of its line is looked for. Farther, and what stands before
+#: the header is a sentence, not a gutter: its body is read as one with no gutter.
+_PREFIX_REACH = 256
+#: What :data:`_GAP` is made of, for the ends of a line's prefix.
+_GAP_CHARS = " \t\"'+,>\\"
+_A_LINE_BREAK = re.compile(_LINE_BREAK)
+#: A prefix that ends in a number and its sign: ``     2\t``, ``     2→``, ``  2 | ``, ``2:``.
+_NUMBERED_PREFIX = re.compile("(?:^|(?<=[\\s\"'>]))" + _NUMBER_GUTTER + "\\Z")
+#: A prefix's last word that is a file's name and a line's number: ``id_rsa:2:``, ``id_rsa:``.
+_FILED_PREFIX = re.compile("[^\\s:\"'\\\\>]{1,255}?[:-](?:[0-9]++[:-])?")
+#: The rest of a line, to its break (as :data:`_LINE_BREAK` reads one) or to a clip's ``…``.
+_LINE_REST = re.compile("(?:[^\\r\\n\\\\<\u2026]++|\\\\++(?![rn])|<(?![bB][rR][ \\t]*+/?>))*+")
 
 #: ``strict`` only. Who typed it and where they were — identity, not secrets.
 _IDENTITY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -415,7 +485,8 @@ def _without_pem_blocks(text: str) -> str:
     body, so the body goes with it, to its last run, and the prose after it stays: taking the
     text to its end (as #25 did) removed the question asked about the key, and the words after
     a header that was only quoted (R9k). No later BEGIN has an END either, and each is taken
-    with its own body, or kept when it has none."""
+    with its own body, or kept when it has none. A key whose lines a listing numbered is read
+    past each line's number (:func:`_end_of_body`)."""
     if "-----BEGIN " not in text:
         return text
     ends = [found.span() for found in _PEM_END.finditer(text)]
@@ -432,9 +503,7 @@ def _without_pem_blocks(text: str) -> str:
         nearest = bisect_left(ends, (closes, 0), nearest)
         if nearest == len(ends):
             # A header and no footer after it: the header and its body, never what follows it.
-            # The body may be empty, so the pattern always matches; ``closes`` is for the type.
-            body = _PEM_BODY.match(text, closes)
-            stop = body.span()[1] if body is not None else closes
+            stop = _end_of_body(text, opens, closes)
             if stop > closes:  # no body, nothing secret: the header is kept, as 0.9.2 kept it
                 kept += [text[at:opens], MARKER]
                 at = stop
@@ -443,3 +512,48 @@ def _without_pem_blocks(text: str) -> str:
         at = ends[nearest][1]
     kept.append(text[at:])
     return "".join(kept)
+
+
+def _matched_to(found: re.Match[str] | None, at: int) -> int:
+    """Where ``found`` ends, or ``at`` where nothing was (a pattern of ``*+`` always matches)."""
+    return found.span()[1] if found is not None else at
+
+
+def _end_of_body(text: str, opens: int, closes: int) -> int:
+    """Where the body of the key whose header, with no footer after it, is ``text[opens:closes]``
+    ends: ``closes`` where it has none.
+
+    The body is read by what stands before the header on its line (R9k, reopen 2), because
+    ``cat -n``, ``grep -n`` and Claude Code's Read tool print a key's lines each after a gutter,
+    and a body read as a line that starts with base64 stopped at the first of them and shipped
+    the rest: a number (``     1\t``, ``     1→``, ``  1 | ``, ``1:``) lets each line of the key
+    start with a number; a file's name (``id_rsa:1:``) with that name; nothing, or only quotes,
+    spaces and ``>``, with nothing. Any other prefix (``# ``, ``// ``, a diff's ``-``) cannot be
+    read, and the lines right after the header that start with it go with the header, whatever
+    they hold; the body goes on after them as one with no gutter. Each costs what it reads: the
+    prefix, at most :data:`_PREFIX_REACH` characters back, and the lines it takes."""
+    reach = max(0, opens - _PREFIX_REACH)
+    starts = reach
+    for found in _A_LINE_BREAK.finditer(text, reach, opens):
+        starts = found.span()[1]
+    if starts == reach and reach > 0:  # the line started farther back: a sentence, not a gutter
+        return _matched_to(_PEM_BODY.match(text, closes), closes)
+    prefix = text[starts:opens]
+    line = prefix.rstrip(_GAP_CHARS)
+    if not line.strip(_GAP_CHARS):
+        return _matched_to(_PEM_BODY.match(text, closes), closes)
+    if _NUMBERED_PREFIX.search(prefix[-32:]):
+        return _matched_to(_PEM_BODY_NUMBERED.match(text, closes), closes)
+    word = max(map(line.rfind, " \t\"'>\\")) + 1
+    if _FILED_PREFIX.fullmatch(line, word):
+        filed = _PEM_BODY_FILED.match(text, starts + word)
+        if filed is not None and filed.span()[1] >= closes:
+            return filed.span()[1]
+    run = closes
+    pos = _matched_to(_LINE_REST.match(text, closes), closes)
+    lead = prefix.rstrip(" \t")
+    while (brk := _A_LINE_BREAK.match(text, pos)) is not None and text.startswith(
+        lead, brk.span()[1]
+    ):
+        run = pos = _matched_to(_LINE_REST.match(text, brk.span()[1] + len(lead)), closes)
+    return _matched_to(_PEM_BODY.match(text, run), run)

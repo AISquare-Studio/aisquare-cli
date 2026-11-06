@@ -98,27 +98,27 @@ def test_a_private_key_cut_short_is_removed_from_its_header_to_the_end_of_its_bo
 @pytest.mark.parametrize(
     ("text", "shown"),
     [
-        (f'{{"password": "{PASSWORD}"}}', f'{{"password": {MARKER}}}'),
-        (f'{{"apiKey": "{PASSWORD}", "x": 1}}', f'{{"apiKey": {MARKER}, "x": 1}}'),
-        (f'"api_key":"{PASSWORD}"', f'"api_key":{MARKER}'),
-        (f"{{'secret': '{PASSWORD}'}}", f"{{'secret': {MARKER}}}"),
+        (f'{{"password": "{PASSWORD}"}}', f'{{"password": "{MARKER}"}}'),
+        (f'{{"apiKey": "{PASSWORD}", "x": 1}}', f'{{"apiKey": "{MARKER}", "x": 1}}'),
+        (f'"api_key":"{PASSWORD}"', f'"api_key":"{MARKER}"'),
+        (f"{{'secret': '{PASSWORD}'}}", f"{{'secret': '{MARKER}'}}"),
         (
             f'{{"db_password" : "{PASSWORD}", "port": 5432}}',
-            f'{{"db_password" : {MARKER}, "port": 5432}}',
+            f'{{"db_password" : "{MARKER}", "port": 5432}}',
         ),
         (
             f'{{"user": "a", "token": "{PASSWORD} with spaces"}}',
-            f'{{"user": "a", "token": {MARKER}}}',
+            f'{{"user": "a", "token": "{MARKER}"}}',
         ),
-        (f'{{"password":\t"{PASSWORD}"}}', f'{{"password":\t{MARKER}}}'),
+        (f'{{"password":\t"{PASSWORD}"}}', f'{{"password":\t"{MARKER}"}}'),
         # the same JSON inside a string, where a tool call's arguments hold it: quotes escaped
         (
             f'curl -d \'{{\\"password\\": \\"{PASSWORD}\\"}}\'',
-            f"curl -d '{{\\\"password\\\": {MARKER}}}'",
+            f'curl -d \'{{\\"password\\": \\"{MARKER}\\"}}\'',
         ),
         (
             json.dumps({"cmd": f"""curl -d '{{"password": "{PASSWORD}"}}' https://x"""}),
-            '{"cmd": "curl -d \'{\\"password\\": ' + MARKER + "}' https://x\"}",
+            '{"cmd": "curl -d \'{\\"password\\": \\"' + MARKER + '\\"}\' https://x"}',
         ),
         # a name that is not quoted, with a value that is, inside such a string
         (
@@ -182,7 +182,7 @@ def test_a_key_straight_after_text_in_another_script_is_removed(prefix: str, lea
     ("text", "shown"),
     [
         ("密钥token=abcdefgh1234", f"密钥token={MARKER}"),
-        ('密钥"token": "abcdefgh1234"', f'密钥"token": {MARKER}'),
+        ('密钥"token": "abcdefgh1234"', f'密钥"token": "{MARKER}"'),
         ("密钥password: hunter2hunter2", f"密钥password: {MARKER}"),
         ("头bearer abcdefghijkl1234", f"头bearer {MARKER}"),
         ("头Authorization: Bearer abcdefghijkl1234", f"头Authorization: Bearer {MARKER}"),

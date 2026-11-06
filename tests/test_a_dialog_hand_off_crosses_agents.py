@@ -510,7 +510,7 @@ def test_a_jwt_after_a_hyphen_a_key_cut_short_a_quoted_name_and_a_key_after_othe
     for expected in (
         "my session is token-[redacted] and it is rejected",
         "my deploy key, cut short:",
-        '"password": [redacted]}',
+        '"password": "[redacted]"}',
         "我的密钥[redacted]",
     ):
         assert expected in file_text, expected
@@ -552,7 +552,7 @@ def test_a_codex_tool_call_whose_arguments_hold_json_with_a_password_is_gone(
     assert "exec_command(curl -d" in file_text, "the call is in the brief"
     for where, text in (("the first message", prompt), ("the brief file", file_text)):
         assert R24_PASSWORD not in text, where
-        assert '"password": [redacted]' in text, where
+        assert '"password": "[redacted]"' in text, where
 
 
 @pytest.mark.parametrize(("level", "kept"), [("off", True), ("standard", False), ("strict", False)])

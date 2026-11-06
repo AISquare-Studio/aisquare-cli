@@ -243,7 +243,12 @@ def test_a_block_is_one_marker_whatever_it_holds_inside() -> None:
 def _as_the_regular_expression_would(text: str) -> str:
     """``PEM_BLOCK.sub`` over ``text``, and then each header it left (one with no footer after
     it) that has a key's body after it, with the body (``_PEM_HEADER_ALONE``): the rule as it
-    was, with a block cut short taken to the end of its body, and a header alone kept."""
+    was, with a block cut short taken to the end of its body, and a header alone kept.
+
+    For a header with nothing, or only a gap, before it on its line. Where text the redactor
+    cannot read as a gutter stands there and the next line starts with it too, that line goes
+    with the header (reopen 2, P4), which one expression cannot say: none of the seeds below
+    makes one (5 in 5,000 do), and ``test_redaction_keeps_ordinary_text.py`` pins it."""
     return redaction._PEM_HEADER_ALONE.sub(MARKER, PEM_BLOCK.sub(MARKER, text))
 
 
@@ -365,6 +370,19 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     "quoted-names-joined-unclosed": lambda size: '"accesstoken": "' * (size // 16),
     "quoted-names-camel": lambda size: "aToken" * (size // 6),
     "quoted-name-version-values": lambda size: '"auth": "^1.' * (size // 12),
+    # reopen 2: the broad name, the exact list, the placeholders, and a key's lines in a listing
+    "quoted-names-near-the-list": lambda size: '"max_tokensX": "' * (size // 16),
+    "quoted-names-long-prefix": lambda size: (
+        ('"' + "a." * 30 + 'token": "ab' + "\n") * (size // 76)
+    ),
+    "quoted-placeholders-unclosed": lambda size: '"api_key": "${{<[' * (size // 17),
+    "pem-numbered-lines": lambda size: f"     1\t{HEADER}" + "\n     2\tabcdefgh" * (size // 16),
+    "pem-numbered-headers": lambda size: f"     1\t{HEADER}\n" * (size // 39),
+    "pem-filed-lines": lambda size: f"id_rsa:1:{HEADER}" + "\nid_rsa:2:abcdefgh" * (size // 18),
+    "pem-filed-long-names": lambda size: ("a" * 250 + ":1:" + HEADER + "\n") * (size // 285),
+    "pem-prefixed-run": lambda size: f"# {HEADER}" + "\n# abcdefgh" * (size // 11),
+    "pem-prefixed-headers-on-one-line": lambda size: "# " + (HEADER + " ") * (size // 32),
+    "pem-prefixed-headers-alone": lambda size: ("x" * 200 + HEADER + "\ny\n") * (size // 234),
 }
 
 #: Four sizes, each four times the one before, the last 2 MB.

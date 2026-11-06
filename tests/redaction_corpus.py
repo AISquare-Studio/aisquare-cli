@@ -18,6 +18,7 @@ WHSEC = "whsec" + "_" + "abc123def456ghi789"
 OPENSSH_LINE = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdzc2gtcn"
 NPM_LIKE = "npm" + "_" + "Zq8vR2mXk4Lp9Tn3Ab1Cd2Ef3Gh4Ij5Kl6Mn7"
 HF = "hf" + "_" + "Zq8vR2mXk4Lp9Tn3Ab1Cd2Ef3Gh4Ij5"
+ANTHROPIC = "sk" + "-ant-api03-" + "Zq8vR2mXk4Lp9Tn3Ab1Cd2Ef3Gh"
 
 #: (where it comes from, the text). Grouped as the brief asked: JSON configs, API docs, shell
 #: sessions, stack traces, and code that names token, key and secret variables.
@@ -250,4 +251,58 @@ CORPUS: tuple[tuple[str, str], ...] = (
         f"{HEADER}\ninternationalization breaks when I paste the key",
     ),
     ("a path after a header", f"{HEADER}\n/home/me/projects/deploy/keys is where it lives"),
+    # --- reopen 2 (tester-r9k, seq 11411, G4): ten ordinary prompts of the tester's --------------
+    (
+        "hf tokenizer_config.json",
+        '{"bos_token": "<s>", "eos_token": "</s>", "unk_token": "<unk>", "pad_token": "<pad>", '
+        '"model_max_length": 2048, "tokenizer_class": "LlamaTokenizer"}',
+    ),
+    (
+        "hf special_tokens_map",
+        "Why does my BERT fine-tune crash? special_tokens_map.json is "
+        '{"cls_token": "[CLS]", "mask_token": "[MASK]", "sep_token": "[SEP]", '
+        '"unk_token": "[UNK]"}',
+    ),
+    (
+        "i18n en.json",
+        '{"login.title": "Sign in", "login.password": "Password", "login.forgot_password": '
+        '"Forgot your password?", "settings.api_key": "API key", "settings.token": "Access token"}',
+    ),
+    (
+        "api docs placeholder",
+        'curl https://api.example.com/v1/run -H "Content-Type: application/json" '
+        '-d \'{"api_key": "<YOUR_API_KEY>", "model": "fast-1"}\'',
+    ),
+    (
+        "devcontainer.json env ref",
+        '{"name": "app", "containerEnv": {"GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}", '
+        '"NPM_TOKEN": "${localEnv:NPM_TOKEN}"}}',
+    ),
+    (
+        "openai request",
+        '{"model": "gpt-4o", "max_tokens": 1024, "max_completion_tokens": 900, "temperature": 0.2, '
+        '"messages": [{"role": "user", "content": "explain token buckets"}]}',
+    ),
+    (
+        "claude settings.json",
+        '{"apiKeyHelper": "~/bin/get-key.sh", "env": {"ANTHROPIC_AUTH_TOKEN": "'
+        + ANTHROPIC
+        + '"}, "permissions": {"allow": ["Bash(npm run test:*)"]}}',
+    ),
+    (
+        "package.json scripts",
+        '{"scripts": {"build": "tsc -p .", "gen-token": "node scripts/gen-token.js", '
+        '"rotate-secret": "node scripts/rotate.js --env prod"}}',
+    ),
+    (
+        "postman auth",
+        '{"auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{access_token}}", '
+        '"type": "string"}]}}',
+    ),
+    (
+        "appsettings.json",
+        '{"ConnectionStrings": {"Default": '
+        '"Server=.;Database=app;User Id=sa;Password=Passw0rd!;"}, '
+        '"Jwt": {"Key": "dev-only-signing-key-0123456789", "Issuer": "app"}}',
+    ),
 )

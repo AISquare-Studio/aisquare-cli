@@ -32,9 +32,9 @@ def _shown(text: str) -> str:
 #: (the text, what ``redact`` leaves of it; ``<R>`` is the marker)
 HELD_QUOTES: list[tuple[str, str]] = [
     # JSON, the name quoted.
-    (r'{"password": "abcd\"efgh1234"}', '{"password": <R>}'),
-    (r'{"api_key":"sk\"tail-of-the-key-xyz","user":"bob"}', '{"api_key":<R>,"user":"bob"}'),
-    (r'{"token": "ab\"cd"}  tail', '{"token": <R>}  tail'),
+    (r'{"password": "abcd\"efgh1234"}', '{"password": "<R>"}'),
+    (r'{"api_key":"sk\"tail-of-the-key-xyz","user":"bob"}', '{"api_key":"<R>","user":"bob"}'),
+    (r'{"token": "ab\"cd"}  tail', '{"token": "<R>"}  tail'),
     # An assignment, double and single quoted; the text after the value is kept.
     (r"PASSWORD='ab\'cd1234'", "PASSWORD=<R>"),
     # The floor is four characters of the value, an escaped quote as one, in single quotes too.
@@ -43,13 +43,13 @@ HELD_QUOTES: list[tuple[str, str]] = [
     (r'PASSWORD="ab\"cd1234 and more" next="x"', 'PASSWORD=<R> next="x"'),
     (r'secret = "\"\"\"\"" # why', "secret = <R> # why"),
     # An escaped backslash before the closing quote is not an escaped quote.
-    (r'{"password": "abcd\\", "next": "keep"}', '{"password": <R>, "next": "keep"}'),
+    (r'{"password": "abcd\\", "next": "keep"}', '{"password": "<R>", "next": "keep"}'),
     # JSON inside a string: its quotes escaped, and a quote of the value escaped again.
-    (r"{\"password\": \"abcd1234\"}", r"{\"password\": <R>}"),
-    (r"{\"password\": \"abcd\\\"efgh1234\"}", r"{\"password\": <R>}"),
+    (r"{\"password\": \"abcd1234\"}", r"{\"password\": \"<R>\"}"),
+    (r"{\"password\": \"abcd\\\"efgh1234\"}", r"{\"password\": \"<R>\"}"),
     (
         r"{\"password\": \"abcd\\nefgh\\\"ijkl\\\\mnop\", \"k\": 1}",
-        r"{\"password\": <R>, \"k\": 1}",
+        r"{\"password\": \"<R>\", \"k\": 1}",
     ),
     (r"PASSWORD=\"ab\\\"cd1234\" rest", "PASSWORD=<R> rest"),
     # The closer needs no look at what follows: nothing else closes it but the quote.
@@ -83,7 +83,7 @@ UNCLOSED_ESCAPES: list[tuple[str, str]] = [
     # An opening that is escaped and a closing that is not, or an opening of two backslashes.
     (r'PASSWORD=\"abcdefgh1234" rest', "PASSWORD=<R> rest"),
     (r'PASSWORD=\\"abcdefgh1234\\" rest', "PASSWORD=<R> rest"),
-    (r'{"password": "C:\dir\", "other": "x"}', '{"password": <R>, "other": "x"}'),
+    (r'{"password": "C:\dir\", "other": "x"}', '{"password": "<R>", "other": "x"}'),
     (r'password="abc\" api_key="sk_live_abcdefgh1234" ', "password=<R> api_key=<R> "),
     (r"password='abc\' token='tok_live_abcdefgh1234' ", "password=<R> token=<R> "),
 ]

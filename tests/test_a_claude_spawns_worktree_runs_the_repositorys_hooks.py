@@ -21,6 +21,7 @@ import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -595,3 +596,231 @@ def test_the_home_folder_is_spelled_as_a_person_writes_it(
     assert fleet_service._home_spelled(home / "work" / "repo") == "~/work/repo"
     elsewhere = Path("/opt/elsewhere")
     assert fleet_service._home_spelled(elsewhere) == str(elsewhere), "as this OS writes it"
+
+
+# --- #101's reopen 1 (seq 11302): the list and the forget, by name; the four claims pinned ------
+
+
+def _root(path: Path, agent: str = "codex", at: str = "2026-11-05T10:00:00+00:00") -> Path:
+    """``path`` recorded as a root of ``agent`` (a value that cannot be read for ``agent=""``,
+    as a hand-edited or a later release's record), as `core.sandbox_roots.record` keys it."""
+    real = Path(os.path.realpath(path))
+    real.mkdir(parents=True, exist_ok=True)
+    value = json.dumps({"agent": agent, "at": at}) if agent else "not json"
+    with store_session() as store:
+        store.set_meta(f"{sandbox_roots.PREFIX}{real}", value)
+    return real
+
+
+def _cli(*argv: str) -> Any:
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+
+    return CliRunner().invoke(app, list(argv))
+
+
+def test_status_roots_of_an_agent_with_none_says_so_of_that_agent_alone(
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Reopen 1, item 1: four Codex roots guarded, and `agents status claude-code --roots`
+    said "no folder is recorded: every fleet worktree runs its repository's hooks"."""
+    for name in ("a", "b"):
+        _root(tmp_path / name)
+
+    none = _cli("agents", "status", "claude-code", "--roots")
+    unknown = _cli("agents", "status", "nosuch", "--roots")
+    without = _cli("agents", "status", "nosuch")
+
+    assert none.exit_code == 0, none.output
+    assert " ".join(none.stdout.split()) == (
+        "no folder is recorded for Claude Code (2 are, of other agents: "
+        "aisquare agents status --roots)"
+    )
+    assert (
+        (unknown.exit_code, unknown.output)
+        == (without.exit_code, without.output)
+        == (
+            1,
+            "✗ unknown agent: nosuch\n",
+        )
+    )
+
+
+def test_forgetting_a_root_under_another_agents_name_is_refused_naming_the_command(
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Reopen 1, item 2: `disconnect claude-code --forget-root` forgot Codex's root, and so did
+    `disconnect nosuch`."""
+    import shlex
+
+    root = _root(tmp_path / "work")
+
+    other = _cli("agents", "disconnect", "claude-code", "--forget-root", str(root), "--yes")
+    unknown = _cli("--json", "agents", "disconnect", "nosuch", "--forget-root", str(root), "--yes")
+
+    assert other.exit_code == 1
+    forget = shlex.join(["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)])
+    assert " ".join(other.output.split()) == (
+        f"✗ {root} was recorded by a Codex agent, not claude-code: forget it with {forget}"
+    )
+    assert unknown.exit_code == 1 and json.loads(unknown.stdout)["error"] == "unknown_agent"
+    with store_session() as store:
+        assert root in sandbox_roots.recorded(store), "neither forgot it"
+
+
+@pytest.mark.parametrize("agent", ["gemini-cli", ""], ids=["unknown-agent", "unreadable"])
+def test_the_command_printed_for_a_root_no_agent_of_this_release_recorded_works_pasted(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    agent: str,
+) -> None:
+    """Reopen 1, item 2: such a root's line said `disconnect unknown`, a placeholder. The line
+    and the list print one command for it, naming this release's agent that sandboxes its
+    tools, and that command, pasted, forgets it."""
+    import shlex
+
+    _post_checkout(project, tmp_path, "husky")
+    root = _root(project.root.parent, agent=agent)
+    forget = shlex.join(["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)])
+
+    [said] = _said(fleet_service.spawn(project, "coder", worktree=True))
+    listed = _cli("agents", "status", "--roots")
+    pasted = _cli(*shlex.split(forget)[1:], "--yes")
+
+    assert "unknown" not in said and said.endswith(f"`{forget}` forgets it"), said
+    assert f"forget it: {forget}" in listed.stdout, listed.stdout
+    assert pasted.exit_code == 0, pasted.output
+    with store_session() as store:
+        assert sandbox_roots.recorded(store) == {}
+
+
+def test_forgetting_one_root_keeps_every_other(
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """MA: one folder and nothing else. Two others recorded, one with a space in its name."""
+    kept = [_root(tmp_path / "work"), _root(tmp_path / "my work")]
+    gone = _root(tmp_path / "own")
+
+    result = _cli("agents", "disconnect", "codex", "--forget-root", str(gone), "--yes")
+
+    assert result.exit_code == 0, result.output
+    with store_session() as store:
+        assert sandbox_roots.recorded(store) == {path: "codex" for path in kept}
+
+
+def test_the_projects_own_codex_session_keeps_the_line_it_had(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """MB: a project where a Codex agent ran is said so, before any recorded root around it."""
+    _post_checkout(project, tmp_path, "husky")
+    _codex_ran_here(project)
+    _root(project.root.parent)
+
+    [said] = _said(fleet_service.spawn(project, "coder", worktree=True))
+
+    assert "a Codex agent has run in this project" in said, said
+    assert "--forget-root" not in said
+
+
+@posix
+@pytest.mark.parametrize(
+    ("typed", "forgets"), [("", False), ("n", False), ("y", True)], ids=["enter", "n", "y"]
+)
+def test_at_a_terminal_forgetting_is_asked_and_its_default_is_no(
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    typed: str,
+    forgets: bool,
+) -> None:
+    """MC: a terminal (a pty) is asked `[y/N]`: a bare Enter and "n" forget nothing, "y" forgets.
+    The prompt names the agent as the line does."""
+    import pty
+    import select
+    import sys
+    import time
+
+    if sys.platform == "win32":  # `posix` skips it; this says so to mypy's win32 pass too
+        pytest.skip("no pty on Windows")
+    root = _root(tmp_path / "work")
+    leader, follower = pty.openpty()
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "aisquare",
+            "agents",
+            "disconnect",
+            "codex",
+            "--forget-root",
+            str(root),
+        ],
+        stdin=follower,
+        stdout=follower,
+        stderr=follower,
+        env=dict(os.environ),
+        close_fds=True,
+    )
+    os.close(follower)
+    seen = b""
+
+    def read_until(wanted: bytes, seconds: float) -> None:
+        nonlocal seen
+        deadline = time.monotonic() + seconds
+        while wanted not in seen and time.monotonic() < deadline:
+            ready, _, _ = select.select([leader], [], [], 0.1)
+            if ready:
+                try:
+                    seen += os.read(leader, 4096)
+                except OSError:
+                    return
+
+    try:
+        read_until(b"[y/N]", 30)
+        os.write(leader, f"{typed}\r".encode())
+        read_until(b"forgot" if forgets else b"nothing forgotten", 30)
+        assert child.wait(timeout=30) == 0, seen
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+        os.close(leader)
+
+    said = " ".join(seen.decode(errors="replace").split())
+    assert f"Forget that a Codex agent could write {root}?" in said, said
+    with store_session() as store:
+        assert (root in sandbox_roots.recorded(store)) is not forgets, said
+
+
+@posix
+def test_a_typed_path_is_resolved_before_it_is_matched(
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ME: a link's spelling of a recorded folder (macOS's /var for /private/var), and a quoted
+    '~', name the folder they resolve to."""
+    real = _root(tmp_path / "real")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    home = tmp_path / "home"
+    at_home = _root(home / "work")
+    monkeypatch.setenv("HOME", str(home))
+    spelled = [(str(link), real), ("~/work", at_home)]
+    if str(real).startswith("/private/var/"):
+        spelled.append((str(real).removeprefix("/private"), _root(tmp_path / "var-spelled")))
+        spelled[-1] = (str(spelled[-1][1]).removeprefix("/private"), spelled[-1][1])
+
+    for typed, recorded in spelled:
+        result = _cli("agents", "disconnect", "codex", "--forget-root", typed, "--yes")
+        assert result.exit_code == 0, (typed, result.output)
+        with store_session() as store:
+            assert recorded not in sandbox_roots.recorded(store), typed

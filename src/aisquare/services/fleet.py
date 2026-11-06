@@ -2567,16 +2567,7 @@ def _ran_in_a_recorded_root(root: sandbox_roots.Root) -> str:
     known = recorded_adapter(root.agent) if root.agent else None
     who = f"a {known.label} agent" if known is not None else "an agent that sandboxes its tools"
     when = f" ({root.at.astimezone().date().isoformat()})" if root.at is not None else ""
-    forget = shell_line.command_line(
-        [
-            "aisquare",
-            "agents",
-            "disconnect",
-            root.agent or "unknown",
-            "--forget-root",
-            str(root.path),
-        ]
-    )
+    forget = shell_line.command_line(sandbox_roots.forget_argv(root))
     return (
         f"made its worktree without the repository's hooks: {who} ran in "
         f"{_home_spelled(root.path)}{when}, and a hook it could have changed would run outside "

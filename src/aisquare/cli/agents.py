@@ -113,7 +113,7 @@ def disconnect(
 ) -> None:
     """Disconnect an agent (its already-imported context is kept)."""
     if forget_root is not None:
-        _forget_root(forget_root, yes=yes)
+        _forget_root(name, forget_root, yes=yes)
         return
     refusal = agents_service.access(name, config_dir).disconnect
     if refusal is not None:
@@ -212,10 +212,34 @@ def _hooks_text(name: str, config_dir: Path | None) -> bytes | None:
         return None
 
 
+def _known_or_refused(name: str) -> None:
+    """Refuse an agent this CLI does not know, as ``agents status`` and ``disconnect`` refuse
+    one without ``--roots`` or ``--forget-root`` (#101's reopen 1)."""
+    if agent_core.detect(name) is None:
+        fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+
+
+def _agent_said(name: str) -> str:
+    """``a Codex agent``, as the spawn's line names one; an agent this release has no adapter
+    for, by its name."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    known = recorded_adapter(name)
+    return f"a {known.label} agent" if known is not None else f"a {name} agent"
+
+
 def _list_roots(name: str | None) -> None:
-    """``agents status --roots``: every recorded folder (``core.sandbox_roots``), of ``name``'s
-    agent alone when named."""
-    found = [root for root in agents_service.sandbox_roots() if name is None or root.agent == name]
+    """``agents status --roots``: every recorded folder (``core.sandbox_roots``), each with the
+    command that forgets it; of ``name``'s agent alone when named (:func:`sandbox_roots.owner`,
+    which a root whose agent cannot be read is said under), and an agent with none says so
+    of itself alone (#101's reopen 1)."""
+    from aisquare.core import sandbox_roots
+    from aisquare.core.shell_line import command_line
+
+    if name is not None:
+        _known_or_refused(name)
+    every = agents_service.sandbox_roots()
+    found = [root for root in every if name is None or sandbox_roots.owner(root) == name]
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -224,6 +248,7 @@ def _list_roots(name: str | None) -> None:
                         "path": str(root.path),
                         "agent": root.agent or None,
                         "recorded_at": root.at.isoformat() if root.at is not None else None,
+                        "forget": command_line(sandbox_roots.forget_argv(root)),
                     }
                     for root in found
                 ]
@@ -231,6 +256,20 @@ def _list_roots(name: str | None) -> None:
         )
         return
     console = stdout_console()
+    if not found and name is not None:
+        others = len(every)
+        also = (
+            f" ({others} {'is' if others == 1 else 'are'}, of other agents: "
+            "aisquare agents status --roots)"
+            if others
+            else ""
+        )
+        from aisquare.core.agent_adapters import recorded_adapter
+
+        adapter = recorded_adapter(name)
+        label = adapter.label if adapter is not None else name
+        console.print(f"no folder is recorded for {label}{also}", markup=False)
+        return
     if not found:
         console.print("no folder is recorded: every fleet worktree runs its repository's hooks")
         return
@@ -242,13 +281,19 @@ def _list_roots(name: str | None) -> None:
     for root in found:
         when = root.at.astimezone().date().isoformat() if root.at is not None else "?"
         console.print(f"  {root.path}  {root.agent or '?'}  {when}", markup=False)
-    console.print(
-        "forget one: aisquare agents disconnect <agent> --forget-root <path>", markup=False
-    )
+        console.print(
+            f"    forget it: {command_line(sandbox_roots.forget_argv(root))}", markup=False
+        )
 
 
-def _forget_root(path: Path, *, yes: bool) -> None:
-    """``agents disconnect … --forget-root PATH``: forget that recorded folder, asked first."""
+def _forget_root(name: str, path: Path, *, yes: bool) -> None:
+    """``agents disconnect NAME --forget-root PATH``: forget that recorded folder, and nothing
+    else, asked first. NAME counts: it must be the agent the root is forgotten as
+    (:func:`sandbox_roots.owner`), which the line and the list name (#101's reopen 1)."""
+    from aisquare.core import sandbox_roots
+    from aisquare.core.shell_line import command_line
+
+    _known_or_refused(name)
     real = Path(path).expanduser().resolve()
     known = next((root for root in agents_service.sandbox_roots() if root.path == real), None)
     if known is None:
@@ -257,6 +302,16 @@ def _forget_root(path: Path, *, yes: bool) -> None:
             error="no_such_root",
             ref=str(real),
         )
+    owner = sandbox_roots.owner(known)
+    if owner != name:
+        who = _agent_said(known.agent) if known.agent else "an agent whose name cannot be read"
+        fail(
+            f"{real} was recorded by {who}, not {name}: forget it with "
+            f"{command_line(sandbox_roots.forget_argv(known))}",
+            error="wrong_agent",
+            ref=str(real),
+            detail=owner,
+        )
     if not yes:
         if get_state().json_output or not sys.stdin.isatty():
             fail(
@@ -264,9 +319,10 @@ def _forget_root(path: Path, *, yes: bool) -> None:
                 error="confirmation_required",
                 ref=str(real),
             )
+        who = _agent_said(known.agent) if known.agent else "an agent that sandboxes its tools"
         if not typer.confirm(
-            f"Forget that {known.agent or 'an agent that sandboxes its tools'} could write "
-            f"{real}? A fleet worktree in a repository there runs its hooks again.",
+            f"Forget that {who} could write {real}? A fleet worktree in a repository there "
+            "runs its hooks again.",
             default=False,
         ):
             stdout_console().print("nothing forgotten", markup=False)

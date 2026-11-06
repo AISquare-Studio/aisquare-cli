@@ -98,6 +98,36 @@ def touching(tree: Path, roots: Sequence[Root]) -> Root | None:
     return None
 
 
+def owner(root: Root) -> str | None:
+    """The agent a forget of ``root`` names (``agents disconnect <agent> --forget-root``): the
+    agent recorded there where this release knows it; else this release's first agent that
+    sandboxes its tools (``capabilities.sandboxes_tools``), as only such an agent records a
+    root, for a value that cannot be read or a later release's agent after a rollback. The
+    line, the list and the forget all name it, so the command they print works pasted
+    (#101's reopen 1). ``None`` only for a release with no such agent."""
+    from aisquare.core.agent_adapters import adapters
+
+    known = {adapter.id for adapter in adapters()}
+    if root.agent in known:
+        return root.agent
+    return next(
+        (adapter.id for adapter in adapters() if adapter.capabilities.sandboxes_tools), None
+    )
+
+
+def forget_argv(root: Root) -> list[str]:
+    """The command that forgets ``root``: ``aisquare agents disconnect <owner> --forget-root
+    <path>``, its agent :func:`owner`'s."""
+    return [
+        "aisquare",
+        "agents",
+        "disconnect",
+        owner(root) or root.agent,
+        "--forget-root",
+        str(root.path),
+    ]
+
+
 def forget(store: ContextStore, path: Path) -> Root | None:
     """Forget the record of ``path`` (made absolute and real); the root forgotten, or ``None``
     where none was recorded."""

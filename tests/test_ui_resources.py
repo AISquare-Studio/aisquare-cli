@@ -16,7 +16,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.geometry import Region
 from textual.pilot import Pilot
-from textual.widgets import Button, Static
+from textual.widgets import Button, ContentSwitcher, Static
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import SETTINGS_KEY, SettingsRow
@@ -101,9 +101,22 @@ class Host(App[None]):
         yield ResourcesView(sampler=self.sampler, id="resources")
 
 
-def _drive_page(sampler: Any, fn: Callable[[Pilot[None], ResourcesView], Awaitable[T]]) -> T:
+class Switched(Host):
+    """The page as the app holds it: one of the pages of a ``ContentSwitcher``."""
+
+    def compose(self) -> ComposeResult:
+        with ContentSwitcher(initial="resources"):
+            yield ResourcesView(sampler=self.sampler, id="resources")
+            yield Static("another page", id="elsewhere")
+
+
+def _drive_page(
+    sampler: Any,
+    fn: Callable[[Pilot[None], ResourcesView], Awaitable[T]],
+    host: Callable[[Any], Host] = Host,
+) -> T:
     async def run() -> T:
-        app = Host(sampler)
+        app = host(sampler)
         async with app.run_test(size=SIZE) as pilot:
             await settle_page(app)
             return await fn(pilot, app.query_one(ResourcesView))
@@ -165,28 +178,32 @@ def test_a_hidden_page_samples_nothing_and_shown_again_resumes(
     sampler = Counted()
 
     async def go(pilot: Pilot[None], view: ResourcesView) -> tuple[int, int, int, int]:
+        pages = view.app.query_one(ContentSwitcher)
         await pilot.pause(0.3)
         await settle_page(view.app)
         while_open = sampler.calls
-        view.display = False
+        pages.current = "elsewhere"
         await settle_page(view.app)
         hidden_at = sampler.calls
         await pilot.pause(0.3)
         hidden_later = sampler.calls
-        view.display = True
-        # Shown again, its Show event (the pilot's pause lets the screen refresh that sends
-        # it) starts the timer and samples on a worker thread: then read once that sample
-        # came, which a loaded runner took past the 0.3 s (116 > 116, py3.12 shard 3/4, CI
-        # 42116492406; R7's flake list). Without the pause, waiting on workers alone, the
-        # page was never shown again on CI (42123077743, 42129324547).
-        await pilot.pause(0.3)
+        # Shown again as the app shows a page, by its ContentSwitcher, never by a bare
+        # `display = True` (R7's flake list, CI 42116492406, 42123077743, 42129324547). A sample
+        # in flight at the hide paints the hidden page once its hide was drawn, which leaves
+        # Textual's map of the screen stale; a bare flip then reads the page's region, which
+        # rebuilds that map with the page in it, and the next layout finds nothing newly shown:
+        # no Show, no timer, no sample, however long a test waits. The switcher hides the other
+        # page first, and its own region read rebuilds the map without either page. Then the
+        # page's Show starts the timer and samples on a worker thread, which a loaded runner
+        # takes its time over: read once that sample came.
+        pages.current = "resources"
         await settle_until_held(
             view.app, lambda: sampler.calls > hidden_later, what="a sample, the page shown again"
         )
         await settle_page(view.app)
         return while_open, hidden_at, hidden_later, sampler.calls
 
-    while_open, hidden_at, hidden_later, shown_again = _drive_page(sampler, go)
+    while_open, hidden_at, hidden_later, shown_again = _drive_page(sampler, go, Switched)
 
     assert while_open >= 3, "every REFRESH_SECONDS while it shows"
     assert hidden_later == hidden_at, "nothing is sampled while the page is hidden"

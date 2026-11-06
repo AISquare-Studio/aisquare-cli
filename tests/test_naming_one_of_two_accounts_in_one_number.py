@@ -777,9 +777,10 @@ def _agree(
     monkeypatch: pytest.MonkeyPatch,
     folders: dict[str, Path],
     rows: list[tuple[str, list[list[str]], str | None]],
-) -> None:
-    """Every row: bind's ✓ and each folder's launch agree, and run the account expected
-    (``None``: refused by all). Printed as the DONE note's table (run with -s)."""
+) -> list[str]:
+    """The rows where bind's ✓ and each folder's launch disagree, or run another account than
+    the one expected (``None``: refused by all). Printed whole as the DONE note's table (run
+    with -s)."""
     table: list[str] = []
     wrong: list[str] = []
     for row, steps, expected in rows:
@@ -797,7 +798,7 @@ def _agree(
         "\n| row | team bind … | bind | launch: no default | Codex default | Claude Code default |"
     )
     print("\n".join(table))
-    assert wrong == [], "\n".join(wrong)
+    return wrong
 
 
 def test_b5_the_collided_homes_bindings_agree_from_every_folder(
@@ -807,7 +808,7 @@ def test_b5_the_collided_homes_bindings_agree_from_every_folder(
     Code 3 aliased "work"; every binding bound, and launched from three kinds of folder."""
     service.set_alias("3", "work")
     folders = _folders(tmp_path)
-    _agree(
+    disagree = _agree(
         runner,
         monkeypatch,
         folders,
@@ -830,6 +831,7 @@ def test_b5_the_collided_homes_bindings_agree_from_every_folder(
             ("c16", [["--account", "work"]], "claude-code:3"),
         ],
     )
+    assert disagree == [], "\n".join(disagree)
 
 
 def test_b5_the_reserve_homes_bindings_agree_from_every_folder(
@@ -844,7 +846,7 @@ def test_b5_the_reserve_homes_bindings_agree_from_every_folder(
         _claude(email)
     assert _codex("codex@example.com").slot == 5
     folders = _folders(tmp_path)
-    _agree(
+    disagree = _agree(
         runner,
         monkeypatch,
         folders,
@@ -858,6 +860,7 @@ def test_b5_the_reserve_homes_bindings_agree_from_every_folder(
             ("r7", [["--agent", CODEX, "--account", "2"]], None),
         ],
     )
+    assert disagree == [], "\n".join(disagree)
 
 
 def test_b5_a_later_bind_of_agent_alone_is_refused_with_the_launchs_reason_and_binds_nothing(

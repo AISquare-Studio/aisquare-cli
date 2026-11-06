@@ -1860,18 +1860,14 @@ def test_polling_an_echo_slower_than_one_tick_shows_without_the_idle_wait(
 ) -> None:
     """An echo that lands 80 ms after its key: the frame after it shows it, not one
     500 ms later. The tick at 50 ms finds nothing new, and used to back off to the
-    idle interval there."""
-    fake = FakeTmux()
-    fake.panes["%1"] = FakePane(screen=["$ "])
-    pressed: list[float] = []
+    idle interval there.
 
-    def echo(pane: FakePane) -> None:
-        if pressed and time.monotonic() - pressed[0] >= 0.08:
-            pane.screen = ["$ x"]
+    A wait the user sits through, so the wall clock, and the least of up to three rounds
+    (#103's rule): windows-latest once took 0.48 s for it (CI run 42243005098, shard 4), its
+    timers late on a loaded runner, where the loop's own path is ~110 ms and the back-off it
+    guards against ~550 ms in every round."""
 
-    fake.before_capture = echo
-
-    async def drive() -> float:
+    async def drive(fake: FakeTmux, pressed: list[float]) -> float:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             pane = host.pane
@@ -1883,6 +1879,21 @@ def test_polling_an_echo_slower_than_one_tick_shows_without_the_idle_wait(
             await wait_until(pilot, lambda: screen_text(pane)[0] == "$ x", timeout=2.0)
             return time.monotonic() - pressed[0]
 
-    took = run(drive())
-    print(f"\npolling, an 80 ms echo: on screen {took * 1000:.0f} ms after its key")
-    assert took < 0.25, took
+    def one_round() -> float:
+        fake = FakeTmux()
+        fake.panes["%1"] = FakePane(screen=["$ "])
+        pressed: list[float] = []
+
+        def echo(pane: FakePane) -> None:
+            if pressed and time.monotonic() - pressed[0] >= 0.08:
+                pane.screen = ["$ x"]
+
+        fake.before_capture = echo
+        return run(drive(fake, pressed))
+
+    rounds: list[float] = []
+    while len(rounds) < 3 and (not rounds or min(rounds) >= 0.25):
+        rounds.append(one_round())
+    took = min(rounds)
+    print(f"\npolling, an 80 ms echo: on screen {took * 1000:.0f} ms after its key ({rounds})")
+    assert took < 0.25, rounds

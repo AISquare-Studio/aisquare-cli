@@ -242,7 +242,8 @@ def test_no_role_is_the_first_option_and_spawns_a_plain_claude_with_nothing_else
             note(dialog, "#spawn-role-note"),
             advanced(dialog).collapsed,
         ]
-        await pilot.click("#spawn-submit")
+        # The role's note moved *Spawn* a row: the click aims once that is laid out (#107).
+        assert await pilot.click("#spawn-submit"), "the click landed beside Spawn"
         await settle(pilot)
         return seen
 

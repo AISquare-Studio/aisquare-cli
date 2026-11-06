@@ -619,6 +619,16 @@ _PRIVATE_FLEETS: list[Path] = []
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _pilot_aims_at_what_is_laid_out() -> Iterator[None]:
+    """Every ``Pilot`` mouse event waits for the screen to be laid out before it aims, as the
+    owner's click comes once the screen shows the change (``tests.ui_workers.aim``; #107)."""
+    from tests.ui_workers import aiming_at_what_is_laid_out
+
+    with aiming_at_what_is_laid_out():
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _sweep_private_fleets() -> Iterator[None]:
     """End every private tmux server and remove every private folder the tests left.
 

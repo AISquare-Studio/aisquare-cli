@@ -1836,7 +1836,8 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
         await pilot.press("enter")  # the highlighted bind
         await settle(pilot)
         seen.append((select(dialog, "role").value, dialog.query_one("#spawn-binary", Input).value))
-        await pilot.pause(0.3)
+        # Pick… pressed a moment ago: its press effect ends on a timer, not a fixed wait (#107)
+        await released(pilot, dialog.query_one("#spawn-pick", Button))
         await pilot.click("#spawn-pick")
         picker = await wait_for_screen(pilot, AttachTargetScreen)
         await settle(pilot)

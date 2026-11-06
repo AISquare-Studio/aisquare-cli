@@ -387,8 +387,9 @@ def test_scanning_a_five_megabyte_transcript_fits_the_stop_hooks_budget(tmp_path
 
     Each figure is the best of three runs: a box loaded by a parallel gate slowed one cold
     scan past the bound once (final delta review, n8), while a real slowdown slows all
-    three, so the bound keeps its teeth. And each is this thread's CPU time, which the
-    scan's reads are in and pytest's other workers on a shared runner are not."""
+    three, so the bound keeps its teeth. By the WALL clock: the bound is the Stop hook's
+    budget, which a user waits through, and a sleep, a lock or a child process in the scan
+    costs no CPU time here (R9i reopen 1)."""
     transcript = tmp_path / "big.jsonl"
     filler = "x" * 4_000
     with transcript.open("w", encoding="utf-8") as handle:
@@ -399,17 +400,17 @@ def test_scanning_a_five_megabyte_transcript_fits_the_stop_hooks_budget(tmp_path
     assert transcript.stat().st_size > 5_000_000
     colds: list[float] = []
     for _ in range(3):
-        began = time.thread_time()
+        began = time.perf_counter()
         found, state = usage.scan(transcript)
-        colds.append(time.thread_time() - began)
+        colds.append(time.perf_counter() - began)
         assert found.models[MODEL].requests == 600
     _write(transcript, _assistant("msg_new", output=1), _result("t_new", filler), mode="a")
     incrementals: list[float] = []
     for _ in range(3):
         resumed = usage.ScanState.parse(state.to_json())  # the same offsets each time
-        began = time.thread_time()
+        began = time.perf_counter()
         added, _ = usage.scan(transcript, resumed)
-        incrementals.append(time.thread_time() - began)
+        incrementals.append(time.perf_counter() - began)
         assert added.models[MODEL].requests == 1
     assert min(colds) < budget(1.0), colds
     assert min(incrementals) < budget(0.05), incrementals

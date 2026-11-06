@@ -903,6 +903,135 @@ def test_tell_types_into_a_codex_agent_at_its_empty_prompt_before_any_hook(
     assert _notes_to(codex.project, codex.agent.label) == []
 
 
+#: Codex's screen while its ``Stop`` hook runs: the hook fires BEFORE Codex ends the turn,
+#: whose status line is still drawn over the empty prompt (measured on 0.164.0 and 0.166.0
+#: under tmux, 37 to 84 ms after the hook wrote ``waiting``; #102).
+TURN_ENDING = [
+    "  >_ OpenAI Codex (v0.164.0)",
+    "",
+    f"{CHEVRON} reply ok",
+    "",
+    "• Working (2s • esc to interrupt)",
+    "",
+    f"{CHEVRON} Ask Codex to do anything",
+    "",
+    "  local-fixture default · /work/repo",
+]
+
+
+def _drawn(fake: FakeTmux, timer: FakeClock, pane: str, ending: Callable[[float], bool]) -> None:
+    """``pane`` draws :data:`TURN_ENDING` while ``ending(clock)``, its empty prompt otherwise."""
+    real = fake.screen_text
+
+    def screen_text(pane_id: str) -> list[str]:
+        if pane_id == pane:
+            fake.screens[pane] = TURN_ENDING if ending(timer.now) else IDLE_PROMPT
+        return real(pane_id)
+
+    fake.screen_text = screen_text  # type: ignore[method-assign]
+
+
+def _stopped(codex: Codex) -> None:
+    """A turn the agent's hooks have said is over: its prompt, then its ``Stop``."""
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="go", turn_id="turn-1")
+    codex.hook("Stop", THREAD_ONE, turn_id="turn-1", stop_hook_active=False)
+
+
+def test_a_tell_waits_for_the_turn_its_stop_ended_to_leave_codexs_screen(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#102: Codex's hooks say waiting before its turn ends, its empty prompt drawn under the
+    turn's status line. A command Codex disables during a turn (``/clear``, ``/compact``)
+    typed then is refused and gone, so the line waits for the turn to leave the screen, and
+    for the screen to stay so."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    _stopped(codex)
+    assert fleet_service.status_of(_row(codex.agent.id)).state == "waiting"
+    _drawn(tmux, clock, pane, lambda now: now < 0.2)
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "/clear")
+
+    assert told.delivered is True and "typed" in told.how, told
+    [(kind, text, typed_at), (key, _enter, _entered_at)] = typed
+    assert (kind, text, key) == ("paste", "/clear", "key")
+    quiet = fleet_service.TURN_END_QUIET
+    assert 0.2 + quiet - 0.1 <= typed_at < fleet_service.TURN_END_WAIT, typed_at
+
+
+def test_a_screen_at_rest_before_the_hooks_status_line_is_drawn_is_not_the_turns_end(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#102, the run that still failed (1 of 5 with the Stop hook held 1.5 s): for its first
+    ~200 ms a hook runs under no status line, the screen at rest, then ``• Working (0s • esc
+    to interrupt) · Running hook``. A line typed in that first read was refused."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    _stopped(codex)
+    _drawn(tmux, clock, pane, lambda now: 0.1 <= now < 0.5)
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    fleet_service.tell(codex.project, codex.agent.label, "/clear")
+
+    [(kind, _text, typed_at), *_] = typed
+    assert kind == "paste" and typed_at >= 0.5 + fleet_service.TURN_END_QUIET - 0.1, typed_at
+
+
+def test_a_tell_long_after_a_turn_ended_waits_for_nothing(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The quiet is owed from the Stop's own stamp: a tell a while after it, at rest, is typed
+    at once."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    _stopped(codex)
+    later = datetime.now(UTC) + timedelta(seconds=30)
+    monkeypatch.setattr(fleet_service, "_now", lambda: later)
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    fleet_service.tell(codex.project, codex.agent.label, "reply ok")
+
+    [(kind, _text, typed_at), *_] = typed
+    assert (kind, typed_at) == ("paste", 0.0)
+
+
+def test_past_the_wait_a_tell_is_typed_as_before_which_codex_holds(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn that stays on the screen (a follow-up it held, started) is waited for no longer
+    than ``TURN_END_WAIT``: the line is then typed, and Codex submits it after the turn."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    _stopped(codex)
+    _drawn(tmux, clock, pane, lambda now: True)
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "reply ok")
+
+    assert told.delivered is True, told
+    [(kind, text, typed_at), *_] = typed
+    assert (kind, text) == ("paste", "reply ok")
+    assert fleet_service.TURN_END_WAIT <= typed_at < fleet_service.TURN_END_WAIT + 1
+
+
 @pytest.mark.parametrize(
     ("screen", "printing"),
     [(TRUST_DIALOG, False), (HOOK_REVIEW, False), (DRAFT, False), (IDLE_PROMPT, True)],

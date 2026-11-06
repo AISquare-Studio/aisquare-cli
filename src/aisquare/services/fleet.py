@@ -10276,7 +10276,9 @@ def tell(
     (``capabilities.reads_pane_readiness``: Codex) is typed into only at its prompt as
     :func:`_at_its_prompt` decides it: its own hooks freshly say ``waiting``, or, with
     none fresh (none fire before its first prompt), its quiet pane shows its empty
-    prompt. When they freshly say ``working``, the message goes through the agent's own
+    prompt; and once its screen shows no turn running, waited for briefly
+    (:func:`_let_its_turn_end`), since Codex's ``Stop`` hook fires before its turn ends
+    (#102). When they freshly say ``working``, the message goes through the agent's own
     queue for its next turn (``AgentAdapter.queue_args``: ``codex queue``, which reached
     an interactive session busy with a turn on 0.162.1), and a queue that fails, or an
     agent without one, leaves the board note. The queue is no way in before the first
@@ -10400,6 +10402,9 @@ def tell(
                     agent,
                 ),
             )
+        # Its hooks say waiting and its empty prompt is drawn, which a turn keeps too: an
+        # agent that runs its Stop hook before it ends the turn is still in it (#102).
+        _let_its_turn_end(pane, adapter, session.last_seen_at if session is not None else None)
     if status.state == "waiting":
         try:
             facts = pane.facts()
@@ -10663,6 +10668,61 @@ def _at_its_prompt(
     except TmuxError:
         return False
     return screen_of(adapter).at_empty_prompt(screen)
+
+
+TURN_END_WAIT = 5.0
+"""How long ``tell`` waits for a turn its agent's ``Stop`` hook said was over to leave the
+agent's screen (:func:`_let_its_turn_end`)."""
+TURN_END_QUIET = 1.0
+"""How long the screen must read ready, since that ``Stop``, for the turn to be over: Codex
+draws its hook's status line only some 200 ms after it starts the hook, so a screen read at
+rest right after the hook wrote ``waiting`` was no evidence (#102)."""
+TURN_END_POLL = 0.05
+"""How often it reads the screen meanwhile."""
+
+
+def _let_its_turn_end(
+    pane: PlacedPane, adapter: AgentAdapter | None, stopped: datetime | None
+) -> bool:
+    """Wait, at most :data:`TURN_END_WAIT`, until ``pane``'s screen shows no turn running
+    (``AgentScreen.working_on_screen``) and has shown none for :data:`TURN_END_QUIET` since
+    the agent's hooks said its turn was over (``stopped``, their stamp); say whether it did.
+    At once for an agent whose screen is not read for one, or a pane that cannot be read; and
+    for a ``Stop`` that long ago, at rest now, as a tell long after a turn is.
+
+    Codex runs its ``Stop`` hook BEFORE it ends the turn, and keeps its empty prompt drawn
+    under a turn, so ``tell`` read it at its prompt while the turn still ran: its status line
+    said ``Working``, 37 to 84 ms after the hook wrote ``waiting`` on 0.164.0 and 0.166.0, in
+    both of its screen layouts, and past 0.3 s on a CI runner. And for its first ~200 ms a
+    hook runs under no status line at all, its screen read at rest: ``• Working (0s • esc to
+    interrupt) · Running hook`` comes after (measured with a hook held 2 s; #102). A line typed
+    then is held and submitted once the turn is over, but a command Codex disables during a
+    turn is refused and gone: ``'/clear' is disabled while a task is in progress``, and so is
+    ``/compact`` (both releases; ``/exit`` is taken). Past the wait the line is typed as
+    before, which Codex holds."""
+    working = screen_of(adapter).working_on_screen if adapter is not None else None
+    if working is None:
+        return True
+    since = _monotonic()
+    deadline = since + TURN_END_WAIT
+    if stopped is not None:
+        # The quiet is owed from the Stop's stamp, not from this read: no tell long after a
+        # turn waits at all, as long as the turn shows on no screen read.
+        ago = max(0.0, (_now() - stopped).total_seconds())
+        since -= ago
+    while True:
+        try:
+            rows = pane.screen()
+        except TmuxError:
+            return True
+        now = _monotonic()
+        if working(rows):
+            since = now
+        elif now - since >= TURN_END_QUIET:
+            return True
+        if now >= deadline:
+            return False
+        _sleep(TURN_END_POLL)
 
 
 def pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:

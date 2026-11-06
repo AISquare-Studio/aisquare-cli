@@ -517,7 +517,21 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 # A /clear: no SessionEnd for the thread it leaves; the new thread's
                 # SessionStart (source clear) comes with its first prompt, from the same
                 # process, and the row and the claim move to it there.
-                until(lambda: state(restarted.started) == "waiting", 20, "waiting", pane)
+                # Waited for as a person waits: its prompt at rest, and staying so. Its Stop hook
+                # says waiting before Codex ends the turn, and for its first ~200 ms a hook runs
+                # under no status line; a /clear typed then is refused ("'/clear' is disabled
+                # while a task is in progress", CI 42186910684 attempt 1; #102).
+                calm: list[float] = []
+
+                def settled() -> bool:
+                    rows = srv.run("capture-pane", "-p", "-t", pane).splitlines()
+                    if state(restarted.started) != "waiting" or not codex_screen.ready(rows):
+                        calm.clear()
+                        return False
+                    calm.append(time.monotonic())
+                    return calm[-1] - calm[0] >= fleet.TURN_END_QUIET
+
+                until(settled, 20, "waiting at its prompt, at rest", pane)
                 srv.send_literal(pane, "/clear")
                 time.sleep(0.3)
                 srv.send_keys(pane, "Enter")

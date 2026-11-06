@@ -318,15 +318,19 @@ def test_redaction_cannot_blow_up_on_the_primary_path() -> None:
     """A canary for catastrophic backtracking, not a benchmark.
 
     The bound is deliberately loose — it fails on a pathological regex, not on a
-    slow machine. Anything that trips this would have been a hang on a hook.
+    slow machine. Anything that trips this would have been a hang on a hook. This thread's
+    CPU time, the least of three runs: pytest's other workers stall a run on a shared runner
+    by the wall clock, and a stall lands on one run where a backtracking rule is in all three.
     """
     payload = ("sk-" + "a" * 40 + " normal words here " + "x" * 200 + "\n") * 40
 
-    started = time.perf_counter()
-    redact(payload[:8000], RedactionLevel.strict)
-    elapsed = time.perf_counter() - started
+    elapsed = float("inf")
+    for _ in range(3):
+        started = time.thread_time()
+        redact(payload[:8000], RedactionLevel.strict)
+        elapsed = min(elapsed, time.thread_time() - started)
 
-    assert elapsed < 0.1, f"redaction took {elapsed:.3f}s on 8k of text"
+    assert elapsed < 0.1, f"redaction took {elapsed:.3f}s of CPU on 8k of text"
 
 
 def test_consent_line_states_that_shipping_is_scrubbed() -> None:

@@ -144,17 +144,17 @@ def test_no_window_of_a_secret_that_holds_quotes_survives(form: str) -> None:
 
 # --- a long run of '-' or '.' costs what a run of letters does -----------------------------------
 
-#: CPU time where it is not too coarse to read (Windows' ticks every 15.6 ms), the wall clock there.
-_clock = time.perf_counter if sys.platform == "win32" else time.process_time
+#: This thread's CPU time, as ``test_redaction_is_linear_on_hostile_input`` reads it (and why).
+_clock = time.thread_time
+#: The least a run of letters is read as. Windows' CPU clock ticks every 15.6 ms, and 250 KB of
+#: letters is about two ticks there; elsewhere a hundredth of a second.
+_LETTERS_FLOOR = 0.05 if sys.platform == "win32" else 0.01
 
 
-def _best_of(text: str, runs: int = 3) -> float:
-    best = float("inf")
-    for _ in range(runs):
-        started = _clock()
-        redact(text, RedactionLevel.standard)
-        best = min(best, _clock() - started)
-    return best
+def _cost(text: str) -> float:
+    started = _clock()
+    redact(text, RedactionLevel.standard)
+    return _clock() - started
 
 
 @pytest.mark.parametrize("run", ["-", ".", "-.", ".-."])
@@ -163,13 +163,17 @@ def test_a_long_run_of_hyphens_or_dots_costs_per_character_what_letters_do(run: 
     secret's name was tried from every character of the run, each with the whole 48-character look
     ahead for a keyword. It is linear either way (``test_redaction_is_linear_on_hostile_input``
     asks the growth); this asks the constant, at 8 times where the cost was 50 and more, and where
-    a shared runner's noise is well inside."""
+    a shared runner's noise is well inside. The two are read in turn, three times each, so a load
+    on the runner that comes or goes between them is on both."""
     size = 250_000
-    letters = _best_of("a" * size)
-    in_run = _best_of((run * size)[:size])
-    assert in_run <= 8 * max(letters, 0.01), (
-        f"{size:,} characters of {run!r} took {in_run:.3f} s, {in_run / letters:.1f} times the "
-        f"{letters:.3f} s of the same many letters"
+    letters_text, run_text = "a" * size, (run * size)[:size]
+    letters = in_run = float("inf")
+    for _ in range(3):
+        letters = min(letters, _cost(letters_text))
+        in_run = min(in_run, _cost(run_text))
+    assert in_run <= 8 * max(letters, _LETTERS_FLOOR), (
+        f"{size:,} characters of {run!r} took {in_run:.3f} s of CPU, "
+        f"{in_run / max(letters, 1e-9):.1f} times the {letters:.3f} s of the same many letters"
     )
 
 

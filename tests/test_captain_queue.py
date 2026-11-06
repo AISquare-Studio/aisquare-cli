@@ -1129,11 +1129,12 @@ def test_an_older_observation_folded_later_does_not_undo_a_newer_fold(fx: Fixtur
 
 
 def test_normalise_is_bounded_on_untrusted_text() -> None:
-    """Should-fix 8a: no quadratic pattern under the lock."""
+    """Should-fix 8a: no quadratic pattern under the lock. This thread's CPU time: the wall
+    clock also counts pytest's other workers on a shared runner."""
     hostile = "seq" + " " * 200_000 + "1 " + "x" * 200_000
-    started = time.perf_counter()
+    started = time.thread_time()
     out = normalise(hostile)
-    assert time.perf_counter() - started < 0.5
+    assert time.thread_time() - started < 0.5
     assert len(out) <= 2000
 
 

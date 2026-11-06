@@ -165,11 +165,11 @@ def test_the_words_around_a_credential_are_kept(kind: str) -> None:
 def test_a_credential_is_removed_whole_up_to_what_a_brief_reads(kind: str, length: int) -> None:
     """``handoff.SCAN_BUDGET`` is 2,000,000 bytes: a token as long as a record can be."""
     secret, text = KINDS[kind](random.Random(f"long{kind}"), length)
-    started = time.perf_counter()
+    started = _clock()
 
     shown = redact(text, RedactionLevel.standard)
 
-    elapsed = time.perf_counter() - started
+    elapsed = _clock() - started
     assert len(shown) < 300, (kind, len(shown))
     assert surviving(secret[:5_000], shown) == [] and surviving(secret[-5_000:], shown) == []
     assert elapsed < budget(10.0), f"{kind} {length}: {elapsed:.2f} s"
@@ -203,11 +203,11 @@ def test_a_header_with_no_footer_costs_no_more_than_reading_the_text() -> None:
     pad = "x" * 250
     text = "".join(f"{HEADER}\n{pad}\n" for _ in range(7_000))
     assert len(text) > 1_900_000
-    started = time.perf_counter()
+    started = _clock()
 
     shown = redact(text, RedactionLevel.standard)
 
-    elapsed = time.perf_counter() - started
+    elapsed = _clock() - started
     assert elapsed < budget(5.0), f"{elapsed:.2f} s"
     assert shown == MARKER, "the first header takes the text, and no later one has a footer"
 
@@ -215,22 +215,22 @@ def test_a_header_with_no_footer_costs_no_more_than_reading_the_text() -> None:
 def test_headers_after_a_block_whose_footer_is_the_last_cost_no_more_either() -> None:
     pad = "y" * 250
     text = HEADER + "\n" + FOOTER + "\n" + "".join(f"{HEADER}\n{pad}\n" for _ in range(7_000))
-    started = time.perf_counter()
+    started = _clock()
 
     shown = redact(text, RedactionLevel.standard)
 
-    assert time.perf_counter() - started < budget(5.0)
+    assert _clock() - started < budget(5.0)
     assert shown == f"{MARKER}\n{MARKER}", "the block, then the first header that has no footer"
 
 
 def test_many_headers_and_one_footer_are_one_block() -> None:
     text = "before\n" + "".join(f"{HEADER}\nbody {n}\n" for n in range(7_000)) + FOOTER + "\nafter"
-    started = time.perf_counter()
+    started = _clock()
 
     shown = redact(text, RedactionLevel.standard)
 
     assert shown == f"before\n{MARKER}\nafter"
-    assert time.perf_counter() - started < budget(5.0)
+    assert _clock() - started < budget(5.0)
 
 
 def test_a_block_is_one_marker_whatever_it_holds_inside() -> None:
@@ -366,23 +366,29 @@ GROWTH = 8.0
 #: the next size on: the two this must fail took 1.3 s at 125 KB here.
 SLACK = 0.1
 #: A run shorter than this says too little about the next one: the ratio is not asked of it.
+#: Windows' CPU clock ticks every 15.6 ms, so a reading there is two ticks for 31 KB (0.031 s,
+#: 1.0 microseconds a character, where 125 KB read 0.172 s and 1.4: run 42212286157), and is
+#: asked from a tenth of a second.
 FLOOR = 0.1 if sys.platform == "win32" else 0.02
-#: The process's CPU time, not the wall clock: on a shared runner (several pytest workers on two
-#: cores) a long run is stalled by its neighbours more than a short one, which is a ratio that
-#: is not the rule's. Windows' CPU clock ticks every 15.6 ms, too coarse for the short runs, so
-#: it keeps the wall clock.
-_clock = time.perf_counter if sys.platform == "win32" else time.process_time
+#: This thread's CPU time, on every platform, not the wall clock: a run that is not on a core
+#: (pytest's other workers, a child they started, the OS) is not the rule's cost. Not the
+#: process's either, which counts a thread another test left running in this worker. CPU time
+#: alone is not enough on CI's 4-vCPU runners, where the other workers share the cores' caches
+#: and pipelines: under ``pytest -n auto`` 2 MB of one text took 2.5 to 4.9 times the CPU of
+#: 500 KB, where alone it takes 4.0 (run 42212286157). That is what :func:`_step` is for.
+_clock = time.thread_time
+#: How many times a step is read again, both of its sizes, while it is over the bar.
+PAIRS = 3
 #: Seconds. Not a bound on speed (a loaded runner takes four times what a laptop does for the
 #: same text, which is what a tight absolute budget failed on), only on a rule that has stopped
 #: being a scrub: 30 microseconds a character.
 CEILING = budget(60.0)
 
 
-def _best_of(text: str, bar: float | None) -> float:
+def _least(text: str) -> float:
     """The least of several runs of ``redact`` over ``text``: five while they are short (a short
     run is mostly noise), three up to half a second, one beyond that, where a repeat would only
-    cost. Three at least while the least is over ``bar``: a stall on a shared runner looks like a
-    regression once, and a regression looks like one every time."""
+    cost."""
     best = float("inf")
     runs = 0
     while True:
@@ -390,38 +396,62 @@ def _best_of(text: str, bar: float | None) -> float:
         redact(text, RedactionLevel.strict)
         best = min(best, _clock() - started)
         runs += 1
-        if best > 40.0:
+        if best > 40.0 or runs >= (5 if best <= 0.1 else 3 if best <= 0.5 else 1):
             return best
-        wanted = 5 if best <= 0.1 else 3 if best <= 0.5 else 1
-        if bar is not None and best > bar:
-            wanted = max(wanted, 3)
-        if runs >= wanted:
-            return best
+
+
+def _step(before: str, after: str, read: float) -> tuple[float, float]:
+    """The cost of ``before`` (``read`` just now) and of ``after``, four times as long, read as a
+    PAIR: one right after the other, so a load on the runner that comes or goes is on both or on
+    neither. While ``after`` is over the bar, both are read again, up to :data:`PAIRS` times, and
+    the pair that passes (or the last) is returned.
+
+    Not the least of each over every attempt: CI's Windows shard read 500 KB at 1.95 s and then
+    2 MB at 19.3 s three times over, by the wall clock, while ``test_delivery_bulk``'s storm of
+    writers ran beside it for 169 s (9.9 times; run 42205940486, attempt 1). That runner's image
+    takes 0.69 and 2.73 s for them alone (3.98 times; run 42212286157). The load had come in
+    between, and stayed, so 2 MB read again could not pass against the 500 KB read before it.
+    Read again as a pair, both are slowed alike. A rule that is not linear is over the bar in
+    every pair, a stall in one."""
+    small = read
+    large = _least(after)
+    for _ in range(PAIRS - 1):
+        if large <= small * GROWTH + SLACK or large >= CEILING:
+            break
+        small = _least(before)
+        large = _least(after)
+    return small, large
 
 
 @pytest.mark.parametrize("name", sorted(HOSTILE))
 def test_redaction_is_linear_on_hostile_input(name: str) -> None:
     """Each of these made some backtracking engine's cubic or quadratic case, and a regression
     is a hang on the hook path. Asked as growth, not as speed: four times the text costs under
-    ``GROWTH`` times the time, at every size from 31 KB to 2 MB, so a runner that is slow all
-    over still passes and a rule that is quadratic fails at the first size that can show it
-    (the next size is not run), where 16 times the time is 16 and not 4. A text that costs
-    under ``FLOOR`` at every size (``assignment-equals``) has only the ceiling.
+    ``GROWTH`` times the CPU time, at every size from 31 KB to 2 MB, so a runner that is slow
+    all over still passes and a rule that is quadratic fails at the first size that can show it
+    (the next size is not run), where 16 times the time is 16 and not 4. Each size is read
+    against the one before as a pair (:func:`_step`), so a runner whose load changes between
+    the two is not read as a rule that grows. A text that costs under ``FLOOR`` at every size
+    (``assignment-equals``) has only the ceiling.
 
     Quadratic rules this test fails: the private-key pattern ``BEGIN .*? END`` (headers-only)
     and a JWT that starts at every ``eyJ`` after ``\\b`` (jwt-starts-inside-a-run)."""
-    previous: float | None = None
+    before: str | None = None
+    previous = 0.0
     for size in SIZES:
         text = HOSTILE[name](size)
-        bar = previous * GROWTH + SLACK if previous is not None and previous >= FLOOR else None
-
-        took = _best_of(text, bar)
+        asked = before is not None and previous >= FLOOR
+        if before is not None and asked:
+            previous, took = _step(before, text, previous)
+        else:
+            took = _least(text)
 
         assert took < CEILING, f"{name}: {took:.2f} s for {len(text):,} characters"
-        if bar is not None and previous is not None:
-            assert took <= bar, (
-                f"{name}: {len(text):,} characters took {took:.2f} s, {took / previous:.1f} "
-                f"times the {previous:.2f} s of the {size // 4:,} before (linear is 4, "
-                f"quadratic 16; the bar is {GROWTH:g} times and {SLACK:g} s)"
+        if asked:
+            assert took <= previous * GROWTH + SLACK, (
+                f"{name}: {len(text):,} characters took {took:.2f} s of CPU, "
+                f"{took / previous:.1f} times the {previous:.2f} s of the {size // 4:,} read "
+                f"before it (linear is 4, quadratic 16; the bar is {GROWTH:g} times and "
+                f"{SLACK:g} s, and each of {PAIRS} pairs was over it)"
             )
-        previous = took
+        before, previous = text, took

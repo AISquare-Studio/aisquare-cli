@@ -1555,14 +1555,15 @@ def test_a_code_mode_script_is_read_in_time_linear_in_its_length(opener: str) ->
     and the next one scanned it again, so the script's read was quadratic in the text the
     model writes (60 KB of unclosed ``/*`` took 2.5 s; 30 KB of ``\\"`` 1.5 s). 200 KB of
     each shape is read in one pass, well under a budget the quadratic read missed by
-    minutes."""
+    minutes, of this thread's CPU time (the wall clock also counts pytest's other workers on a
+    shared runner)."""
     from aisquare.core.agent_adapters import codex_transcript
 
     script = opener * (200_000 // len(opener))
-    started = time.perf_counter()
+    started = time.thread_time()
     codex_transcript._script_asks_first(script)
-    took = time.perf_counter() - started
-    assert took < 0.25, f"{len(script)} chars of {opener!r} took {took:.2f} s"
+    took = time.thread_time() - started
+    assert took < 0.25, f"{len(script)} chars of {opener!r} took {took:.2f} s of CPU"
 
 
 def _rollout_at(source: Path, home: Path, cwd: Path, swaps: dict[str, str]) -> Path:

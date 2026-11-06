@@ -2904,21 +2904,22 @@ def test_a_long_line_of_asides_or_links_is_read_in_one_pass(text: str, asks: boo
     """The question test runs every scan, and every quarter second of an interrupt, on an
     assistant's last text, up to a 256 KiB record. Searching the line for its last aside again
     after each one took seconds on a line of 1 000 links, and minutes on a 256 KiB one of
-    ``(a)``s (review of #243, round 5). Each aside is read once now: milliseconds."""
-    started = time.perf_counter()
+    ``(a)``s (review of #243, round 5). Each aside is read once now: milliseconds, of this
+    thread's CPU time (the wall clock also counts pytest's other workers on a shared runner)."""
+    started = time.thread_time()
     assert looks_like_a_question(text) is asks
-    assert time.perf_counter() - started < 0.5
+    assert time.thread_time() - started < 0.5
 
 
 def test_a_long_line_of_backtick_runs_is_read_in_one_pass() -> None:
     """Pairing each run of backticks against the rest of its line took over a second on a
     256 KiB line of runs of different lengths, none closed (review of #243, round 5). Each run
-    is paired with the next of its length now, in one pass."""
+    is paired with the next of its length now, in one pass (this thread's CPU time)."""
     text = " ".join("`" * size for size in range(1, 720)) + " — keep these?"
     assert len(text) > 250_000
-    started = time.perf_counter()
+    started = time.thread_time()
     assert looks_like_a_question(text)
-    assert time.perf_counter() - started < 0.5
+    assert time.thread_time() - started < 0.5
 
 
 @pytest.mark.parametrize(

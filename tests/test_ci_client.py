@@ -89,15 +89,16 @@ def test_a_broken_config_enables_nothing(isolated_home: Path) -> None:
 def test_off_reads_no_config_and_costs_no_measurable_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """A config read on the off path would be paid by every prompt of every
     user who never opted in. Proven by making the read explode, and bounded by
-    a generous wall clock rather than a literal."""
+    a generous budget of this thread's CPU time rather than a literal (the wall
+    clock also counts pytest's other workers on a shared runner)."""
     monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "0")
     monkeypatch.setattr(
         ci_client, "load_config", lambda: (_ for _ in ()).throw(RuntimeError("read"))
     )
-    started = time.perf_counter()
+    started = time.thread_time()
     for _ in range(200):
         assert ci_client.enabled() is False
-    assert time.perf_counter() - started < 0.2
+    assert time.thread_time() - started < 0.2
 
 
 @pytest.mark.parametrize(

@@ -90,7 +90,6 @@ def test_accounts_default_for_a_role_and_the_hint_of_accounts_add_ask_the_order_
     watched: dict[str, Any], runner: CliRunner
 ) -> None:
     accounts_cli = import_module("aisquare.cli.accounts")
-    team_cli = import_module("aisquare.cli.team")
 
     result = runner.invoke(
         app, ["accounts", "default", "--role", "coder", str(watched["codex"].slot)]
@@ -98,10 +97,12 @@ def test_accounts_default_for_a_role_and_the_hint_of_accounts_add_ask_the_order_
     assert result.exit_code == 0, result.output
     assert accounts_cli._role_agent("coder", str(watched["claude"].slot)) == CLAUDE
     assert accounts_cli._role_agent("coder") == CODEX, "the order's agent"
-    # team bind reads the agent as the role's launch will (#100's reopen 4, B4), unmeasured.
-    codex_slot = str(watched["codex"].slot)
-    assert team_cli._launching_agent("coder", None, None, codex_slot) == CODEX
-    assert team_cli._launching_agent("coder", "claude-code", None, codex_slot) == "claude-code"
+    # team bind reads the binding it would store as every launch will (#100's reopen 5, B5),
+    # unmeasured: --agent claude-code beside the Codex account is refused, Codex's bound.
+    team_service.activate(Path.cwd())
+    refused = runner.invoke(app, ["team", "bind", "coder", "--agent", "claude-code"])
+    bound = runner.invoke(app, ["team", "bind", "coder", "--agent", CODEX])
+    assert (refused.exit_code, bound.exit_code) == (1, 0), (refused.output, bound.output)
 
     _nothing_was_measured(watched)
 

@@ -1499,6 +1499,24 @@ def one_load() -> Iterator[None]:
         _ONE_LOAD.reset(token)
 
 
+_AS_IF: ContextVar[tuple[Path, AppConfig] | None] = ContextVar(
+    "aisquare_config_as_if", default=None
+)
+
+
+@contextmanager
+def as_if(config: AppConfig, path: Path | None = None) -> Iterator[None]:
+    """Within it, :func:`load_config` of ``path`` (the standard file) reads ``config``, never the
+    file: a dry run of a change through the code that reads the file. ``team bind`` asks the
+    launch's own resolution of the binding it would store before it stores it, so the two
+    verdicts are one by construction (#100's reopen 5, B5). Each load is a copy, as ever."""
+    token = _AS_IF.set((path or paths.config_path(), config))
+    try:
+        yield
+    finally:
+        _AS_IF.reset(token)
+
+
 _LAST_PARSE: tuple[Path, bytes, AppConfig] | None = None
 """The last file :func:`load_config` parsed: its path, its bytes, and what they validated to,
 which no caller that may change it is handed (each gets a copy; ``copy=False`` reads it)."""
@@ -1522,6 +1540,9 @@ def load_config(path: Path | None = None, *, copy: bool = True) -> AppConfig:
     same bytes, in any caller, then copied (round 20).
     """
     target = path or paths.config_path()
+    imagined = _AS_IF.get()
+    if imagined is not None and imagined[0] == target:
+        return imagined[1].model_copy(deep=True) if copy else imagined[1]
     snapshot = _READ_SNAPSHOT.get()
     if snapshot is None:
         return _load_config_file(target, copy=copy)

@@ -137,7 +137,42 @@ def bind_role(
     account: str | None = None,
     clear_account: bool = False,
 ) -> RoleLaunchProfile:
-    """Merge a launch binding into ``role`` and persist it.
+    """Merge a launch binding into ``role`` and persist it (:func:`merge_binding`).
+
+    ``team bind`` resolves the binding this would store before calling this, as the
+    role's launch will read it (#100's reopen 5, B5)."""
+    config = load_config()
+    profile = merge_binding(
+        config,
+        role,
+        agent_bin=agent_bin,
+        agent=agent,
+        env=env,
+        env_files=env_files,
+        unset=unset,
+        args=args,
+        account=account,
+        clear_account=clear_account,
+    )
+    save_config(config)
+    return profile
+
+
+def merge_binding(
+    config: AppConfig,
+    role: str,
+    *,
+    agent_bin: str | None = None,
+    agent: str | None = None,
+    env: dict[str, str] | None = None,
+    env_files: dict[str, str] | None = None,
+    unset: Sequence[str] = (),
+    args: Sequence[str] = (),
+    account: str | None = None,
+    clear_account: bool = False,
+) -> RoleLaunchProfile:
+    """Merge a launch binding into ``role`` in ``config``, saving nothing: the complete binding
+    :func:`bind_role` stores, which ``team bind`` resolves first (``config.as_if``).
 
     Env merges **per key** and args **append**, so a second call adds to the
     binding rather than replacing it — otherwise setting a second variable
@@ -154,7 +189,6 @@ def bind_role(
     way the operator would expect; validation that it names a real account is
     the caller's (``team bind`` resolves it before calling this).
     """
-    config = load_config()
     profile = config.team.profiles.setdefault(role, RoleLaunchProfile())
     if agent is not None:
         from aisquare.core.agent_adapters import get_adapter
@@ -186,7 +220,6 @@ def bind_role(
         # `--clear` would take it, rather than an empty `[team.profiles.<role>]`
         # that `launch._declared_roles` would read as an operator-declared role.
         config.team.profiles.pop(role, None)
-    save_config(config)
     return profile
 
 

@@ -953,38 +953,85 @@ def harness_status() -> None:
     )
 
 
-def _launching_agent(role: str, agent: str | None, binary: str | None, account: str) -> str | None:
-    """The agent a launch of ``role`` runs once this bind is written (``--agent``, ``--bin``
-    and ``--account`` as given here; the rest as bound now), as the launch works it out:
-    ``agent_launch.resolve``, the binding's account standing in for the one bound now. A
-    number two agents' accounts hold, with nothing naming the agent, refuses as the launch
-    refuses (:class:`AmbiguousAccount`). ``agent`` where the launch refuses for a reason of
-    its own, not the account's: the launch's to say (#100's reopen 4, B4)."""
+def _as_every_launch_reads_it(
+    role: str, changes: dict[str, Any], *, typed_agent: str | None
+) -> None:
+    """Refuse, as the role's launch would refuse it, the binding ``changes`` would leave
+    ``role`` with: the role's binding with them applied (``settings.merge_binding``), read
+    by the launch's own code (``config.as_if``), never stored (#100's reopen 5, B5).
+
+    One dry run of what every launch of the role does: the agent
+    (``agent_launch.resolve``), then, where the binding names an account, the account as
+    that agent's (``claude_accounts.choose``). A role binding is the machine's, so the
+    folder's project default is left out: a launch from another folder will not have it, and
+    the binding's own account names its agent above it anyway (B5 (b)). So the ✓ and every
+    launch's verdict are one by construction:
+    - an ``--agent`` and a ``--bin`` that disagree are refused with the launch's reason;
+    - a role bound to an agent reads a bare number as that agent's;
+    - an account of another agent is refused with the launch's reason, a later ``--agent``
+      or ``--bin`` too;
+    - a number two agents hold, with nothing naming the agent, with B3-1's advice.
+    Every bind is asked, not only one that gives ``--account``."""
+    from aisquare.core import config as config_core
     from aisquare.services import agent_launch
 
     try:
-        return agent_launch.resolve(
-            role, agent=agent, binary=binary, account=account, measure=False
-        ).adapter.id
+        would_be = config_core.load_config()
+    except Exception:  # an unreadable file is the write's to report, as before
+        return
+    try:
+        profile = settings_service.merge_binding(would_be, role, **changes)
     except ValueError as exc:
-        ambiguous = claude_accounts_service.ambiguity_in(exc)
-        if ambiguous is not None:
-            raise ambiguous from exc
-        return agent
-    except Exception:  # an unresolvable role is the launch's to refuse, not the bind's
-        return agent
+        fail(str(exc), error="agent_configuration")
+    ref = profile.account
+    with config_core.as_if(would_be):
+        try:
+            selected = agent_launch.resolve(role, measure=False, folder_default=False)
+        except ValueError as exc:
+            ambiguous = claude_accounts_service.ambiguity_in(exc)
+            if ambiguous is not None:
+                said = _bind_one_of(ambiguous)
+                fail(said, error="ambiguous_account", ref=ref, detail=said)
+            fail(str(exc), error="agent_configuration")
+        if ref is None or selected.adapter.accounts is None:
+            return  # no account bound, or one the launch reads nothing of
+        try:
+            claude_accounts_service.choose(None, role=role, agent=selected.adapter.id)
+        except claude_accounts_service.NoSuchAccount as exc:
+            ambiguous = claude_accounts_service.ambiguity_in(exc)
+            if ambiguous is not None:
+                # An alias two accounts hold, which an agent narrows nothing of: the launch's
+                # own words, prefix and all.
+                said = _bind_one_of(ambiguous, otherwise=str(exc))
+                fail(said, error="ambiguous_account", ref=ref, detail=said)
+            said = str(exc)
+            wrong = exc.__cause__
+            if (
+                isinstance(wrong, claude_accounts_service.WrongAgent)
+                and wrong.account is not None
+                and typed_agent is None
+            ):
+                # Its own agent named here binds it (#100's reopen 2).
+                said = (
+                    said.removesuffix(" (see: aisquare accounts)")
+                    + f", or pass --agent {wrong.account.agent} (see: aisquare accounts)"
+                )
+            fail(said, error="unknown_account", ref=ref)
 
 
-def _bind_one_of(exc: claude_accounts_service.AmbiguousAccount) -> str:
+def _bind_one_of(
+    exc: claude_accounts_service.AmbiguousAccount, *, otherwise: str | None = None
+) -> str:
     """The refusal of a reference two agents' accounts answer to, saying how to bind each: as
     ``--agent X --account <ref>`` first, which 0.9.2 reads after a rollback, then as ``X:N``,
     the agent whose numbers 0.9.2 keeps first (#100's reopen 4, B4). An alias two accounts
-    hold keeps its own words: an agent named beside it narrows nothing."""
+    hold keeps its own words (``otherwise``, else the refusal's): an agent named beside it
+    narrows nothing."""
     accounts = sorted(
         exc.accounts, key=lambda a: not claude_accounts_core.kind(a.agent).legacy_slots
     )
     if len({account.agent for account in accounts}) < 2 or exc.ref is None:
-        return str(exc)
+        return otherwise if otherwise is not None else str(exc)
     each = ", or as ".join(
         f"--agent {account.agent} --account {exc.ref} or "
         f"{claude_accounts_core.qualified_ref(account)}"
@@ -1128,47 +1175,23 @@ def bind(
             # the file read here: kept relative, every launch looked for it in its own
             # working directory, and the role's window refused (review of #259, round 3).
             env_files[key] = typed if Path(where).is_absolute() else str(Path(where).absolute())
-        if account is not None:
-            # Resolved NOW, so a typo is a usage error rather than a binding
-            # that refuses every later launch of the role. Accepted if and only if the role's
-            # launch would run it, read as that launch will read it (#100's reopen 4, B4): the
-            # agent it runs (`--agent`, the role's bound agent, its binary's, the project's,
-            # else the account's own), then the account as that agent's. So a role bound to
-            # Codex narrows a bare 5 to Codex's, `--agent claude-code` with a number only
-            # Codex holds is refused with the launch's own reason, and a binding naming no
-            # agent with a number two agents hold is refused, as its launch refuses it (B3-1).
-            try:
-                whose = _launching_agent(role_name, agent, agent_bin, account)
-                claude_accounts_service.resolve(account, agent=whose)
-            except claude_accounts_service.AmbiguousAccount as exc:
-                # As `accounts` refuses it, under --json too (#100's reopen 2, E2), with how to
-                # bind each (B4).
-                said = _bind_one_of(exc)
-                fail(said, error="ambiguous_account", ref=account, detail=said)
-            except claude_accounts_service.WrongAgent as exc:
-                said = str(exc)
-                if exc.account is not None and agent is None:
-                    # Its own agent named here binds it (#100's reopen 2).
-                    said = (
-                        said.removesuffix(" (see: aisquare accounts)")
-                        + f", or pass --agent {exc.account.agent} (see: aisquare accounts)"
-                    )
-                fail(said, error="unknown_account", ref=account)
-            except claude_accounts_service.AccountsError as exc:
-                fail(str(exc), error="unknown_account", ref=account)
+        changes: dict[str, Any] = {
+            "agent_bin": agent_bin,
+            "agent": agent,
+            "env": _parse_env(env_pairs or []),
+            "env_files": env_files,
+            "unset": unset or [],
+            "args": extra_args or [],
+            "account": account,
+            "clear_account": clear_account,
+        }
+        # Checked NOW, so a typo is a usage error rather than a binding that refuses every
+        # later launch of the role: the complete binding this would store, resolved by the
+        # launch's own code before it is stored (#100's reopen 5, B5).
+        _as_every_launch_reads_it(role_name, changes, typed_agent=agent)
         try:
             with expected_config_write_errors():
-                bound = settings_service.bind_role(
-                    role_name,
-                    agent_bin=agent_bin,
-                    agent=agent,
-                    env=_parse_env(env_pairs or []),
-                    env_files=env_files,
-                    unset=unset or [],
-                    args=extra_args or [],
-                    account=account,
-                    clear_account=clear_account,
-                )
+                bound = settings_service.bind_role(role_name, **changes)
         except ValueError as exc:
             fail(str(exc), error="agent_configuration")
     path = settings_service.config_path()

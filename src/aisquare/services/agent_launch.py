@@ -219,11 +219,21 @@ def resolve(
     measure: bool = True,
     family: Callable[[], str | None] | None = None,
     model_agent: str | None = None,
+    folder_default: bool = True,
 ) -> ResolvedAgent:
     """The agent ``role`` launches, its binary and why. ``account`` is the launch's
-    ``--account``: the account it names (else the role's bound one) names the agent when
-    nothing above pins it; below that, the agent of the best account in the one priority
-    order (``claude_accounts.agent_pick``), then the fallbacks.
+    ``--account``: the account it names names the agent when nothing above pins it; below
+    that, the agent of the best account in the one priority order
+    (``claude_accounts.agent_pick``), then the fallbacks.
+
+    The role binding's own account, where the launch names none, names its agent ABOVE the
+    project's default: a role binding is the machine's, so what it names outranks the folder,
+    and the project's default fills in only where the binding names nothing (#100's reopen 5,
+    B5 (b)). So: ``--agent``; the binding's agent; its binary's; the binding's account's;
+    the project's default; then the launch's own account's, and the order's. A number two
+    agents' accounts hold names no agent, and is refused from every folder.
+    ``folder_default=False`` leaves the project's default out, for ``team bind``'s dry run of
+    the binding it would store, which every folder's launch reads.
 
     ``measure`` is whether that rung may read accounts' usage, as a launch does: a headroom
     pick across agents reads it, up to ``core.USAGE_TIMEOUT_SECONDS`` when the cache is cold.
@@ -251,19 +261,27 @@ def resolve(
         adapter_for_binary(chosen_binary.binary) if chosen_binary.source != "default" else None
     )
     try:
-        preferred = project_default(cwd)
+        preferred = project_default(cwd) if folder_default else None
     except Exception:
         preferred = None  # a damaged board must not prevent launching
     inherited = os.environ.get(ACTIVE_AGENT_ENV)
     # Launch identity and operator preference have different lifetimes. A
     # parent's executable family cannot identify an arbitrary wrapper.
     owned_family = os.environ.get(LAUNCH_AGENT_ENV) if chosen_binary.source == "default" else None
-    pinned = agent or (bound.agent if bound else None) or inferred or preferred
+    above_the_folder = agent or (bound.agent if bound else None) or inferred
+    # The binding's own account, above the project's default (B5 (b)): asked only where
+    # nothing in the binding pins the agent, no binary was named (one that names no agent is
+    # the default agent's wrapper, as it always was), and the launch names no account itself.
+    bound_names = (
+        account_agent(None, role)
+        if not above_the_folder and chosen_binary.source == "default" and account is None
+        else None
+    )
+    pinned = above_the_folder or bound_names or preferred
     # Nothing pins the agent and no binary was named: the agent of the best account, by
-    # the one priority order and headroom (owner, PR #113). A named binary that names no
-    # agent is the default agent's wrapper, as it always was.
+    # the one priority order and headroom (owner, PR #113).
     unpinned = not pinned and chosen_binary.source == "default"
-    named = account_agent(account, role) if unpinned else None
+    named = account_agent(account, role) if unpinned and account is not None else None
     model = model_agent if unpinned and not named else None
     pick = (
         accounts_pick(measure=measure, family=family)
@@ -274,6 +292,7 @@ def resolve(
         (agent, "flag"),
         (bound.agent if bound else None, "role"),
         (inferred.id if inferred else None, chosen_binary.source),
+        (bound_names, "account"),
         (preferred, "project"),
         (named, "account"),
         (model, "model"),

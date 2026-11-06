@@ -498,8 +498,9 @@ def test_team_bind_of_another_agents_account_says_the_agent_that_binds_it(
         "— name a Codex account, or pass --agent claude-code (see: aisquare accounts)"
     ), _said(result)
     assert launched.exit_code != 0 and env == {}, launched.output
-    reason = _said(launched).split("names account 'claude-code:5': ", 1)[1]
-    assert _said(result).startswith("✗ " + reason.removesuffix(" (see: aisquare accounts)"))
+    assert _said(result).startswith(_said(launched).removesuffix(" (see: aisquare accounts)")), (
+        "the launch's own words, then how to bind it (B5)"
+    )
     assert load_config().team.profiles["cx"].account is None, "nothing bound"
 
 
@@ -666,7 +667,7 @@ def test_agent_claude_code_with_a_number_only_codex_holds_is_refused_with_the_la
     launched, env = _launch(runner, monkeypatch, "coder")
     settings_service.clear_role_binding("coder")
     assert launched.exit_code != 0 and env == {}, launched.output
-    reason = _said(launched).split("names account '5': ", 1)[1]
+    reason = _said(launched).removeprefix("✗ ")
 
     result = runner.invoke(app, ["team", "bind", "coder", "--agent", CLAUDE, "--account", "5"])
     as_json = runner.invoke(
@@ -709,3 +710,271 @@ def test_binds_advice_names_agent_claude_code_first_and_the_launch_runs_it(
     launched, env = _launch(runner, monkeypatch, "coder")
     assert launched.exit_code == 0, launched.output
     assert _runs(env, claude), env
+
+
+# --- B5: one dry run of the complete would-be binding; its account names its agent above ----
+# --- the folder's default, so bind and every folder's launch agree by construction ---------
+
+
+def _folders(root: Path) -> dict[str, Path]:
+    """Folders a role is launched from: one with no project default, one whose default agent
+    is Codex, one whose default is Claude Code (`agents use X --project`)."""
+    folders: dict[str, Path] = {}
+    for name, agent in (("none", None), ("codex", CODEX), ("claude-code", CLAUDE)):
+        folder = root / f"folder-{name}"
+        folder.mkdir()
+        team_service.activate(folder)
+        if agent is not None:
+            agent_launch.use(agent, project=True, cwd=folder)
+        folders[name] = folder
+    return folders
+
+
+def _ran(env: dict[str, str]) -> str | None:
+    """The account a held launch ran, as `agent:slot`, by the home its environment names."""
+    for account in service.list_accounts():
+        if _runs(env, account):
+            return core.qualified_ref(account)
+    return None
+
+
+def _verdicts(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    folders: dict[str, Path],
+    row: str,
+    steps: list[list[str]],
+) -> tuple[str, dict[str, str]]:
+    """``team bind`` of ``steps`` (its last step's verdict, from the Codex folder), and the
+    launch of a twin role bound to the same complete binding without bind's check
+    (`settings.bind_role`), from each folder: `✓` or `✗ <code>`, and the account run."""
+    role, twin = f"b5-{row}", f"b5-{row}-twin"
+    monkeypatch.chdir(folders["codex"])
+    said = ""
+    for step in steps:
+        result = runner.invoke(app, ["--json", "team", "bind", role, *step])
+        said = "✓" if result.exit_code == 0 else f"✗ {json.loads(result.stdout)['error']}"
+    for step in steps:
+        pairs = dict(zip(step[::2], step[1::2], strict=True))
+        settings_service.bind_role(
+            twin,
+            agent=pairs.get("--agent"),
+            agent_bin=pairs.get("--bin"),
+            account=pairs.get("--account"),
+        )
+    launches: dict[str, str] = {}
+    for name, folder in folders.items():
+        monkeypatch.chdir(folder)
+        launched, env = _launch(runner, monkeypatch, twin)
+        launches[name] = (
+            f"✓ {_ran(env)}" if launched.exit_code == 0 else f"✗ rc {launched.exit_code}"
+        )
+    return said, launches
+
+
+def _agree(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    folders: dict[str, Path],
+    rows: list[tuple[str, list[list[str]], str | None]],
+) -> None:
+    """Every row: bind's ✓ and each folder's launch agree, and run the account expected
+    (``None``: refused by all). Printed as the DONE note's table (run with -s)."""
+    table: list[str] = []
+    wrong: list[str] = []
+    for row, steps, expected in rows:
+        bound, launches = _verdicts(runner, monkeypatch, folders, row, steps)
+        typed = " then ".join(" ".join(step) for step in steps)
+        table.append(f"| {row} | {typed} | {bound} | " + " | ".join(launches.values()) + " |")
+        agrees = (
+            bound.startswith("✗") and all(v.startswith("✗") for v in launches.values())
+            if expected is None
+            else bound == "✓" and set(launches.values()) == {f"✓ {expected}"}
+        )
+        if not agrees:
+            wrong.append(table[-1])
+    print(
+        "\n| row | team bind … | bind | launch: no default | Codex default | Claude Code default |"
+    )
+    print("\n".join(table))
+    assert wrong == [], "\n".join(wrong)
+
+
+def test_b5_the_collided_homes_bindings_agree_from_every_folder(
+    signed: Pair, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex 5 (codex@example.com) and Claude Code 5 (x1@example.com) on one number, Claude
+    Code 3 aliased "work"; every binding bound, and launched from three kinds of folder."""
+    service.set_alias("3", "work")
+    folders = _folders(tmp_path)
+    _agree(
+        runner,
+        monkeypatch,
+        folders,
+        [
+            ("c1", [["--account", "5"]], None),
+            ("c2", [["--account", "05"]], None),
+            ("c3", [["--account", "codex@example.com"]], "codex:5"),
+            ("c4", [["--account", "x1@example.com"]], "claude-code:5"),
+            ("c5", [["--account", "codex:5"]], "codex:5"),
+            ("c6", [["--account", "claude-code:5"]], "claude-code:5"),
+            ("c7", [["--agent", CODEX, "--account", "5"]], "codex:5"),
+            ("c8", [["--agent", CLAUDE, "--account", "5"]], "claude-code:5"),
+            ("c9", [["--agent", CODEX, "--account", "claude-code:5"]], None),
+            ("c10", [["--agent", CLAUDE, "--account", "codex:5"]], None),
+            ("c11", [["--bin", "codex", "--account", "5"]], "codex:5"),
+            ("c12", [["--bin", "claude", "--account", "5"]], "claude-code:5"),
+            ("c13", [["--agent", CODEX, "--bin", "claude", "--account", "5"]], None),
+            ("c14", [["--account", "3"]], "claude-code:3"),
+            ("c15", [["--agent", CODEX, "--account", "3"]], None),
+            ("c16", [["--account", "work"]], "claude-code:3"),
+        ],
+    )
+
+
+def test_b5_the_reserve_homes_bindings_agree_from_every_folder(
+    machine: Path,  # noqa: F811
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Codex 5 alone, its number reserved; Claude Code 2, 3 and 4. P11 and P12 (11387,
+    failure 2): a later bind of --agent or --bin alone is read with the account bound."""
+    for email in ("two@example.com", "three@example.com", "four@example.com"):
+        _claude(email)
+    assert _codex("codex@example.com").slot == 5
+    folders = _folders(tmp_path)
+    _agree(
+        runner,
+        monkeypatch,
+        folders,
+        [
+            ("r1", [["--account", "5"]], "codex:5"),
+            ("r2", [["--agent", CLAUDE, "--account", "5"]], None),
+            ("r3", [["--account", "5"], ["--agent", CLAUDE]], None),
+            ("r4", [["--account", "5"], ["--bin", "claude"]], None),
+            ("r5", [["--agent", CODEX, "--account", "5"]], "codex:5"),
+            ("r6", [["--account", "2"]], "claude-code:2"),
+            ("r7", [["--agent", CODEX, "--account", "2"]], None),
+        ],
+    )
+
+
+def test_b5_a_later_bind_of_agent_alone_is_refused_with_the_launchs_reason_and_binds_nothing(
+    machine: Path,  # noqa: F811
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """11387 P11: `team bind ac --account 5` (Codex 5 alone), then `--agent claude-code` gave
+    a ✓ and every launch was refused. Refused now in the launch's words; the binding stays."""
+    for email in ("two@example.com", "three@example.com", "four@example.com"):
+        _claude(email)
+    _codex("codex@example.com")
+    team_service.activate(Path.cwd())
+    assert runner.invoke(app, ["team", "bind", "ac", "--account", "5"]).exit_code == 0
+    settings_service.bind_role("twin", agent=CLAUDE, account="5")
+    launched, _env = _launch(runner, monkeypatch, "twin")
+
+    result = runner.invoke(app, ["team", "bind", "ac", "--agent", CLAUDE])
+
+    assert result.exit_code == 1, result.output
+    reason = _said(launched).split("names account '5': ", 1)[1]
+    assert _said(result).endswith(reason), (_said(result), reason)
+    profile = load_config().team.profiles["ac"]
+    assert (profile.agent, profile.account) == (None, "5"), "the binding as it was"
+
+
+def test_b5_an_agent_and_a_binary_that_disagree_are_refused_as_the_launch_refuses_them(
+    signed: Pair, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """11387 P6: `--agent codex --bin claude` gave a ✓, and every launch refused it."""
+    team_service.activate(Path.cwd())
+    settings_service.bind_role("twin", agent=CODEX, agent_bin="claude", account="5")
+    launched, _env = _launch(runner, monkeypatch, "twin")
+
+    as_json = runner.invoke(
+        app, ["--json", "team", "bind", "p6", "--agent", CODEX, "--bin", "claude"]
+    )
+    result = runner.invoke(app, ["team", "bind", "p6", "--agent", CODEX, "--bin", "claude"])
+
+    assert launched.exit_code == 1 and "'claude' runs claude-code" in _said(launched)
+    assert json.loads(as_json.stdout)["error"] == "agent_configuration", as_json.stdout
+    assert result.exit_code == 1, result.output
+    assert _said(result) == _said(launched), "the launch's own words"
+    assert "p6" not in load_config().team.profiles
+
+
+def test_b5_an_alias_two_accounts_hold_is_refused_in_the_launchs_own_words(
+    signed: Pair, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent narrows no alias: bind's advice of --agent is no way out, so the refusal is
+    the launch's own, prefix and all (the tester's surviving mutant of round 5)."""
+    from aisquare.core.store import store_session
+
+    with store_session() as store:
+        store.set_claude_account_alias(5, "work")
+        store.set_agent_account_alias(CODEX, 5, "work")
+    team_service.activate(Path.cwd())
+    settings_service.bind_role("twin", agent=CLAUDE, account="work")
+    launched, _env = _launch(runner, monkeypatch, "twin")
+
+    result = runner.invoke(app, ["team", "bind", "al", "--agent", CLAUDE, "--account", "work"])
+
+    assert result.exit_code == 1, result.output
+    assert "Bind one as" not in _said(result)
+    assert _said(result) == _said(launched).replace("'twin'", "'al'"), "the launch's words"
+
+
+def test_b5_bind_reads_no_folders_default_where_the_binding_names_no_agent(
+    signed: Pair, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A role binding is the machine's: bind from a folder whose default agent is Codex reads
+    the binding as a launch from a folder with no default does. An account no agent holds,
+    with nothing naming the agent, is refused in that launch's words (the order's agent's,
+    Claude Code's), never as "no Codex account", which only that folder would say."""
+    folders = _folders(tmp_path)
+    settings_service.bind_role("twin", account="9")
+    monkeypatch.chdir(folders["none"])
+    launched, _env = _launch(runner, monkeypatch, "twin")
+    monkeypatch.chdir(folders["codex"])
+
+    result = runner.invoke(app, ["team", "bind", "n9", "--account", "9"])
+
+    assert result.exit_code == 1, result.output
+    assert _said(launched).startswith("✗ the role binding for 'twin' names account '9':")
+    assert _said(result) == _said(launched).replace("'twin'", "'n9'"), (
+        _said(result),
+        _said(launched),
+    )
+
+
+@pytest.mark.parametrize("surface", ["team-spawn", "fleet-spawn"])
+@pytest.mark.usefixtures("a_tmux")
+def test_b5_a_spawn_from_a_folder_whose_default_is_the_other_agent_runs_the_bound_accounts(
+    signed: Pair,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    """B5 (b) through the one resolver: a role bound to claude-code:5 and nothing else, spawned
+    from a folder whose default agent is Codex, runs Claude Code, on account 5. It ran Codex
+    there, and refused the account."""
+    folders = _folders(tmp_path)
+    settings_service.bind_role("cc5", account="claude-code:5")
+    monkeypatch.chdir(folders["codex"])
+    argv = (
+        ["--json", "team", "spawn", "cc5", "--no-probe"]
+        if surface == "team-spawn"
+        else ["--json", "fleet", "spawn", "cc5", "--no-worktree"]
+    )
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    if surface == "team-spawn":
+        assert payload["agent"] == CLAUDE, payload
+    else:
+        row = payload["agent"]
+        assert (row["agent"], row["account_slot"]) == (CLAUDE, 5), row

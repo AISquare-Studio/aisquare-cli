@@ -126,9 +126,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `fleet tell`, `stop`, `reap`, `shutdown` and `attach` act on the pane it names, never on
   a store row alone, and a spawn whose record cannot be written starts nothing. An agent
   0.9.2 started is given one from its row the first time 0.10.0 reads it.
-- **`redact` removes a credential whole**, and catches more: values under a quoted name,
-  `github_pat_` and `xapp-` tokens, and a private key with no footer. Hand-off briefs and
-  CI prompts are scrubbed with it.
+- **`redact` removes a credential whole**, and catches more, `github_pat_` and `xapp-`
+  tokens among them; hand-off briefs are scrubbed with it. With `explainability.ship` or
+  the CI test bed on (both off by default), what they send is scrubbed by these rules, and
+  two things differ from 0.9.2. A JSON or dict string under a credential's name is removed
+  (`"access_token"`, `"client_secret"`, `"api_key"`, `"apiKey"`, `"password"`,
+  `"PGPASSWORD"`, `"SecretBinary"`, Docker's `"auth"`), while `"max_tokens": "8192"`,
+  `"token_type": "Bearer"`, a pagination cursor (`"NextToken"`, `"nextPageToken"`) and a
+  package's version or spec are kept. And a private key with no footer (`head -3 id_rsa`)
+  is removed with its body, while the text after it, and a header with no key after it,
+  are kept.
 - The Spawn dialog has an *Agent* field (blank: the role's agent), and its *Model* and
   *Effort* follow it. *Settings* shows each role's agent, account, permission and flags.
 - `--as` takes a fleet label. A manager's `state.md` is read only as a regular file of at

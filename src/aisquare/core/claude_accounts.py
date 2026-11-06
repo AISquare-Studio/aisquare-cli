@@ -490,9 +490,10 @@ def qualified_slot(text: str) -> tuple[str, int] | None:
     if not sep:
         return None
     slot = slot_number(number)
-    if slot is None or agent.strip() not in account_agents():
+    named = agent.strip().lower()  # `CODEX:5` as `codex:5` (#100's reopen 2)
+    if slot is None or named not in account_agents():
         return None
-    return agent.strip(), slot
+    return named, slot
 
 
 def qualified_ref(account: ClaudeAccount) -> str:
@@ -636,20 +637,36 @@ def _legacy_number_paths(account: ClaudeAccount) -> list[Path]:
     ]
 
 
-def reserve_number(account: ClaudeAccount) -> None:
+def reserve_number(account: ClaudeAccount) -> list[str]:
     """Keep ``account``'s number from an account 0.9.2 adds after a rollback: its
     ``next_free_slot`` takes the lowest number with no ``claude-accounts/<n>``, whatever is
     in ``codex-accounts``, and the two accounts then shared it (seq 11271, #100). A small
     FILE there, which no release lists (both list folders alone) and 0.9.2 reads as taken.
-    Best effort: an account is added all the same, and the order reads a shared number."""
+    Best effort: an account is added all the same, and the order reads a shared number.
+    What could not be written, said (``[]`` when nothing failed)."""
+    failed: list[str] = []
     for path in _legacy_number_paths(account):
         try:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if not os.path.lexists(path):
                 body = {"slot": account.slot, "agent": account.agent, "reserved": True}
                 path.write_text(json.dumps(body) + "\n", encoding="utf-8")
-        except OSError:
-            continue
+        except OSError as exc:
+            failed.append(f"{path} ({exc.strerror or exc})")
+    return failed
+
+
+def reserve_every_number() -> list[str]:
+    """:func:`reserve_number` for every account aisquare added of an agent that does not
+    number by Claude Code's slots, read from their folders: what an upgrade's last step and a
+    move back to 0.9.2's first run, with no read of the order between them, so that a Codex
+    account a build before the reserve made keeps its number too (#100's reopen 2, A2). A home
+    with Claude Code's accounts alone is not touched. What could not be written, said."""
+    try:
+        accounts = all_managed_accounts()
+    except OSError as exc:
+        return [f"the accounts could not be listed ({exc.strerror or exc})"]
+    return [failure for account in accounts for failure in reserve_number(account)]
 
 
 def _release_number(account: ClaudeAccount) -> None:

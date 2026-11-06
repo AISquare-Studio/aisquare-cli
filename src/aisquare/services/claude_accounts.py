@@ -133,12 +133,34 @@ class ClaudeNotInstalled(AccountsError):
 
 
 class WrongAgent(NoSuchAccount):
-    """A reference names an account of another agent than the one launching."""
+    """A reference names an account of another agent than the one launching: ``account``."""
+
+    def __init__(self, message: str, *, account: ClaudeAccount | None = None) -> None:
+        super().__init__(message)
+        self.account = account
 
 
 class AmbiguousAccount(NoSuchAccount):
     """A slot number two agents' accounts hold (0.9.2, after a rollback, numbers its own
-    accounts by Claude Code's slots alone): refused, never one picked silently (#100)."""
+    accounts by Claude Code's slots alone): refused, never one picked silently (#100).
+    ``ref`` is what was typed, which ``--json`` refusals carry."""
+
+    def __init__(self, message: str, *, ref: str | None = None) -> None:
+        super().__init__(message)
+        self.ref = ref
+
+
+def ambiguity_in(exc: BaseException | None) -> AmbiguousAccount | None:
+    """The :class:`AmbiguousAccount` behind ``exc``, itself or in its causes: a launch and a
+    spawn re-raise it as their own errors, whose ``--json`` refusal says so as ``accounts``
+    does (``ambiguous_account``; #100's reopen 2, E2)."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, AmbiguousAccount):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return None
 
 
 def _now() -> datetime:
@@ -649,10 +671,11 @@ def _resolve_in(
     account = _find_in(accounts, ref, note=note, agent=agent)
     if agent is not None and account.agent != agent:
         raise WrongAgent(
-            f"{core.label(account)} (slot {account.slot}) is a "
+            account=account,
+            message=f"{core.label(account)} (slot {account.slot}) is a "
             f"{core.agent_label(account.agent)} account, and this launch runs "
             f"{core.agent_label(agent)} — name a {core.agent_label(agent)} account "
-            "(see: aisquare accounts)"
+            "(see: aisquare accounts)",
         )
     return account
 
@@ -693,11 +716,12 @@ def _signed_in_as(
             first[account.agent] = account
     if len(first) > 1:
         raise AmbiguousAccount(
-            f"{email!r} is signed in to "
+            ref=email,
+            message=f"{email!r} is signed in to "
             + " and ".join(f"{core.agent_label(a.agent)} (slot {a.slot})" for a in first.values())
             + " — name one as "
             + " or ".join(core.qualified_ref(a) for a in first.values())
-            + "; see: aisquare accounts"
+            + "; see: aisquare accounts",
         )
     return next(iter(first.values()), None)
 
@@ -730,7 +754,7 @@ def _find_in(
         if agent is not None and len(matches) > 1:
             matches = [a for a in matches if a.agent == agent] or matches
         if len(matches) > 1:
-            raise AmbiguousAccount(_two_in_one_number(text, matches))
+            raise AmbiguousAccount(_two_in_one_number(text, matches), ref=text)
         account = matches[0] if matches else None
         if account is None:
             # An agent's plain home that is not one of the accounts yet
@@ -745,9 +769,10 @@ def _find_in(
         by_alias = [a for a in accounts if _same_alias(a.alias, text)]
         if len(by_alias) > 1:  # two accounts an older build let take one name: neither picked
             raise AmbiguousAccount(
-                f"{text!r} names "
+                ref=text,
+                message=f"{text!r} names "
                 + " and ".join(core.qualified_ref(a) for a in by_alias)
-                + " — name one as such, and give one another alias; see: aisquare accounts"
+                + " — name one as such, and give one another alias; see: aisquare accounts",
             )
         if by_alias:
             return by_alias[0]
@@ -5072,7 +5097,7 @@ def account_named(ref: int | str) -> ClaudeAccount | None:
     if number is not None:
         held = [account for account in core.list_accounts() if account.slot == number]
         if len(held) > 1:
-            raise AmbiguousAccount(_two_in_one_number(text, held))
+            raise AmbiguousAccount(_two_in_one_number(text, held), ref=text)
         return core.find_account(number)
     if core.qualified_slot(text) is None:
         return None

@@ -117,6 +117,15 @@ _sleep: Callable[[float], None] = time.sleep
 _monotonic: Callable[[], float] = time.monotonic
 
 
+def _refuse_an_ambiguous_account(exc: BaseException) -> None:
+    """Refuse with ``ambiguous_account`` where ``exc`` is a number two agents' accounts hold,
+    its message and the ref typed under ``--json``, as ``accounts`` refuses it (#100's reopen
+    2, E2); return otherwise, to the caller's own refusal."""
+    ambiguous = claude_accounts_service.ambiguity_in(exc)
+    if ambiguous is not None:
+        fail(str(exc), error="ambiguous_account", ref=ambiguous.ref, detail=str(exc))
+
+
 def _declared_roles() -> set[str]:
     """Roles the operator has named in ``team.profiles``.
 
@@ -651,6 +660,7 @@ def launch(
             account=account,
         )
     except ValueError as exc:
+        _refuse_an_ambiguous_account(exc)
         fail(str(exc), error="agent_configuration")
     resolution = selected.binary
     binary = agent_launch.executable(selected)
@@ -746,6 +756,7 @@ def launch(
                 account, role=role, project=project, agent=selected.adapter.id, pick=selected.pick
             )
         except claude_accounts_service.NoSuchAccount as exc:
+            _refuse_an_ambiguous_account(exc)
             message = str(exc)
             native = selected.adapter.capabilities.value_options
             if (

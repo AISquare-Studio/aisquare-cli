@@ -1116,6 +1116,18 @@ def bind(
                     if agent is None:
                         raise
                     claude_accounts_service.resolve(account, agent=whose)
+            except claude_accounts_service.AmbiguousAccount as exc:
+                # As `accounts` refuses it, under --json too (#100's reopen 2, E2).
+                fail(str(exc), error="ambiguous_account", ref=account, detail=str(exc))
+            except claude_accounts_service.WrongAgent as exc:
+                said = str(exc)
+                if exc.account is not None and agent is None:
+                    # Its own agent named here binds it (#100's reopen 2).
+                    said = (
+                        said.removesuffix(" (see: aisquare accounts)")
+                        + f", or pass --agent {exc.account.agent} (see: aisquare accounts)"
+                    )
+                fail(said, error="unknown_account", ref=account)
             except claude_accounts_service.AccountsError as exc:
                 fail(str(exc), error="unknown_account", ref=account)
         try:

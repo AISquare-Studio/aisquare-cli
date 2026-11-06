@@ -1199,6 +1199,7 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
     """
     if plan.reason is not None:
         raise UpgradeRefused(plan.reason, plan.command)
+    unkept = _keep_the_numbers(plan)
     code = install_route.run_installer(plan.argv, env=plan.env, to_stderr=to_stderr)
     if code != 0:
         # Asked too: uv resolves before it replaces anything (measured, uv 0.12.19), so a
@@ -1229,12 +1230,34 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         f"asq, `aisquare serve` and `aisquare remote serve` processes that were already "
         f"running keep {plan.current} until they are restarted"
     )
+    if unkept is not None:
+        notes.append(unkept)
     if version is not None and lacks_refresh_hooks(version):
         # A move back to a release before `agents refresh-hooks`: the plan left every site,
         # each saying so with its remedy.
         return UpgradeReport(plan, exit_code=code, version=version, notes=tuple(notes))
     hooks = tuple(_refresh(site, plan.route.facts) for site in plan.refresh)
     return UpgradeReport(plan, exit_code=code, version=version, hooks=hooks, notes=tuple(notes))
+
+
+def _keep_the_numbers(plan: UpgradePlan) -> str | None:
+    """A move back, before its installer runs, the last of this release's code: every number
+    another agent's account holds is kept from the release it moves to
+    (``core.claude_accounts.reserve_every_number``), so an account that release adds never
+    takes it, whatever build made the account and with no read of the order since (#100's
+    reopen 2, A2). Best effort: what could not be kept is said, and the move goes on. ``None``
+    for a move forward, a home with Claude Code's accounts alone, and every number kept."""
+    if not plan.backwards:
+        return None
+    from aisquare.core import claude_accounts as accounts_core
+
+    unkept = accounts_core.reserve_every_number()
+    if not unkept:
+        return None
+    return (
+        f"{plan.destination} may give an account you add there the number of another agent's "
+        f"account, which this release then lists last: not kept at {'; '.join(unkept)}"
+    )
 
 
 def _newly_recorded(plan: UpgradePlan, ran: install_route.InstallRoute) -> list[str]:

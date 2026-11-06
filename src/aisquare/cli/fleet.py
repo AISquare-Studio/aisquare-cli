@@ -107,6 +107,10 @@ def _fail_fleet(exc: Exception) -> NoReturn:
         fail(str(exc), error=exc.code, detail=str(exc), hint=retry)
     if isinstance(exc, fleet_service.CapacityRefused | adopt_service.AdoptRefused):
         fail(str(exc), error=exc.code, detail=str(exc))
+    ambiguous = accounts_service.ambiguity_in(exc)
+    if ambiguous is not None:
+        # A number two agents' accounts hold, as `accounts` refuses it (#100's reopen 2, E2).
+        fail(str(exc), error="ambiguous_account", ref=ambiguous.ref, detail=str(exc))
     fail(str(exc), error="fleet_error", detail=str(exc))
 
 

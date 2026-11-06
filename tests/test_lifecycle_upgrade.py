@@ -4151,3 +4151,87 @@ def test_a_codex_home_whose_hooks_are_switched_off_is_named_by_codexs_setting(
     assert result.exit_code == 0, result.output
     assert f"but switched off: remove {off} from {codex / 'config.toml'}" in result.stdout
     assert "disableAllHooks" not in planned.stdout + result.stdout
+
+
+# --- #100's reopen 2, A2: a move back keeps every Codex account's number from 0.9.2 -------------
+
+
+def _codex_account_an_earlier_build_made() -> Path:
+    """A Codex account made before this release reserved its number (seq 11300's 741dad37):
+    its reserve file, which it lacks."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    account = accounts_core.create_account("codex")
+    reserve = accounts_core.accounts_root() / str(account.slot)
+    reserve.unlink()
+    return reserve
+
+
+def test_a_move_back_keeps_the_number_of_a_codex_account_with_no_read_before_it(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """seq 11300, failure 1: a Codex account an earlier build made had no reserve, and only a
+    read of the order wrote one: `upgrade --version 0.9.2 --yes` with nothing before it left
+    the number to 0.9.2's next add. The move back writes it before 0.9.2's code runs."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.10.1")
+    reserve = _codex_account_an_earlier_build_made()
+    held_when_it_ran: list[bool] = []
+    real = install_route.run_installer
+
+    def run_installer(argv: Any, *, env: Any, to_stderr: bool) -> int:
+        held_when_it_ran.append(reserve.is_file())
+        return real(argv, env=env, to_stderr=to_stderr)
+
+    monkeypatch.setattr(install_route, "run_installer", run_installer)
+    machine.new_version = "0.9.2"
+
+    ran = runner.invoke(app, ["upgrade", "--version", "0.9.2", "--yes"])
+
+    assert ran.exit_code == 0, ran.output
+    assert held_when_it_ran == [True], "kept before the installer put 0.9.2 in place"
+    assert json.loads(reserve.read_text(encoding="utf-8")) == {
+        "slot": int(reserve.name),
+        "agent": "codex",
+        "reserved": True,
+    }
+    assert "not kept at" not in ran.stdout, "every number kept: nothing to say"
+
+
+def test_a_move_back_says_a_number_it_could_not_keep_and_moves_back_all_the_same(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core import claude_accounts as accounts_core
+
+    monkeypatch.setattr(lifecycle, "__version__", "0.10.1")
+    reserve = _codex_account_an_earlier_build_made()
+    monkeypatch.setattr(
+        accounts_core,
+        "reserve_every_number",
+        lambda: [f"{reserve} (Permission denied)"],
+    )
+    machine.new_version = "0.9.2"
+
+    ran = runner.invoke(app, ["upgrade", "--version", "0.9.2", "--yes"])
+
+    assert ran.exit_code == 0, ran.output
+    assert len(machine.installs) == 1, "the move went on"
+    assert (
+        "· 0.9.2 may give an account you add there the number of another agent's account, "
+        f"which this release then lists last: not kept at {reserve} (Permission denied)"
+    ) in " ".join(ran.stdout.split())
+
+
+def test_a_claude_only_move_back_writes_nothing_in_its_accounts_folder(
+    runner: CliRunner, tool: Tool, machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core import claude_accounts as accounts_core
+
+    monkeypatch.setattr(lifecycle, "__version__", "0.10.1")
+    accounts_core.create_account()
+    before = sorted(path.name for path in accounts_core.accounts_root().iterdir())
+    machine.new_version = "0.9.2"
+
+    ran = runner.invoke(app, ["upgrade", "--version", "0.9.2", "--yes"])
+
+    assert ran.exit_code == 0, ran.output
+    assert sorted(path.name for path in accounts_core.accounts_root().iterdir()) == before

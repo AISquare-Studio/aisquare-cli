@@ -168,6 +168,13 @@ def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
     person types. Later releases must keep it, or an upgrade from this one
     cannot refresh hooks.
     """
+    from aisquare.core import claude_accounts as accounts_core
+
+    # An upgrade's last step in the new install: the numbers of another agent's accounts a
+    # build before the reserve made are kept from 0.9.2 from here on, before any read of the
+    # order (#100's reopen 2, A2). Best effort, and said nowhere: this command's output is
+    # what every release has printed, which the upgrade that runs it reads.
+    accounts_core.reserve_every_number()
     before = _hooks_text(name, config_dir)
     try:
         written = agents_service.refresh_hooks(name, config_dir)

@@ -370,3 +370,104 @@ def test_doctor_has_no_such_row_where_no_number_is_shared(machine: Path) -> None
     core.create_account(CODEX)
 
     assert diagnostics._shared_number_checks() == []
+
+
+# --- #100's reopen 2 (seq 11300) -------------------------------------------------------------
+
+
+def test_the_hook_refresh_an_upgrade_runs_keeps_the_number_with_no_read_before_it(
+    machine: Path,  # noqa: F811
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """A2: 0.9.2's own upgrade runs `agents refresh-hooks claude-code --config-dir <site>` in
+    the new install, and nothing else of it but `--version`; a Codex account an earlier
+    build made then had no reserve until something read the order."""
+    codex = _codex_account_of_an_earlier_build()
+    reserve = core.accounts_root() / str(codex.slot)
+    site = tmp_path / "claude-site"
+    site.mkdir()
+
+    result = runner.invoke(
+        app, ["agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert reserve.is_file(), "kept before 0.9.2 can add an account"
+    assert _add_on_092().slot == codex.slot + 1
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["launch", "agent", "--account", "5"],
+        ["team", "bind", "coder", "--account", "5"],
+        ["fleet", "spawn", "agent", "--account", "5"],
+    ],
+    ids=["launch", "team-bind", "fleet-spawn"],
+)
+def test_a_json_refusal_outside_accounts_carries_the_ambiguity_too(
+    signed: Pair, runner: CliRunner, argv: list[str]
+) -> None:
+    """E2: as `accounts` refuses it, {"error": "ambiguous_account", "ref": "5", "detail"}.
+    Claude Code first in the order (``signed``): no agent of the role's names one of the two."""
+    team_service.activate(Path.cwd())
+
+    result = runner.invoke(app, ["--json", *argv])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert (payload["error"], payload.get("ref")) == ("ambiguous_account", "5"), payload
+    assert payload["detail"].startswith("slot 5 is two accounts, Codex's account 5 (")
+    assert payload["detail"].endswith(
+        "Name one as codex:5 or claude-code:5; see: aisquare accounts"
+    )
+
+
+def test_an_unknown_account_keeps_its_own_code(
+    collided: Pair,  # noqa: F811
+    runner: CliRunner,
+) -> None:
+    team_service.activate(Path.cwd())
+
+    for argv in (
+        ["launch", "agent", "--account", "99"],
+        ["team", "bind", "coder", "--account", "99"],
+    ):
+        result = runner.invoke(app, ["--json", *argv])
+        assert json.loads(result.stdout)["error"] == "unknown_account", (argv, result.stdout)
+
+
+def test_team_bind_of_another_agents_account_says_the_agent_that_binds_it(
+    signed: Pair, runner: CliRunner
+) -> None:
+    """The order makes the role's agent Codex (Codex 5 first after a move), so claude-code:5
+    is another agent's account: the refusal says how to bind it."""
+    service.move("codex:5", "top")
+    team_service.activate(Path.cwd())
+
+    result = runner.invoke(app, ["team", "bind", "newrole", "--account", "claude-code:5"])
+
+    assert result.exit_code == 1, result.output
+    assert _said(result).endswith(
+        "— name a Codex account, or pass --agent claude-code (see: aisquare accounts)"
+    ), _said(result)
+
+
+def test_an_agents_own_form_is_read_whatever_its_case(signed: Pair) -> None:
+    for ref, agent in (("CODEX:5", CODEX), ("Claude-Code:5", CLAUDE), (" codex : 5 ", CODEX)):
+        account = service.resolve(ref)
+        assert (account.agent, account.slot) == (agent, 5), ref
+
+
+@pytest.mark.parametrize("command", ["list", "usage"])
+def test_the_list_shows_the_agents_form_only_where_a_number_is_shared(
+    signed: Pair, runner: CliRunner, command: str
+) -> None:
+    """At 80 columns too, never cut to `claude-code…`: it is the name every command takes."""
+    result = runner.invoke(app, ["accounts", command])
+
+    slots = [line.split()[0] for line in result.stdout.splitlines() if line[:1].isalnum()]
+    assert "codex:5" in slots and "claude-code:5" in slots, result.stdout
+    assert {"1", "2", "3", "4"} <= set(slots), "a number of one account reads as it did"
+    assert "5" not in slots

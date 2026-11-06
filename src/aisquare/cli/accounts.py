@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
@@ -287,11 +288,13 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
                 )
             )
     several = len(agents) > 1
+    listed = [status.account for status in overview.accounts]
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
     # Rows arrive in PRIORITY order (services.claude_accounts.list_accounts), so
     # the table reads top-down as "the order the fleet would try them": the first
     # enabled, signed-in row is the machine default, and needs no mark of its own.
-    for column in ("slot", *(["agent"] if several else []), "label", "signed in as"):
+    _add_slot_column(table, listed)
+    for column in (*(["agent"] if several else []), "label", "signed in as"):
         table.add_column(column)
     for column in ("plan", "hooks"):
         table.add_column(column)
@@ -313,7 +316,9 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         if status.account.disabled:
             label.append(" (disabled)", style="dim")
         cells: list[Text | str] = [
-            str(status.account.slot),
+            # `codex:5` where two agents' accounts hold 5, as every command names it (#100's
+            # reopen 2); a number of one account's reads as it always did.
+            core.ref_among(status.account, listed),
             *(
                 [core.agent_label(status.account.agent) + stage_mark_of(status.account.agent)]
                 if several
@@ -559,7 +564,7 @@ def usage_(
             label.append(" (disabled)", style="dim")
         labels.append(label)
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
-    table.add_column("slot")
+    _add_slot_column(table, [status.account for status in statuses])
     # The label is never squeezed: a narrow terminal shortens the email instead.
     widest = max((len(text.plain) for text in labels), default=5)
     table.add_column("label", no_wrap=True, min_width=widest)
@@ -585,7 +590,13 @@ def usage_(
             if not slots.legacy_slots:
                 binary = get_adapter(status.account.agent).binary
                 label = Text.assemble(label, (f" · {binary}", "dim"))
-        row: list[Text | str] = [str(status.account.slot), label, who, session, week]
+        row: list[Text | str] = [
+            core.ref_among(status.account, [each.account for each in statuses]),
+            label,
+            who,
+            session,
+            week,
+        ]
         table.add_row(*row, *([windows or ""] if windowed else []))
     if fleet.limit_by_slot:
         # The fleet's row (#287): the mean of the usable accounts, percent USED like the
@@ -792,6 +803,18 @@ def _account_json(account: ClaudeAccount | None) -> dict[str, Any] | None:
     identity = core.identity(account)
     payload["email"] = identity.email if identity else None
     return payload
+
+
+def _add_slot_column(table: Table, accounts: Sequence[ClaudeAccount]) -> None:
+    """The ``slot`` column. Where two agents' accounts hold a number its cells read
+    ``codex:5`` (``core.ref_among``), the name every command takes, which a narrow terminal
+    must never cut to ``claude-code…`` (#100's reopen 2); a table of one account per number
+    gets the column it always had."""
+    refs = [core.ref_among(account, accounts) for account in accounts]
+    if any(":" in ref for ref in refs):
+        table.add_column("slot", no_wrap=True, min_width=max(len(ref) for ref in refs))
+    else:
+        table.add_column("slot")
 
 
 def _who(account: ClaudeAccount) -> str:

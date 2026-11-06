@@ -287,6 +287,9 @@ def test_json_with_its_credentials_taken_is_json_still() -> None:
         ("x-token", "git+ssh://github.com/o/x-token.git#v1"),
         ("x-auth", "link:./packages/x-auth"),
         ("x-auth", "file:../x-auth"),
+        # reopen 4 (K2): a URL with no userinfo, and ssh's git@
+        ("x-auth", "https://registry.npmjs.org/@scope/x-auth/-/x-auth-1.0.0.tgz"),
+        ("x-auth", "git+https://github.com:443/org/x-auth.git"),
     ],
 )
 def test_a_package_whose_name_ends_in_a_credentials_word_keeps_its_version(
@@ -324,9 +327,19 @@ def test_a_credential_name_with_a_value_that_is_not_a_version_is_still_taken() -
         "v2.1-Zq8vR2mXk4Lp9Tn3Ab1Cd2Ef",
         "12345678",
         '^1.2.3\\" ' + SECRET,
+        # reopen 4 (K2): a token written as a spec URL's user, and a #ref URL with a query
+        "git+https://" + SECRET + "@dev.azure.com/org/p/_git/node-jsonwebtoken#v9",
+        "git+https://ATBB" + SECRET + "@bitbucket.org/me/api-key-auth.git#v1",
+        "https://" + SECRET + "@pkgs.dev.azure.com/o/_packaging/f/npm/registry/t/-/t-1.0.0.tgz",
+        "https://" + SECRET + "@github.com/me/repo#main",
+        "git+ssh://" + SECRET + "@github.com/me/repo.git",
+        "https://user:" + SECRET + "@h.example.com/x-1.0.0.tgz",
+        "https://h.example.com/hook?sig=" + SECRET + "#main",
+        "git://" + SECRET,
     ):
         text = f'{{"auth": "{value}"}}'
-        assert redact(text, RedactionLevel.standard) == f'{{"auth": "{MARKER}"}}', value
+        shown = redact(text, RedactionLevel.standard)
+        assert shown == f'{{"auth": "{MARKER}"}}' and SECRET not in shown, value
 
 
 @pytest.mark.parametrize(
@@ -615,6 +628,13 @@ def test_a_line_of_one_word_after_a_keys_lines_is_read_as_its_last_line() -> Non
     assert _both(text) == (f"{MARKER}\nwhat now?",) * 2
 
 
+def test_a_sentence_after_a_keys_lines_is_kept_whatever_its_first_word() -> None:
+    """A word that reads as base64 (``OpenSSL``) ends a key only with no word after it."""
+    text = f"{HEADER}\n{BODY[0]}\nOpenSSL says bad decrypt"
+
+    assert _both(text) == (f"{MARKER}\nOpenSSL says bad decrypt",) * 2
+
+
 def test_the_clips_notice_stays_after_a_dek_info_line_it_cut() -> None:
     """An RFC 1421 line runs to its end, and the clip's notice is not the line's: the text still
     says it was cut (reopen 1)."""
@@ -696,6 +716,83 @@ def test_a_keys_lines_whatever_wraps_them_are_its_body(layout: str) -> None:
         assert not any(line[at : at + 6] in shown for at in range(len(line) - 5)), (layout, shown)
 
 
+#: What may join a key's lines that no reader here knows as a line break (reopen 4, K1).
+SEPARATORS = {
+    "&#10;": "&#10;",
+    "&#xA;": "&#xA;",
+    "&#x0A;": "&#x0A;",
+    "&#13;&#10;": "&#13;&#10;",
+    "&#xD;&#xA;": "&#xD;&#xA;",
+    "</div><div>": "</div><div>",
+    "</p><p>": "</p><p>",
+    "U+2028": "\u2028",
+    "U+0085": "\u0085",
+    "form feed": "\x0c",
+    "vertical tab": "\x0b",
+    "backslash u000a": "\\u000a",
+    "backslash 012": "\\012",
+    "%0A": "%0A",
+}
+
+
+def _separated(separator: str, lines: list[str], in_an_attribute: bool) -> tuple[str, str]:
+    """A key whose lines ``separator`` joins, bare or as an XML attribute's value, and what is
+    left of the attribute's text with the key gone ("" for the bare one)."""
+    key = separator.join(lines)
+    if in_an_attribute:
+        return (
+            f'<add key="SigningKey" value="{key}" />\nwhy?',
+            f'<add key="SigningKey" value="{MARKER}" />\nwhy?',
+        )
+    return f"{key}{separator}why is this key rejected?", ""
+
+
+@pytest.mark.parametrize("in_an_attribute", [False, True], ids=["bare", "in an attribute"])
+@pytest.mark.parametrize("separator", sorted(SEPARATORS))
+def test_a_keys_lines_joined_by_a_separator_no_reader_knows_are_its_body(
+    separator: str, in_an_attribute: bool
+) -> None:
+    """K1: an XML writer stores a newline in an attribute as ``&#10;``, a rich-text editor
+    joins lines with ``</div><div>``, Word with a vertical tab. No reader here knows those as
+    line breaks, and the body stopped at the first: the key shipped. A run that reads as a key's
+    with only a short text before it is the key's, whatever that text is."""
+    text, shown = _separated(SEPARATORS[separator], [HEADER, *BODY], in_an_attribute)
+
+    redacted, strict = _both(text)
+
+    assert redacted == strict and MARKER in redacted
+    if shown:
+        assert redacted == shown
+    for line in BODY:
+        assert not any(line[at : at + 6] in redacted for at in range(len(line) - 5)), redacted
+
+
+@pytest.mark.parametrize("in_an_attribute", [False, True], ids=["bare", "in an attribute"])
+@pytest.mark.parametrize("separator", sorted(SEPARATORS))
+def test_a_separated_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
+    separator: str, in_an_attribute: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each K1 separator, bare and in an attribute, cut by the clip at every point from the
+    header to the footer: no four characters of a body line are left."""
+    monkeypatch.setattr(insights, "redaction_level", lambda: RedactionLevel.standard)
+    text, _ = _separated(SEPARATORS[separator], [HEADER, *BODY, FOOTER], in_an_attribute)
+    mark = insights._TRUNCATION_MARK
+    limit = insights._MAX_TEXT - len(mark)
+    for cut in range(text.index(HEADER) + len(HEADER), text.index(FOOTER)):
+        pad = "#" * (limit - cut - 1) + "\n"
+
+        shown = insights._outbound(pad + text + "\n" + "and what now? " * 4)
+
+        assert shown.startswith(pad) and shown.endswith(mark), (separator, cut)
+        left = shown[len(pad) : -len(mark)]
+        for line in BODY:
+            assert not any(line[at : at + 4] in left for at in range(len(line) - 3)), (
+                separator,
+                cut,
+                left[-120:],
+            )
+
+
 def test_a_keys_lines_that_journalctl_cut_with_an_ellipsis_are_its_body() -> None:
     """``journalctl`` cuts a line too long for the terminal with ``…``, and the key's next
     line comes after it: an ellipsis is no clip, and the lines after it are still the key's."""
@@ -717,6 +814,10 @@ def test_a_keys_lines_that_journalctl_cut_with_an_ellipsis_are_its_body() -> Non
         "^a1b2c3d (A 2026-11-06 10:00:00 +0000  6) and the body follows below",
         f"| 1 | {HEADER} |\n| 2 | the first line of a key, above |",
         f"{HEADER}$\nis what cat -A printed for the header line$",
+        # K1: what a separator joins after a header, when it is prose
+        f"<p>{HEADER}</p><p>is the first line of a key</p>",
+        f"{HEADER}&#10;is the first line of a key",
+        f"The header {HEADER} is followed by Proc-Type in old keys",
     ],
 )
 def test_a_wrapped_header_with_no_body_after_it_is_kept(text: str) -> None:

@@ -413,6 +413,16 @@ HOSTILE: dict[str, Callable[[int], str]] = {
         'token=\\"a\\\\\\"b ' * (size // 12) + "\u2026"
     ),
     "quoted-value-a-long-range": lambda size: '{"auth": "' + "^1.2 || " * (size // 8) + '"}',
+    # reopen 4 (K1): a key's runs after a separator no reader knows, and what is not one
+    "pem-separated-runs": lambda size: HEADER + ("&#10;" + "A1b2" * 16) * (size // 69),
+    "pem-headers-then-short-junk": lambda size: (HEADER + "&#10;" + "ab+ " * 6) * (size // 60),
+    "pem-a-run-then-short-runs": lambda size: (
+        HEADER + "&#10;" + "A1b2" * 8 + "&#10;Ab12" * (size // 9)
+    ),
+    "pem-junk-just-longer-than-a-separator": lambda size: (
+        HEADER + ("x" * 25 + "A1b2" * 8) * (size // 57)
+    ),
+    "pem-headers-each-cut-short": lambda size: (HEADER + "&#10;Ab1\u2026 ") * (size // 42),
 }
 
 #: Four sizes, each four times the one before, the last 2 MB.

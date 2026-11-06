@@ -251,12 +251,17 @@ _RANGE = (
 )  # fmt: skip
 _NPM_NAME = "(?:@[a-z0-9][a-z0-9._-]*+/)?[a-z0-9][a-z0-9._-]*+"
 _REF = "#[A-Za-z0-9_./-]++"
+#: A URL's host, and its port: NO USERINFO (R9k, reopen 4, K2). A token written as a URL's user
+#: (``https://<token>@dev.azure.com/…``, ``git+https://<token>@bitbucket.org/…``) is a credential
+#: carried in a spec, not a spec; only ssh's ``git@`` is a spec's (``git+ssh://git@github.com/…``).
+_HOST = "[A-Za-z0-9.-]++(?::[A-Za-z0-9._~-]*+)?"
 _PATH = "(?:\\.{1,2}/|/|~/|[A-Za-z0-9_.@-]++/)[A-Za-z0-9_./@~+-]*+"
 #: Each shape a package's spec takes, as the WHOLE value (R9k, reopen 3, N4): a range; a
 #: dist-tag; ``workspace:*`` or a range; ``npm:`` and a name, then ``@`` and a range or a tag;
 #: ``github:``, ``gitlab:`` or ``bitbucket:`` and owner/repo, with a ref; ``file:``, ``link:`` or
 #: ``portal:`` and a path; ``catalog:`` and a name; ``patch:`` with its version and patch file; a
-#: git URL, with a ref; an http(s) URL to a tarball or to a ref. Anything after such a start is a
+#: git URL with its path, and a ref; an http(s) URL to a tarball or to a ref, with no query. A
+#: URL holds no userinfo (:data:`_HOST`). Anything after such a start is a
 #: secret's, and so is a value that only starts so (``1.2hunter2``, ``github:hunter2``).
 _SPEC_SHAPES = "|".join((
     _RANGE,
@@ -267,9 +272,9 @@ _SPEC_SHAPES = "|".join((
     "(?:file|link|portal):" + _PATH,
     "catalog:[A-Za-z0-9_.-]*+",
     "patch:" + _NPM_NAME + "@[A-Za-z0-9_.%:^~<>=*-]++#" + _PATH,
-    "git(?:\\+[a-z]++)?://[^\\s\"'#\\\\]++(?:" + _REF + ")?",
-    "https?://[^\\s\"'#?\\\\]++(?:(?<=\\.tgz)|(?<=\\.tar\\.gz))",
-    "https?://[^\\s\"'#\\\\]++" + _REF,
+    "git(?:\\+[a-z]++)?://(?:git@)?" + _HOST + "/[^\\s\"'#?\\\\]*+(?:" + _REF + ")?",
+    "https?://" + _HOST + "/[^\\s\"'#?\\\\]*+(?:(?<=\\.tgz)|(?<=\\.tar\\.gz))",
+    "https?://" + _HOST + "(?:/[^\\s\"'#?\\\\]*+)?" + _REF,
 ))  # fmt: skip
 
 #: A value that is a package's spec, not a secret (:data:`_SPEC_SHAPES`), WHOLE: to a closing
@@ -526,20 +531,48 @@ _WRAPPED_LINE = (
     + "|" + _IN_LINE + "*?" + _EDGE + _CUT_RUN
     + ")"
 )  # fmt: skip
-#: The lines after a key's body (or its header) that are still the key's: :data:`_WRAPPED_LINE`
-#: after :data:`_WRAPPED_LINE`, from the line break that ends the line the body ended on.
 #: The rest of a line, ``…`` and all, to its break: the match ends at a run's end, so a clip's
 #: notice after the run stays outside it.
 _TO_LINE_END = "(?:[^\\r\\n\\\\<]++|\\\\++(?![rn])|<(?![bB][rR][ \\t]*+/?>))*+"
-_PEM_WRAPPED = re.compile(_WRAPPED_LINE + "(?:" + _TO_LINE_END + _WRAPPED_LINE + ")*+")
+#: The most text that may stand between two runs of one key that no reader here knows as a line
+#: break: ``&#13;&#10;``, ``</div><div>`` and ``\u000a`` are shorter, and a sentence is longer.
+_SEPARATION = 24
+#: A key's run after a SEPARATOR this reader does not know (R9k, reopen 4, K1): ``&#10;`` and
+#: ``&#xD;&#xA;`` in an XML attribute, ``</div><div>`` from a rich-text editor, U+2028, U+0085,
+#: a form feed or a vertical tab, ``\u000a``, ``\012``, ``%0A``, and those no one has thought of.
+#: Security first: after a header, a run that reads as a key's (:data:`_LONG_RUN`) with at most
+#: :data:`_SEPARATION` characters of anything else before it, never the clip's ``…``, is the
+#: key's. Prose between two runs is longer than that. The gap reads each character once, and
+#: stops where a run starts.
+_SEPARATED_RUN = (
+    "(?:(?!" + _EDGE + _LONG_RUN + ")[^\u2026]){1," + str(_SEPARATION) + "}+"
+    + _EDGE + _LONG_RUN
+)  # fmt: skip
+#: Where a key ends after such a separator: its short last run (four characters or more that
+#: read as base64, no word after them), or a run the clip cut. The first only after a run was
+#: taken, where prose after a header would be read as one; the second right after the header
+#: too (:data:`_SEPARATED_CUT`), where the clip cut the key's first run short.
+_SEPARATED_END = (
+    "[^\u2026]{1," + str(_SEPARATION) + "}?" + _EDGE
+    + "(?:(?![a-z/]*+(?![A-Za-z0-9+/=]))(?![A-Z/]*+(?![A-Za-z0-9+/=]))" + _BASE64 + "{4,}+"
+    + "(?![ \\t]++[A-Za-z])"
+    + "|" + _CUT_RUN + ")"
+)  # fmt: skip
+#: One more piece of a key after its body: a run after a separator, or a line whatever wraps it.
+_TAIL_ITEM = "(?:" + _SEPARATED_RUN + "|" + _TO_LINE_END + _WRAPPED_LINE + ")"
+_A_SEPARATED_RUN = re.compile(_SEPARATED_RUN)
+_SEPARATED_CUT = "[^\u2026]{1," + str(_SEPARATION) + "}?" + _EDGE + _CUT_RUN
+_A_SEPARATED_END = re.compile(_SEPARATED_END)
+_A_SEPARATED_CUT = re.compile(_SEPARATED_CUT)
+_A_WRAPPED_LINE = re.compile(_WRAPPED_LINE)
 #: A header with no footer and a body after it, as one pattern: what the linear pass removes for
 #: one at the start of its line, for whoever asks it of a text (the tests' reference does). A
 #: header with NO body after it (``grep`` quoting one, a doc naming one, the clip cutting right
 #: after its line) holds nothing secret, and is kept, as 0.9.2 kept it (R9k, H1).
 _PEM_HEADER_ALONE = re.compile(
     _PEM_BEGIN.pattern
-    + "(?:" + _PEM_BODY_RUN + "++(?:" + _TO_LINE_END + _PEM_WRAPPED.pattern + ")?"
-    + "|" + _TO_LINE_END + _PEM_WRAPPED.pattern + ")"
+    + "(?:(?:" + _PEM_BODY_RUN + "++" + _TAIL_ITEM + "*+|" + _TAIL_ITEM + "++)"
+    + "(?:" + _SEPARATED_END + ")?|" + _SEPARATED_CUT + ")"
 )  # fmt: skip
 
 #: How far before a header the start of its line is looked for. Farther, and what stands before
@@ -631,7 +664,7 @@ def _without_pem_blocks(text: str) -> str:
         if nearest == len(ends):
             # A header and no footer after it: the header and its body, never what follows it.
             lines = lines or _Lines(text)
-            stop = lines.past_wrapped(text, _end_of_body(text, opens, closes))
+            stop = lines.tail(text, closes, _end_of_body(text, opens, closes))
             if stop > closes:  # no body, nothing secret: the header is kept, as 0.9.2 kept it
                 kept += [text[at:opens], MARKER]
                 at = stop
@@ -643,28 +676,48 @@ def _without_pem_blocks(text: str) -> str:
 
 
 class _Lines:
-    """Where a text's line breaks are, found once (a pass over the text), and
-    where each line break's key lines end (:data:`_PEM_WRAPPED`), read once: every header on a
-    line asks it of the same line break, and 7,000 of them reading the line after theirs again
-    each is the quadratic case the PEM rule is not a regular expression to avoid."""
+    """Where a text's line breaks are, found once (a pass over the text), and where the key's
+    line after each line break ends (:data:`_WRAPPED_LINE`), read once: every header on a line
+    asks it of the same line break, and 7,000 of them reading the line after theirs again each
+    is the quadratic case the PEM rule is not a regular expression to avoid."""
 
     def __init__(self, text: str) -> None:
         self.breaks = [found.span()[0] for found in _A_LINE_BREAK.finditer(text)]
         self.read: dict[int, int | None] = {}
 
-    def past_wrapped(self, text: str, at: int) -> int:
-        """``at``, a key's body's end, past the lines after it that are the key's whatever
-        wraps them (:data:`_PEM_WRAPPED`): from the line break that ends ``at``'s line (none
-        after the clip's notice, which ends the text), and ``at`` where there are none."""
+    def tail(self, text: str, closes: int, at: int) -> int:
+        """``at``, the end of the body of the key whose header ends at ``closes``, past what
+        comes after it that is still the key's (:data:`_TAIL_ITEM`, one at a time): a run after
+        a separator no reader knows (:data:`_SEPARATED_RUN`), or the next line whatever wraps
+        it (:data:`_WRAPPED_LINE`). Once anything was taken, its last short run or a cut one
+        (:data:`_SEPARATED_END`); where nothing was, a cut one (:data:`_SEPARATED_CUT`). ``at``
+        where there is none."""
+        end = at
+        while True:
+            found = _A_SEPARATED_RUN.match(text, end)
+            if found is not None:
+                end = found.span()[1]
+                continue
+            stop = self._wrapped(text, end)
+            if stop is None:
+                break
+            end = stop
+        if end > closes:
+            return _matched_to(_A_SEPARATED_END.match(text, end), end)
+        return _matched_to(_A_SEPARATED_CUT.match(text, end), end)
+
+    def _wrapped(self, text: str, at: int) -> int | None:
+        """Where the key's line after the line break that ends ``at``'s line ends, or ``None``
+        where that line is not the key's or there is none (none after the clip's notice, which
+        ends the text)."""
         nearest = bisect_left(self.breaks, at)
         if nearest == len(self.breaks):
-            return at
+            return None
         brk = self.breaks[nearest]
         if brk not in self.read:
-            found = _PEM_WRAPPED.match(text, brk)
+            found = _A_WRAPPED_LINE.match(text, brk)
             self.read[brk] = found.span()[1] if found is not None else None
-        stop = self.read[brk]
-        return at if stop is None else stop
+        return self.read[brk]
 
 
 def _matched_to(found: re.Match[str] | None, at: int) -> int:

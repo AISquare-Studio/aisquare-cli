@@ -121,12 +121,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `~/.aisquare/captain/mcp.json` is no longer written and 0.9.2's copy is left where it is.
   `persona import --engine manager` gives Claude Code the strict form of its answer's
   schema (every field required, no other).
-- **aisquare's own git runs none of the repository's hooks** or file-system monitor, so a
-  hook a sandboxed agent wrote in the tree never runs outside its sandbox. The one
-  exception is 0.9.2's: a Claude Code `fleet spawn --worktree` in a project where no Codex
-  agent has run makes its worktree with the repository's hooks (husky's or lefthook's
-  `post-checkout`). In a project a Codex agent has run in, a Claude Code spawn's worktree
-  runs none.
+- **`fleet spawn --worktree` runs the repository's hooks**, as 0.9.2 did, with one
+  exception. A hooks folder inside the work tree (husky's `.husky`, a `.githooks`) is
+  skipped where a Codex agent spawns or has run in the project. A hook it could have
+  written there would run outside its sandbox. The spawn says so in one line, naming why.
+  `.git/hooks` and a hooks folder outside the tree always run.
 - **`persona import <name>`** looks where 0.9.2 looked first, in its order (Claude Code's
   `~/.claude/skills`, then the repository's `.claude/skills`), then in the other agents'
   skill folders; `persona import --list` lists them in that order.
@@ -188,6 +187,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - With Claude Code's prompt suggestions on, a tell to a fleet agent spawned without a
   first message is typed at its prompt again: the cursor on the placeholder's first letter
   no longer reads as a draft. A real draft is still never typed over.
+- A `fleet tell` (or a typed first message, or a nudge) whose text holds a word wider than
+  Claude Code's input box (a long path, a URL) is sent. Claude Code wraps such a word
+  inside itself, and the box was read as a draft beside ours: the text was left unsent in
+  the box and filed as a note. 0.9.2 had this too.
 - A Claude Code agent whose start the board never saw (its hooks broken) is told at its
   prompt once its screen reads ready, as 0.9.2 did.
 - `aisquare accounts`, the Accounts page, Welcome and doctor show an npm-installed Claude

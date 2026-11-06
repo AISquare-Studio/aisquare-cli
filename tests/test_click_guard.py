@@ -148,6 +148,47 @@ def test_a_press_queued_before_the_paint_is_ignored_and_takes_no_focus() -> None
     assert told == []
 
 
+def test_the_guard_comes_down_with_the_apps_queue_not_after_the_screens_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard comes down from the back of the app's queue, once the app has judged every
+    press it had queued by the paint, and not a frame later. A callback after the screen's
+    refresh (``call_after_refresh``) waits behind every other one the screen has queued
+    there; on the Settings hub that was the restyle of the focus moving, and the guard stayed
+    up to a second after the view was drawn (UI tester on #8, PR #478 at 41569b99). Here such
+    a callback is queued with the frame that shows the button and runs until the test lets it
+    go, so a guard that waited for the screen's callbacks is still up. Nothing here waits on
+    a pause, a click or a clock (R9l2: the last click of the test above caught that only by
+    chance, 0 of 3 alone)."""
+
+    async def go(pilot: Pilot[None], host: Host) -> tuple[bool, bool, bool, bool]:
+        button = await _shown(pilot, host)
+        shown_at = button.region
+        host.query_one(ContentSwitcher).current = "one"
+        await settle_page(host)
+        restyled = guard_paint.slow_after_refresh(monkeypatch, lambda: button.region == shown_at)
+        host.query_one(ContentSwitcher).current = "two"
+        app_free = guard_paint.busy(host)
+        # The app is held, so the guard cannot come down from its queue before the look; the
+        # screen lays out and paints apart, and queues the slow callback with that frame.
+        await watch_until(lambda: button.region == shown_at)
+        up_at_the_paint = button.guarding
+        app_free.set()
+        judged = asyncio.Event()
+        host.call_later(judged.set)  # behind everything the app had queued by the paint
+        await watch_until(judged.is_set)
+        down_once_judged = judged.is_set() and not button.guarding
+        restyled.set()
+        await settle_page(host)
+        return button.region == shown_at, up_at_the_paint, down_once_judged, button.guarding
+
+    shown, up_at_the_paint, down_once_judged, guarding_after = drive(go)
+    assert shown, "the button must come up where it was"
+    assert up_at_the_paint, "the guard must be up while the app has not judged its queue"
+    assert down_once_judged, "the guard waited for the screen's callbacks after its refresh"
+    assert not guarding_after
+
+
 async def _shown_again(pilot: Pilot[None], host: Host) -> tuple[GuardedButton, Offset]:
     """The button shown once, then the view before it back, with the keyboard on
     ``#typing``: the next switch puts the button under a pointer resting at the place

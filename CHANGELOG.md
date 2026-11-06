@@ -129,14 +129,34 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   0.9.2 started is given one from its row the first time 0.10.0 reads it.
 - **`redact` removes a credential whole**, and catches more, `github_pat_` and `xapp-`
   tokens among them; hand-off briefs are scrubbed with it. With `explainability.ship` or
-  the CI test bed on (both off by default), what they send is scrubbed by these rules, and
-  two things differ from 0.9.2. A JSON or dict string under a credential's name is removed
-  (`"access_token"`, `"client_secret"`, `"api_key"`, `"apiKey"`, `"password"`,
-  `"PGPASSWORD"`, `"SecretBinary"`, Docker's `"auth"`), while `"max_tokens": "8192"`,
-  `"token_type": "Bearer"`, a pagination cursor (`"NextToken"`, `"nextPageToken"`) and a
-  package's version or spec are kept. And a private key with no footer (`head -3 id_rsa`)
-  is removed with its body, while the text after it, and a header with no key after it,
-  are kept.
+  the CI test bed on (both off by default), what they send is scrubbed security first, and
+  two things differ from 0.9.2.
+  - First, a JSON or dict string under a name that mentions a token, secret, password or
+    key is replaced inside its quotes (`"access_token": "[redacted]"`, as `"PGPASSWORD"`,
+    `"secret_id"`, `"API_KEY_SECONDARY"` and Docker's `"auth"` are), and such a value may
+    be removed even when it is not a credential: `"password_hint"`, `"secret_name"`,
+    `"PWD"`, an i18n label such as `"login.password": "Password"`, a `"gen-token"` script.
+    A quoted value the 8,000-character clip cut before its closing quote is removed to the
+    cut. Kept are only these:
+    - documented fields, exactly as their APIs spell them (`max_tokens`,
+      `max_completion_tokens`, `max_output_tokens`, `token_type`, `token_count`,
+      `tokenizer`, `tokenizer_class`, the pagination cursors `NextToken`,
+      `ContinuationToken`, `NextContinuationToken`, `continuationToken`, `pageToken`,
+      `nextPageToken`, `syncToken`, `nextSyncToken`, `startPageToken`, `deltaToken`,
+      `skipToken`, and `password_policy`, `auth_token_url`, `token_uri`, `auth_uri`,
+      `token_endpoint`, `token_endpoint_auth_method`, Claude Code's `apiKeyHelper`), so a
+      credential stored under one of those names is kept;
+    - a package's version or spec as the whole value (`^4.24.5`, `beta`, `npm:pkg@^1`,
+      `github:owner/repo#ref`, `file:../path`, a git URL, an http(s) tarball or `#ref`
+      URL), so a password shaped exactly so is kept;
+    - a placeholder, a template's bare reference, a boolean or null (`<YOUR_API_KEY>`,
+      `</s>`, `[CLS]`, `${localEnv:GITHUB_TOKEN}`, `{{access_token}}`, `true`, `null`), so
+      a password written exactly so is kept, while a reference with a default
+      (`${VAR:-…}`) is removed.
+  - Second, a private key with no footer (`head -3 id_rsa`, also as `cat -n`, `cat -A`,
+    `grep -n`, `git blame`, `journalctl` or Claude Code's Read tool print its lines) is
+    removed with its body, while the text after it, and a header with no key after it, are
+    kept.
 - The Spawn dialog has an *Agent* field (blank: the role's agent), and its *Model* and
   *Effort* follow it. *Settings* shows each role's agent, account, permission and flags.
 - `--as` takes a fleet label. A manager's `state.md` is read only as a regular file of at

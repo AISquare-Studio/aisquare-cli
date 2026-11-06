@@ -166,6 +166,36 @@ def git_argv(*args: str) -> list[str]:
     return ["git", *GIT_OWN, *args]
 
 
+def hooks_in_tree(root: Path) -> str | None:
+    """The repository's ``core.hooksPath`` as it is set, when it names a folder inside the
+    work tree at ``root`` and outside its ``.git`` (husky's ``.husky/_``, a ``.githooks``):
+    the hooks a sandboxed agent may write, as it writes the tree. ``None`` where git runs
+    the hooks in ``.git/hooks`` (none set), which no sandbox writes (Codex's grants ``.git``
+    read-only), or in a folder outside the tree (``~/.githooks``). A git that cannot say is
+    a folder in the tree: what is not known to be safe is guarded (review r40 of #113,
+    finding 6, the owner's ruling in #96)."""
+    with repository_hooks(True):  # `git config` runs no hook; GIT_OWN would answer its own
+        argv = git_argv("-C", str(root), "config", "--type=path", "--get", "core.hooksPath")
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, timeout=10, check=False, env=git_env()
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "(unreadable)"
+    if done.returncode == 1 and not done.stdout.strip():
+        return None  # not set
+    value = done.stdout.strip()
+    if done.returncode != 0 or not value:
+        return "(unreadable)"
+    where = Path(value)
+    if not where.is_absolute():
+        where = root / where  # relative to the work tree's top, where git runs the hooks
+    tree, folder = os.path.realpath(root), os.path.realpath(where)
+    inside = os.path.commonpath([tree, folder]) == tree
+    in_git = os.path.commonpath([os.path.join(tree, ".git"), folder]) == os.path.join(tree, ".git")
+    return value if inside and not in_git else None
+
+
 def _resolved(path: Path) -> Path:
     """``path.resolve()``, a symlink loop on the way raised as ``OSError`` (``ELOOP``) on every
     Python, as ``stat`` raises it. A path that is missing still resolves: ``directory_project``

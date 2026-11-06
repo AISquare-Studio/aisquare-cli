@@ -130,6 +130,7 @@ from aisquare.core.workspace import (
     _resolved_or_spelled,
     active_project,
     git_argv,
+    hooks_in_tree,
     project_id_for,
     repository_hooks,
 )
@@ -2506,30 +2507,49 @@ def _git(cwd: Path, *args: str) -> _GitResult:
     return _GitResult(completed.returncode, completed.stdout, completed.stderr)
 
 
-def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> bool:
-    """Whether the fleet's own git for an agent of ``adapter``'s in ``project`` runs the
-    repository's hooks, as 0.9.2's plain ``git -C`` did: yes for an agent that does not
-    sandbox its tools in a project where no agent that does has run, a session or a fleet
-    row (``core.workspace.repository_hooks``). Not where one has: a hook in the tree
-    (``.husky/post-checkout``) may be that agent's to write, and aisquare's git runs it
-    outside its sandbox, with every right the sandbox withheld (review r11 of #113,
-    finding 4). The guard is that sandbox's alone; Claude Code runs whatever a hook could
-    in its own tools, and a Claude Code user's ``fleet spawn --worktree`` ran the
-    repository's ``post-checkout`` on 0.9.2 (review r40 of #113, finding 6). A store that
-    cannot say is a yes to the guard."""
+def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> str | None:
+    """Why the fleet's own git making a worktree for an agent of ``adapter``'s in ``project``
+    runs none of the repository's hooks, a line the spawn says; ``None`` where it runs them,
+    as 0.9.2's plain ``git -C`` did (``core.workspace.repository_hooks``).
+
+    Only a hooks folder inside the work tree is guarded (``core.workspace.hooks_in_tree``:
+    husky's, a ``.githooks``), and only where an agent that sandboxes its tools may have
+    written it: the spawn's own agent sandboxes them, or such an agent has run in the project
+    (a session, or a fleet row with none yet). aisquare's git would run such a hook outside
+    the sandbox, with every right it withheld (review r11 of #113, finding 4). ``.git/hooks``
+    runs always: no sandbox writes ``.git`` (Codex's grants it read-only). Claude Code runs
+    whatever a hook could in its own tools, and a Claude Code user's ``fleet spawn
+    --worktree`` ran the repository's ``post-checkout`` on 0.9.2 (review r40 of #113, finding
+    6; the owner's ruling in #96). A store that cannot say is a reason to guard."""
+    inside = hooks_in_tree(project.root)
+    if inside is None:
+        return None
     if adapter.capabilities.sandboxes_tools:
-        return False
-    try:
-        with store_session() as store:
-            ran = {row.agent for row in store.fleet_agents(project.id)}
-            ran.update(session.agent for session in store.team_sessions(project.id))
-    except Exception:
-        return False
-    for agent in ran:
-        found = recorded_adapter(agent)
-        if found is not None and found.capabilities.sandboxes_tools:
-            return False
-    return True
+        who = f"{adapter.label} sandboxes its tools and could have written them"
+    else:
+        try:
+            with store_session() as store:
+                ran = {row.agent for row in store.fleet_agents(project.id)}
+                ran.update(session.agent for session in store.team_sessions(project.id))
+        except Exception:
+            ran = None
+        sandboxed = [
+            found
+            for found in map(recorded_adapter, sorted(ran or (), key=str))
+            if found is not None and found.capabilities.sandboxes_tools
+        ]
+        if ran is None:
+            who = "the store could not say whether an agent that sandboxes its tools ran here"
+        elif sandboxed:
+            who = (
+                f"a {sandboxed[0].label} agent has run in this project and could have written them"
+            )
+        else:
+            return None
+    return (
+        f"made its worktree without the repository's hooks: core.hooksPath ({inside}) is "
+        f"inside the work tree, {who}, and aisquare's git runs outside that sandbox"
+    )
 
 
 def _git_ok(cwd: Path, *args: str) -> str:
@@ -6241,7 +6261,8 @@ def spawn(
                 branch = _carried_on(project.root, branch, codename, retired)
             # A replay's tree that is gone is made again where its record names it, on the
             # branch its row recorded (`_remake_worktree`).
-            with repository_hooks(_repository_hooks_run(project, selected.adapter)):
+            skipped = _repository_hooks_run(project, selected.adapter)
+            with repository_hooks(skipped is None):
                 cwd = _worktree_for(
                     project.root,
                     config.worktree_dir,
@@ -6254,6 +6275,8 @@ def spawn(
                     common=common,
                     start_point=start_point,
                 )
+            if skipped is not None:
+                notes.append(skipped)
         if settled is not None and os.path.realpath(cwd) == os.path.realpath(start):
             # Only for the folder it shared for: a restart's own tree can be elsewhere.
             env[claude_accounts_service.SHARED_ENV] = settled

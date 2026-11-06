@@ -634,7 +634,9 @@ def sign_in_slot(state: ClaudeState) -> int:
     The account the manager would launch on (:attr:`ClaudeState.account_slot`), else
     the agent's plain home. A plain home this agent never ran in does not exist yet,
     and the Accounts page lists it only once it does: it is made here, as the agent's
-    own sign-in and ``agents connect`` both make it.
+    own sign-in and ``agents connect`` both make it. Another agent's plain home is listed
+    only once aisquare takes it on (``claude_accounts.plain_home_counts``), which this
+    sign-in does (``take_on_plain_home``).
     """
     if state.account_slot is not None:
         found = accounts_core.find_account(state.account_slot)
@@ -643,6 +645,7 @@ def sign_in_slot(state: ClaudeState) -> int:
     plain = accounts_core.default_account(agent=state.agent)
     if not plain.config_dir.is_dir():
         plain.config_dir.mkdir(parents=True, exist_ok=True)
+    accounts_core.take_on_plain_home(state.agent)
     return plain.slot
 
 

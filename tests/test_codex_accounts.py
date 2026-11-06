@@ -206,11 +206,15 @@ def test_codex_slots_share_one_ladder_with_claude_and_keep_its_numbers(home: Pat
     assert core.create_account().slot == 3
 
 
-def test_the_plain_codex_is_slot_0_and_is_listed_once_its_home_exists(
+def test_the_plain_codex_is_slot_0_and_is_listed_once_aisquare_takes_it_on(
     home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     assert [a.slot for a in core.list_accounts()] == [1]  # no ~/.codex: no Codex row
     (home / ".codex").mkdir()
+    # Codex run outside aisquare is no account (review r40 of #113, finding 1:
+    # tests/test_a_plain_codex_aisquare_never_took_on_is_no_account.py)...
+    assert [a.slot for a in core.list_accounts()] == [1]
+    core.take_on_plain_home("codex")  # ...until aisquare takes it on (Welcome's Sign in)
     plain = core.list_accounts()[-1]
     assert (plain.slot, plain.agent, plain.managed) == (0, "codex", False)
     assert plain.config_dir == home / ".codex" and core.label(plain) == "plain codex"

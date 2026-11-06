@@ -213,15 +213,7 @@ def _hooks_installed(account: ClaudeAccount) -> bool:
     ``hooks.json``, which Codex then asks the operator to trust once): its plugin's hooks
     are trusted apart from them.
     """
-    from aisquare.core import agents as agent_core
-
-    home = core.agent_config_dir(account)
-    try:
-        if get_adapter(account.agent).capabilities.requires_hook_trust:
-            return agent_core.hooks_installed(account.agent, home)
-        return agent_core.connected(account.agent, home)
-    except Exception:
-        return False
+    return core.hooks_in(account)
 
 
 def overview() -> AccountsOverview:
@@ -615,6 +607,11 @@ def _find_in(
     if number is not None:
         account = next((a for a in accounts if a.slot == number), None)
         if account is None:
+            # An agent's plain home that is not one of the accounts yet
+            # (``core.plain_home_counts``), named by its number: the home it names.
+            plain = core.find_account(number)
+            if plain is not None and not plain.managed and agent in (None, plain.agent):
+                return plain
             raise NoSuchAccount(f"no {whose} account in slot {text} — see: aisquare accounts")
         return account
     wanted = text.lower()
@@ -1000,6 +997,8 @@ def set_default(
             "reorder instead: aisquare accounts move <slot|alias|email> top"
         )
     account = resolve(ref, agent=agent) if ref is not None else None
+    if account is not None:
+        _take_on(account)
     whose = account.agent if account is not None else agent or AGENT
     if account is not None and account.disabled:
         # Accepted silently, the default was a rung `choose` skipped on every
@@ -1085,6 +1084,7 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
     work`` cannot tell apart, so another slot's name in any case is taken.
     """
     account = resolve(ref)
+    _take_on(account)
     normalised = core.normalise_alias(alias, slot=account.slot) if alias is not None else None
     try:
         with store_session() as store:
@@ -1116,6 +1116,7 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
 def set_disabled(ref: str, disabled: bool) -> ClaudeAccount:
     """Take a slot out of (or back into) automatic selection. It stays usable by name."""
     account = resolve(ref)
+    _take_on(account)
     try:
         with store_session() as store:
             _arranged(store)
@@ -1139,7 +1140,22 @@ def reorder(refs: Sequence[str]) -> list[ClaudeAccount]:
     per ``↑`` (review of #205, third round).
     """
     accounts, note = _read_arranged()
-    return _write_order([_resolve_in(accounts, ref, note=note) for ref in refs])
+    order = [_resolve_in(accounts, ref, note=note) for ref in refs]
+    if [account for account in order if _take_on(account)]:
+        accounts, note = _read_arranged()
+        order = [_resolve_in(accounts, ref, note=note) for ref in refs]
+    return _write_order(order)
+
+
+def _take_on(account: ClaudeAccount) -> bool:
+    """Arranging an agent's plain home that is not one of the accounts yet (an alias, a
+    place in the order, a default, disabled) is adding it: aisquare takes it on
+    (``core.take_on_plain_home``), and it is listed from now on (``core.plain_home_counts``).
+    Whether it had to."""
+    if account.managed or core.plain_home_counts(account):
+        return False
+    core.take_on_plain_home(account.agent)
+    return True
 
 
 def _write_order(order: Sequence[ClaudeAccount]) -> list[ClaudeAccount]:
@@ -1178,6 +1194,9 @@ def move(ref: str, direction: Direction) -> list[ClaudeAccount]:
     """
     accounts, note = _read_arranged()
     account = _resolve_in(accounts, ref, note=note)
+    if _take_on(account):
+        accounts, note = _read_arranged()
+        account = _resolve_in(accounts, ref, note=note)
     order = list(accounts)
     index = next(at for at, a in enumerate(order) if a.slot == account.slot)
     order.pop(index)

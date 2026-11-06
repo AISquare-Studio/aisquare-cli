@@ -118,6 +118,11 @@ FIRST_MANAGED_SLOT = 2
 MARKER = ".aisquare-account.json"
 """Written into every directory this module creates; a numbered directory without it is a stray."""
 
+PLAIN_MARKER = ".plain-home"
+"""In an agent's slots folder (:func:`accounts_root`), for an agent whose plain home is not
+listed until aisquare takes it on (:func:`plain_home_counts`): written when aisquare signs
+that home in itself (Welcome's *Sign in*), so the sign-in it starts has a slot to land in."""
+
 CONFIG_DIR_VAR = "CLAUDE_CONFIG_DIR"
 TMPDIR_VAR = "CLAUDE_CODE_TMPDIR"
 HOME_DIR = ".claude"
@@ -292,21 +297,98 @@ def all_managed_accounts() -> list[ClaudeAccount]:
 def list_accounts() -> list[ClaudeAccount]:
     """Each agent's plain slot, then every managed slot of its in order, Claude Code's first.
 
-    An agent's plain home is listed only once it exists: Codex makes ``~/.codex`` on its
-    first run, and a machine that never ran it has no Codex login to show. Claude Code's
-    plain slot is listed always, as it always was (``AgentAccounts.legacy_slots``).
+    Claude Code's plain slot is listed always, as it always was (``AgentAccounts.
+    legacy_slots``). Another agent's plain home only once aisquare has taken it on
+    (:func:`plain_home_counts`).
     """
     found: list[ClaudeAccount] = []
     for agent in account_agents():
+        managed = managed_accounts(agent)
         plain = default_account(agent=agent)
-        if kind(agent).legacy_slots or os.path.isdir(plain.config_dir):
+        if plain_home_counts(plain, managed=bool(managed)):
             found.append(plain)
-        found.extend(managed_accounts(agent))
+        found.extend(managed)
     return found
 
 
+def plain_home_counts(plain: ClaudeAccount, *, managed: bool | None = None) -> bool:
+    """Whether ``plain``, an agent's plain home, is one of the accounts: listed, in the one
+    order, picked by a launch nothing pins, crossed to by a hand-over, and read by the
+    headroom pick, Welcome, the doctor and the Spawn dialog.
+
+    Always for an agent whose slots predate the others (``AgentAccounts.legacy_slots``:
+    Claude Code's ``~/.claude``, as 0.9.2 listed it). Another agent's only once its home
+    exists and aisquare has taken it on: an account of that agent was added (``accounts add
+    --agent``: ``managed`` says whether it has a slot, read when ``None``), aisquare's hooks
+    are in the home (``agents connect``, and install.sh ``--agent``, which connects it:
+    :func:`hooks_in`), or aisquare signed it in itself (Welcome's *Sign in*:
+    :data:`PLAIN_MARKER`). A Codex that is merely installed and logged in on a Claude Code
+    user's machine is none of these: counted, it took that user's unpinned launches and
+    crossed a one-account limit to it, the brief going to another provider, where 0.9.2
+    waited for the reset (review r40 of #113, finding 1). And a launch would have refused
+    that home anyway, as one of the user's that aisquare does not connect at a launch.
+    """
+    agent = plain.agent
+    if kind(agent).legacy_slots:
+        return True
+    if not os.path.isdir(plain.config_dir):
+        return False
+    if managed if managed is not None else managed_accounts(agent):
+        return True
+    return os.path.isfile(accounts_root(agent) / PLAIN_MARKER) or hooks_in(plain)
+
+
+def take_on_plain_home(agent: str) -> None:
+    """Record that aisquare took ``agent``'s plain home on as an account (:data:`PLAIN_MARKER`),
+    for a sign-in aisquare starts there itself; nothing for an agent that always lists it."""
+    if kind(agent).legacy_slots:
+        return
+    root = accounts_root(agent)
+    paths.ensure_home()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker = root / PLAIN_MARKER
+    if not marker.is_file():
+        marker.write_text(
+            json.dumps({"taken_on_at": _now().isoformat(), "by": f"aisquare-cli {__version__}"})
+            + "\n",
+            encoding="utf-8",
+        )
+
+
+def hooks_in(account: ClaudeAccount) -> bool:
+    """Whether aisquare runs in ``account``'s home: the one shared answer, which never raises.
+
+    The one "connected?" answer (``core.agents.connected``, the plugin route included). An
+    agent that runs a hook only once it is trusted (``capabilities.requires_hook_trust``) is
+    read by its hooks file alone, every hook in it (``core.agents.hooks_installed``: Codex's
+    ``hooks.json``, which Codex then asks the operator to trust once): its plugin's hooks
+    are trusted apart from them. A settings file that cannot be read is "not installed".
+    """
+    from aisquare.core import agents as agent_core
+    from aisquare.core.agent_adapters import get_adapter
+
+    home = agent_config_dir(account)
+    try:
+        if get_adapter(account.agent).capabilities.requires_hook_trust:
+            return agent_core.hooks_installed(account.agent, home)
+        return agent_core.connected(account.agent, home)
+    except Exception:
+        return False
+
+
 def find_account(slot: int) -> ClaudeAccount | None:
-    return next((account for account in list_accounts() if account.slot == slot), None)
+    """The account in ``slot``. A slot that names an agent's plain home (``AgentAccounts.
+    plain_slot``) finds it once the home exists, listed or not (:func:`plain_home_counts`):
+    an operator who names it (``--account 0``) asked for that home, and a launch there says
+    what it lacks (``agents connect``) rather than that there is no such account."""
+    found = next((account for account in list_accounts() if account.slot == slot), None)
+    if found is not None:
+        return found
+    for agent in account_agents():
+        if kind(agent).plain_slot == slot:
+            plain = default_account(agent=agent)
+            return plain if os.path.isdir(plain.config_dir) else None
+    return None
 
 
 def managed_slot(config_dir: Path | str, agent: str | None = AGENT) -> int | None:

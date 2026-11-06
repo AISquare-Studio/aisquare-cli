@@ -210,15 +210,20 @@ def homes() -> list[Home]:
     """Every account home an agent keeps its sessions' transcripts in, with its slot: each
     agent's plain home and registered slots, and each agent's plain home as its binary finds
     it with its variable unset (``~/.claude``, ``~/.codex``) when the variable points the
-    plain slot elsewhere (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``)."""
+    plain slot elsewhere (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``).
+
+    A plain home is read whether or not it is one of the accounts yet
+    (``claude_accounts.plain_home_counts``): which home holds a transcript is history, and
+    an agent run outside aisquare still ran there."""
     found = [
         Home(account.slot, account.agent, account.config_dir)
         for account in accounts_core.list_accounts()
     ]
     for agent in accounts_core.account_agents():
-        unset = accounts_core.plain_home(agent, {})
-        if all(not _same_path(unset, home.path) for home in found):
-            found.append(Home(accounts_core.kind(agent).plain_slot, agent, unset))
+        plain = accounts_core.kind(agent).plain_slot
+        for where in (accounts_core.plain_home(agent), accounts_core.plain_home(agent, {})):
+            if all(not _same_path(where, home.path) for home in found):
+                found.append(Home(plain, agent, where))
     return found
 
 

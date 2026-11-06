@@ -539,6 +539,9 @@ def test_the_shared_batch_holds_the_claude_code_session_alone_and_the_stats_both
         request(at + timedelta(minutes=1), "m1", cwd=alpha),
     )
     rollout = _rollout(codex_home, beta, THREAD)
+    # One of the accounts (``core.plain_home_counts``), so the registered count below is
+    # seen to leave out an account that is listed, not one that is not.
+    core.take_on_plain_home("codex")
     runner = CliRunner()
     assert runner.invoke(app, ["metrics", "backfill"]).exit_code == 0
 

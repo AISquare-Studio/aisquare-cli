@@ -254,11 +254,19 @@ def spawn(
         str | None,
         typer.Option(
             "--bin",
+            help="Agent executable (default: the role's binding); the agent is read from it.",
+        ),
+    ] = None,
+    command: Annotated[
+        str | None,
+        typer.Option(
             "--command",
             "-c",
-            help="Agent executable (default: the role's binding). -c is this option's, as "
-            "launch's is; -c KEY=VALUE stays Codex's own, and Claude Code's -c is "
+            help="A program to run AS the role's agent, a wrapper of it (`claude-work`, a "
+            "versioned claude): its session, board join and flags stay the agent's, as "
+            "launch's -c does. -c KEY=VALUE stays Codex's own, and Claude Code's -c is "
             "--continue, or given after --.",
+            metavar="PROGRAM",
         ),
     ] = None,
     prompt: Annotated[
@@ -346,6 +354,7 @@ def spawn(
             sandbox=sandbox,
             approval_policy=approval,
             binary=binary,
+            wrapper=command,
             agent=agent,
             prompt=prompt,
             # The window's `launch` reads these among the spawn's arguments, as 0.9.2's did,

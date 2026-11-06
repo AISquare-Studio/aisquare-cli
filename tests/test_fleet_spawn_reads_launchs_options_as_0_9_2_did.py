@@ -123,30 +123,77 @@ def test_a_malformed_pair_is_refused_before_any_window_opens(
     assert tmux.spawned == []
 
 
-@pytest.mark.parametrize("spelling", ["--command", "-c"])
-def test_command_and_c_are_the_binary_as_0_9_2_s_window_read_them(
+def _altclaude(fake: Path) -> None:
+    """A wrapper of Claude Code on PATH, `altclaude` (`claude-work`, a versioned claude). Its
+    suffix kept: on Windows the fake is `claude.cmd`, and `which` finds `altclaude.cmd` for
+    `altclaude` by PATHEXT, as it finds a real one."""
+    shutil.copy2(fake, fake.with_name("altclaude" + fake.suffix))
+
+
+def _runs_the_wrapper_as_claude_code(command: list[str], row: FleetAgent) -> None:
+    """The window runs `altclaude` AS Claude Code: its launch swaps the program and nothing
+    else, so the agent's session (`--session-id`, or its `--resume`), board join and flags
+    stay; the row names the wrapper, its agent Claude Code's."""
+    options, agents = _launchs_options_and_the_agents(command)
+    assert _flag(options, "--command") == "altclaude", options
+    assert _flag(options, "--agent") == "claude-code", options
+    assert "--session-id" in agents or "--resume" in agents, agents
+    assert "altclaude" not in agents, "never an argument of the agent's"
+    assert (row.binary, row.agent) == ("altclaude", "claude-code")
+    assert row.session_id is not None, "its board join"
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [["--command", "altclaude"], ["-c", "altclaude"], ["--command=altclaude"]],
+    ids=["--command", "-c", "--command="],
+)
+def test_command_runs_a_wrapper_as_the_roles_agent_with_its_session_as_0_9_2_did(
     tmux: FakeTmux,  # noqa: F811
     claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
     three_accounts: list[int],
     runner: CliRunner,
-    spelling: str,
+    spelling: list[str],
 ) -> None:
-    """`--command X` and `-c X` are `--bin X`, as 0.9.2's window launch read them and the
-    head's `launch` reads them. Claude Code's own -c (--continue) is given after --; a bare
-    -c is refused before any window opens (0.9.2's window refused it too, as a binary with no
-    value, once open)."""
-    named = runner.invoke(app, ["fleet", "spawn", "agent", spelling, str(claude_on_path)])
+    """#105's reopen 2 (tester-r9f, seq 11425): `--command BIN` and `-c BIN` are 0.9.2's: BIN
+    runs AS the role's agent, a wrapper of it, its session id and board join kept. As --bin's
+    alias it was the binary the agent is read from, and a wrapper not named claude ran with
+    no --session-id and no board join. --bin keeps that meaning. A bare -c is refused before
+    any window, and `-- -c` reaches claude."""
+    _altclaude(claude_on_path)
+
+    wrapped = runner.invoke(app, ["fleet", "spawn", "agent", *spelling])
     bare = runner.invoke(app, ["fleet", "spawn", "agent", "-c"])
     continued = runner.invoke(app, ["fleet", "spawn", "agent", "--", "-c"])
 
-    assert named.exit_code == 0, named.output
+    assert wrapped.exit_code == 0, wrapped.output
     assert bare.exit_code == 2, bare.output
     assert continued.exit_code == 0, continued.output
-    assert len(tmux.spawned) == 2, "the named one and the continued one"
-    first = _command(tmux, 0)
-    assert _flag(first, "--command") == str(claude_on_path), first
-    assert spelling not in _after_the_options(first), "never the agent's"
+    assert len(tmux.spawned) == 2, "the wrapped one and the continued one"
+    with store_session() as store:
+        rows = store.fleet_agents(project.id, live_only=True)
+    [first] = [row for row in rows if row.pane_id == tmux.spawned[0]["pane_id"]]
+    _runs_the_wrapper_as_claude_code(_command(tmux, 0), first)
     assert "-c" in _after_the_options(_command(tmux, -1)), "the agent's own -c, after --"
+
+
+def test_bin_still_names_the_binary_its_agent_is_read_from(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+    runner: CliRunner,
+) -> None:
+    """--bin keeps its meaning on both builds: the agent is read from the program, and one
+    no agent is named for gets no session id (0.9.2 the same)."""
+    _altclaude(claude_on_path)
+
+    result = runner.invoke(app, ["fleet", "spawn", "agent", "--bin", "altclaude"])
+
+    assert result.exit_code == 0, result.output
+    assert "--session-id" not in _after_the_options(_command(tmux))
+    assert _row(project).session_id is None
 
 
 def test_a_codex_spawns_a_with_codexs_own_word_says_where_codexs_goes(
@@ -242,27 +289,90 @@ def test_a_0_9_2_rows_own_a_is_the_account_its_replay_runs_and_never_the_agents(
     assert "-a" not in started.launch_spec.extra_args, "recorded as this release reads it"
 
 
-def test_a_0_9_2_rows_own_command_is_the_binary_its_restart_runs(
+@pytest.mark.parametrize("how", ["restart", "switch", "fork"])
+@pytest.mark.parametrize(
+    "recorded",
+    [None, ["--command", "altclaude"], ["--command=altclaude"]],
+    ids=["this-releases-spawn", "0.9.2-record", "0.9.2-record-one-token"],
+)
+def test_a_wrapper_is_replayed_as_the_roles_agent_with_its_session(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+    how: str,
+    recorded: list[str] | None,
+) -> None:
+    """On 0.9.2, `fleet spawn agent --command altclaude` recorded ['--command', 'altclaude'],
+    and its own restart, switch and fork ran altclaude WITH --session-id. The head's ran it
+    with none (seq 11425). A wrapper this release spawned replays the same way."""
+    _altclaude(claude_on_path)
+    if recorded is None:
+        row = fleet_service.spawn(project, "agent", worktree=False, wrapper="altclaude").agent
+    else:
+        row = fleet_service.spawn(project, "agent", worktree=False).agent
+        row = _as_0_9_2_recorded(row, recorded, slot=4)
+
+    started = _replayed(project, tmux, row, how)
+
+    _runs_the_wrapper_as_claude_code(_command(tmux), started)
+
+
+@pytest.mark.parametrize(
+    ("recorded", "runs"),
+    [
+        (["-a3"], "3"),
+        (["-a", "3", "-a", "2"], "2"),
+        (["--account=3"], "3"),
+    ],
+    ids=["attached-a3", "the-last-a-wins", "--account=N"],
+)
+def test_each_spelling_of_a_0_9_2_records_account_is_read_as_its_window_read_it(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+    recorded: list[str],
+    runs: str,
+) -> None:
+    """The tester's surviving mutants (seq 11425): 0.9.2's launch read `-a3` attached, the
+    last of two -a (its `-a 3 -- -a 2` ran 2), and `--account=N` as one token."""
+    row = fleet_service.spawn(project, "agent", account="4", worktree=False).agent
+    row = _as_0_9_2_recorded(row, recorded, slot=4)
+
+    started = _replayed(project, tmux, row, "restart")
+
+    assert _flag(_command(tmux), "--account") == runs
+    assert started.account_slot == int(runs)
+
+
+def test_a_0_9_2_records_account_is_pinned_and_an_account_the_caller_names_beats_it(
     tmux: FakeTmux,  # noqa: F811
     claude_on_path: Path,  # noqa: F811
     project: ProjectInfo,  # noqa: F811
     three_accounts: list[int],
 ) -> None:
-    """On 0.9.2, `fleet spawn agent --command altclaude` ran altclaude, recorded
-    ['--command', 'altclaude'], and its own restart ran altclaude. The head's ran claude with
-    `--command altclaude` among claude's arguments."""
-    # Its suffix kept: on Windows the fake is `claude.cmd`, and `which` finds `altclaude.cmd`
-    # for `altclaude` by PATHEXT, as it finds a real one.
-    shutil.copy2(claude_on_path, claude_on_path.with_name("altclaude" + claude_on_path.suffix))
-    row = fleet_service.spawn(project, "agent", worktree=False).agent
-    row = _as_0_9_2_recorded(row, ["--command", "altclaude"], slot=4)
+    """The record's -a is the user's own choice, so the replacement keeps it pinned
+    (`account_pinned`, which `[accounts] before_limit` leaves alone). An account the caller
+    names, the Spawn dialog's take-over, wins over it."""
+    first = _as_0_9_2_recorded(
+        fleet_service.spawn(project, "agent", account="4", worktree=False).agent,
+        ["-a", "3"],
+        slot=4,
+    )
+    restarted = _replayed(project, tmux, first, "restart")
+    assert restarted.launch_spec is not None and restarted.launch_spec.account_pinned is True
 
-    started = _replayed(project, tmux, row, "restart")
+    second = _as_0_9_2_recorded(
+        fleet_service.spawn(project, "agent", account="4", worktree=False).agent,
+        ["-a", "3"],
+        slot=4,
+    )
+    tmux.die(second.pane_id, 0)
+    taken = fleet_service.hand_off(project, second.label, mode="take_over", account="2")
 
-    command = _command(tmux)
-    assert _flag(command, "--command") == "altclaude", command
-    assert "altclaude" not in _after_the_options(command)
-    assert started.binary == "altclaude", "the row names what runs"
+    assert _flag(_command(tmux), "--account") == "2"
+    assert taken.started.agent.account_slot == 2
 
 
 def test_this_releases_record_keeps_an_a_after_its_windows_separator_as_the_agents(

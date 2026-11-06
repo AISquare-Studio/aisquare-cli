@@ -4091,13 +4091,76 @@ def test_a_move_back_to_a_release_without_codex_hooks_leaves_them_and_names_the_
 def test_a_release_after_the_last_without_codex_hooks_has_them() -> None:
     through = get_adapter("codex").capabilities.hookless_through
     assert through is not None and lifecycle.lacks_agent_hooks("codex", through)
-    # 0.8.2, the release this branch merged, ships no Codex adapter either, nor 0.8.1.
-    assert lifecycle.lacks_agent_hooks("codex", "0.8.2")
-    assert lifecycle.lacks_agent_hooks("codex", "0.8.1")
-    assert lifecycle.lacks_agent_hooks("codex", "0.8.0")
-    assert lifecycle.lacks_agent_hooks("codex", "0.7.0")
-    assert not lifecycle.lacks_agent_hooks("codex", "0.9.0")
+    # 0.9.2 (6a77e650) lists Codex as "detected only: no hooks yet" (`planned="0.10"`), and so
+    # do 0.9.1 and 0.9.0, the mains this branch merged; 0.8.x shipped no Codex adapter at all
+    # (#105's reopen 2: a move back to 0.9.2 asked it to refresh Codex's hooks, and ended rc 1).
+    for release in ("0.9.2", "0.9.1", "0.9.0", "0.8.2", "0.8.1", "0.8.0", "0.7.0"):
+        assert lifecycle.lacks_agent_hooks("codex", release), release
+    assert not lifecycle.lacks_agent_hooks("codex", "0.10.0")
     assert not lifecycle.lacks_agent_hooks("claude-code", "0.7.0"), "refresh-hooks' question"
+
+
+def test_a_move_back_to_0_9_2_leaves_a_codex_accounts_hooks_and_ends_well(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    tmp_path: Path,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tester-r9f (seq 11425): `upgrade --version 0.9.2 --yes` on a home with a Codex account
+    ended rc 1, "✗ hooks in …/codex-accounts/5 (Codex) were not re-connected (codex is not
+    installed on this machine)": 0.9.2's refresh-hooks knows no Codex. The plan leaves them,
+    naming the disconnect to run first, refreshes Claude Code's, and the move ends rc 0."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.10.0")  # this release, moving back
+    codex = _codex_hooked(_codex_account("5"), tool.script)
+    claude = _hooked(tmp_path / "claude", tool.script)
+    _record_agents(claude_code=[claude])
+    machine.new_version = "0.9.2"
+
+    planned = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.9.2"]).stdout)
+    result = runner.invoke(app, ["upgrade", "--version", "0.9.2", "--yes"])
+
+    remove = install_route.command_line(
+        ["aisquare", "agents", "disconnect", "codex", "--config-dir", str(codex)]
+    )
+    assert planned["refresh_hooks"] == [str(claude)], planned
+    [left] = planned["hooks_left"]
+    assert (left["agent"], left["config_dir"]) == ("codex", str(codex))
+    assert left["reason"].startswith("0.9.2 has no Codex hooks: the move back leaves them")
+    assert f"take them out first with `{remove}`" in left["reason"]
+    assert result.exit_code == 0, result.output
+    assert [argv[3] for argv in machine.connects()] == ["claude-code"], "Codex's never asked"
+    assert "not re-connected" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(("version", "code", "mark"), [("0.9.2", 0, "·"), ("0.10.1", 1, "✗")])
+def test_a_hook_a_move_back_could_not_refresh_is_a_warning_and_a_move_forwards_fails(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    tmp_path: Path,
+    version: str,
+    code: int,
+    mark: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#105's reopen 2, item 3: a move back never ends rc 1 for its hooks. One its refresh
+    could not rewrite is said as a warning, with the command that rewrites it, and the move
+    is done. A move forward still exits 1 for it, as before."""
+    monkeypatch.setattr(lifecycle, "__version__", "0.10.0")  # 0.9.2 back, 0.10.1 forward
+    site = _hooked(tmp_path / "claude", tool.script)
+    _record(site)
+    machine.new_version = version
+    machine.latest = LatestRelease(version)
+    machine.connect_exit = 1
+
+    result = runner.invoke(app, ["upgrade", "--version", version, "--yes"])
+
+    assert result.exit_code == code, result.output
+    said = [line for line in result.stdout.splitlines() if "were not re-connected" in line]
+    assert len(said) == 1 and said[0].startswith(f"{mark} hooks in "), result.stdout
+    assert " — run: aisquare agents refresh-hooks claude-code --config-dir " in said[0]
 
 
 def test_the_refresh_the_upgrade_runs_for_codex_is_a_command_this_cli_has(

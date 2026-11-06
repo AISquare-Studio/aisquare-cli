@@ -159,8 +159,10 @@ _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 PLUGIN = "aisquare"
 PLUGIN_MARKETPLACE = "aisquare-cli"
 #: The last aisquare release with no Codex hooks: an install of it, or of one before it,
-#: has none to write, and its ``agents refresh-hooks codex`` fails.
-LAST_WITHOUT_HOOKS = "0.8.2"
+#: has none to write, and its ``agents refresh-hooks codex`` fails. 0.9.2's (6a77e650) lists
+#: Codex as "detected only: no hooks yet" (``planned="0.10"``) and answers "codex is not
+#: installed on this machine", which ended a move back to it rc 1 (#105's reopen 2).
+LAST_WITHOUT_HOOKS = "0.9.2"
 #: Codex's own installer, as ``install.sh --agent codex`` runs it (its ``CODEX_INSTALLER_URL``).
 INSTALL_COMMAND = "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
 #: Codex's Homebrew cask, offered on macOS after its installer.

@@ -326,7 +326,10 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                     str(hook.config_dir),
                 ]
             )
-            _say(f"✗ hooks in {where} were not re-connected ({hook.error}) — run: {remedy}")
+            # A move back is done whatever a hook says: a warning, with the command, never
+            # the exit 1 a move forward's failed hook gives (#105's reopen 2).
+            mark = "·" if plan.backwards else "✗"
+            _say(f"{mark} hooks in {where} were not re-connected ({hook.error}) — run: {remedy}")
     for site in plan.left:
         _say(f"· {_place(site.config_dir, site.agent)} left as it is: {site.reason}")
     for note in report.notes:
@@ -696,7 +699,7 @@ def _upgrade(
             detail=report.problem,
         )
     _emit_report(report)
-    if any(not hook.ok for hook in report.hooks):
+    if any(not hook.ok for hook in report.hooks) and not plan.backwards:
         raise _HooksFailed()
     _reopen(reopen, one_click=one_click, installed=True, started=started)
 

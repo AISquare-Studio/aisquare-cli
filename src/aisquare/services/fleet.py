@@ -1073,6 +1073,20 @@ class PlacedPane:
         srv.send_keys(self.pane_id, "Enter")
 
 
+def _without_option(args: Sequence[str], option: str) -> list[str]:
+    """``args`` less every ``option`` and the value after it (``--command claude``)."""
+    kept: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == option:
+            skip = True
+        else:
+            kept.append(arg)
+    return kept
+
+
 def _enter_gap(adapter: AgentAdapter | None) -> float:
     """How long after its text is in the box a typed delivery presses Enter for ``adapter``'s
     agent: ``delivery.ENTER_GAP`` for one that takes a quick Enter (Claude Code, as 0.9.2
@@ -5250,6 +5264,7 @@ def spawn(
     sandbox: str | None = None,
     approval_policy: str | None = None,
     binary: str | None = None,
+    wrapper: str | None = None,
     agent: str | None = None,
     prompt: str | None = None,
     agent_args: Sequence[str] = (),
@@ -5475,6 +5490,10 @@ def spawn(
             remote_control = spec.remote_control  # Claude Code's Remote Control, as spawned
         if replayed_args and not experimental.captain_role(role):
             agent_args = _replayed_args(role, spec, config)
+        if wrapper is None:
+            # The program the record's window ran AS its agent (`--command BIN`, 0.9.2's or
+            # this release's), its agent and session the record's own (#105's reopen 2).
+            wrapper = window_read(spec).binary
     if experimental.captain_role(role) and not _is_the_captains_launch(cwd):
         # `fleet spawn captain` on the home was a captain with every tool, in the
         # home itself — and `aisquare captain` then attached to it and typed into it.
@@ -5516,6 +5535,11 @@ def spawn(
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     resolution = selected.binary
+    if wrapper is not None and shutil.which(wrapper) is None:
+        raise FleetError(
+            f"{wrapper!r} is not on your PATH (--command: the program run as "
+            f"{selected.adapter.label}) — install it, or spawn without --command"
+        )
     if agent_launch.executable(selected) is None:
         if selected.source == "model":
             # The agent the spawn's own model is (review r29 of #113, delta's nit): the way out
@@ -5604,6 +5628,10 @@ def spawn(
     recorded_args = _without_session_choice(
         resolution.binary, [*role_args, *extra, *launch_options]
     )
+    if wrapper is not None:
+        # Recorded where the window line holds it, among its launch's options, so a replay
+        # runs it as the agent again (`window_read`, #105's reopen 2).
+        recorded_args += ["--command", wrapper]
     forked: ForkArgs | None = None
     replay_lead: list[str] = []
     if resume is not None:
@@ -6071,6 +6099,11 @@ def spawn(
         # nothing printed. `docs/fleet.md` promises `AISQUARE_BIN_<ROLE>` works
         # for a fleet launch; this is what makes that true.
         flags += ["--command", resolution.binary]
+    if wrapper is not None:
+        # A program run AS the agent (`--command BIN`, a wrapper: 0.9.2's meaning, #105's
+        # reopen 2): the agent, its session id, board join and flags are the ones resolved
+        # above from the agent's own binary, and the window's launch runs this in its place.
+        flags = [*_without_option(flags, "--command"), "--command", wrapper]
     # The parent already resolved this family. Carry that decision through
     # tmux so a legacy wrapper is not reclassified against inherited defaults.
     flags += ["--agent", selected.adapter.id, "--no-bound-args"]
@@ -6524,7 +6557,7 @@ def spawn(
             project_id=project.id,
             label=picked,
             role=role,
-            binary=resolution.binary,
+            binary=wrapper or resolution.binary,
             agent=selected.adapter.id,
             tmux_socket=config.tmux_socket,
             pane_id=window.pane_id,
@@ -6829,8 +6862,9 @@ def _launch_binary(
     """
     if spec is None or binary is not None:
         return _binary_for(role, override=binary, bin_flag=bin_flag)
-    # A 0.9.2 record's `--command BIN`, which its window's launch ran (#105's reopen 1).
-    resolution = harness.resolve_binary(role, override=window_read(spec).binary or spec.binary)
+    # The record's agent's binary: a `--command BIN` it holds is the program run AS that agent
+    # (`window_read`), never the binary the agent is read from (#105's reopen 2).
+    resolution = harness.resolve_binary(role, override=spec.binary)
     if shutil.which(resolution.binary) is None:
         # Replayed, and gone since: today's resolution, when it is the same kind of program.
         resolution = _in_place_of_recorded(
@@ -15422,6 +15456,11 @@ def _refuse_a_replay_that_cannot_start(
         bin_flag=False,
     )
     chosen = replayed.binary if replayed.source != "default" else None
+    wrapper = window_read(record.spec).binary
+    if wrapper is not None and shutil.which(wrapper) is None:
+        # The program the record runs AS its agent (`--command`), gone: refused before the
+        # stop, as spawn refuses it after (#105's reopen 2).
+        raise FleetError(f"{wrapper!r} is not on your PATH (the --command its spawn named)")
     try:
         selected = agent_launch.resolve(
             record.role, agent=record.agent, binary=chosen, cwd=project.root

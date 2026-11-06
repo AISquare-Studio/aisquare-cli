@@ -321,19 +321,26 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     """
     promoted = _promote_retired_defaults(store)
     listed = core.list_accounts()
+    # A rank whose slot has no registry row is an orphan: a removed slot's, whose number the
+    # next account took, with its place (review r40 of #113, finding 2). The ranks are read
+    # before the rows: every writer writes a slot's row before its rank, so a rank seen here
+    # whose row is not seen after it is one no row stands behind, never a row another
+    # reader made meanwhile (asked the other way round, a reader that read the rows before
+    # another made them dropped that reader's ranks, and the order it wrote back put a Codex
+    # account first: CI on b3920f7b).
+    ranked = set(store.account_ranks())
     registered = {record.slot for record in store.claude_accounts()}
+    for agent in core.account_agents():
+        if not core.kind(agent).legacy_slots:
+            registered.update(record.slot for record in store.agent_accounts(agent))
     arranged: list[ClaudeAccount] = []
     for agent in core.account_agents():
         mine = [a for a in listed if a.agent == agent]
         if core.kind(agent).legacy_slots:
             arranged.extend(_arranged_claude(store, mine))
         else:
-            registered.update(record.slot for record in store.agent_accounts(agent))
             arranged.extend(_arranged_agent(store, agent, mine))
-    # A slot registered only now is new: a rank it has is a removed slot's, whose number it
-    # took (review r40 of #113, finding 2).
-    fresh = {account.slot for account in listed} - registered
-    return _ranked(store, arranged, promoted, fresh=fresh)
+    return _ranked(store, arranged, promoted, fresh=ranked - registered)
 
 
 def _promote_retired_defaults(store: ContextStore) -> list[int]:
@@ -391,8 +398,8 @@ def _ranked(
     an older build writes when it reorders a store it shares with this one, and that reorder
     is dropped, not merged (review r23 of #113, nit). The ranks are the one order.
 
-    ``fresh`` are the slots registered by this read (:func:`_arranged`): a rank one of them
-    has is an orphan, a removed slot's that :func:`forget_arrangement` left behind before it
+    ``fresh`` are the slots ranked with no registry row behind the rank (:func:`_arranged`):
+    an orphan, a removed slot's that :func:`forget_arrangement` left behind before it
     dropped ranks too, and is not read. Read, the next ``accounts add`` took the removed
     slot's number and its place, rank 1 and the machine default among them, where 0.9.2 put
     a new account last (review r40 of #113, finding 2).

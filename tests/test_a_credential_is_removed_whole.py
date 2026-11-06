@@ -432,6 +432,9 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     "pem-overlong-tags": lambda size: HEADER + ("<" + "a" * 300) * (size // 301),
     "pem-a-sea-of-whitespace": lambda size: HEADER + " " * (size - 63) + "A1b2" * 8,
     "pem-ellipses-between-runs": lambda size: HEADER + ("\u2026" + "A1b2" * 8) * (size // 33),
+    # reopen 6 (L1): headers inside tags, where each gap read every tag after it
+    "pem-headers-inside-tags": lambda size: ("<" + HEADER + ">") * (size // 33),
+    "pem-headers-inside-attributes": lambda size: ('<input value="' + HEADER + '">') * (size // 47),
 }
 
 #: Four sizes, each four times the one before, the last 2 MB.

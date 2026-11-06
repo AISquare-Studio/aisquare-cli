@@ -430,7 +430,6 @@ _PEM_END = re.compile(r"-----END [A-Z ]{0,32}PRIVATE KEY-----")
 #: code string) or HTML's ``<br>``; between two runs on a line may stand spaces, quotes, ``+`` and
 #: ``,`` (a key written as a string concatenation, a line quoted with ``>``).
 _BASE64 = r"[A-Za-z0-9+/=]"
-_BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
 _LINE_BREAK = r"(?:\r\n?|\n|\\+[rn]|<[bB][rR][ \t]*+/?>)"
 _GAP = r"""(?:\\+["']|[ \t"'+,>])"""
 #: The run that is a key's whatever stands before it: no word of prose is this long.
@@ -566,17 +565,27 @@ _SEPARATED_RUN = _gap(_EDGE + _LONG_RUN) + _EDGE + _LONG_RUN
 #: read as base64, no word after them), or a run the clip cut. The first only after a run was
 #: taken, where prose after a header would be read as one; the second right after the header
 #: too (:data:`_SEPARATED_CUT`), where the clip cut the key's first run short.
+#: The key's last run before the clip's notice, with only markup between: in any case, four
+#: characters or more (a line of a key, not a listing's number before the cut). A short
+#: last line of one case (``ovcxxr``) does not read as base64, and before ``</span></div>…
+#: [truncated by aisquare-cli]`` nothing but the key can stand there (reopen 6, the clip fuzz).
+_CLIP_NOTICE = "\u2026 \\[truncated by [^\\]\\r\\n]{0,32}+\\]\\Z"
 _LAST_RUN = (
     "(?:(?![a-z/]*+(?![A-Za-z0-9+/=]))(?![A-Z/]*+(?![A-Za-z0-9+/=]))" + _BASE64 + "{4,}+"
-    + "(?![ \\t]++[A-Za-z])|" + _CUT_RUN + ")"
+    + "(?![ \\t]++[A-Za-z])|" + _CUT_RUN
+    + "|" + _BASE64 + "{4,}+(?=" + _MARKUP + "*+\\\\*+" + _CLIP_NOTICE + "))"
 )  # fmt: skip
 _SEPARATED_END = _gap(_EDGE + _LAST_RUN) + _EDGE + _LAST_RUN
 #: One more piece of a key after its body: a run after a separator, or a line whatever wraps it.
 _TAIL_ITEM = "(?:" + _SEPARATED_RUN + "|" + _TO_LINE_END + _WRAPPED_LINE + ")"
-_A_SEPARATED_RUN = re.compile(_SEPARATED_RUN)
+#: The gaps and the runs after them, as the loop reads them: a gap first, with its end bounded
+#: (:func:`_after_a_gap`), then the run from where it stopped.
+_GAPS_AND_RUNS = {
+    "run": (re.compile(_gap(_EDGE + _LONG_RUN)), re.compile(_EDGE + _LONG_RUN)),
+    "last": (re.compile(_gap(_EDGE + _LAST_RUN)), re.compile(_EDGE + _LAST_RUN)),
+    "cut": (re.compile(_gap(_EDGE + _CUT_RUN)), re.compile(_EDGE + _CUT_RUN)),
+}
 _SEPARATED_CUT = _gap(_EDGE + _CUT_RUN) + _EDGE + _CUT_RUN
-_A_SEPARATED_END = re.compile(_SEPARATED_END)
-_A_SEPARATED_CUT = re.compile(_SEPARATED_CUT)
 _A_WRAPPED_LINE = re.compile(_WRAPPED_LINE)
 #: A header with no footer and a body after it, as one pattern: what the linear pass removes for
 #: one at the start of its line, for whoever asks it of a text (the tests' reference does). A
@@ -707,14 +716,13 @@ class _Lines:
         where there is none."""
         end = at
         while True:
-            stop = _within_the_cap(_A_SEPARATED_RUN.match(text, end), end)
+            stop = _after_a_gap("run", text, end)
             if stop is None:
                 stop = self._wrapped(text, end)
             if stop is None:
                 break
             end = stop
-        last = _A_SEPARATED_END if end > closes else _A_SEPARATED_CUT
-        stop = _within_the_cap(last.match(text, end), end)
+        stop = _after_a_gap("last" if end > closes else "cut", text, end)
         return end if stop is None else stop
 
     def _wrapped(self, text: str, at: int) -> int | None:
@@ -731,15 +739,26 @@ class _Lines:
         return self.read[brk]
 
 
-def _within_the_cap(found: re.Match[str] | None, at: int) -> int | None:
-    """Where a piece of a key that ``found`` read from ``at`` ends, or ``None`` when there is
-    none, or when its gap holds more than :data:`_GAP_CAP` characters, markup and all. A run is
-    what its match ends in: base64, after a gap whose last character is none."""
-    if found is None:
+#: How far past :data:`_GAP_CAP` a gap's match may look: enough that a run starting at the cap is
+#: read whole by the gap's look for it.
+_GAP_LOOK = 256
+
+
+def _after_a_gap(piece: str, text: str, at: int) -> int | None:
+    """Where the ``piece`` of a key (:data:`_GAPS_AND_RUNS`) after a gap from ``at`` ends, or
+    ``None`` where there is none, or where its gap holds more than :data:`_GAP_CAP` characters.
+
+    The gap is matched with an END (``endpos``), the cap and :data:`_GAP_LOOK` past ``at``, and
+    its run from where it stopped. Read to wherever its markup ended, a gap after a header that
+    sits inside a tag (``<-----BEGIN RSA PRIVATE KEY----->`` repeated, ``<input value="-----BEGIN
+    …">``) read every tag after it, to the end of the text, and N headers read it N times:
+    x15 the time for x4 the text (R9k, reopen 6, L1). Now no gap reads past its bound."""
+    gap, run = _GAPS_AND_RUNS[piece]
+    found = gap.match(text, at, at + _GAP_CAP + _GAP_LOOK)
+    if found is None or found.span()[1] - at > _GAP_CAP:
         return None
-    piece = found.group()
-    run = len(piece) - len(piece.rstrip(_BASE64_CHARS))
-    return found.span()[1] if len(piece) - run <= _GAP_CAP else None
+    ran = run.match(text, found.span()[1])
+    return ran.span()[1] if ran is not None else None
 
 
 def _matched_to(found: re.Match[str] | None, at: int) -> int:

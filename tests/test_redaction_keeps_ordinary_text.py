@@ -802,6 +802,12 @@ def test_a_separated_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body
 MARKUPS = {
     "VS Code's HTML": '</span></div><div><span style="color: #cccccc;">',
     "a highlighted code block": '</span><span class="line">',
+    # a tag of 129 to 256 characters: Word's HTML, a styled span on every line (reopen 6, MZ2)
+    "Word's HTML": (
+        "</span></p><p class=MsoNormal><span style='font-size:10.0pt;line-height:107%;"
+        'font-family:"Courier New";mso-fareast-font-family:"Times New Roman";color:#1F3864;'
+        "mso-themecolor:accent1;mso-themeshade:128;mso-ansi-language:EN-US'>"
+    ),
     "Google Docs' HTML": '</span></p><p dir="ltr"><span style="font-size:11pt;">',
     "Slack's export": '</div><div class="p-rich_text_section">',
     "a table row with a line number": '</td></tr><tr><td class="num">2</td><td class="code">',
@@ -853,6 +859,21 @@ def test_a_key_joined_by_markup_the_8000_character_clip_cuts_leaves_no_byte_of_i
                 cut,
                 left[-120:],
             )
+
+
+def test_a_last_line_of_one_case_goes_with_the_key_before_the_clips_notice() -> None:
+    """A key's short last line can be letters of one case (``ovcxxr``), which do not read as
+    base64, and before ``</span></div>`` and the clip's notice it shipped (the tester's clip
+    fuzz, seed 61, at reopen 6). Before the notice nothing but the key stands there, so it goes;
+    before prose a word of one case is still kept."""
+    markup = MARKUPS["VS Code's HTML"]
+    mark = insights._TRUNCATION_MARK
+    cut = markup.join([HEADER, BODY[0], "ovcxxrab"]) + "</span></div>" + mark
+    prose = markup.join([HEADER, BODY[0], "thanks"]) + "</span></div>\nwhy is this rejected?"
+
+    assert "ovcxxrab" not in redact(cut, RedactionLevel.standard)
+    assert redact(cut, RedactionLevel.standard).endswith("</span></div>" + mark)
+    assert "thanks</span></div>\nwhy is this rejected?" in redact(prose, RedactionLevel.standard)
 
 
 def test_markup_past_the_cap_ends_the_key() -> None:

@@ -968,8 +968,8 @@ def _as_every_launch_reads_it(
     launch's verdict are one by construction:
     - an ``--agent`` and a ``--bin`` that disagree are refused with the launch's reason;
     - a role bound to an agent reads a bare number as that agent's;
-    - an account of another agent is refused with the launch's reason, a later ``--agent``
-      or ``--bin`` too;
+    - an account of another agent is refused with the launch's reason (what its binding rung
+      found, as bind always said it), a later ``--agent`` or ``--bin`` too;
     - a number two agents hold, with nothing naming the agent, with B3-1's advice.
     Every bind is asked, not only one that gives ``--account``."""
     from aisquare.core import config as config_core
@@ -998,40 +998,40 @@ def _as_every_launch_reads_it(
         try:
             claude_accounts_service.choose(None, role=role, agent=selected.adapter.id)
         except claude_accounts_service.NoSuchAccount as exc:
-            ambiguous = claude_accounts_service.ambiguity_in(exc)
+            # The launch's reason: what its binding rung found, without the sentence the launch
+            # wraps it in ("the role binding for 'R' names account 'N': …"), which a bind never
+            # said. So a Claude-only bind of a slot there is none of reads as 0.9.2's did.
+            cause = exc.__cause__
+            reason = cause if isinstance(cause, claude_accounts_service.NoSuchAccount) else exc
+            ambiguous = claude_accounts_service.ambiguity_in(reason)
             if ambiguous is not None:
-                # An alias two accounts hold, which an agent narrows nothing of: the launch's
-                # own words, prefix and all.
-                said = _bind_one_of(ambiguous, otherwise=str(exc))
+                # An alias two accounts hold, which an agent narrows nothing of: its own words.
+                said = _bind_one_of(ambiguous)
                 fail(said, error="ambiguous_account", ref=ref, detail=said)
-            said = str(exc)
-            wrong = exc.__cause__
+            said = str(reason)
             if (
-                isinstance(wrong, claude_accounts_service.WrongAgent)
-                and wrong.account is not None
+                isinstance(reason, claude_accounts_service.WrongAgent)
+                and reason.account is not None
                 and typed_agent is None
             ):
                 # Its own agent named here binds it (#100's reopen 2).
                 said = (
                     said.removesuffix(" (see: aisquare accounts)")
-                    + f", or pass --agent {wrong.account.agent} (see: aisquare accounts)"
+                    + f", or pass --agent {reason.account.agent} (see: aisquare accounts)"
                 )
             fail(said, error="unknown_account", ref=ref)
 
 
-def _bind_one_of(
-    exc: claude_accounts_service.AmbiguousAccount, *, otherwise: str | None = None
-) -> str:
+def _bind_one_of(exc: claude_accounts_service.AmbiguousAccount) -> str:
     """The refusal of a reference two agents' accounts answer to, saying how to bind each: as
     ``--agent X --account <ref>`` first, which 0.9.2 reads after a rollback, then as ``X:N``,
     the agent whose numbers 0.9.2 keeps first (#100's reopen 4, B4). An alias two accounts
-    hold keeps its own words (``otherwise``, else the refusal's): an agent named beside it
-    narrows nothing."""
+    hold keeps its own words: an agent named beside it narrows nothing."""
     accounts = sorted(
         exc.accounts, key=lambda a: not claude_accounts_core.kind(a.agent).legacy_slots
     )
     if len({account.agent for account in accounts}) < 2 or exc.ref is None:
-        return otherwise if otherwise is not None else str(exc)
+        return str(exc)
     each = ", or as ".join(
         f"--agent {account.agent} --account {exc.ref} or "
         f"{claude_accounts_core.qualified_ref(account)}"

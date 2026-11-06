@@ -498,9 +498,8 @@ def test_team_bind_of_another_agents_account_says_the_agent_that_binds_it(
         "— name a Codex account, or pass --agent claude-code (see: aisquare accounts)"
     ), _said(result)
     assert launched.exit_code != 0 and env == {}, launched.output
-    assert _said(result).startswith(_said(launched).removesuffix(" (see: aisquare accounts)")), (
-        "the launch's own words, then how to bind it (B5)"
-    )
+    reason = _said(launched).split("names account 'claude-code:5': ", 1)[1]
+    assert _said(result).startswith("✗ " + reason.removesuffix(" (see: aisquare accounts)"))
     assert load_config().team.profiles["cx"].account is None, "nothing bound"
 
 
@@ -667,7 +666,7 @@ def test_agent_claude_code_with_a_number_only_codex_holds_is_refused_with_the_la
     launched, env = _launch(runner, monkeypatch, "coder")
     settings_service.clear_role_binding("coder")
     assert launched.exit_code != 0 and env == {}, launched.output
-    reason = _said(launched).removeprefix("✗ ")
+    reason = _said(launched).split("names account '5': ", 1)[1]
 
     result = runner.invoke(app, ["team", "bind", "coder", "--agent", CLAUDE, "--account", "5"])
     as_json = runner.invoke(
@@ -925,7 +924,7 @@ def test_b5_an_alias_two_accounts_hold_is_refused_in_the_launchs_own_words(
 
     assert result.exit_code == 1, result.output
     assert "Bind one as" not in _said(result)
-    assert _said(result) == _said(launched).replace("'twin'", "'al'"), "the launch's words"
+    assert _said(result) == "✗ " + _said(launched).split("names account 'work': ", 1)[1]
 
 
 def test_b5_bind_reads_no_folders_default_where_the_binding_names_no_agent(
@@ -945,10 +944,8 @@ def test_b5_bind_reads_no_folders_default_where_the_binding_names_no_agent(
 
     assert result.exit_code == 1, result.output
     assert _said(launched).startswith("✗ the role binding for 'twin' names account '9':")
-    assert _said(result) == _said(launched).replace("'twin'", "'n9'"), (
-        _said(result),
-        _said(launched),
-    )
+    assert _said(result) == "✗ " + _said(launched).split("names account '9': ", 1)[1]
+    assert _said(result) == "✗ no Claude account in slot 9 — see: aisquare accounts"
 
 
 @pytest.mark.parametrize("surface", ["team-spawn", "fleet-spawn"])
@@ -981,3 +978,20 @@ def test_b5_a_spawn_from_a_folder_whose_default_is_the_other_agent_runs_the_boun
     else:
         row = payload["agent"]
         assert (row["agent"], row["account_slot"]) == (CLAUDE, 5), row
+
+
+def test_b5_a_claude_only_bind_of_a_slot_there_is_none_of_reads_as_0_9_2s(
+    machine: Path,  # noqa: F811
+    runner: CliRunner,
+) -> None:
+    """Claude-only output is unchanged (the ruling on seq 11388): 0.9.2's own refusal, word for
+    word, never the launch's sentence around it (step-5's B-unknown and B-05)."""
+    for email in ("two@example.com", "three@example.com", "four@example.com"):
+        _claude(email)
+    team_service.activate(Path.cwd())
+
+    for typed in ("9", "05"):
+        result = runner.invoke(app, ["team", "bind", "b", "--account", typed])
+
+        assert result.exit_code == 1, result.output
+        assert _said(result) == f"✗ no Claude account in slot {typed} — see: aisquare accounts"

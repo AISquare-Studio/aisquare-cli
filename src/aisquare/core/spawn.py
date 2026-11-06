@@ -71,8 +71,9 @@ narrowing their environment would be change without a reason:
     so hooks that name a stale binary stop grading as healthy (#84).
   * ``core/workspace.py::git_common_root`` — ``git rev-parse``; stripped, as every
     git seam is (:func:`git_env`).
-  * ``core/workspace.py::hooks_in_tree`` — ``git config --get core.hooksPath``, read
-    before a spawn's worktree is made (#96); stripped, as every git seam is.
+  * ``core/workspace.py::repository_has_hooks`` — ``git config --get core.hooksPath`` and
+    ``git rev-parse --git-path hooks``, for the line a guarded spawn says (#96, #97);
+    stripped, as every git seam is.
   * ``services/ci_snapshot.py::_git`` — the CI test bed's snapshot plumbing
     (``stash create``, ``update-ref``, ``rev-parse``, ``remote get-url``). No
     model; stripped anyway because it runs inside a traced session's hook and
@@ -381,9 +382,9 @@ SEAMS: dict[str, Seam] = {
     "aisquare/core/workspace.py::git_common_root": Seam(
         EXCLUDED, "`git rev-parse`, in `git_env()`", strips_identity=True
     ),
-    "aisquare/core/workspace.py::hooks_in_tree": Seam(
+    "aisquare/core/workspace.py::repository_has_hooks": Seam(
         EXCLUDED,
-        "`git config --get core.hooksPath` before a spawn's worktree, in `git_env()`; no model",
+        "`git config`/`rev-parse --git-path hooks` for a spawn's line, in `git_env()`; no model",
         strips_identity=True,
     ),
     "aisquare/services/ci_snapshot.py::_git": Seam(

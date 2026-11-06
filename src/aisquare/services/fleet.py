@@ -130,8 +130,8 @@ from aisquare.core.workspace import (
     _resolved_or_spelled,
     active_project,
     git_argv,
-    hooks_in_tree,
     project_id_for,
+    repository_has_hooks,
     repository_hooks,
 )
 from aisquare.models import (
@@ -2509,28 +2509,26 @@ def _git(cwd: Path, *args: str) -> _GitResult:
 
 def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> str | None:
     """Why the fleet's own git making a worktree for an agent of ``adapter``'s in ``project``
-    runs none of the repository's hooks, a line the spawn says; ``None`` where it runs them,
-    as 0.9.2's plain ``git -C`` did (``core.workspace.repository_hooks``).
+    runs none of the repository's hooks, a line the spawn says; ``None`` where it runs them
+    all, as 0.9.2's plain ``git -C`` did (``core.workspace.repository_hooks``).
 
-    Only a hooks folder inside the work tree is guarded (``core.workspace.hooks_in_tree``:
-    husky's, a ``.githooks``), and only where an agent that sandboxes its tools may have
-    written it: the spawn's own agent sandboxes them, or such an agent has run in the project
-    (a session, or a fleet row with none yet). aisquare's git would run such a hook outside
-    the sandbox, with every right it withheld (review r11 of #113, finding 4). ``.git/hooks``
-    runs always: no sandbox writes ``.git`` (Codex's grants it read-only). Claude Code runs
-    whatever a hook could in its own tools, and a Claude Code user's ``fleet spawn
-    --worktree`` ran the repository's ``post-checkout`` on 0.9.2 (review r40 of #113, finding
-    6; the owner's ruling in #96). A store that cannot say is a reason to guard."""
-    inside = hooks_in_tree(project.root)
-    if inside is None:
-        return None
+    None run where an agent that sandboxes its tools spawns, or has run in the project (a
+    session, or a fleet row with none yet): any hook may be one it changed, a script in the
+    tree, a link from ``.git/hooks`` into it, or a config a hook reads (husky's, lefthook's,
+    pre-commit's), and aisquare's git runs it outside the sandbox, with every right the
+    sandbox withheld (review r11 of #113, finding 4; #96's counterexample, ruled in #97).
+    Everywhere else every hook runs: a Claude Code user's ``fleet spawn --worktree`` ran the
+    repository's ``post-checkout`` on 0.9.2 (review r40 of #113, finding 6). A store that
+    cannot say whether such an agent ran is a yes (#97, failing closed)."""
     if adapter.capabilities.sandboxes_tools:
-        who = f"{adapter.label} sandboxes its tools and could have written them"
+        why = f"{adapter.label} sandboxes its tools"
     else:
+        ran: set[str | None] | None
         try:
             with store_session() as store:
-                ran = {row.agent for row in store.fleet_agents(project.id)}
-                ran.update(session.agent for session in store.team_sessions(project.id))
+                agents = {row.agent for row in store.fleet_agents(project.id)}
+                agents.update(session.agent for session in store.team_sessions(project.id))
+            ran = set(agents)
         except Exception:
             ran = None
         sandboxed = [
@@ -2539,16 +2537,15 @@ def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> str | 
             if found is not None and found.capabilities.sandboxes_tools
         ]
         if ran is None:
-            who = "the store could not say whether an agent that sandboxes its tools ran here"
+            why = "the store could not say whether an agent that sandboxes its tools ran here"
         elif sandboxed:
-            who = (
-                f"a {sandboxed[0].label} agent has run in this project and could have written them"
-            )
+            why = f"a {sandboxed[0].label} agent has run in this project"
         else:
             return None
     return (
-        f"made its worktree without the repository's hooks: core.hooksPath ({inside}) is "
-        f"inside the work tree, {who}, and aisquare's git runs outside that sandbox"
+        f"made its worktree without the repository's hooks: {why}, and a hook such an agent "
+        "could have changed would run outside its sandbox (a project where none has run runs "
+        "them)"
     )
 
 
@@ -6275,8 +6272,8 @@ def spawn(
                     common=common,
                     start_point=start_point,
                 )
-            if skipped is not None:
-                notes.append(skipped)
+            if skipped is not None and repository_has_hooks(project.root):
+                notes.append(skipped)  # a repository with no hooks is told nothing
         if settled is not None and os.path.realpath(cwd) == os.path.realpath(start):
             # Only for the folder it shared for: a restart's own tree can be elsewhere.
             env[claude_accounts_service.SHARED_ENV] = settled

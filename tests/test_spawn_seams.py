@@ -229,7 +229,7 @@ def test_every_seam_that_runs_in_the_git_environment_is_ruled_stripped() -> None
             in_git_env.append(key)
 
     # Main's nine (with `aisquare outcomes`' lines, task #11), `handoff._git`, the brief's (#15),
-    # and `workspace.hooks_in_tree`, read before a spawn's worktree (#96)
+    # and `workspace.repository_has_hooks`, for a guarded spawn's line (#96, #97)
     assert len(in_git_env) == 11, in_git_env
     assert [key for key in in_git_env if not SEAMS[key].strips_identity] == []
 

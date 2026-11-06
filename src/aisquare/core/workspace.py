@@ -166,34 +166,42 @@ def git_argv(*args: str) -> list[str]:
     return ["git", *GIT_OWN, *args]
 
 
-def hooks_in_tree(root: Path) -> str | None:
-    """The repository's ``core.hooksPath`` as it is set, when it names a folder inside the
-    work tree at ``root`` and outside its ``.git`` (husky's ``.husky/_``, a ``.githooks``):
-    the hooks a sandboxed agent may write, as it writes the tree. ``None`` where git runs
-    the hooks in ``.git/hooks`` (none set), which no sandbox writes (Codex's grants ``.git``
-    read-only), or in a folder outside the tree (``~/.githooks``). A git that cannot say is
-    a folder in the tree: what is not known to be safe is guarded (review r40 of #113,
-    finding 6, the owner's ruling in #96)."""
-    with repository_hooks(True):  # `git config` runs no hook; GIT_OWN would answer its own
-        argv = git_argv("-C", str(root), "config", "--type=path", "--get", "core.hooksPath")
+def repository_has_hooks(root: Path) -> bool:
+    """Whether git in ``root`` would run a hook of the repository's: ``core.hooksPath`` is set,
+    or git's own hooks folder (``.git/hooks``, wherever its links lead) holds anything but
+    git's ``*.sample`` files. For the line a spawn says where the guard skips them
+    (``services.fleet._repository_hooks_run``): a repository with none is told nothing. Asked
+    of git as it runs here, which a hook of the repository's never answers. A git that cannot
+    say has hooks: what is not known is said (#97, failing closed)."""
+    hooks: Path | None = None
+    for args in (
+        ("config", "--type=path", "--get", "core.hooksPath"),
+        ("rev-parse", "--git-path", "hooks"),
+    ):
+        with repository_hooks(True):  # neither runs a hook; GIT_OWN would answer its own
+            argv = git_argv("-C", str(root), *args)
+        try:
+            done = subprocess.run(
+                argv, capture_output=True, text=True, timeout=10, check=False, env=git_env()
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        said = done.stdout.strip()
+        if args[0] == "config":
+            if done.returncode == 1 and not said:
+                continue  # none set: git's own folder
+            return True  # a folder of the repository's, or a config git could not read
+        if done.returncode != 0 or not said:
+            return True
+        hooks = Path(said) if Path(said).is_absolute() else root / said
+    if hooks is None:
+        return True
     try:
-        done = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10, check=False, env=git_env()
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "(unreadable)"
-    if done.returncode == 1 and not done.stdout.strip():
-        return None  # not set
-    value = done.stdout.strip()
-    if done.returncode != 0 or not value:
-        return "(unreadable)"
-    where = Path(value)
-    if not where.is_absolute():
-        where = root / where  # relative to the work tree's top, where git runs the hooks
-    tree, folder = os.path.realpath(root), os.path.realpath(where)
-    inside = os.path.commonpath([tree, folder]) == tree
-    in_git = os.path.commonpath([os.path.join(tree, ".git"), folder]) == os.path.join(tree, ".git")
-    return value if inside and not in_git else None
+        return any(not entry.name.endswith(".sample") for entry in hooks.iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
 
 
 def _resolved(path: Path) -> Path:

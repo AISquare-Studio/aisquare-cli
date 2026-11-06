@@ -143,11 +143,25 @@ class WrongAgent(NoSuchAccount):
 class AmbiguousAccount(NoSuchAccount):
     """A slot number two agents' accounts hold (0.9.2, after a rollback, numbers its own
     accounts by Claude Code's slots alone): refused, never one picked silently (#100).
-    ``ref`` is what was typed, which ``--json`` refusals carry."""
+    ``ref`` is what was typed, which ``--json`` refusals carry.
 
-    def __init__(self, message: str, *, ref: str | None = None) -> None:
+    ``accounts`` are the accounts it names, each another agent's, where naming the agent
+    names one of them (a number, an email signed in on both): ``team bind`` advises
+    ``--agent`` with them (#100's reopen 4, B4). ``reason`` is the message less its advice.
+    An alias two accounts hold carries none: an agent named beside it narrows nothing."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        ref: str | None = None,
+        accounts: Sequence[ClaudeAccount] = (),
+        reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.ref = ref
+        self.accounts = tuple(accounts)
+        self.reason = reason if reason is not None else message
 
 
 def ambiguity_in(exc: BaseException | None) -> AmbiguousAccount | None:
@@ -715,13 +729,17 @@ def _signed_in_as(
         if account.agent not in first and matches(account):
             first[account.agent] = account
     if len(first) > 1:
+        reason = f"{email!r} is signed in to " + " and ".join(
+            f"{core.agent_label(a.agent)} (slot {a.slot})" for a in first.values()
+        )
         raise AmbiguousAccount(
             ref=email,
-            message=f"{email!r} is signed in to "
-            + " and ".join(f"{core.agent_label(a.agent)} (slot {a.slot})" for a in first.values())
+            message=reason
             + " — name one as "
             + " or ".join(core.qualified_ref(a) for a in first.values())
             + "; see: aisquare accounts",
+            accounts=list(first.values()),
+            reason=reason,
         )
     return next(iter(first.values()), None)
 
@@ -754,7 +772,7 @@ def _find_in(
         if agent is not None and len(matches) > 1:
             matches = [a for a in matches if a.agent == agent] or matches
         if len(matches) > 1:
-            raise AmbiguousAccount(_two_in_one_number(text, matches), ref=text)
+            raise _two_in_one_number(text, matches)
         account = matches[0] if matches else None
         if account is None:
             # An agent's plain home that is not one of the accounts yet
@@ -788,9 +806,9 @@ def _find_in(
     )
 
 
-def _two_in_one_number(number: str, accounts: Sequence[ClaudeAccount]) -> str:
-    """Why a bare number is refused where two agents' accounts hold it, naming each and how
-    to name one (#100)."""
+def _two_in_one_number(number: str, accounts: Sequence[ClaudeAccount]) -> AmbiguousAccount:
+    """The refusal of a bare number two agents' accounts hold, naming each and how to name
+    one (#100)."""
 
     def named_for_the_refusal(account: ClaudeAccount) -> str:
         identity = core.identity(account)
@@ -799,9 +817,15 @@ def _two_in_one_number(number: str, accounts: Sequence[ClaudeAccount]) -> str:
 
     each = " and ".join(named_for_the_refusal(account) for account in accounts)
     names = " or ".join(core.qualified_ref(account) for account in accounts)
-    return (
+    reason = (
         f"slot {number} is two accounts, {each}: 0.9.2, used after this release, numbers its "
-        f"own accounts by Claude Code's alone. Name one as {names}; see: aisquare accounts"
+        "own accounts by Claude Code's alone"
+    )
+    return AmbiguousAccount(
+        f"{reason}. Name one as {names}; see: aisquare accounts",
+        ref=number,
+        accounts=accounts,
+        reason=reason,
     )
 
 
@@ -5097,7 +5121,7 @@ def account_named(ref: int | str) -> ClaudeAccount | None:
     if number is not None:
         held = [account for account in core.list_accounts() if account.slot == number]
         if len(held) > 1:
-            raise AmbiguousAccount(_two_in_one_number(text, held), ref=text)
+            raise _two_in_one_number(text, held)
         return core.find_account(number)
     if core.qualified_slot(text) is None:
         return None

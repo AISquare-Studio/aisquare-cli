@@ -21,19 +21,23 @@ import json
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
+from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
 from aisquare.core.config import load_config
 from aisquare.models import ClaudeAccount
 from aisquare.services import agent_launch, diagnostics, lifecycle
 from aisquare.services import claude_accounts as service
+from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from tests.test_a_removed_slots_place_goes_with_it import ticking  # noqa: F401 - fixture
 from tests.test_claude_accounts import _sign_in as _claude_sign_in
+from tests.test_codex_accounts import _sign_in as _codex_sign_in
 from tests.test_one_priority_order_across_agents import (  # noqa: F401 - fixture, by name
     _claude,
+    _codex,
     machine,
 )
 from tests.test_two_agents_accounts_in_one_number import (  # noqa: F401 - fixture, by name
@@ -54,6 +58,30 @@ def _said(result: object) -> str:
 
 def _row(agent: str, slot: int) -> ClaudeAccount:
     return next(a for a in service.list_accounts() if (a.agent, a.slot) == (agent, slot))
+
+
+#: `team bind`'s advice for a bare 5 two agents hold (#100's reopen 4, B4): `--agent
+#: claude-code --account 5` first, which 0.9.2 reads after a rollback, then claude-code:5.
+BIND_ONE_OF_5 = (
+    "Bind one as --agent claude-code --account 5 or claude-code:5, or as --agent codex "
+    "--account 5 or codex:5; see: aisquare accounts"
+)
+
+
+def _launch(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, role: str
+) -> tuple[Result, dict[str, str]]:
+    """`aisquare launch ROLE`, as the bound role's window runs it: its exec held, and the
+    environment it would have handed over kept (empty when it refused)."""
+    seen: dict[str, str] = {}
+    monkeypatch.setattr(launch_cli, "_exec", lambda _binary, _argv, env: seen.update(env))
+    return runner.invoke(app, ["launch", role]), seen
+
+
+def _runs(env: dict[str, str], account: ClaudeAccount) -> bool:
+    """Whether the launch ran ``account``: its home is the one the environment names."""
+    home = account.config_dir.resolve()
+    return any(Path(value).resolve() == home for value in env.values() if Path(value).is_absolute())
 
 
 @pytest.fixture
@@ -432,7 +460,9 @@ def test_a_json_refusal_outside_accounts_carries_the_ambiguity_too(
     assert (payload["error"], payload.get("ref")) == ("ambiguous_account", "5"), payload
     assert payload["detail"].startswith("slot 5 is two accounts, Codex's account 5 (")
     assert payload["detail"].endswith(
-        "Name one as codex:5 or claude-code:5; see: aisquare accounts"
+        BIND_ONE_OF_5
+        if argv[0] == "team"
+        else "Name one as codex:5 or claude-code:5; see: aisquare accounts"
     )
 
 
@@ -451,19 +481,45 @@ def test_an_unknown_account_keeps_its_own_code(
 
 
 def test_team_bind_of_another_agents_account_says_the_agent_that_binds_it(
-    signed: Pair, runner: CliRunner
+    signed: Pair, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The order makes the role's agent Codex (Codex 5 first after a move), so claude-code:5
-    is another agent's account: the refusal says how to bind it."""
-    service.move("codex:5", "top")
+    """A role bound to Codex, and claude-code:5: another agent's account, which its launch
+    refuses. The refusal says how to bind it, in the launch's own words (B4)."""
     team_service.activate(Path.cwd())
+    settings_service.bind_role("cx", agent=CODEX, account="claude-code:5")
+    launched, env = _launch(runner, monkeypatch, "cx")
+    settings_service.clear_role_binding("cx")
+    assert runner.invoke(app, ["team", "bind", "cx", "--agent", CODEX]).exit_code == 0
 
-    result = runner.invoke(app, ["team", "bind", "newrole", "--account", "claude-code:5"])
+    result = runner.invoke(app, ["team", "bind", "cx", "--account", "claude-code:5"])
 
     assert result.exit_code == 1, result.output
     assert _said(result).endswith(
         "— name a Codex account, or pass --agent claude-code (see: aisquare accounts)"
     ), _said(result)
+    assert launched.exit_code != 0 and env == {}, launched.output
+    reason = _said(launched).split("names account 'claude-code:5': ", 1)[1]
+    assert _said(result).startswith("✗ " + reason.removesuffix(" (see: aisquare accounts)"))
+    assert load_config().team.profiles["cx"].account is None, "nothing bound"
+
+
+def test_team_bind_of_an_account_that_names_its_agent_is_what_the_launch_runs(
+    signed: Pair, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4, the other way: Codex 5 first in the order, and a role bound to nothing but
+    claude-code:5. Its launch runs the agent the account names, Claude Code, on that account
+    (`agent_launch.resolve`'s account rung, above the order's), so bind accepts it. Reopen 2
+    refused it as the order's agent's, a binding every launch ran."""
+    _codex_5, claude = signed
+    service.move("codex:5", "top")
+    team_service.activate(Path.cwd())
+
+    result = runner.invoke(app, ["team", "bind", "newrole", "--account", "claude-code:5"])
+
+    assert result.exit_code == 0, result.output
+    launched, env = _launch(runner, monkeypatch, "newrole")
+    assert launched.exit_code == 0, launched.output
+    assert _runs(env, claude), env
 
 
 def test_an_agents_own_form_is_read_whatever_its_case(signed: Pair) -> None:
@@ -501,7 +557,7 @@ def test_team_bind_of_a_bare_shared_number_is_refused_with_codex_5_signed_in(
     as_json = runner.invoke(app, ["--json", "team", "bind", "coder", "--account", "5"])
 
     assert text.exit_code == 1, text.output
-    assert "Name one as codex:5 or claude-code:5" in _said(text)
+    assert _said(text).endswith(BIND_ONE_OF_5), _said(text)
     payload = json.loads(as_json.stdout)
     assert (payload["error"], payload["ref"]) == ("ambiguous_account", "5"), payload
     assert payload["detail"].startswith("slot 5 is two accounts")
@@ -563,3 +619,93 @@ def test_a_launch_naming_two_accounts_by_one_alias_says_the_ambiguity_under_json
     payload = json.loads(result.stdout)
     assert (payload["error"], payload["ref"]) == ("ambiguous_account", "work"), payload
     assert payload["detail"].startswith("'work' names codex:5 and claude-code:5"), payload
+
+
+# --- B4: team bind accepts a binding if and only if the role's launch would run it ---------
+
+
+@pytest.mark.parametrize("agent", [CODEX, CLAUDE])
+def test_a_role_bound_to_an_agent_narrows_a_bare_shared_number_as_its_launch_does(
+    collided: Pair,  # noqa: F811
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+) -> None:
+    """11339 nit 1: the role's binding names its agent, so its launch reads a bare 5 as that
+    agent's 5 and runs it. Bind reads it so too: a ✓, and the launch runs that account."""
+    codex, claude = collided
+    team_service.activate(Path.cwd())
+    assert runner.invoke(app, ["team", "bind", "coder", "--agent", agent]).exit_code == 0
+
+    result = runner.invoke(app, ["team", "bind", "coder", "--account", "5"])
+
+    assert result.exit_code == 0, result.output
+    profile = load_config().team.profiles["coder"]
+    assert (profile.agent, profile.account) == (agent, "5")
+    launched, env = _launch(runner, monkeypatch, "coder")
+    assert launched.exit_code == 0, launched.output
+    assert _runs(env, codex if agent == CODEX else claude), env
+
+
+def test_agent_claude_code_with_a_number_only_codex_holds_is_refused_with_the_launchs_reason(
+    machine: Path,  # noqa: F811
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """11339 nit 3: a normal home, Codex 5 alone (its number reserved). `--agent claude-code
+    --account 5` gave a ✓, and every launch of the role was then refused. Refused now, in the
+    launch's own words, and nothing is bound."""
+    for email in ("two@example.com", "three@example.com", "four@example.com"):
+        _claude(email)
+    codex = _codex("codex@example.com")
+    assert codex.slot == 5
+    assert [a.agent for a in service.list_accounts() if a.slot == 5] == [CODEX]
+    team_service.activate(Path.cwd())
+    # The launch of that binding, as the bind before this one wrote it: refused.
+    settings_service.bind_role("coder", agent=CLAUDE, account="5")
+    launched, env = _launch(runner, monkeypatch, "coder")
+    settings_service.clear_role_binding("coder")
+    assert launched.exit_code != 0 and env == {}, launched.output
+    reason = _said(launched).split("names account '5': ", 1)[1]
+
+    result = runner.invoke(app, ["team", "bind", "coder", "--agent", CLAUDE, "--account", "5"])
+    as_json = runner.invoke(
+        app, ["--json", "team", "bind", "coder", "--agent", CLAUDE, "--account", "5"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert _said(result) == f"✗ {reason}", "the launch's own words"
+    assert "is a Codex account, and this launch runs Claude Code" in reason
+    payload = json.loads(as_json.stdout)
+    assert (payload["error"], payload["ref"]) == ("unknown_account", "5"), payload
+    assert "coder" not in load_config().team.profiles, "nothing bound"
+
+
+@pytest.mark.parametrize("ref", ["5", "x1@example.com"])
+def test_binds_advice_names_agent_claude_code_first_and_the_launch_runs_it(
+    signed: Pair, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    """B3-1's refusal stays, and its advice for bind is `--agent claude-code --account 5`
+    FIRST, which 0.9.2 reads after a rollback, then claude-code:5, then Codex's. An email
+    signed in on both reads so too. The first, followed, launches Claude Code's 5."""
+    codex, claude = signed  # Claude Code 5 is signed in as x1@example.com
+    _codex_sign_in(codex.config_dir, "x1@example.com")  # one person's address on both
+    team_service.activate(Path.cwd())
+
+    refused = runner.invoke(app, ["team", "bind", "coder", "--account", ref])
+
+    assert refused.exit_code == 1, refused.output
+    said = _said(refused)
+    first = f"--agent claude-code --account {ref}"
+    assert said.endswith(
+        f"Bind one as {first} or claude-code:5, or as --agent codex --account {ref} or codex:5;"
+        " see: aisquare accounts"
+    ), said
+    assert said.index(first) < said.index("claude-code:5") < said.index("codex:5"), said
+    assert "coder" not in load_config().team.profiles, "nothing bound"
+
+    bound = runner.invoke(app, ["team", "bind", "coder", *first.split()])
+    assert bound.exit_code == 0, bound.output
+    launched, env = _launch(runner, monkeypatch, "coder")
+    assert launched.exit_code == 0, launched.output
+    assert _runs(env, claude), env

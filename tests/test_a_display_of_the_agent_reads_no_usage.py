@@ -98,8 +98,10 @@ def test_accounts_default_for_a_role_and_the_hint_of_accounts_add_ask_the_order_
     assert result.exit_code == 0, result.output
     assert accounts_cli._role_agent("coder", str(watched["claude"].slot)) == CLAUDE
     assert accounts_cli._role_agent("coder") == CODEX, "the order's agent"
-    assert team_cli._bound_agent("coder", None) == CODEX
-    assert team_cli._bound_agent("coder", "claude-code") == "claude-code"
+    # team bind reads the agent as the role's launch will (#100's reopen 4, B4), unmeasured.
+    codex_slot = str(watched["codex"].slot)
+    assert team_cli._launching_agent("coder", None, None, codex_slot) == CODEX
+    assert team_cli._launching_agent("coder", "claude-code", None, codex_slot) == "claude-code"
 
     _nothing_was_measured(watched)
 

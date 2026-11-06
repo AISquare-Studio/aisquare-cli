@@ -328,11 +328,20 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     # reader made meanwhile (asked the other way round, a reader that read the rows before
     # another made them dropped that reader's ranks, and the order it wrote back put a Codex
     # account first: CI on b3920f7b).
-    ranked = set(store.account_ranks())
-    registered = {record.slot for record in store.claude_accounts()}
+    #
+    # And a rank whose slot's row was made after the ranks were written is one too: 0.9.2,
+    # which keeps no ranks, removed that account and made a row for the one added in its
+    # number, so an upgrade read the new account at the removed one's place, rank 1 and the
+    # machine default among them (r41 of #113, finding 1). Both rows carry their making time
+    # on every version; the ranks their writing time from this one on.
+    ranks, written = store.account_ranks_written()
+    made = {record.slot: record.created_at for record in store.claude_accounts()}
     for agent in core.account_agents():
         if not core.kind(agent).legacy_slots:
-            registered.update(record.slot for record in store.agent_accounts(agent))
+            made.update((record.slot, record.created_at) for record in store.agent_accounts(agent))
+    orphans = {
+        slot for slot in ranks if slot not in made or (written is not None and made[slot] > written)
+    }
     arranged: list[ClaudeAccount] = []
     for agent in core.account_agents():
         mine = [a for a in listed if a.agent == agent]
@@ -340,7 +349,7 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
             arranged.extend(_arranged_claude(store, mine))
         else:
             arranged.extend(_arranged_agent(store, agent, mine))
-    return _ranked(store, arranged, promoted, fresh=ranked - registered)
+    return _ranked(store, arranged, promoted, fresh=orphans)
 
 
 def _promote_retired_defaults(store: ContextStore) -> list[int]:

@@ -2190,6 +2190,7 @@ class ContextStore(Protocol):
     def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None: ...
     # One priority order over every agent's slots (v49).
     def account_ranks(self) -> dict[int, int]: ...
+    def account_ranks_written(self) -> tuple[dict[int, int], datetime | None]: ...
     def rank_accounts(self, slots: Sequence[int]) -> None: ...
     def promote_retired_claude_account_default(self) -> int | None: ...
     def promote_retired_agent_account_default(self, agent: str) -> int | None: ...
@@ -2210,6 +2211,10 @@ class ContextStore(Protocol):
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+_RANKS_WRITTEN_KEY = "account-ranks-written-at"
+"""``team_meta``: when :meth:`SqliteStore.rank_accounts` last wrote the one order."""
 
 
 def _row_to_entry(row: sqlite3.Row) -> ContextEntry:
@@ -7060,11 +7065,34 @@ class SqliteStore:
         rows = self._conn.execute("SELECT slot, rank FROM account_rank").fetchall()
         return {int(row[0]): int(row[1]) for row in rows}
 
+    def account_ranks_written(self) -> tuple[dict[int, int], datetime | None]:
+        """:meth:`account_ranks`, and when :meth:`rank_accounts` last wrote them, read in one
+        statement; ``None`` for ranks a build that kept no such time wrote. A slot whose
+        registry row was made after it is not the slot the rank was written for: an account
+        removed, and its number taken by one added, by 0.9.2, which keeps no ranks (r41 of
+        #113, finding 1)."""
+        rows = self._conn.execute(
+            "SELECT r.slot, r.rank, m.value FROM account_rank AS r "
+            "LEFT JOIN team_meta AS m ON m.key = ?",
+            (_RANKS_WRITTEN_KEY,),
+        ).fetchall()
+        written: datetime | None = None
+        if rows and rows[0][2]:
+            with contextlib.suppress(ValueError, TypeError):
+                written = datetime.fromisoformat(str(rows[0][2]))
+        return {int(row[0]): int(row[1]) for row in rows}, written
+
     def rank_accounts(self, slots: Sequence[int]) -> None:
-        """The whole order: ``slots`` ranked 1..n (first mention wins), every other row dropped."""
+        """The whole order: ``slots`` ranked 1..n (first mention wins), every other row dropped,
+        and the time it was written (:meth:`account_ranks_written`), in one transaction."""
         self._conn.execute("DELETE FROM account_rank")
         for rank, slot in enumerate(dict.fromkeys(slots), start=1):
             self._conn.execute("INSERT INTO account_rank (slot, rank) VALUES (?, ?)", (slot, rank))
+        self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (_RANKS_WRITTEN_KEY, _now_iso()),
+        )
         self._commit()
 
     def promote_retired_claude_account_default(self) -> int | None:

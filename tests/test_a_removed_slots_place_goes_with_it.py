@@ -69,7 +69,9 @@ def test_a_store_holding_an_orphan_rank_is_repaired_on_read(machine: Path) -> No
     assert _order() == [3, 1, 2]
 
 
-@pytest.mark.parametrize("paused_after", ["account_ranks", "claude_accounts", "agent_accounts"])
+@pytest.mark.parametrize(
+    "paused_after", ["account_ranks_written", "claude_accounts", "agent_accounts"]
+)
 def test_a_read_another_reader_overtakes_keeps_the_order_that_reader_wrote(
     machine: Path,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
@@ -103,3 +105,66 @@ def test_a_read_another_reader_overtakes_keeps_the_order_that_reader_wrote(
     assert overtaken == [[], wanted], "reader A ran inside B's read"
     with store_session() as store:
         assert store.account_ranks() == {slot: at for at, slot in enumerate(wanted, start=1)}
+
+
+@pytest.fixture
+def ticking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The store's clock one second on at every reading, so a row made after the ranks were
+    written is later than them on every platform (Windows' clock reads in 15 ms steps)."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core import store as store_module
+
+    start = datetime(2026, 11, 5, tzinfo=UTC)
+    ticks = iter(range(1, 1_000_000))
+    monkeypatch.setattr(
+        store_module, "_now_iso", lambda: (start + timedelta(seconds=next(ticks))).isoformat()
+    )
+
+
+@pytest.mark.usefixtures("ticking")
+def test_an_account_0_9_2_removed_and_added_in_its_place_goes_last_after_an_upgrade(
+    machine: Path,  # noqa: F811
+) -> None:
+    """r41 of #113, finding 1: on this release the order is 2 3 1; rolled back, 0.9.2 removes
+    slot 2 and adds an account, which takes number 2 (0.9.2 reads 3 1 2); upgraded again, this
+    release read 2 3 1: the new account at the removed one's rank, the machine default. 0.9.2's
+    writes, replayed with the store calls 0.9.2 makes (byte-identical to its own but for the
+    commit helper): its remove deletes the slot's registry row and keeps no ranks, and the
+    read after its add makes a row for the new slot, with its making time."""
+    _ordered_2_3_1()
+    two = service.resolve("2")
+
+    core.remove_account(two)  # 0.9.2's `accounts remove 2`
+    with store_session() as store:
+        store.delete_claude_account(two.slot)
+    added = core.create_account()  # 0.9.2's `accounts add`, and its next read
+    with store_session() as store:
+        store.upsert_claude_account(added.slot, added.config_dir)
+        assert store.account_ranks()[added.slot] == 1, "the removed account's rank, kept"
+
+    assert added.slot == 2
+    assert _order() == [3, 1, 2], "as 0.9.2 read it: the new account last"
+    with store_session() as store:
+        assert store.account_ranks() == {3: 1, 1: 2, 2: 3}, "the stale rank repaired"
+    assert _order() == [3, 1, 2], "and read so again"
+
+
+@pytest.mark.usefixtures("ticking")
+def test_this_releases_own_order_paths_keep_every_rank(machine: Path) -> None:  # noqa: F811
+    """Reorder, default, add and remove on this release: no rank is read as a stale one."""
+    _claude("two@example.com"), _claude("three@example.com")
+    assert _order() == [1, 2, 3]
+    service.reorder(["3", "1", "2"])
+    assert _order() == [3, 1, 2]
+    service.set_default("2")
+    assert _order() == [2, 3, 1]
+    four = _claude("four@example.com")
+    assert _order() == [2, 3, 1, four.slot]
+    service.remove(service.resolve("3"))
+    assert _order() == [2, 1, four.slot]
+    again = _claude("again@example.com")
+    assert again.slot == 3
+    assert _order() == [2, 1, four.slot, 3]
+    service.move("3", "top")
+    assert _order() == [3, 2, 1, four.slot]

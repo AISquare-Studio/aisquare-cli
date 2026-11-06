@@ -235,6 +235,23 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     hooks are set up here. Claude Code's reads *configured* or *not configured*, or
     *unreadable* where its settings file cannot be read, with the reason on a line under
     the table.
+  - New options, all optional:
+    - `--agent` (`claude-code`, `codex (beta)`) on `accounts default`, `persona export`,
+      `launch` and `team spawn`, besides the commands named above. A project's default
+      account is per agent: `accounts default <ref> --project` sets the account's own
+      agent's, and `--clear --project` clears Claude Code's unless `--agent codex` says
+      otherwise.
+    - `fleet spawn --sandbox` (`read-only`, `workspace-write`, `danger-full-access`) and
+      `--approval` (`on-request`, `untrusted`, `never`) are Codex's write scope and
+      approval policy. A Claude Code role refuses both and points to `--permission-mode`.
+    - `--permission-mode` on `fleet spawn` and `fleet restart` also takes one permission
+      for every agent, as `WRITE:APPROVALS` (`workspace:auto`, `read_only:auto`,
+      `workspace:ask`, `full:never`…), mapped to each agent's own flags. For Claude
+      Code, `ask` is `--permission-mode manual`, `auto` is `auto`, `never` is `dontAsk`
+      (and `bypassPermissions` with `full`), and `read_only` denies the tools that edit
+      files. Claude Code's own words (`auto`, `acceptEdits`, …) work as before.
+  - `persona import --list` has a column naming the agents that read each skill's folder
+    (`claude-code`), and with no skill found it lists the folders it searched.
   - `--json` gains keys and loses none: `agent`, `detail` and `installs` in `accounts`;
     `readiness`, `detail` and `route` in `agents list`, `scan` and `status`, and
     `readiness` and `detail` in `agents connect`;
@@ -242,7 +259,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     in `fleet ls` and `board`; `agent` in `upgrade`'s and `uninstall`'s rows (and `plugin`
     in uninstall's plugin rows) and in `persona export`; `killed` in `fleet stop`;
     `price_lists` in `metrics tokens`; `launchers` in `upgrade`'s and `uninstall`'s
-    plans; and `exit_command` in Remote's needs cards.
+    plans; `exit_command` in Remote's needs cards; each skill's `agents` and the `roots`
+    searched in `persona import --list`; and in `config list`, `agents.default` and each
+    role's `approval_policy`, `approve_for_me`, `permission` and `sandbox` (unset unless
+    you set them).
   - Files: `launch-seals/` is new; `agents.json` gains `hook_files_made`; a saved
     `config.toml` gains an empty `[fleet.roles.<role>.agent_args]` table per role. 0.9.2
     reads both. `config list` shows new defaults: `[agents] mcp` (off; on, each launch is
@@ -311,6 +331,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   on.
 - Turning Remote on again just as the last one stops is no longer refused with *another
   Remote is on for this ~/.aisquare*.
+- On Windows, `aisquare outcomes` reads who started a turn (you or an agent) from that
+  turn's own marker when two were written in the same tick of the clock; it used to take
+  the newer one. 0.9.2 had this too.
 - `agents disconnect` and uninstall remove a hooks file aisquare created and left empty.
 - An agent Codex 0.166.0 draws with no spinner in its status line reads working once you
   allow its command, not asking until the command ends.

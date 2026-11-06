@@ -272,6 +272,7 @@ class ClaudeCodeAdapter:
         ambient_first_run=True,
         reads_pane_readiness=True,
         starts_at_its_prompt=True,
+        takes_a_quick_enter=True,
         resumes_across_homes=True,
         pid_env="CLAUDE_PID",
         # Set in its hooks and its tools' shells alike: who sent a tell (0.9.2's origin).

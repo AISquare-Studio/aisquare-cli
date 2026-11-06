@@ -6195,7 +6195,7 @@ def _timed_input(
     return seen
 
 
-def test_a_told_line_and_a_typed_prompt_have_their_enter_apart_too(
+def test_a_claude_code_tell_and_typed_prompt_are_one_bracketed_paste_then_one_enter_as_0_9_2s(
     tmux: FakeTmux,
     typed_first_lines: FakeTmux,
     clock: FakeClock,
@@ -6203,8 +6203,13 @@ def test_a_told_line_and_a_typed_prompt_have_their_enter_apart_too(
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every line the fleet types goes in one way (``_type_line``): a paste, and its Enter
-    ``_KEY_GAP`` behind it, the gap ``stop`` learned for ``/exit`` on Codex."""
+    """The key sequence a Claude Code tell sends, pinned so a later change is caught (#104's
+    reopen, item 5): ONE paste (``TmuxServer.paste``, a bracketed ``paste-buffer -p``:
+    test_tmux's test_paste_loads_the_buffer_from_stdin_then_pastes_bracketed), then ONE Enter,
+    a key of its own ``delivery.ENTER_GAP`` after the text is in its box, as 0.9.2 typed it.
+    The fleet's longer ``_KEY_GAP`` is Codex's, which reads keys arriving in one burst as a
+    paste (``capabilities.takes_a_quick_enter``; test_codex_fleet_parity pins it there). A
+    typed first prompt goes the same way."""
     agent = _coder(project)
     _board_session(agent, "waiting")
     tmux.set_command(agent.pane_id, "claude")
@@ -6220,7 +6225,7 @@ def test_a_told_line_and_a_typed_prompt_have_their_enter_apart_too(
         ("key", "Enter"),
     ]
     for (_, _, typed_at), (_, _, entered_at) in (typed[0:2], typed[2:4]):
-        assert round(entered_at - typed_at, 9) >= fleet_service._KEY_GAP > 0
+        assert round(entered_at - typed_at, 9) == delivery.ENTER_GAP < fleet_service._KEY_GAP
 
 
 def test_a_managers_own_stop_says_so_and_nudges_nobody_and_a_kill_by_anyone_else_does(

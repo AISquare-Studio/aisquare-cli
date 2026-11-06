@@ -1032,6 +1032,84 @@ def test_past_the_wait_a_tell_is_typed_as_before_which_codex_holds(
     assert fleet_service.TURN_END_WAIT <= typed_at < fleet_service.TURN_END_WAIT + 1
 
 
+def test_the_quiet_is_owed_from_the_stop_not_from_the_sessions_start(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#102's pin gap MY1 (tester-r9g, seq 11355): a session that started an hour before its
+    Stop. Owed from the start, the quiet was long served at the first read, at rest before the
+    hook's status line is drawn, and the line went in under the turn."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    _stopped(codex)
+    session_id = _row(codex.agent.id).session_id
+    assert session_id is not None
+    with store_session() as store:
+        session = store.get_session(session_id)
+    assert session is not None
+    earlier = session.started_at - timedelta(hours=1)
+    # A session's start is its first, which an upsert keeps: written as such.
+    _rewrite("team_session", "started_at", earlier.isoformat(), session_id)
+    with store_session() as store:
+        reread = store.get_session(session_id)
+    assert reread is not None and reread.started_at == earlier
+    _drawn(tmux, clock, pane, lambda now: 0.1 <= now < 0.5)
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    fleet_service.tell(codex.project, codex.agent.label, "/clear")
+
+    [(kind, _text, typed_at), *_] = typed
+    assert kind == "paste" and typed_at >= 0.5 + 1.0 - 0.1, typed_at
+
+
+def test_a_long_rest_before_the_hooks_status_line_is_not_the_turns_end_either(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#102's pin gap MY2: 0.3 s at rest before the hook's status line is drawn (the coder
+    measured ~200 ms on one machine, the tester ~25 ms on another). A shorter quiet than that
+    gap typed the line inside it, under the turn."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    _stopped(codex)
+    _drawn(tmux, clock, pane, lambda now: 0.3 <= now < 0.8)
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    fleet_service.tell(codex.project, codex.agent.label, "/clear")
+
+    [(kind, _text, typed_at), *_] = typed
+    assert kind == "paste" and typed_at >= 0.8 + 1.0 - 0.1, typed_at
+
+
+def test_a_stop_hook_of_a_few_seconds_is_waited_out_within_the_bound(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#102's pin gap MY3: a Stop hook that runs 3 s. The line waits it out and the quiet
+    after it, inside the 5 s bound, rather than give up early and be refused mid-hook (live,
+    a 2 s bound typed /clear at 2.0 s into a 3 s hook and Codex refused it 3 of 3 times)."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    _stopped(codex)
+    _drawn(tmux, clock, pane, lambda now: now < 3.0)
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "/clear")
+
+    assert told.delivered is True, told
+    [(kind, _text, typed_at), *_] = typed
+    assert kind == "paste" and 3.0 + 1.0 - 0.1 <= typed_at < 5.0, typed_at
+
+
 @pytest.mark.parametrize(
     ("screen", "printing"),
     [(TRUST_DIALOG, False), (HOOK_REVIEW, False), (DRAFT, False), (IDLE_PROMPT, True)],

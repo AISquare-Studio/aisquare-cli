@@ -184,7 +184,9 @@ unconfirmed, 409 `one_press_exit`, while the screen shows that prompt or cannot 
 refuses every agent a second within 3 s; empty for an agent that asks for a second press,
 Claude Code's; each must be a key the pad reaches the agent as),
 `starts_at_its_prompt` (its `SessionStart` fires once it is at rest at its prompt,
-Claude Code's), `resumes_across_homes`, `resume_keeps_system_prompt` (a
+Claude Code's), `takes_a_quick_enter` (a typed line's Enter comes 0.1 s after its text is
+in the box, as 0.9.2 typed Claude Code's; without it 0.2 s, since Codex reads keys arriving in
+one burst as a paste), `resumes_across_homes`, `resume_keeps_system_prompt` (a
 resumed session keeps the system prompt `system_prompt_args` gave its first launch and
 ignores a new one, Codex's: a restart's receipt says a persona changed since reaches it
 through the briefing alone), `exports_home_env`, `own_doctor_check` (the doctor has a dedicated check for it, Claude Code's, which Welcome's step 2 probes it with too; the per-adapter row and the generic probe skip it), `model_ladders`,

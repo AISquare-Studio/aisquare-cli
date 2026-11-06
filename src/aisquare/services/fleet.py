@@ -1026,11 +1026,13 @@ class PlacedPane:
         re_press: tuple[float, ...] = delivery.RE_PRESS,
         last_wait: float = delivery.LAST_WAIT,
         origin: str | None = None,
+        gap: float = _KEY_GAP,
     ) -> delivery.Delivered:
         """``delivery.deliver_typed`` into this pane, the one door's acknowledged way: ``text``
-        without its control characters (:func:`_typeable`), its Enter :data:`_KEY_GAP` after the
-        text is in, a key of its own (:meth:`type_line`). ``origin`` leaves the marker the
-        turn it starts is recorded by (``core.prompt_origin``), whichever agent runs here."""
+        without its control characters (:func:`_typeable`), its Enter ``gap`` after the text is
+        in, a key of its own: :data:`_KEY_GAP` unless the caller knows the agent takes a
+        quicker one (:func:`_enter_gap`). ``origin`` leaves the marker the turn it starts is
+        recorded by (``core.prompt_origin``), whichever agent runs here."""
         return delivery.deliver_typed(
             self.server(),
             self.pane_id,
@@ -1046,7 +1048,7 @@ class PlacedPane:
             guard=guard,
             re_press=re_press,
             last_wait=last_wait,
-            gap=_KEY_GAP,
+            gap=gap,
             origin=origin,
         )
 
@@ -1069,6 +1071,15 @@ class PlacedPane:
             srv.paste(self.pane_id, text)
         _sleep(_KEY_GAP)
         srv.send_keys(self.pane_id, "Enter")
+
+
+def _enter_gap(adapter: AgentAdapter | None) -> float:
+    """How long after its text is in the box a typed delivery presses Enter for ``adapter``'s
+    agent: ``delivery.ENTER_GAP`` for one that takes a quick Enter (Claude Code, as 0.9.2
+    typed every tell), else :data:`_KEY_GAP`, Codex's (``capabilities.takes_a_quick_enter``;
+    #104's reopen, item 5)."""
+    quick = adapter is not None and adapter.capabilities.takes_a_quick_enter
+    return delivery.ENTER_GAP if quick else _KEY_GAP
 
 
 def _typeable(text: str) -> str:
@@ -9267,7 +9278,15 @@ def _type_prompt(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
         )
     return _typed_prompt(
-        pane, prompt, notes, done, to=to, reads_box=box is not None, agent_id=agent_id, guard=guard
+        pane,
+        prompt,
+        notes,
+        done,
+        to=to,
+        reads_box=box is not None,
+        agent_id=agent_id,
+        guard=guard,
+        gap=_enter_gap(adapter),
     )
 
 
@@ -9292,6 +9311,7 @@ def _typed_prompt(
     reads_box: bool = False,
     agent_id: str | None = None,
     guard: float | None = None,
+    gap: float = _KEY_GAP,
 ) -> tuple[Typed, bool | None]:
     """Type ``prompt`` into ``pane`` through the one door (:meth:`PlacedPane.deliver_typed`),
     and how it ended, and whether a turn started on it, a note saying so when it is not
@@ -9309,6 +9329,7 @@ def _typed_prompt(
             what="the prompt",
             guard=guard,
             origin=prompt_origin.SPAWN,
+            gap=gap,
         )
     if delivered.refused is not None and delivered.in_box:
         notes.append(
@@ -9647,7 +9668,15 @@ def _type_at_its_start(
     if box is not None and not _at_input_box(pane, box, notes, done, folder=folder, to=to):
         return "no", None
     return _typed_prompt(
-        pane, prompt, notes, done, to=to, reads_box=box is not None, agent_id=agent_id, guard=guard
+        pane,
+        prompt,
+        notes,
+        done,
+        to=to,
+        reads_box=box is not None,
+        agent_id=agent_id,
+        guard=guard,
+        gap=_enter_gap(adapter),
     )
 
 
@@ -10623,6 +10652,7 @@ def tell(
                 done="typed into its pane (it was waiting)",
                 guard=settings().draft_quiet_seconds,
                 origin=prompt_origin.TELL,
+                gap=_enter_gap(adapter),
             )
         if done.refused is not None and done.in_box:
             return TellResult("no", noted(done.refused, agent))
@@ -19218,6 +19248,7 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
                 re_press=_NUDGE_RE_PRESS,
                 last_wait=_NUDGE_LAST_WAIT,
                 origin=prompt_origin.WAKE,
+                gap=_enter_gap(recorded_adapter(manager.agent)),
             )
             deferred = f"{NUDGE_DEFERRED}{session.id}"
             if done.refused is not None:
@@ -19345,6 +19376,7 @@ def type_line(agent: FleetAgent, text: str, *, acked: Callable[[], bool]) -> del
         what="the line",
         guard=settings().draft_quiet_seconds,
         origin=prompt_origin.UPKEEP,
+        gap=_enter_gap(recorded_adapter(placement.agent.agent)),
     )
 
 

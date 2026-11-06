@@ -344,6 +344,12 @@ class AgentCapabilities:
     A session that starts (not a compaction) is then ``waiting`` until a prompt says
     otherwise, and one that has not started is not typed into. Codex's fires with its
     first prompt."""
+    takes_a_quick_enter: bool = False
+    """The agent submits an Enter that comes ``delivery.ENTER_GAP`` (0.1 s) after its text is
+    seen in its input box, as 0.9.2 typed every Claude Code ``fleet tell``. Without it, the
+    Enter comes the fleet's longer ``_KEY_GAP`` (0.2 s) after it: Codex reads keys that
+    arrive in one burst as a paste, its Enter included (6ee17ee3, 0.162.1), a reason that is
+    not Claude Code's (#104's reopen, item 5)."""
     resumes_across_homes: bool = False
     """A session resumes from another config dir (Claude Code finds a transcript by its
     absolute path), so ``fleet switch`` to another account resumes it; otherwise the

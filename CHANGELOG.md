@@ -36,7 +36,7 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 
 ### Codex support (beta)
 
-- **How to start.** Install Codex CLI 0.162.1 or newer (`install.sh --agent codex` or
+- **How to start.** Install Codex CLI 0.164.0 or newer (`install.sh --agent codex` or
   `--agent both` installs a missing one), then run `aisquare agents connect codex`. Pick
   *Codex (beta)* in the Spawn dialog's *Agent* field, or run `aisquare fleet spawn <role>
   --agent codex`; `aisquare team bind <role> --agent codex` makes it a role's agent.
@@ -52,16 +52,18 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   the other agent's vendor, with credentials scrubbed out first.
 - **Sandboxed.** A Codex agent's sandbox writes nothing in the store: its board calls go
   through a broker that runs outside it.
-<!-- #93 (R7, reopened seq 11203/11204): the reviewer-denial line (a command Codex's
-     automatic reviewer denies counts as a denied permission in `aisquare outcomes`) is held
-     until #93's code-mode fix lands; until then it holds for direct calls only. -->
+- **Reviewer denials.** Under `--approve-for-me`, a command Codex's automatic reviewer
+  denies counts as a denied permission in `aisquare outcomes`, as one you refuse at the
+  prompt does. That includes a command inside a code-mode script, how Codex runs every
+  call on GPT-6.1-Sol.
 - **Known limits.**
   - Codex runs a hook only once it is trusted. `agents connect`, `accounts add` and
     `aisquare upgrade` record that trust for you; where they cannot (a `config.toml`
     aisquare may not write, or the Codex plugin's hooks), trust aisquare's hooks in
     Codex's `/hooks`. Until then doctor says so, and the board sees nothing from that Codex.
   - CI tests Codex 0.164.0 and 0.166.0 (the current release, which `install.sh` installs),
-    both pinned, and the newest release nightly. Treat a release past 0.166.0 as untested
+    both pinned, 0.166.0 on macOS too, where the tests of Codex's sandbox and its automatic
+    reviewer run; and the newest release nightly. Treat a release past 0.166.0 as untested
     until the nightly says otherwise, and tell us what breaks.
   - Usage sharing covers Claude Code only: Codex sessions are counted on this machine and
     never shared, whatever your consent.
@@ -144,7 +146,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     reads both. `config list` shows new defaults: `[agents] mcp` (off; on, each launch is
     handed aisquare's MCP server), `[agents.models]`, a role's `agent_args` and
     `[accounts] cross_agent_handover` (on).
-<!-- R2: one line for each item SMOKE14 classifies CLAUDE-VISIBLE and the owner keeps. -->
+  - Screens: the Accounts page's agent section is *Coding agent accounts* (it was *Claude
+    Code*), over a line saying the order is every agent's. The Spawn dialog also gains a
+    *Permission* field, one value each agent maps to its own flags (*role default* leaves
+    the agent's own fields below it in charge). *App settings* gains *captain's agent*
+    under the captain's box and *hand off across agents* among the accounts' rules. The
+    Settings hub's *Usage & stats* reads *all your agents' sessions*.
 
 ### Fixed
 
@@ -152,6 +159,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   leaves a named rule under the dialog, so the captain's press answers it.
 - `fleet tell` never types into a dialog a waiting Claude Code agent shows (`/resume`,
   `/model`, `/config`): a board note names the dialog and says Esc closes it.
+- With Claude Code's prompt suggestions on, a tell to a fleet agent spawned without a
+  first message is typed at its prompt again: the cursor on the placeholder's first letter
+  no longer reads as a draft. A real draft is still never typed over.
 - A Claude Code agent whose start the board never saw (its hooks broken) is told at its
   prompt once its screen reads ready, as 0.9.2 did.
 - `aisquare accounts`, the Accounts page, Welcome and doctor show an npm-installed Claude
@@ -173,6 +183,8 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - A switch or restart's hand-off prompt quotes the newest five board entries meant for the
   agent, not 🔔 lines meant for you. The Spawn dialog names the account the spawn will run
   on.
+- Turning Remote on again just as the last one stops is no longer refused with *another
+  Remote is on for this ~/.aisquare*.
 - `agents disconnect` and uninstall remove a hooks file aisquare created and left empty.
 
 ## [0.9.2] - 2026-11-03

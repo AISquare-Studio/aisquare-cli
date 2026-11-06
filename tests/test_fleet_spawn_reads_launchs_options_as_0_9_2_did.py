@@ -251,7 +251,9 @@ def test_a_0_9_2_rows_own_command_is_the_binary_its_restart_runs(
     """On 0.9.2, `fleet spawn agent --command altclaude` ran altclaude, recorded
     ['--command', 'altclaude'], and its own restart ran altclaude. The head's ran claude with
     `--command altclaude` among claude's arguments."""
-    shutil.copy2(claude_on_path, claude_on_path.with_name("altclaude"))
+    # Its suffix kept: on Windows the fake is `claude.cmd`, and `which` finds `altclaude.cmd`
+    # for `altclaude` by PATHEXT, as it finds a real one.
+    shutil.copy2(claude_on_path, claude_on_path.with_name("altclaude" + claude_on_path.suffix))
     row = fleet_service.spawn(project, "agent", worktree=False).agent
     row = _as_0_9_2_recorded(row, ["--command", "altclaude"], slot=4)
 

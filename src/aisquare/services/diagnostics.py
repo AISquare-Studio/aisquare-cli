@@ -4282,10 +4282,18 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
         selected_dirs = set()
         if configured and selected is not None:
             selected_dirs.add(agent_core._dir_key(selected.config_dir))
-        if os.environ.get(adapter.home_env, "").strip():
+        # The home the shell names (`CODEX_HOME`) is graded where the agent is the selected
+        # one, and a home only a record names (0.7.0's hookless `agents connect codex`
+        # among them) where its binary is installed: a Claude Code user who exported one, or
+        # recorded one long ago, with no Codex here, read 0.9.2's ok, and the warn this
+        # graded made install.sh exit 2 (review r40 of #113, finding 3). A home that holds
+        # aisquare's hooks or its plugin is graded wherever it is, and a recorded one whose
+        # hooks file cannot be read (which may hold them).
+        if configured and os.environ.get(adapter.home_env, "").strip():
             ambient = agent_core.ambient_hook_dir(adapter.id)
             if ambient is not None:
                 selected_dirs.add(agent_core._dir_key(ambient))
+        installed = configured or agent_core.on_path(adapter.id) is not None
         if (
             configured
             and selected is not None
@@ -4299,7 +4307,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
             path: site
             for path, site in sites.items()
             if agent_core._dir_key(path) in selected_dirs
-            or site.recorded
+            or (site.recorded and (installed or site.error))
             or site.hooks_installed
             or site.binary_state is not None
             or _plugin_install(adapter, path) is not None

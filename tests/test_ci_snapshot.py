@@ -503,7 +503,9 @@ def test_every_git_aisquare_runs_is_its_own_hookless_one() -> None:
     (no hook, no fsmonitor of the repository's), never a git argv of its own; the others
     are command lines printed for the user to run (``install_route.command_line``): the
     pull of an editable install, and ``fleet reap``'s way to drop a branch it kept. Read by
-    the syntax tree (r13, 11)."""
+    the syntax tree (r13, 11). ``git_argv``'s plain form is 0.9.2's git, within
+    ``workspace.repository_hooks`` alone: a Claude Code spawn's worktree where no sandboxed
+    agent has run (review r40 of #113, finding 6)."""
     source = Path(__file__).resolve().parents[1] / "src" / "aisquare"
     found = []
     for path in sorted(source.rglob("*.py")):
@@ -515,5 +517,6 @@ def test_every_git_aisquare_runs_is_its_own_hookless_one() -> None:
     assert found == [
         'cli/fleet.py: ["git", "-C", str(root), "branch", "-D", branch]',
         'core/workspace.py: ["git", *GIT_OWN, *args]',
+        'core/workspace.py: ["git", *args]',
         'services/install_route.py: ["git", "-C", route.source or ".", "pull"]',
     ], found

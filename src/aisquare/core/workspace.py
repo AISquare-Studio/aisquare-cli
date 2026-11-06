@@ -13,6 +13,9 @@ import hashlib
 import os
 import stat
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from aisquare.core import paths
@@ -134,9 +137,32 @@ def marks_project_root(directory: Path) -> bool:
 #: from a file in its own tree is the tree's, as it is for every git run there.
 GIT_OWN = ("-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false")
 
+_REPOSITORY_HOOKS: ContextVar[bool] = ContextVar("aisquare_git_repository_hooks", default=False)
+
+
+@contextmanager
+def repository_hooks(run: bool) -> Iterator[None]:
+    """Within it, :func:`git_argv` is plain ``git`` when ``run``: the repository's hooks and
+    file-system monitor run, as they did for every git 0.9.2 ran.
+
+    For work done for an agent that does not sandbox its tools in a project where no agent
+    that does has run (``services.fleet``'s worktree for a Claude Code spawn): no sandbox's
+    files are in the tree, so nothing runs outside one that the agent could not run itself,
+    and the repository's ``post-checkout`` (husky, lefthook, ``.git/hooks``) runs for the
+    spawn's ``git worktree add`` as it did on 0.9.2 (review r40 of #113, finding 6).
+    :data:`GIT_OWN` is the default for every other git aisquare runs."""
+    token = _REPOSITORY_HOOKS.set(run)
+    try:
+        yield
+    finally:
+        _REPOSITORY_HOOKS.reset(token)
+
 
 def git_argv(*args: str) -> list[str]:
-    """``git`` with :data:`GIT_OWN` and then ``args``: the one way aisquare runs git."""
+    """``git`` with :data:`GIT_OWN` and then ``args``: the one way aisquare runs git. Plain
+    ``git`` within :func:`repository_hooks` (``True``)."""
+    if _REPOSITORY_HOOKS.get():
+        return ["git", *args]
     return ["git", *GIT_OWN, *args]
 
 

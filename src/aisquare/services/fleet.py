@@ -131,6 +131,7 @@ from aisquare.core.workspace import (
     active_project,
     git_argv,
     project_id_for,
+    repository_hooks,
 )
 from aisquare.models import (
     CLOSED_STATUSES,
@@ -2483,6 +2484,8 @@ def _git(cwd: Path, *args: str) -> _GitResult:
     call, so a ``post-checkout`` that lives in the tree (``.husky/``, ``.githooks/``), which
     a sandboxed agent may write, is never run by the fleet outside its sandbox (review r11
     of #113, finding 4). A commit of the agent's own, or the operator's, runs them as ever.
+    Where no sandbox's safety is at stake (:func:`_repository_hooks_run`), a spawn's worktree
+    is made by plain ``git``, its hooks run, as 0.9.2 made it.
     """
     try:
         completed = subprocess.run(
@@ -2501,6 +2504,32 @@ def _git(cwd: Path, *args: str) -> _GitResult:
         raise FleetError(f"git {args[0]} did not finish within {_GIT_TIMEOUT:.0f} s") from exc
     _moved_on()  # under the branch lock, each git command finished is a step a waiter sees
     return _GitResult(completed.returncode, completed.stdout, completed.stderr)
+
+
+def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> bool:
+    """Whether the fleet's own git for an agent of ``adapter``'s in ``project`` runs the
+    repository's hooks, as 0.9.2's plain ``git -C`` did: yes for an agent that does not
+    sandbox its tools in a project where no agent that does has run, a session or a fleet
+    row (``core.workspace.repository_hooks``). Not where one has: a hook in the tree
+    (``.husky/post-checkout``) may be that agent's to write, and aisquare's git runs it
+    outside its sandbox, with every right the sandbox withheld (review r11 of #113,
+    finding 4). The guard is that sandbox's alone; Claude Code runs whatever a hook could
+    in its own tools, and a Claude Code user's ``fleet spawn --worktree`` ran the
+    repository's ``post-checkout`` on 0.9.2 (review r40 of #113, finding 6). A store that
+    cannot say is a yes to the guard."""
+    if adapter.capabilities.sandboxes_tools:
+        return False
+    try:
+        with store_session() as store:
+            ran = {row.agent for row in store.fleet_agents(project.id)}
+            ran.update(session.agent for session in store.team_sessions(project.id))
+    except Exception:
+        return False
+    for agent in ran:
+        found = recorded_adapter(agent)
+        if found is not None and found.capabilities.sandboxes_tools:
+            return False
+    return True
 
 
 def _git_ok(cwd: Path, *args: str) -> str:
@@ -6212,18 +6241,19 @@ def spawn(
                 branch = _carried_on(project.root, branch, codename, retired)
             # A replay's tree that is gone is made again where its record names it, on the
             # branch its row recorded (`_remake_worktree`).
-            cwd = _worktree_for(
-                project.root,
-                config.worktree_dir,
-                picked,
-                branch,
-                notes,
-                refuse_if_taken=refuse_if_taken,
-                own=own_worktree,
-                own_branch=own_branch,
-                common=common,
-                start_point=start_point,
-            )
+            with repository_hooks(_repository_hooks_run(project, selected.adapter)):
+                cwd = _worktree_for(
+                    project.root,
+                    config.worktree_dir,
+                    picked,
+                    branch,
+                    notes,
+                    refuse_if_taken=refuse_if_taken,
+                    own=own_worktree,
+                    own_branch=own_branch,
+                    common=common,
+                    start_point=start_point,
+                )
         if settled is not None and os.path.realpath(cwd) == os.path.realpath(start):
             # Only for the folder it shared for: a restart's own tree can be elsewhere.
             env[claude_accounts_service.SHARED_ENV] = settled

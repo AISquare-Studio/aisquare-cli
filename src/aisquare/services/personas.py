@@ -38,7 +38,7 @@ from pydantic import BaseModel
 from aisquare.core import agents as agents_core
 from aisquare.core import claude_accounts
 from aisquare.core import personas as core
-from aisquare.core.agent_adapters import DEFAULT_AGENT, adapters, get_adapter
+from aisquare.core.agent_adapters import DEFAULT_AGENT, adapters, default_adapter, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, SkillDirs
 from aisquare.core.atomic import write_replacing
 from aisquare.core.config import PersonaImportSettings, load_config
@@ -779,20 +779,36 @@ def skill_homes(adapter: AgentAdapter) -> list[Path]:
 
 def skill_roots(root: Path | None) -> list[SkillRoot]:
     """Every skill directory of every coding agent under every home it has
-    (:func:`skill_homes`), the user's first and each agent's in its own order within, a
-    directory two agents or two homes read (``~/.agents/skills``) once with its agents."""
+    (:func:`skill_homes`), a directory two agents or two homes read (``~/.agents/skills``)
+    once with its agents. Import by name takes the first match, so 0.9.2's two places come
+    first, in 0.9.2's order: the default agent's user skills in this environment's config
+    dir, then its project's (Claude Code's ``~/.claude/skills``, then ``<repo>/.claude/
+    skills``). Then the rest, the user's before the project's and each agent's in its own
+    order within: a Claude Code user's first match by name is 0.9.2's, where another agent's
+    folder holding a skill of that name came first (review r40 of #113, finding 5, as the
+    owner ruled)."""
     found: dict[Path, SkillRoot] = {}
+
+    def add(adapter: AgentAdapter, base: Path, scope: SkillScope) -> None:
+        where = found.setdefault(_dir_key(base), SkillRoot(path=base, scope=scope))
+        if adapter.id not in where.agents:
+            where.agents.append(adapter.id)
+
     every = [
         (adapter, [adapter.skill_dirs(home, root) for home in skill_homes(adapter)])
         for adapter in adapters()
     ]
+    first = default_adapter()
+    own = first.skill_dirs(skill_homes(first)[0], root)
+    for base in own.user:
+        add(first, base, "user")
+    for base in own.project:
+        add(first, base, "project")
     for scope in ("user", "project"):
         for adapter, per_home in every:
             for dirs in per_home:
                 for base in dirs.user if scope == "user" else dirs.project:
-                    where = found.setdefault(_dir_key(base), SkillRoot(path=base, scope=scope))
-                    if adapter.id not in where.agents:
-                        where.agents.append(adapter.id)
+                    add(adapter, base, scope)
     return list(found.values())
 
 

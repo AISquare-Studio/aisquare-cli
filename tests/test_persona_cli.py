@@ -526,17 +526,18 @@ def test_export_skill_user_for_codex_writes_into_the_skills_every_codex_home_rea
 def test_import_list_reads_every_skill_directory_of_every_agent(
     runner: CliRunner, repo: Path, claude_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SCOPE #113 0.8.2 A2: ``import --list`` reads each agent's ``skill_dirs``, the user's
-    first: Claude Code's two and Codex's four (measured on 0.162.1), each named with the
-    agents that read it, and a skill from any of them imports by its name."""
+    """SCOPE #113 0.8.2 A2: ``import --list`` reads each agent's ``skill_dirs``: Claude Code's
+    two and Codex's four (measured on 0.162.1), each named with the agents that read it, and
+    a skill from any of them imports by its name. 0.9.2's two places first, in its order
+    (review r40 of #113, finding 5), then the others, the user's first."""
     codex_home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     home = agents_core.home()
     roots = {
         "claude-user": (claude_dir / "skills", "user", ["claude-code"]),
+        "claude-project": (repo / ".claude" / "skills", "project", ["claude-code"]),
         "agents-user": (home / ".agents" / "skills", "user", ["codex"]),
         "codex-user": (codex_home / "skills", "user", ["codex"]),
-        "claude-project": (repo / ".claude" / "skills", "project", ["claude-code"]),
         "agents-project": (repo / ".agents" / "skills", "project", ["codex"]),
         "codex-project": (repo / ".codex" / "skills", "project", ["codex"]),
     }

@@ -278,6 +278,15 @@ def test_json_with_its_credentials_taken_is_json_still() -> None:
         # reopen 2 (MT2): a range whose second part is x
         ("next-auth", "^4.x"),
         ("@octokit/auth-token", "2.x || 3.x"),
+        # reopen 3 (N4): each shape whole
+        ("y-auth", "npm:z-auth@^1"),
+        ("x-auth", "1.0.0 - 2.0.0"),
+        ("x-auth", "1.2.3-rc.1"),
+        ("x-auth", "18.3.0-canary-6bc0e3f0-20240101"),
+        ("x-auth", "workspace:^1.2.3"),
+        ("x-token", "git+ssh://github.com/o/x-token.git#v1"),
+        ("x-auth", "link:./packages/x-auth"),
+        ("x-auth", "file:../x-auth"),
     ],
 )
 def test_a_package_whose_name_ends_in_a_credentials_word_keeps_its_version(
@@ -301,6 +310,20 @@ def test_a_credential_name_with_a_value_that_is_not_a_version_is_still_taken() -
         # an http(s) URL that is neither a tarball's nor a git ref's: a webhook, a signed download
         "https://hooks.slack.com/services/T0000/B0000/" + SECRET,
         "https://cdn.example.com/x-1.0.0.tgz?X-Amz-Signature=" + SECRET,
+        # reopen 3 (N4): a spec's start with a secret after it, and a secret shaped as a version
+        "1.2" + SECRET,
+        "^1.x" + SECRET,
+        "github:" + SECRET,
+        "npm:" + SECRET,
+        "file:" + SECRET,
+        "git+x:" + SECRET,
+        "https://h.example/" + SECRET + "#",
+        "nightly" + SECRET,
+        "9.8n+P7r@-abcdef",
+        "3.14159PiDay!hunter",
+        "v2.1-Zq8vR2mXk4Lp9Tn3Ab1Cd2Ef",
+        "12345678",
+        '^1.2.3\\" ' + SECRET,
     ):
         text = f'{{"auth": "{value}"}}'
         assert redact(text, RedactionLevel.standard) == f'{{"auth": "{MARKER}"}}', value
@@ -552,10 +575,12 @@ def test_a_key_in_html_lines_and_a_read_result_in_json_are_taken() -> None:
     lines = [HEADER, *BODY]
     html = "<p>" + "<br>".join(lines) + "</p><p>why?</p>"
     upper = "<P>" + "<BR>".join(lines) + "</P><P>why?</P>"
+    mixed = "<p>" + "<Br/>".join(lines) + "</p><p>why?</p>"
     read = '{"content": "' + _listed(GUTTERS["Read tool"], lines, "\\n") + '", "is_error": false}'
 
     assert _both(html) == (f"<p>{MARKER}</p><p>why?</p>",) * 2
     assert _both(upper) == (f"<P>{MARKER}</P><P>why?</P>",) * 2
+    assert _both(mixed) == (f"<p>{MARKER}</p><p>why?</p>",) * 2
     assert _both(read) == (f'{{"content": "     1\u2192{MARKER}", "is_error": false}}',) * 2
 
 
@@ -775,17 +800,30 @@ QUOTED_FORMS = {
 }
 
 
+#: How each form writes a quote its value holds: one level of escape in from its own quote.
+HELD_QUOTE = {
+    "json": '\\"',
+    "python": "\\'",
+    "json in a string": '\\\\\\"',
+    "assignment": '\\"',
+    "assignment, single": "\\'",
+}
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["plain", "holding a quote"])
 @pytest.mark.parametrize("form", sorted(QUOTED_FORMS))
 def test_a_quoted_value_the_8000_character_clip_cuts_is_taken_to_the_cut(
-    form: str, monkeypatch: pytest.MonkeyPatch
+    form: str, held: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``core.insights`` clips, then scrubs: a value cut before its closing quote has none, and
     neither rule took it, so its start shipped, in 0.9.2 and the PR too (the ruling after reopen
     2). Taken to the clip's ``…``, the notice kept, at every cut that leaves 4 characters of it
-    or more (the floor every quoted value has)."""
+    or more (the floor every quoted value has). A value that holds a quote, escaped as its form
+    escapes one, is cut as well: the forms that close at the first quote closed it there, and
+    what the clip left after the quote shipped (reopen 3, D1)."""
     monkeypatch.setattr(insights, "redaction_level", lambda: RedactionLevel.standard)
     lead, quote = QUOTED_FORMS[form]
-    secret = "sk_live_" + "51HqZ8vR2mXk4Lp9Tn3A"
+    secret = "sk_live_" + ("51Hq" + HELD_QUOTE[form] if held else "") + "51HqZ8vR2mXk4Lp9Tn3A"
     key = lead + secret + quote + ", and more" + " after it" * 20  # longer than the notice
     mark = insights._TRUNCATION_MARK
     limit = insights._MAX_TEXT - len(mark)
@@ -810,6 +848,8 @@ def test_a_value_the_clip_cut_leaves_its_quote_and_not_a_character_of_it() -> No
         # the other quote is a character of the value
         ('{"password": "it' + "'" + "s-hunter2" + mark, f'{{"password": "{MARKER}' + mark),
         ("{'api_key': 'say \"hi\" sk_live" + mark, f"{{'api_key': '{MARKER}" + mark),
+        # a closed value's ellipsis is no clip: the value is taken whole, to its quote
+        ('{"password": "wait\u2026 what"}', f'{{"password": "{MARKER}"}}'),
         # under the floor every quoted value has, as '{"password": "abc"}' is (r24)
         ('{"password": "hun' + mark, '{"password": "hun' + mark),
     ):

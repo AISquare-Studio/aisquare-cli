@@ -100,6 +100,32 @@ def _clipped(quote: str) -> str:
 
 _CLIPPED_VALUE = _clipped('"') + "|" + _clipped("'")
 
+
+#: A value the clip cut that holds an ESCAPED quote (R9k, reopen 3, D1): ``"abcdefghij\"klmn…
+#: [truncated by aisquare-cli]``. The forms below close it at the escaped quote, the first quote,
+#: and what the clip left after it shipped. So this form comes first. It reads a quote escaped
+#: one level in from its own as a character of the value (``\"`` in JSON, ``\\\"`` in JSON
+#: inside a string: twice its own backslashes and one), to the clip's ``…`` with only its notice
+#: after it, at the end of the text. Any other quote ends its run, so it reads each character
+#: once: the ``"`` of a value that closes, and the quotes of the values after it, stop it
+#: (``token=\"ab\"`` x N).
+def _clipped_holding_quotes(quote: str, name: str) -> str:
+    """A value opened by ``quote``, the opening's backslashes kept as ``name``."""
+    char = "[^" + quote + "\\\\\n\u2026]"
+    held = "(?P=" + name + ")(?P=" + name + ")\\\\" + quote
+    escape = "\\\\++[^" + quote + "\n\u2026]"
+    return (
+        "(?P<" + name + ">\\\\*+)" + quote
+        + "(?=(?:" + char + "|" + held + "|" + escape + "){4})"
+        + "(?:" + char + "++|" + held + "|" + escape + ")*+"
+        + "\\\\*+(?=\u2026[^\"'\\r\\n]*+\\Z)"
+    )  # fmt: skip
+
+
+_CLIPPED_HOLDING_QUOTES = (
+    _clipped_holding_quotes('"', "cutd") + "|" + _clipped_holding_quotes("'", "cuts")
+)
+
 #: A quoted value, to the quote that closes it. ``"ab\"cd"`` is one value that holds a quote (in
 #: JSON, in Python, in a shell), and the first quote is not its end: a pattern that stopped there
 #: shipped the rest of the value (``cd1234"}``), or all of it when fewer than four characters came
@@ -112,7 +138,8 @@ _CLIPPED_VALUE = _clipped('"') + "|" + _clipped("'")
 #: form stops at the first quote it does not know as an escape, so no value reads the text of
 #: the next one: the cost stays linear.
 _QUOTED_VALUE = (
-    r'\\"(?:[^"\\\n]|\\\\\\"|\\\\\\\\|\\\\[^"\\\n]){4,}+\\"'
+    _CLIPPED_HOLDING_QUOTES
+    + r'|\\"(?:[^"\\\n]|\\\\\\"|\\\\\\\\|\\\\[^"\\\n]){4,}+\\"'
     + r'|\\++"[^"\n]{4,}+"'
     + r'|"(?:[^"\\\n]|\\[^\n]){4,}+"'
     + _VALUE_END
@@ -208,24 +235,49 @@ _QUOTED_CREDENTIAL_NAME = (
 
 #: npm's dist-tags, which a ``package.json`` may give for a version: ``"next-auth": "beta"``.
 _DIST_TAGS = ("latest", "next", "beta", "alpha", "canary", "rc", "experimental", "nightly")
-#: The protocols of a package spec that is not a version: ``"better-auth": "github:org/repo#main"``,
-#: ``"@octokit/auth-token": "catalog:"``, ``workspace:*``, ``git+https://…``.
-_SPEC_PROTOCOLS = (
-    "workspace", "npm", "file", "link", "catalog", "patch", "portal", "github", "gitlab",
-    "bitbucket", "git",
+#: A version, a prerelease named as one (``-beta.1``, ``-rc.2``, ``-canary-6bc0e3f0``), and a range
+#: of them (``^4.24.5``, ``~4.0``, ``>=1.0.0 <2``, ``2.x || 3.x``, ``1.0.0 - 2.0.0``). The first
+#: version has a dot: ``12345678`` is no range.
+_PRERELEASE = (
+    "(?:-(?:alpha|beta|rc|next|canary|pre|preview|dev|experimental|nightly|insiders|[0-9]++)"
+    "(?:[.-][0-9A-Za-z]++)*+)?"
+)
+_COMPARATOR = "(?:[~^]|[<>]=?|=)?[ \\t]*+"
+_VERSION_ANY = "v?[0-9]++(?:\\.(?:[0-9]++|[xX*])){0,2}" + _PRERELEASE
+_RANGE = (
+    _COMPARATOR + "v?[0-9]++(?:\\.(?:[0-9]++|[xX*])){1,2}" + _PRERELEASE
+    + "(?:(?:[ \\t]++-[ \\t]++|[ \\t]*+\\|\\|[ \\t]*+|[ \\t]++)"
+    + _COMPARATOR + _VERSION_ANY + ")*+"
 )  # fmt: skip
+_NPM_NAME = "(?:@[a-z0-9][a-z0-9._-]*+/)?[a-z0-9][a-z0-9._-]*+"
+_REF = "#[A-Za-z0-9_./-]++"
+_PATH = "(?:\\.{1,2}/|/|~/|[A-Za-z0-9_.@-]++/)[A-Za-z0-9_./@~+-]*+"
+#: Each shape a package's spec takes, as the WHOLE value (R9k, reopen 3, N4): a range; a
+#: dist-tag; ``workspace:*`` or a range; ``npm:`` and a name, then ``@`` and a range or a tag;
+#: ``github:``, ``gitlab:`` or ``bitbucket:`` and owner/repo, with a ref; ``file:``, ``link:`` or
+#: ``portal:`` and a path; ``catalog:`` and a name; ``patch:`` with its version and patch file; a
+#: git URL, with a ref; an http(s) URL to a tarball or to a ref. Anything after such a start is a
+#: secret's, and so is a value that only starts so (``1.2hunter2``, ``github:hunter2``).
+_SPEC_SHAPES = "|".join((
+    _RANGE,
+    "(?:" + "|".join(_DIST_TAGS) + ")",
+    "workspace:(?:[*^~]|" + _COMPARATOR + _VERSION_ANY + ")",
+    "npm:" + _NPM_NAME + "@(?:" + _COMPARATOR + _VERSION_ANY + "|" + "|".join(_DIST_TAGS) + ")",
+    "(?:github|gitlab|bitbucket):[A-Za-z0-9_.-]++/[A-Za-z0-9_.-]++(?:" + _REF + ")?",
+    "(?:file|link|portal):" + _PATH,
+    "catalog:[A-Za-z0-9_.-]*+",
+    "patch:" + _NPM_NAME + "@[A-Za-z0-9_.%:^~<>=*-]++#" + _PATH,
+    "git(?:\\+[a-z]++)?://[^\\s\"'#\\\\]++(?:" + _REF + ")?",
+    "https?://[^\\s\"'#?\\\\]++(?:(?<=\\.tgz)|(?<=\\.tar\\.gz))",
+    "https?://[^\\s\"'#\\\\]++" + _REF,
+))  # fmt: skip
 
-#: A value that is a package's spec, not a secret: a version (``"next-auth": "^4.24.5"``,
-#: ``"~4.0"``, ``">=1.2 <2"``, ``"^4.x"``), a dist-tag, a spec protocol, or an http(s) URL to a
-#: tarball or to a git ref (``…/x-1.0.0.tgz``, ``…/repo#v1.2``). An http(s) URL that is neither (a
-#: webhook's, a signed download's) is still a value like any other.
+#: A value that is a package's spec, not a secret (:data:`_SPEC_SHAPES`), WHOLE: to a closing
+#: quote with as many backslashes before it as its opening quote, as a placeholder is.
 _PACKAGE_SPEC = (
-    r"""\\*+["'](?:(?:[~^=]|[<>]=?)?[ \t]*v?[0-9]++\.[0-9xX*]"""
-    + "|(?:" + "|".join(_DIST_TAGS) + r""")\\*+["']"""
-    + "|(?:" + "|".join(_SPEC_PROTOCOLS) + "):"
-    + r"|git\+[a-z]++:"
-    + r"""|https?://[^\s"'#\\]*+(?:#|(?<=\.tgz)\\*+["']|(?<=\.tar\.gz)\\*+["'])"""
-    + ")"
+    r'(?:(?P<spd>\\*+)"(?:' + _SPEC_SHAPES + r')(?P=spd)"'
+    + r"|(?P<sps>\\*+)'(?:" + _SPEC_SHAPES + r")(?P=sps)')"
+    + r"(?=[\s,;}\])\\]|\Z)"
 )  # fmt: skip
 
 #: A whole value that stands for one and is not one: a placeholder (``<YOUR_API_KEY>``), a
@@ -262,7 +314,8 @@ def _in_its_quotes(found: re.Match[str]) -> str:
     are the value's own, with the backslashes before them where the JSON sits in a string."""
     name, separator, value = found["name"], found["sep"], found["value"]
     opening = len(value) - len(value.lstrip("\\")) + 1
-    if len(value) <= opening or value[-1] != value[opening - 1]:
+    cut = found.string.startswith("\u2026", found.span("value")[1])  # the clip's, after it
+    if cut or len(value) <= opening or value[-1] != value[opening - 1]:
         return name + separator + value[:opening] + MARKER  # cut by the clip: no closing quote
     inside = value[:-1]
     closing = 1 + min(opening - 1, len(inside) - len(inside.rstrip("\\")))

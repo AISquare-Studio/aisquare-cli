@@ -402,6 +402,17 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     "pem-lines-of-short-runs": lambda size: (HEADER + "\n" + "Ab1 " * 30 + "\n") * (size // 152),
     "pem-a-long-line-of-short-runs": lambda size: HEADER + "\n" + "ab+ " * (size // 4),
     "pem-a-lowercase-run-inside-a-line": lambda size: HEADER + "\nx " + "a" * (size - 40) + " x",
+    # reopen 3 (D1, N4): a cut value read through the quotes it holds, and a spec read whole
+    "quoted-values-holding-quotes-then-a-clip": lambda size: (
+        '{"password": "' + 'a\\"' * (size // 3) + "\u2026"
+    ),
+    "quoted-values-holding-quotes-under-many-names": lambda size: (
+        '"token": "ab\\"cd", ' * (size // 20) + "\u2026"
+    ),
+    "quoted-values-at-two-escape-levels": lambda size: (
+        'token=\\"a\\\\\\"b ' * (size // 12) + "\u2026"
+    ),
+    "quoted-value-a-long-range": lambda size: '{"auth": "' + "^1.2 || " * (size // 8) + '"}',
 }
 
 #: Four sizes, each four times the one before, the last 2 MB.

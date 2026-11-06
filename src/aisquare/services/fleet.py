@@ -6818,7 +6818,8 @@ def _launch_binary(
     """
     if spec is None or binary is not None:
         return _binary_for(role, override=binary, bin_flag=bin_flag)
-    resolution = harness.resolve_binary(role, override=spec.binary)
+    # A 0.9.2 record's `--command BIN`, which its window's launch ran (#105's reopen 1).
+    resolution = harness.resolve_binary(role, override=window_read(spec).binary or spec.binary)
     if shutil.which(resolution.binary) is None:
         # Replayed, and gone since: today's resolution, when it is the same kind of program.
         resolution = _in_place_of_recorded(
@@ -6911,9 +6912,15 @@ def _launch_options(args: Sequence[str], adapter: AgentAdapter) -> tuple[list[st
     """``(the window launch's options, the rest)`` of a spawn's own arguments: each
     :data:`LAUNCH_VALUE_OPTIONS` with its value (``-e K=V``, ``--env K=V``, ``--env=K=V``), as
     0.9.2's window `launch`, whose line ended with them, read it (#105); its value checked as
-    `launch` checks it, here, before any window opens. Up to an argument ``--``, after which
-    every one is the agent's, and never an option the agent declares its own
-    (``capabilities.value_options`` / ``switch_options``)."""
+    `launch` checks it, here, before any window opens. `fleet spawn … -- -e K=V` is one too,
+    as on 0.9.2: the command line's own ``--`` is the CLI's, which never reaches here. A ``--``
+    among the arguments this is given (a second one on the command line, a role's
+    ``extra_args``, the Spawn dialog's) ends them: every one after it is the agent's. Never an
+    option the agent declares its own (``capabilities.value_options`` / ``switch_options``).
+
+    :data:`delivery.FIRST_PROMPT_FLAG` among them is refused (#105's reopen 1): the window's
+    first message is the fleet's to write, and given to the agent it was an argument it
+    never knew. ``--prompt`` gives one."""
     agents_own = adapter.capabilities.value_options | adapter.capabilities.switch_options
     owned: list[str] = []
     rest: list[str] = []
@@ -6925,6 +6932,11 @@ def _launch_options(args: Sequence[str], adapter: AgentAdapter) -> tuple[list[st
             rest.extend(items[index:])
             break
         name, _, inline = token.partition("=")
+        if name == delivery.FIRST_PROMPT_FLAG:
+            raise FleetError(
+                f"{name} is the fleet's own: it hands a window the first message the fleet "
+                "wrote for it. Give the agent its first message with --prompt"
+            )
         if name in LAUNCH_VALUE_OPTIONS and name not in agents_own:
             value: str
             if inline or (name.startswith("--") and "=" in token):
@@ -6948,6 +6960,87 @@ def _launch_options(args: Sequence[str], adapter: AgentAdapter) -> tuple[list[st
     return owned, rest
 
 
+#: The options of 0.9.2's window `launch` that its record kept among the spawn's own arguments
+#: and its own restart and switch read again (#105's reopen 1): the account and the binary, the
+#: last of each winning. -e/--env: :func:`_launch_options`; a first-message file, which no
+#: replay gives the agent: :func:`_without_first_prompt_file`.
+WINDOW_ACCOUNT_OPTIONS = ("-a", "--account")
+WINDOW_BINARY_OPTIONS = ("--command",)
+
+
+@dataclass(frozen=True)
+class WindowRead:
+    """What a recorded window's `launch` read out of its record's arguments
+    (:func:`window_read`), and the arguments it left the agent."""
+
+    account: str | None = None
+    binary: str | None = None
+    args: tuple[str, ...] = ()
+
+
+def window_read(spec: LaunchSpec) -> WindowRead:
+    """What ``spec``'s own window `launch` read out of its recorded arguments: ``-a N``,
+    ``--account N`` and ``--command BIN``, as 0.9.2's did (#105's reopen 1). 0.9.2 ran its
+    window as ``launch ROLE <its options> <the spawn's arguments>`` with no ``--``, so its
+    launch took those among the arguments, and a restart read the record the same way:
+    ``fleet spawn agent -a 3`` ran account 3 at every restart. Read here, a replay runs that
+    account (unless a switch names one) and that binary, and never gives them to the agent.
+
+    Read by where the record's own window line put them: among its launch's options, before
+    the line's first ``--`` (or anywhere, for a record that kept no line). This release's
+    window puts every argument after its ``--``, so a record of its own keeps an ``-a``
+    there as the agent's (Codex's ``-- -a never``), and so does a build of this one that
+    still said 0.9.2. 0.9.2 recorded ``-c BIN`` as ``BIN`` alone, which cannot be told
+    from the agent's own argument: it stays one."""
+    own = _the_windows_own_options(spec.command)
+    args = list(spec.extra_args)
+    account: str | None = None
+    binary: str | None = None
+    left: list[str] = []
+    index = 0
+    named = (*WINDOW_ACCOUNT_OPTIONS, *WINDOW_BINARY_OPTIONS)
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            left.extend(args[index:])
+            break
+        name, equals, inline = token.partition("=")
+        taken: list[str] | None = None
+        value = option = ""
+        if name in named and name.startswith("--") and equals:
+            taken, value, option = [token], inline, name
+        elif token in named and index + 1 < len(args):
+            taken, value, option = [token, args[index + 1]], args[index + 1], token
+        elif token.startswith("-a") and not token.startswith("--") and len(token) > 2:
+            taken, value, option = [token], token[2:], "-a"  # `-a3`, as click reads it
+        if taken is not None and (own is None or _holds_run(own, taken)):
+            if option in WINDOW_ACCOUNT_OPTIONS:
+                account = value
+            elif option in WINDOW_BINARY_OPTIONS:
+                binary = value
+            index += len(taken)
+            continue
+        left.append(token)
+        index += 1
+    return WindowRead(account, binary, tuple(left))
+
+
+def _the_windows_own_options(command: Sequence[str]) -> list[str] | None:
+    """The arguments of a recorded window line's `launch` before its first ``--``: its own
+    options, the ones it read. ``None`` for a record that kept no line (every release before
+    this one, whose windows had no ``--``)."""
+    if "launch" not in command:
+        return None
+    rest = list(command[command.index("launch") + 1 :])
+    return rest[: rest.index("--")] if "--" in rest else rest
+
+
+def _holds_run(tokens: Sequence[str], run: Sequence[str]) -> bool:
+    """Whether ``run`` stands in ``tokens`` as it is, one after another."""
+    width = len(run)
+    return any(list(tokens[at : at + width]) == list(run) for at in range(len(tokens) - width + 1))
+
+
 def _replayed_args(role: str, spec: LaunchSpec, config: FleetSettings) -> list[str]:
     """The arguments a replay of ``spec`` launches with: the recorded ones, as recorded.
 
@@ -6960,8 +7053,10 @@ def _replayed_args(role: str, spec: LaunchSpec, config: FleetSettings) -> list[s
     was chosen (round 20). A spec recorded since then (``recorded_by``) is replayed as it
     is, so a ``--restricted`` chosen in today's config survives a restart; less, from
     0.8.0 to 0.8.2, the reviewer's default deny it leads with, now the role's own.
+
+    Less, too, what the record's own window launch read out of them (:func:`window_read`).
     """
-    args = list(spec.extra_args)
+    args = list(window_read(spec).args)
     if role != "reviewer":
         return args
     if spec.recorded_by is None:
@@ -15766,6 +15861,7 @@ def restart(
     replays = recorded_adapter(record.agent)
     runs_as = role or record.role
     onto = _crossing_to(record, to_agent, label)
+    named: str | None = None  # a 0.9.2 record's own account (`window_read`)
     installed: list[str] = []  # the hooks installed before the stop (SMOKE12 O1), noted
     if onto is not None and permission_mode is not None:
         raise FleetError(
@@ -15820,7 +15916,17 @@ def restart(
                 notes=installed,
             )
         elif replays is None or replays.accounts is not None:
-            choice = _replacement_account(account, slot, role=runs_as, project=project, whose=whose)
+            # A 0.9.2 record's own `-a N` names the account its window ran, as its own restart
+            # read it, unless one is asked for (#105's reopen 1). Its replay only: the record.
+            if account is None and runs_as == record.role:
+                named = window_read(record.spec).account
+            choice = _replacement_account(
+                account if named is None else named,
+                slot,
+                role=runs_as,
+                project=project,
+                whose=whose,
+            )
             if replays is not None and choice.account is not None:
                 # The account it restarts on, which a take-over's `account` may make another
                 # than the record's: its hooks there before anything is stopped (SMOKE12 O1).
@@ -15839,7 +15945,11 @@ def restart(
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot {verb} {label!r}: {exc}") from exc
     # The row's own slot is no new pin; a take-over's account is the human's choice.
-    pinned = _account_pinned(agent) if account is None else account != THIS_SHELL_ACCOUNT
+    pinned = (
+        (_account_pinned(agent) or named is not None)
+        if account is None
+        else account != THIS_SHELL_ACCOUNT
+    )
     account = str(choice.account.slot) if choice.account is not None else None
     # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
     # asks the same ladder and gives them itself.
@@ -16243,8 +16353,10 @@ def hand_off(
     runs_as = role or record.role
     replay = runs_as == record.role and onto is None
     slot = record.account_slot
+    # The account a 0.9.2 record's own `-a N` named, which its window ran (#105's reopen 1).
+    named = window_read(record.spec).account if account is None and replay else None
     # Onto another agent the source's slot is no account of it: the one asked, else its ladder.
-    wanted = _account_wanted(account, slot if onto is None else None)
+    wanted = _account_wanted(account if named is None else named, slot if onto is None else None)
     resume: ResumeSpec | None = None
     if onto is not None:
         notes.append(_crossing_note(record.agent, onto))
@@ -16256,7 +16368,7 @@ def hand_off(
             runs_as,
             wanted,
             notes,
-            plain_home=account is None and slot is None,
+            plain_home=account is None and named is None and slot is None,
         )
     own = is_git_project(project.root)
     if not own:
@@ -16291,9 +16403,12 @@ def hand_off(
         prompt=first,
         spawned_by=spawned_by,
         account=wanted,
-        # The source's slot is no new pin; an account the dialog names is the human's.
+        # The source's slot is no new pin; an account the dialog names is the human's, and so
+        # is one a 0.9.2 record's `-a N` named.
         account_pinned=(
-            _account_pinned(agent) if account is None else account != THIS_SHELL_ACCOUNT
+            (_account_pinned(agent) or named is not None)
+            if account is None
+            else account != THIS_SHELL_ACCOUNT
         ),
         resume=resume,
         size=size,

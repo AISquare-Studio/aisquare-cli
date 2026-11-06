@@ -13,6 +13,7 @@ Codex's `-c KEY=VALUE` stays Codex's by its shape, as `launch` keeps it.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from aisquare.services import fleet as fleet_service
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
+    _as_recorded,
     _command,
     _flag,
     claude_on_path,
@@ -168,3 +170,203 @@ def test_a_codex_spawns_a_with_codexs_own_word_says_where_codexs_goes(
     assert given.exit_code == 0, given.output
     after = _after_the_options(_command(tmux))
     assert after[after.index("-a") + 1] == "never", after
+
+
+# --- #105's reopen 1 (tester-r9f, seq 11381): a row 0.9.2 recorded, replayed ----------------
+
+
+def _as_0_9_2_recorded(row: FleetAgent, args: list[str], *, slot: int) -> FleetAgent:
+    """``row`` as 0.9.2 recorded its spawn with ``args``: kept with the agent's arguments, and
+    on the window's line among its launch's own options, which had no ``--``
+    (services/fleet.py:4077 and 4294 at 6a77e650: ``selfcli.argv_for``'s ``python -P -m
+    aisquare launch ROLE <flags> <args>``, recorded whole), its row naming the default
+    ``slot``."""
+    assert row.launch_spec is not None
+    line = ["/opt/uv/tools/aisquare-cli/bin/python", "-P", "-m", "aisquare", "launch", row.role]
+    line += ["--command", "claude"]
+    line += ["--account", str(slot), "--name", row.label, *args]
+    spec = row.launch_spec.model_copy(
+        update={
+            "extra_args": list(args),
+            "command": line,
+            "recorded_by": "0.9.2",
+            "account_slot": slot,
+            "account_pinned": False,
+            "binary": "claude",
+        }
+    )
+    with store_session() as store:
+        upserted = store.upsert_fleet_agent(
+            row.model_copy(update={"launch_spec": spec, "account_slot": slot, "binary": "claude"})
+        )
+    return _as_recorded(upserted)
+
+
+def _replayed(project: ProjectInfo, tmux: FakeTmux, row: FleetAgent, how: str) -> FleetAgent:  # noqa: F811
+    """``row`` restarted, switched to account 2, or forked, as the head does each."""
+    tmux.die(row.pane_id, 0)
+    if how == "restart":
+        return fleet_service.restart(project, row.label).started
+    if how == "switch":
+        return fleet_service.switch(project, row.label, to="2").started
+    return fleet_service.hand_off(project, row.label, fresh=True).started.agent
+
+
+@pytest.mark.parametrize("how", ["restart", "switch", "fork"])
+def test_a_0_9_2_rows_own_a_is_the_account_its_replay_runs_and_never_the_agents(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+    how: str,
+) -> None:
+    """tester-r9f's repro: on 0.9.2, `fleet spawn agent -a 3 -e PROBE_U=1` ran account 3, its
+    row said 4, and its own restart read `-a 3` again. The head's ran 4 and gave claude
+    `-a 3`. Now a restart and a fork run 3 and say so; a switch runs the account it names.
+    The pair is set, and a first-message file the record held is dropped, as 0.9.2's window
+    took it (the spawn's, long gone): neither reaches claude."""
+    row = fleet_service.spawn(project, "agent", account="4", worktree=False).agent
+    recorded = ["-a", "3", "-e", "PROBE_U=1", "--first-prompt-file", "/gone/prompt.txt"]
+    row = _as_0_9_2_recorded(row, recorded, slot=4)
+
+    started = _replayed(project, tmux, row, how)
+
+    command = _command(tmux)
+    options, agents = command[: command.index("--")], _after_the_options(command)
+    runs = "2" if how == "switch" else "3"
+    assert _flag(command, "--account") == runs, command
+    assert options[options.index("PROBE_U=1") - 1] == "--env", options
+    assert not {"-a", "3", "--first-prompt-file", "PROBE_U=1"} & set(agents), agents
+    assert started.account_slot == int(runs), "the row names what runs"
+    assert started.launch_spec is not None
+    assert "-a" not in started.launch_spec.extra_args, "recorded as this release reads it"
+
+
+def test_a_0_9_2_rows_own_command_is_the_binary_its_restart_runs(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+) -> None:
+    """On 0.9.2, `fleet spawn agent --command altclaude` ran altclaude, recorded
+    ['--command', 'altclaude'], and its own restart ran altclaude. The head's ran claude with
+    `--command altclaude` among claude's arguments."""
+    shutil.copy2(claude_on_path, claude_on_path.with_name("altclaude"))
+    row = fleet_service.spawn(project, "agent", worktree=False).agent
+    row = _as_0_9_2_recorded(row, ["--command", "altclaude"], slot=4)
+
+    started = _replayed(project, tmux, row, "restart")
+
+    command = _command(tmux)
+    assert _flag(command, "--command") == "altclaude", command
+    assert "altclaude" not in _after_the_options(command)
+    assert started.binary == "altclaude", "the row names what runs"
+
+
+def test_this_releases_record_keeps_an_a_after_its_windows_separator_as_the_agents(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+) -> None:
+    """A record whose window line put `-a 2` after its `--` gave it to the agent, as Codex's
+    `-- -a never` is: its restart gives it to the agent again and runs the row's account.
+    Read by where the line put it, not by the version it names: builds of this release before
+    its version moved recorded "0.9.2" too."""
+    row = fleet_service.spawn(
+        project, "agent", account="4", worktree=False, agent_args=["-a", "2"]
+    ).agent
+    assert row.launch_spec is not None and row.launch_spec.extra_args == ["-a", "2"]
+    spec = row.launch_spec.model_copy(update={"recorded_by": "0.9.2"})
+    with store_session() as store:
+        row = _as_recorded(store.upsert_fleet_agent(row.model_copy(update={"launch_spec": spec})))
+
+    started = _replayed(project, tmux, row, "restart")
+
+    command = _command(tmux)
+    assert _flag(command, "--account") == "4", command
+    agents = _after_the_options(command)
+    assert agents[agents.index("-a") + 1] == "2", agents
+    assert started.account_slot == 4
+
+
+# --- the reopen's pin gaps ---------------------------------------------------------------
+
+
+def test_a_separator_among_the_services_arguments_leaves_an_env_pair_to_the_agent(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+) -> None:
+    """The Spawn dialog's path, and a role's own arguments: a `--` among what the service is
+    given ends the window launch's options, and `-e K=V` after it is the agent's."""
+    fleet_service.spawn(project, "agent", worktree=False, agent_args=["--", "-e", "PROBE_S=1"])
+
+    command = _command(tmux)
+    assert "PROBE_S=1" not in command[: command.index("--")], command
+    assert "PROBE_S=1" in _after_the_options(command)
+
+
+def test_the_service_refuses_a_malformed_pair_where_no_cli_checked_it(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+) -> None:
+    """The Spawn dialog's path and a replay's never pass through `fleet spawn`'s check."""
+    with pytest.raises(fleet_service.FleetError, match="expected KEY=VALUE"):
+        fleet_service.spawn(project, "agent", worktree=False, agent_args=["--env", "NO_PAIR"])
+    assert tmux.spawned == []
+
+
+def test_a_number_is_an_account_for_codex_too_and_an_unknown_one_is_said_as_such(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    """`-a 9` on a Codex role names account 9, which there is none of: said as that, with no
+    word of Codex's own -a, which takes no number."""
+    monkeypatch.chdir(project.root)
+    result = runner.invoke(app, ["fleet", "spawn", "coder", "--agent", "codex", "-a", "9"])
+
+    assert result.exit_code == 1, result.output
+    said = " ".join(result.output.split())
+    assert "slot 9" in said and "pass -a" not in said, said
+    assert tmux.spawned == []
+
+
+def test_an_agent_with_no_a_of_its_own_is_told_nothing_of_one(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    three_accounts: list[int],
+    runner: CliRunner,
+) -> None:
+    """Claude Code has no -a: `-a never` is an account it has none of, and nothing more."""
+    result = runner.invoke(app, ["fleet", "spawn", "agent", "-a", "never"])
+
+    assert result.exit_code == 1, result.output
+    said = " ".join(result.output.split())
+    assert "'never'" in said and "pass -a" not in said, said
+    assert tmux.spawned == []
+
+
+def test_a_first_message_file_in_a_spawns_own_arguments_is_refused_before_any_window(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    three_accounts: list[int],
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """0.9.2's window launch read one; the head gave it to claude. It is the fleet's own:
+    refused, pointing at --prompt, and the file is left as it was."""
+    file = tmp_path / "prompt.txt"
+    file.write_text("hello", encoding="utf-8")
+
+    result = runner.invoke(app, ["fleet", "spawn", "agent", "--first-prompt-file", str(file)])
+
+    assert result.exit_code == 1, result.output
+    assert "--prompt" in " ".join(result.output.split()), result.output
+    assert tmux.spawned == [] and file.read_text(encoding="utf-8") == "hello"

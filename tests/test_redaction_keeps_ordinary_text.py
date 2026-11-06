@@ -269,10 +269,6 @@ def test_json_with_its_credentials_taken_is_json_still() -> None:
         ("next-auth", "experimental"),
         ("better-auth", "github:better-auth/better-auth#main"),
         ("@octokit/auth-token", "catalog:"),
-        ("my-token", "git+https://github.com/org/my-token.git"),
-        ("my-token", "git://github.com/org/my-token.git"),
-        ("x-auth", "https://registry.example.com/x-auth/-/x-auth-1.0.0.tgz"),
-        ("x-auth", "https://github.com/org/x-auth#v1.2.0"),
         ("x-auth", "patch:x-auth@1.0.0#./x.patch"),
         ("x-auth", "portal:../x-auth"),
         # reopen 2 (MT2): a range whose second part is x
@@ -284,12 +280,8 @@ def test_json_with_its_credentials_taken_is_json_still() -> None:
         ("x-auth", "1.2.3-rc.1"),
         ("x-auth", "18.3.0-canary-6bc0e3f0-20240101"),
         ("x-auth", "workspace:^1.2.3"),
-        ("x-token", "git+ssh://github.com/o/x-token.git#v1"),
         ("x-auth", "link:./packages/x-auth"),
         ("x-auth", "file:../x-auth"),
-        # reopen 4 (K2): a URL with no userinfo, and ssh's git@
-        ("x-auth", "https://registry.npmjs.org/@scope/x-auth/-/x-auth-1.0.0.tgz"),
-        ("x-auth", "git+https://github.com:443/org/x-auth.git"),
     ],
 )
 def test_a_package_whose_name_ends_in_a_credentials_word_keeps_its_version(
@@ -336,10 +328,17 @@ def test_a_credential_name_with_a_value_that_is_not_a_version_is_still_taken() -
         "https://user:" + SECRET + "@h.example.com/x-1.0.0.tgz",
         "https://h.example.com/hook?sig=" + SECRET + "#main",
         "git://" + SECRET,
+        # reopen 5 (S2): no URL is a spec under a credential's name, a token can sit in its path
+        "https://npm-proxy.fury.io/" + SECRET + "/acct/token-lib/-/token-lib-1.0.0.tgz",
+        "git+https://github.com/org/my-token.git",
+        "git://github.com/org/my-token.git",
+        "git+ssh://git@github.com/o/x-token.git#v1",
+        "https://registry.example.com/x-auth/-/x-auth-1.0.0.tgz",
+        "https://github.com/org/x-auth#v1.2.0",
     ):
         text = f'{{"auth": "{value}"}}'
         shown = redact(text, RedactionLevel.standard)
-        assert shown == f'{{"auth": "{MARKER}"}}' and SECRET not in shown, value
+        assert shown == f'{{"auth": "{MARKER}"}}', value
 
 
 @pytest.mark.parametrize(
@@ -732,6 +731,11 @@ SEPARATORS = {
     "backslash u000a": "\\u000a",
     "backslash 012": "\\012",
     "%0A": "%0A",
+    # at the bound: 20 and 24 characters of what is not markup (reopen 5, MV1)
+    "20 hyphens": "-" * 20,
+    "24 hyphens": "-" * 24,
+    # an ellipsis a reader printed between two runs is no clip (reopen 5, MV2)
+    "an ellipsis": "&#10;\u2026&#10;",
 }
 
 
@@ -791,6 +795,75 @@ def test_a_separated_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body
                 cut,
                 left[-120:],
             )
+
+
+#: What joins a key's lines where it was copied out of an editor, a page or a chat as HTML or
+#: XML: markup longer than any separator, which does not count against the gap (reopen 5, S1).
+MARKUPS = {
+    "VS Code's HTML": '</span></div><div><span style="color: #cccccc;">',
+    "a highlighted code block": '</span><span class="line">',
+    "Google Docs' HTML": '</span></p><p dir="ltr"><span style="font-size:11pt;">',
+    "Slack's export": '</div><div class="p-rich_text_section">',
+    "a table row with a line number": '</td></tr><tr><td class="num">2</td><td class="code">',
+    "a pretty-printed XML attribute": "&#xD;&#xA;" + " " * 16,
+    "&#10; and 24 spaces": "&#10;" + " " * 24,
+    "GitHub's blob rows": (
+        '</td>\n      </tr>\n      <tr>\n        <td id="L2" class="blob-num js-line-number'
+        ' js-code-nav-line-number" data-line-number="2"></td>\n        <td id="LC2"'
+        ' class="blob-code blob-code-inner js-file-line">'
+    ),
+}
+
+
+@pytest.mark.parametrize("markup", sorted(MARKUPS))
+def test_a_keys_lines_joined_by_markup_of_any_length_are_its_body(markup: str) -> None:
+    """S1: a separator was bounded by its length, and HTML with attributes is longer: VS Code's
+    copy as HTML, Google Docs', Slack's, a highlighted block's, a table's, GitHub's. Tags,
+    character references and whitespace do not count against the gap, and the prose after the
+    key, outside any tag, is kept."""
+    text = MARKUPS[markup].join([HEADER, *BODY]) + MARKUPS[markup] + "why is this rejected?"
+
+    shown, strict = _both(text)
+
+    assert shown == strict and MARKER in shown and shown.endswith("why is this rejected?")
+    for line in BODY:
+        assert not any(line[at : at + 6] in shown for at in range(len(line) - 5)), shown
+
+
+@pytest.mark.parametrize("markup", sorted(MARKUPS))
+def test_a_key_joined_by_markup_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
+    markup: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each S1 layout cut by the clip at every point from the header to the footer: no four
+    characters of a body line are left."""
+    monkeypatch.setattr(insights, "redaction_level", lambda: RedactionLevel.standard)
+    text = MARKUPS[markup].join([HEADER, *BODY, FOOTER])
+    mark = insights._TRUNCATION_MARK
+    limit = insights._MAX_TEXT - len(mark)
+    for cut in range(len(HEADER), text.index(FOOTER)):
+        pad = "#" * (limit - cut - 1) + "\n"
+
+        shown = insights._outbound(pad + text + "\n" + "and what now? " * 4)
+
+        assert shown.startswith(pad) and shown.endswith(mark), (markup, cut)
+        left = shown[len(pad) : -len(mark)]
+        for line in BODY:
+            assert not any(line[at : at + 4] in left for at in range(len(line) - 3)), (
+                markup,
+                cut,
+                left[-120:],
+            )
+
+
+def test_markup_past_the_cap_ends_the_key() -> None:
+    """A gap of markup alone is capped (about 512 characters): past it the key has ended, and
+    what comes after, a run or not, is the text's."""
+    far = "<span></span>" * 50  # 650 characters of markup that is no line break
+    text = f"{HEADER}\n{BODY[0]}{far}{BODY[1]}"
+
+    shown, _ = _both(text)
+
+    assert shown == f"{MARKER}{far}{BODY[1]}"
 
 
 def test_a_keys_lines_that_journalctl_cut_with_an_ellipsis_are_its_body() -> None:

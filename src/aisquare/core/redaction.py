@@ -251,18 +251,15 @@ _RANGE = (
 )  # fmt: skip
 _NPM_NAME = "(?:@[a-z0-9][a-z0-9._-]*+/)?[a-z0-9][a-z0-9._-]*+"
 _REF = "#[A-Za-z0-9_./-]++"
-#: A URL's host, and its port: NO USERINFO (R9k, reopen 4, K2). A token written as a URL's user
-#: (``https://<token>@dev.azure.com/…``, ``git+https://<token>@bitbucket.org/…``) is a credential
-#: carried in a spec, not a spec; only ssh's ``git@`` is a spec's (``git+ssh://git@github.com/…``).
-_HOST = "[A-Za-z0-9.-]++(?::[A-Za-z0-9._~-]*+)?"
 _PATH = "(?:\\.{1,2}/|/|~/|[A-Za-z0-9_.@-]++/)[A-Za-z0-9_./@~+-]*+"
 #: Each shape a package's spec takes, as the WHOLE value (R9k, reopen 3, N4): a range; a
 #: dist-tag; ``workspace:*`` or a range; ``npm:`` and a name, then ``@`` and a range or a tag;
 #: ``github:``, ``gitlab:`` or ``bitbucket:`` and owner/repo, with a ref; ``file:``, ``link:`` or
-#: ``portal:`` and a path; ``catalog:`` and a name; ``patch:`` with its version and patch file; a
-#: git URL with its path, and a ref; an http(s) URL to a tarball or to a ref, with no query. A
-#: URL holds no userinfo (:data:`_HOST`). Anything after such a start is a
-#: secret's, and so is a value that only starts so (``1.2hunter2``, ``github:hunter2``).
+#: ``portal:`` and a path; ``catalog:`` and a name; ``patch:`` with its version and patch file.
+#: Anything after such a start is a secret's, and so is a value that only starts so
+#: (``1.2hunter2``, ``github:hunter2``). NO URL (R9k, reopen 5, S2): a git, tarball or ``#ref``
+#: URL under a credential's name can carry a token in its user or its path (Gemfury's
+#: ``https://npm-proxy.fury.io/<token>/…``), and is taken: an over-match accepted (P3).
 _SPEC_SHAPES = "|".join((
     _RANGE,
     "(?:" + "|".join(_DIST_TAGS) + ")",
@@ -272,9 +269,6 @@ _SPEC_SHAPES = "|".join((
     "(?:file|link|portal):" + _PATH,
     "catalog:[A-Za-z0-9_.-]*+",
     "patch:" + _NPM_NAME + "@[A-Za-z0-9_.%:^~<>=*-]++#" + _PATH,
-    "git(?:\\+[a-z]++)?://(?:git@)?" + _HOST + "/[^\\s\"'#?\\\\]*+(?:" + _REF + ")?",
-    "https?://" + _HOST + "/[^\\s\"'#?\\\\]*+(?:(?<=\\.tgz)|(?<=\\.tar\\.gz))",
-    "https?://" + _HOST + "(?:/[^\\s\"'#?\\\\]*+)?" + _REF,
 ))  # fmt: skip
 
 #: A value that is a package's spec, not a secret (:data:`_SPEC_SHAPES`), WHOLE: to a closing
@@ -436,6 +430,7 @@ _PEM_END = re.compile(r"-----END [A-Z ]{0,32}PRIVATE KEY-----")
 #: code string) or HTML's ``<br>``; between two runs on a line may stand spaces, quotes, ``+`` and
 #: ``,`` (a key written as a string concatenation, a line quoted with ``>``).
 _BASE64 = r"[A-Za-z0-9+/=]"
+_BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
 _LINE_BREAK = r"(?:\r\n?|\n|\\+[rn]|<[bB][rR][ \t]*+/?>)"
 _GAP = r"""(?:\\+["']|[ \t"'+,>])"""
 #: The run that is a key's whatever stands before it: no word of prose is this long.
@@ -537,31 +532,49 @@ _TO_LINE_END = "(?:[^\\r\\n\\\\<]++|\\\\++(?![rn])|<(?![bB][rR][ \\t]*+/?>))*+"
 #: The most text that may stand between two runs of one key that no reader here knows as a line
 #: break: ``&#13;&#10;``, ``</div><div>`` and ``\u000a`` are shorter, and a sentence is longer.
 _SEPARATION = 24
+#: MARKUP between a key's runs, which does not count against :data:`_SEPARATION` (R9k, reopen 5,
+#: S1): a tag of up to 256 characters with its attributes (VS Code's and Google Docs' HTML, a
+#: highlighted code block's spans, Slack's divs, a table row's cells), a character reference
+#: (``&#10;``, ``&nbsp;``), and whitespace (a pretty-printed attribute's indent, the newlines
+#: between GitHub's blob rows). A word of prose outside a tag still counts.
+_MARKUP = "(?:<[^<>]{0,256}+>|&#?[A-Za-z0-9]{1,10}+;|\\s)"
+#: The most a gap may hold, markup and all: past it the key has ended, whatever follows.
+_GAP_CAP = 512
+#: Not the clip's notice at the end of the text (``… [truncated by aisquare-cli]``): another
+#: ``…`` between two runs (an ellipsis a reader printed) is a character of the gap, and the
+#: clip's ends it (reopen 5, MV2).
+_NOT_THE_CLIP = "(?!\u2026 \\[truncated by [^\\]\\r\\n]{0,32}+\\]\\Z)"
+
+
+def _gap(stop: str) -> str:
+    """What may stand before a piece of a key after its body: markup at any length, and at most
+    :data:`_SEPARATION` characters of anything else, never the clip's notice; it ends where
+    ``stop`` starts. Possessive throughout, each character read once."""
+    return (
+        "(?:" + _MARKUP + "*+(?!" + stop + ")" + _NOT_THE_CLIP + "[\\s\\S]){0,"
+        + str(_SEPARATION) + "}+" + _MARKUP + "*+"
+    )  # fmt: skip
+
+
 #: A key's run after a SEPARATOR this reader does not know (R9k, reopen 4, K1): ``&#10;`` and
 #: ``&#xD;&#xA;`` in an XML attribute, ``</div><div>`` from a rich-text editor, U+2028, U+0085,
 #: a form feed or a vertical tab, ``\u000a``, ``\012``, ``%0A``, and those no one has thought of.
-#: Security first: after a header, a run that reads as a key's (:data:`_LONG_RUN`) with at most
-#: :data:`_SEPARATION` characters of anything else before it, never the clip's ``…``, is the
-#: key's. Prose between two runs is longer than that. The gap reads each character once, and
-#: stops where a run starts.
-_SEPARATED_RUN = (
-    "(?:(?!" + _EDGE + _LONG_RUN + ")[^\u2026]){1," + str(_SEPARATION) + "}+"
-    + _EDGE + _LONG_RUN
-)  # fmt: skip
+#: Security first: after a header, a run that reads as a key's (:data:`_LONG_RUN`) after a gap
+#: (:func:`_gap`) is the key's. Prose between two runs is longer than the gap allows.
+_SEPARATED_RUN = _gap(_EDGE + _LONG_RUN) + _EDGE + _LONG_RUN
 #: Where a key ends after such a separator: its short last run (four characters or more that
 #: read as base64, no word after them), or a run the clip cut. The first only after a run was
 #: taken, where prose after a header would be read as one; the second right after the header
 #: too (:data:`_SEPARATED_CUT`), where the clip cut the key's first run short.
-_SEPARATED_END = (
-    "[^\u2026]{1," + str(_SEPARATION) + "}?" + _EDGE
-    + "(?:(?![a-z/]*+(?![A-Za-z0-9+/=]))(?![A-Z/]*+(?![A-Za-z0-9+/=]))" + _BASE64 + "{4,}+"
-    + "(?![ \\t]++[A-Za-z])"
-    + "|" + _CUT_RUN + ")"
+_LAST_RUN = (
+    "(?:(?![a-z/]*+(?![A-Za-z0-9+/=]))(?![A-Z/]*+(?![A-Za-z0-9+/=]))" + _BASE64 + "{4,}+"
+    + "(?![ \\t]++[A-Za-z])|" + _CUT_RUN + ")"
 )  # fmt: skip
+_SEPARATED_END = _gap(_EDGE + _LAST_RUN) + _EDGE + _LAST_RUN
 #: One more piece of a key after its body: a run after a separator, or a line whatever wraps it.
 _TAIL_ITEM = "(?:" + _SEPARATED_RUN + "|" + _TO_LINE_END + _WRAPPED_LINE + ")"
 _A_SEPARATED_RUN = re.compile(_SEPARATED_RUN)
-_SEPARATED_CUT = "[^\u2026]{1," + str(_SEPARATION) + "}?" + _EDGE + _CUT_RUN
+_SEPARATED_CUT = _gap(_EDGE + _CUT_RUN) + _EDGE + _CUT_RUN
 _A_SEPARATED_END = re.compile(_SEPARATED_END)
 _A_SEPARATED_CUT = re.compile(_SEPARATED_CUT)
 _A_WRAPPED_LINE = re.compile(_WRAPPED_LINE)
@@ -694,17 +707,15 @@ class _Lines:
         where there is none."""
         end = at
         while True:
-            found = _A_SEPARATED_RUN.match(text, end)
-            if found is not None:
-                end = found.span()[1]
-                continue
-            stop = self._wrapped(text, end)
+            stop = _within_the_cap(_A_SEPARATED_RUN.match(text, end), end)
+            if stop is None:
+                stop = self._wrapped(text, end)
             if stop is None:
                 break
             end = stop
-        if end > closes:
-            return _matched_to(_A_SEPARATED_END.match(text, end), end)
-        return _matched_to(_A_SEPARATED_CUT.match(text, end), end)
+        last = _A_SEPARATED_END if end > closes else _A_SEPARATED_CUT
+        stop = _within_the_cap(last.match(text, end), end)
+        return end if stop is None else stop
 
     def _wrapped(self, text: str, at: int) -> int | None:
         """Where the key's line after the line break that ends ``at``'s line ends, or ``None``
@@ -718,6 +729,17 @@ class _Lines:
             found = _A_WRAPPED_LINE.match(text, brk)
             self.read[brk] = found.span()[1] if found is not None else None
         return self.read[brk]
+
+
+def _within_the_cap(found: re.Match[str] | None, at: int) -> int | None:
+    """Where a piece of a key that ``found`` read from ``at`` ends, or ``None`` when there is
+    none, or when its gap holds more than :data:`_GAP_CAP` characters, markup and all. A run is
+    what its match ends in: base64, after a gap whose last character is none."""
+    if found is None:
+        return None
+    piece = found.group()
+    run = len(piece) - len(piece.rstrip(_BASE64_CHARS))
+    return found.span()[1] if len(piece) - run <= _GAP_CAP else None
 
 
 def _matched_to(found: re.Match[str] | None, at: int) -> int:

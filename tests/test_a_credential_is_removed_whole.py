@@ -423,6 +423,15 @@ HOSTILE: dict[str, Callable[[int], str]] = {
         HEADER + ("x" * 25 + "A1b2" * 8) * (size // 57)
     ),
     "pem-headers-each-cut-short": lambda size: (HEADER + "&#10;Ab1\u2026 ") * (size // 42),
+    # reopen 5 (S1, MV2): markup is free in a gap, up to its cap, and an ellipsis is no clip
+    "pem-markup-gaps": lambda size: (
+        HEADER + ('</span><span class="line">' + "A1b2" * 16) * (size // 90)
+    ),
+    "pem-long-markup-after-headers": lambda size: (HEADER + "<span>" * 100 + "x") * (size // 632),
+    "pem-unclosed-tags": lambda size: HEADER + "<" * (size - 31),
+    "pem-overlong-tags": lambda size: HEADER + ("<" + "a" * 300) * (size // 301),
+    "pem-a-sea-of-whitespace": lambda size: HEADER + " " * (size - 63) + "A1b2" * 8,
+    "pem-ellipses-between-runs": lambda size: HEADER + ("\u2026" + "A1b2" * 8) * (size // 33),
 }
 
 #: Four sizes, each four times the one before, the last 2 MB.

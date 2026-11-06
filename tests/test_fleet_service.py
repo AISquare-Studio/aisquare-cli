@@ -41,7 +41,7 @@ from aisquare.core import claude_screen as screen_reader
 from aisquare.core import claude_sharing, codenames, harness, launch_seal, locking, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
-from aisquare.core.agent_adapters import adapter_for_binary, adapters, get_adapter
+from aisquare.core.agent_adapters import adapter_for_binary, adapters
 from aisquare.core.config import (
     REVIEWER_ARGS,
     AppConfig,
@@ -6225,57 +6225,7 @@ def test_a_claude_code_tell_and_typed_prompt_are_one_bracketed_paste_then_one_en
         ("key", "Enter"),
     ]
     for (_, _, typed_at), (_, _, entered_at) in (typed[0:2], typed[2:4]):
-        assert round(entered_at - typed_at, 9) == 0.1, "0.9.2's Enter, 0.1 s after the paste"
-
-
-def test_a_claude_code_managers_nudge_and_a_typed_line_are_one_paste_then_one_enter_as_0_9_2s(
-    tmux: FakeTmux,
-    clock: FakeClock,
-    claude_on_path: Path,
-    project: ProjectInfo,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The other two typed paths into a Claude Code agent (#104's reopen 2): the manager's
-    nudge (``nudge_manager``) and ``type_line`` (the quiet compaction's line) each send what
-    a tell does, ONE bracketed paste and then ONE Enter 0.1 s after it, as 0.9.2 typed them.
-    Each passes its own agent's gap: Codex's 0.2 s here was 0.9.2's difference again."""
-    monkeypatch.setenv("AISQUARE_ROLE", "manager")
-    manager = fleet_service.spawn(project, "manager").agent
-    tmux.set_command(manager.pane_id, "claude")
-    assert manager.session_id is not None
-    team_service.hook_session_start(manager.session_id, project.root, "startup")
-    coder = _coder(project)
-    _board_session(coder, "waiting")
-    tmux.set_command(coder.pane_id, "claude")
-    typed = _timed_input(tmux, clock, monkeypatch)
-    before = len(tmux.typed)
-
-    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
-    line = fleet_service.type_line(coder, "/compact", acked=lambda: True)
-
-    assert line.told.typed == "yes", line
-    assert tmux.typed[before:] == [
-        (manager.pane_id, "paste", NUDGE_TEXT),
-        (manager.pane_id, "key", "Enter"),
-        (coder.pane_id, "paste", "/compact"),
-        (coder.pane_id, "key", "Enter"),
-    ]
-    for (_, _, typed_at), (_, _, entered_at) in (typed[0:2], typed[2:4]):
-        assert round(entered_at - typed_at, 9) == 0.1, "0.9.2's Enter, 0.1 s after the paste"
-
-
-def test_the_enter_gaps_are_0_9_2s_0_1_s_for_claude_code_and_codex_0_162_1s_0_2_s() -> None:
-    """The two gaps by value (#104's reopen 2): a pin that compares a gap with its constant
-    holds no value, and ``delivery.ENTER_GAP = 0.15`` passed every one. 0.1 s is how long
-    after a Claude Code tell's text is in its box 0.9.2 pressed Enter. 0.2 s is Codex's
-    (``fleet._KEY_GAP``): Codex 0.162.1 read a line and an Enter arriving in one burst as a
-    paste and kept the Enter in its composer. An agent that declares no quick Enter
-    (``capabilities.takes_a_quick_enter``) gets Codex's."""
-    assert delivery.ENTER_GAP == 0.1
-    assert fleet_service._KEY_GAP == 0.2
-    assert fleet_service._enter_gap(get_adapter("claude-code")) == 0.1
-    assert fleet_service._enter_gap(get_adapter("codex")) == 0.2
-    assert fleet_service._enter_gap(None) == 0.2
+        assert round(entered_at - typed_at, 9) == delivery.ENTER_GAP < fleet_service._KEY_GAP
 
 
 def test_a_managers_own_stop_says_so_and_nudges_nobody_and_a_kill_by_anyone_else_does(

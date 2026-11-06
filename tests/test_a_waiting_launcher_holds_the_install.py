@@ -36,11 +36,11 @@ ME = f"aisquare launch of claude (pid {os.getpid()})"
 
 
 def test_a_launcher_is_running_while_it_waits_and_leaves_nothing_after() -> None:
-    assert launchers.running() == ()
+    assert launchers.waiting_launchers() == ()
     with launchers.waiting("claude"):
-        assert [launcher.label for launcher in launchers.running()] == [ME]
+        assert [launcher.label for launcher in launchers.waiting_launchers()] == [ME]
         assert lifecycle.running_launchers() == (ME,)
-    assert launchers.running() == ()
+    assert launchers.waiting_launchers() == ()
     assert list(launchers.registry_dir().iterdir()) == [], "its record and its lock are gone"
 
 
@@ -54,7 +54,7 @@ def test_a_record_whose_lock_is_free_is_a_launcher_that_ended(tmp_path: Path) ->
     )
     (folder / "0123456789ab.lock").write_text("", encoding="utf-8")
 
-    assert launchers.running() == ()
+    assert launchers.waiting_launchers() == ()
 
 
 def test_the_uninstall_refuses_while_a_launcher_waits_and_names_it() -> None:
@@ -123,7 +123,7 @@ def test_the_windows_launcher_is_recorded_for_as_long_as_its_agent_runs(
     agent = [
         sys.executable,
         "-c",
-        "from aisquare.core import launchers; print([l.label for l in launchers.running()])",
+        "from aisquare.core import launchers as w; print([x.label for x in w.waiting_launchers()])",
     ]
     previous = signal.getsignal(signal.SIGINT)
     try:
@@ -135,4 +135,4 @@ def test_the_windows_launcher_is_recorded_for_as_long_as_its_agent_runs(
     assert ended.value.code == 0
     named = f"aisquare launch of {Path(sys.executable).stem} (pid {os.getpid()})"
     assert repr([named]) in capfd.readouterr().out
-    assert launchers.running() == (), "gone once its agent has ended"
+    assert launchers.waiting_launchers() == (), "gone once its agent has ended"

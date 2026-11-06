@@ -97,7 +97,7 @@ def _read(record: Path) -> Launcher | None:
         return None
 
 
-def running() -> tuple[Launcher, ...]:
+def waiting_launchers() -> tuple[Launcher, ...]:
     """The launchers waiting on their agents on this home, oldest first. Read only."""
     folder = registry_dir()
     try:

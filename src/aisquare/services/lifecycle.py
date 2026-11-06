@@ -2190,7 +2190,7 @@ def running_launchers() -> tuple[str, ...]:
     Read only, as :func:`running_asqs` is."""
     from aisquare.core import launchers
 
-    return tuple(launcher.label for launcher in launchers.running())
+    return tuple(launcher.label for launcher in launchers.waiting_launchers())
 
 
 _LAUNCHER_COST = {

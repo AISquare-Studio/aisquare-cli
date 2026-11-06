@@ -136,6 +136,11 @@ class WrongAgent(NoSuchAccount):
     """A reference names an account of another agent than the one launching."""
 
 
+class AmbiguousAccount(NoSuchAccount):
+    """A slot number two agents' accounts hold (0.9.2, after a rollback, numbers its own
+    accounts by Claude Code's slots alone): refused, never one picked silently (#100)."""
+
+
 def _now() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -334,14 +339,31 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     # number, so an upgrade read the new account at the removed one's place, rank 1 and the
     # machine default among them (r41 of #113, finding 1). Both rows carry their making time
     # on every version; the ranks their writing time from this one on.
+    #
+    # Keyed by agent and slot: a number two agents' accounts hold (0.9.2, which numbers by
+    # Claude Code's slots alone, added one in a Codex account's number) has its rank read as
+    # the older account's, the one it was written for, and the newer one is unranked, last,
+    # so the machine default never moves to it (seq 11271, #100).
     ranks, written = store.account_ranks_written()
-    made = {record.slot: record.created_at for record in store.claude_accounts()}
+    holders: dict[int, list[tuple[datetime, str]]] = {}
     for agent in core.account_agents():
-        if not core.kind(agent).legacy_slots:
-            made.update((record.slot, record.created_at) for record in store.agent_accounts(agent))
-    orphans = {
-        slot for slot in ranks if slot not in made or (written is not None and made[slot] > written)
-    }
+        rows = (
+            store.claude_accounts()
+            if core.kind(agent).legacy_slots
+            else store.agent_accounts(agent)
+        )
+        for record in rows:
+            holders.setdefault(record.slot, []).append((record.created_at, agent))
+    unranked: set[tuple[str, int]] = set()
+    for slot in ranks:
+        found = sorted(holders.get(slot, []))
+        if not found:  # no row behind the rank: any account in the number is a new one
+            unranked.update((agent, slot) for agent in core.account_agents())
+            continue
+        if written is not None:
+            unranked.update((agent, slot) for at, agent in found if at > written)
+            found = [(at, agent) for at, agent in found if at <= written]
+        unranked.update((agent, slot) for _, agent in found[1:])
     arranged: list[ClaudeAccount] = []
     for agent in core.account_agents():
         mine = [a for a in listed if a.agent == agent]
@@ -349,7 +371,7 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
             arranged.extend(_arranged_claude(store, mine))
         else:
             arranged.extend(_arranged_agent(store, agent, mine))
-    return _ranked(store, arranged, promoted, fresh=orphans)
+    return _ranked(store, arranged, promoted, unranked=unranked)
 
 
 def _promote_retired_defaults(store: ContextStore) -> list[int]:
@@ -387,7 +409,7 @@ def _ranked(
     arranged: Sequence[ClaudeAccount],
     promoted: Sequence[int] = (),
     *,
-    fresh: Iterable[int] = (),
+    unranked: Iterable[tuple[str, int]] = (),
 ) -> list[ClaudeAccount]:
     """``arranged`` (each agent's slots in its own order) in the one order across agents.
 
@@ -407,18 +429,22 @@ def _ranked(
     an older build writes when it reorders a store it shares with this one, and that reorder
     is dropped, not merged (review r23 of #113, nit). The ranks are the one order.
 
-    ``fresh`` are the slots ranked with no registry row behind the rank (:func:`_arranged`):
-    an orphan, a removed slot's that :func:`forget_arrangement` left behind before it
-    dropped ranks too, and is not read. Read, the next ``accounts add`` took the removed
-    slot's number and its place, rank 1 and the machine default among them, where 0.9.2 put
-    a new account last (review r40 of #113, finding 2).
+    ``unranked`` are the accounts, by agent and slot, whose number's rank is not theirs
+    (:func:`_arranged`): one whose row was made after the ranks were written, an account a
+    build that keeps no ranks added in a removed one's number (review r40 of #113, finding 2;
+    r41, finding 1), and the newer of two agents' accounts in one number (#100). Each goes
+    last, after every ranked account, where 0.9.2 put a new account; read by its number, it
+    would have taken the other's place, rank 1 and the machine default among them.
     """
     stored = store.account_ranks()
-    orphans = set(fresh)
-    ranks = {slot: rank for slot, rank in stored.items() if slot not in orphans}
+    skip = set(unranked)
+
+    def keeps_its_rank(account: ClaudeAccount) -> bool:
+        return account.slot in stored and (account.agent, account.slot) not in skip
+
     if stored:
-        known = sorted((a for a in arranged if a.slot in ranks), key=lambda a: ranks[a.slot])
-        order = [*known, *(a for a in arranged if a.slot not in ranks)]
+        known = sorted((a for a in arranged if keeps_its_rank(a)), key=lambda a: stored[a.slot])
+        order = [*known, *(a for a in arranged if not keeps_its_rank(a))]
         for slot in promoted:
             mover = next((a for a in order if a.slot == slot), None)
             if mover is None:
@@ -430,7 +456,8 @@ def _ranked(
         first = default_agent()
         order = sorted(arranged, key=lambda a: a.agent != first)
     slots = [a.slot for a in order]
-    if stored != {slot: rank for rank, slot in enumerate(slots, start=1)}:
+    # The first mention of a number is its rank, as `rank_accounts` writes it.
+    if stored != {slot: rank for rank, slot in enumerate(dict.fromkeys(slots), start=1)}:
         store.rank_accounts(slots)
     return [a.model_copy(update={"position": rank}) for rank, a in enumerate(order, start=1)]
 
@@ -638,7 +665,12 @@ def _find_in(
     whose = _whose(agent, accounts)
     number = core.slot_number(text)
     if number is not None:
-        account = next((a for a in accounts if a.slot == number), None)
+        matches = [a for a in accounts if a.slot == number]
+        if agent is not None and len(matches) > 1:
+            matches = [a for a in matches if a.agent == agent] or matches
+        if len(matches) > 1:
+            raise AmbiguousAccount(_two_in_one_number(text, matches))
+        account = matches[0] if matches else None
         if account is None:
             # An agent's plain home that is not one of the accounts yet
             # (``core.plain_home_counts``), named by its number: the home it names.
@@ -661,6 +693,23 @@ def _find_in(
     raise NoSuchAccount(
         f"no {whose} account is called {text!r} — not a slot, an alias or a signed-in email"
         f"{detail}; see: aisquare accounts"
+    )
+
+
+def _two_in_one_number(number: str, accounts: Sequence[ClaudeAccount]) -> str:
+    """Why a bare number is refused where two agents' accounts hold it, naming each and how
+    to name one (#100)."""
+
+    def named_for_the_refusal(account: ClaudeAccount) -> str:
+        identity = core.identity(account)
+        who = account.alias or (identity.email if identity is not None else "not signed in")
+        return f"{core.agent_label(account.agent)}'s account {account.slot} ({who})"
+
+    each = " and ".join(named_for_the_refusal(account) for account in accounts)
+    return (
+        f"slot {number} is two accounts, {each}: 0.9.2, used after this release, numbers its "
+        "own accounts by Claude Code's alone. Name one by its alias or the email it is signed "
+        "in as, or with --agent where the command takes it; see: aisquare accounts"
     )
 
 
@@ -1252,28 +1301,37 @@ def forget_arrangement(slot: int, account: ClaudeAccount | None = None) -> None:
     project default pointing at a missing slot is reported by ``choose`` and
     ``doctor`` rather than silently honoured.
     """
+    # Two agents' accounts can hold one number (0.9.2 added one in a Codex account's, #100):
+    # removing one leaves the other's row, its project defaults and, while it is listed, its
+    # rank and readings.
+    agents = [account.agent] if account is not None else list(core.account_agents())
+    still = account is not None and any(
+        each.slot == slot and each.agent != account.agent for each in core.list_accounts()
+    )
     with contextlib.suppress(sqlite3.Error), store_session() as store:
-        store.delete_claude_account(slot)
+        if any(core.kind(agent).legacy_slots for agent in agents):
+            store.delete_claude_account(slot)
         # Its place in the one order too: left, the next `accounts add` took this number and
         # this place with it (review r40 of #113, finding 2).
         ranks = store.account_ranks()
-        if slot in ranks:
+        if slot in ranks and not still:
             store.rank_accounts(
                 [kept for kept in sorted(ranks, key=ranks.__getitem__) if kept != slot]
             )
-        for agent in core.account_agents():
+        for agent in agents:
             if not core.kind(agent).legacy_slots:
                 store.delete_agent_accounts(agent, [slot])
             key = project_account_key(agent)
             for project_id, value in store.project_settings(key).items():
                 if value == str(slot):
                     store.clear_project_setting(project_id, key)
-        # The readings too: keyed on the slot alone, they would rate the next
-        # occupant's first window against this login's history (third round).
-        store.delete_usage_samples(slot)
-        store.set_ui_state(_BACKOFF_KEY.format(slot=slot), None)  # and its wait (F1 of #400)
-        store.set_ui_state(_FAMILY_KEY.format(slot=slot), None)  # and its family weeks
-        store.set_ui_state(_TOKEN_REFRESH_KEY.format(slot=slot), None)  # and a token's refresh
+        if not still:
+            # The readings too: keyed on the slot alone, they would rate the next
+            # occupant's first window against this login's history (third round).
+            store.delete_usage_samples(slot)
+            store.set_ui_state(_BACKOFF_KEY.format(slot=slot), None)  # its wait (F1 of #400)
+            store.set_ui_state(_FAMILY_KEY.format(slot=slot), None)  # and its family weeks
+            store.set_ui_state(_TOKEN_REFRESH_KEY.format(slot=slot), None)  # a token's refresh
         # And the login last seen in its Keychain item: the next occupant's is its own.
         gone = account if account is not None else core.find_account(slot)
         seen = _seen_key(gone) if gone is not None else None
@@ -4539,6 +4597,10 @@ def account_agent(ref: str | None, *, role: str | None = None) -> str | None:
         accounts = _read_arranged()[0] if paths.db_path().exists() else core.list_accounts()
         account = _resolve_in(accounts, wanted)
         return None if ref is None and account.disabled else account.agent
+    except AmbiguousAccount:
+        # A number two agents' accounts hold names no agent: the launch says so rather than
+        # run whichever account a later rung's agent has in it (#100).
+        raise
     except Exception:
         return None
 

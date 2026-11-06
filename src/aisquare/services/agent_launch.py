@@ -322,10 +322,15 @@ def resolve(
 
 
 def account_agent(account: str | None, role: str) -> str | None:
-    """The agent of the account a launch names (``claude_accounts.account_agent``)."""
+    """The agent of the account a launch names (``claude_accounts.account_agent``). A number
+    two agents' accounts hold, with nothing else naming the agent, refuses the launch as
+    every other ``resolve`` refusal does (``ValueError``), naming both (#100)."""
     from aisquare.services import claude_accounts
 
-    return claude_accounts.account_agent(account, role=role)
+    try:
+        return claude_accounts.account_agent(account, role=role)
+    except claude_accounts.AmbiguousAccount as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def model_owner(model: str | None) -> str | None:

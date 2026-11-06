@@ -590,7 +590,48 @@ def create_account(agent: str = AGENT) -> ClaudeAccount:
     if not kind(agent).legacy_slots:
         marker["agent"] = agent  # Claude Code's slots' markers have always gone without
     (account.config_dir / MARKER).write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
+    _reserve_number(account)
     return account
+
+
+def _legacy_number_paths(account: ClaudeAccount) -> list[Path]:
+    """Where a release that numbers by the legacy agent's slots alone (0.9.2:
+    ``AgentAccounts.legacy_slots``) would look for ``account``'s number: ``<its root>/<n>``,
+    for an account of another agent; none for the legacy agent's own."""
+    if kind(account.agent).legacy_slots:
+        return []
+    return [
+        accounts_root(agent) / str(account.slot)
+        for agent in account_agents()
+        if kind(agent).legacy_slots
+    ]
+
+
+def _reserve_number(account: ClaudeAccount) -> None:
+    """Keep ``account``'s number from an account 0.9.2 adds after a rollback: its
+    ``next_free_slot`` takes the lowest number with no ``claude-accounts/<n>``, whatever is
+    in ``codex-accounts``, and the two accounts then shared it (seq 11271, #100). A small
+    FILE there, which no release lists (both list folders alone) and 0.9.2 reads as taken.
+    Best effort: an account is added all the same, and the order reads a shared number."""
+    for path in _legacy_number_paths(account):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not os.path.lexists(path):
+                body = {"slot": account.slot, "agent": account.agent, "reserved": True}
+                path.write_text(json.dumps(body) + "\n", encoding="utf-8")
+        except OSError:
+            continue
+
+
+def _release_number(account: ClaudeAccount) -> None:
+    """Free the number :func:`_reserve_number` kept, once its account is gone: the file
+    alone, never a folder (an account 0.9.2 already added in it)."""
+    for path in _legacy_number_paths(account):
+        try:
+            if path.is_file() and not path.is_symlink():
+                path.unlink()
+        except OSError:
+            continue
 
 
 def remove_account(account: ClaudeAccount) -> Path:
@@ -613,6 +654,7 @@ def remove_account(account: ClaudeAccount) -> Path:
     account.config_dir.rename(target)
     if account.tmp_dir is not None:
         shutil.rmtree(account.tmp_dir, ignore_errors=True)
+    _release_number(account)
     return target
 
 
@@ -623,6 +665,7 @@ def discard_account(account: ClaudeAccount) -> None:
     shutil.rmtree(account.config_dir, ignore_errors=True)
     if account.tmp_dir is not None:
         shutil.rmtree(account.tmp_dir, ignore_errors=True)
+    _release_number(account)
 
 
 # --- what Claude Code wrote there ---------------------------------------------------

@@ -528,11 +528,31 @@ class UpgradePlan:
             return None
         if install_route.is_newer(FIRST_ACCOUNT_RANK, self.target) is not True:
             return None
-        return (
+        said = (
             f"{self.target} opens this home's store as it is and keeps every row, agent and "
             f"setting; but an account order or default you set while on {self.target} is not "
             "kept when you upgrade again, and an account you add there is ranked last"
         )
+        # That release numbers its own accounts by the legacy agent's slots alone, so one it
+        # adds may take another agent's account's number (seq 11271, #100).
+        from aisquare.core import claude_accounts as accounts_core
+
+        try:
+            others = sorted(
+                {
+                    accounts_core.agent_label(account.agent)
+                    for account in accounts_core.all_managed_accounts()
+                    if not accounts_core.kind(account.agent).legacy_slots
+                }
+            )
+        except OSError:
+            others = []
+        if others:
+            said += (
+                f"; it may give it the number of a {' or '.join(others)} account, which this "
+                "release then lists last and asks which you mean"
+            )
+        return said
 
     @property
     def command(self) -> str:

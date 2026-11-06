@@ -153,16 +153,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
       `token_endpoint`, `token_endpoint_auth_method`, Claude Code's `apiKeyHelper`), so a
       credential stored under one of those names is kept;
     - a package's version or spec as the whole value (`^4.24.5`, `beta`, `npm:pkg@^1`,
-      `github:owner/repo#ref`, `file:../path`, a git URL, an http(s) tarball or `#ref`
-      URL), so a password shaped exactly so is kept;
+      `github:owner/repo#ref`, `file:../path`, a git URL, an http(s) tarball or `#ref` URL
+      with no user in it), so a password shaped exactly so is kept;
     - a placeholder, a template's bare reference, a boolean or null (`<YOUR_API_KEY>`,
       `</s>`, `[CLS]`, `${localEnv:GITHUB_TOKEN}`, `{{access_token}}`, `true`, `null`), so
       a password written exactly so is kept, while a reference with a default
       (`${VAR:-…}`) is removed.
   - Second, a private key with no footer (`head -3 id_rsa`, also as `cat -n`, `cat -A`,
-    `grep -n`, `git blame`, `journalctl` or Claude Code's Read tool print its lines) is
-    removed with its body, while the text after it, and a header with no key after it, are
-    kept.
+    `grep -n`, `git blame`, `journalctl` or Claude Code's Read tool print its lines, or
+    with its lines joined by `&#10;` or HTML tags) is removed with its body, while the
+    text after it, and a header with no key after it, are kept.
 - The Spawn dialog has an *Agent* field (blank: the role's agent), and its *Model* and
   *Effort* follow it. *Settings* shows each role's agent, account, permission and flags.
 - `--as` takes a fleet label. A manager's `state.md` is read only as a regular file of at

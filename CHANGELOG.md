@@ -131,11 +131,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `persona import --engine manager` gives Claude Code the strict form of its answer's
   schema (every field required, no other).
 - **`fleet spawn --worktree` runs the repository's hooks**, as 0.9.2 did, where no Codex
-  agent has run in the project or could write to the repository. Where one has or could,
-  and for a Codex spawn, the worktree is made with none of the repository's hooks: any of
-  them (a script `.git/hooks` links into the tree, a husky, lefthook or pre-commit config)
-  may be one that agent changed, and it would run outside its sandbox. The spawn says so
-  in one line.
+  agent has run in the project or in a folder above it (your home folder included) and
+  none could write to the repository. Where one has or could, and for a Codex spawn, the
+  worktree is made with none of the repository's hooks: any of them (a script
+  `.git/hooks` links into the tree, a husky, lefthook or pre-commit config) may be one that
+  agent changed, and it would run outside its sandbox. The spawn says so in one line.
 - **aisquare remembers every folder a Codex agent could write**: where it was launched or
   started a session, each folder it was given with `--add-dir`, and each writable root its
   config names. A repository inside one of them, or holding one, keeps its hooks off for
@@ -180,7 +180,13 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     `<binary> -p`, and says *Claude Code gave no JSON answer*, where it said *the answer
     was not JSON*. The sidebar's and info line's `#slot·%` is the window that limits: the
     week's when it is fuller.
+  - `agents list`, `scan` and `status` gain an *INTEGRATION* column: how far the agent's
+    hooks are set up here. Claude Code's reads *configured* or *not configured*, or
+    *unreadable* where its settings file cannot be read, with the reason on a line under
+    the table.
   - `--json` gains keys and loses none: `agent`, `detail` and `installs` in `accounts`;
+    `readiness`, `detail` and `route` in `agents list`, `scan` and `status`, and
+    `readiness` and `detail` in `agents connect`;
     `agent` and `exit_command` in `fleet ls`; a session's `agent` and `native_session_id`
     in `fleet ls` and `board`; `agent` in `upgrade`'s and `uninstall`'s rows (and `plugin`
     in uninstall's plugin rows) and in `persona export`; `killed` in `fleet stop`;

@@ -173,6 +173,9 @@ hooks reach it from its home alone, Codex's: a fleet spawn, restart or switch in
 trusted, into a slot aisquare made, and refuses a home the user owns where they are not
 (never connected, or since `agents disconnect`), before anything is stopped; without it a launch writes nothing in its home, Claude Code's),
 `stop_reason_as_prompt`,
+`session_end_closes_turn` (its `SessionEnd` closes the newest open turn, Codex's, which fires
+no `Stop` for a failed turn; without it, Claude Code's, a turn with no `Stop` stays open, as
+the store's rule and 0.9.2 keep an interrupted one),
 `limits_in_transcript` (no turn-failed event: the accounts slot's `limit_from_transcript` and `failed_turn` read it), `ambient_first_run`,
 `reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),
 `one_press_exits` (the keys, as the agent is sent them past `key_spellings`, that end it with

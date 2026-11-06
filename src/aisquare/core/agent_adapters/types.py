@@ -316,6 +316,13 @@ class AgentCapabilities:
     stop_reason_as_prompt: bool = False
     """A Stop hook's ``block`` reason comes back as the next ``UserPromptSubmit`` (Codex),
     which is then recorded as a continuation, not as the human's prompt."""
+    session_end_closes_turn: bool = False
+    """Its ``SessionEnd`` closes the session's newest open turn (``metrics.close_turn``,
+    ``services.agent_events``): Codex's, which fires no ``Stop`` for a turn that failed
+    (``limits_in_transcript``). Without it a turn that saw no ``Stop`` stays open and out of
+    the wall-clock figures, ``ContextStore.close_turn``'s rule, as 0.9.2's ``session-end``
+    left Claude Code's: one the human interrupted (Esc fires no ``Stop`` there) was given its
+    session's end as a made-up end time (review r40 of #113, finding 4)."""
     limits_in_transcript: bool = False
     """No turn-failed event: a usage limit is read off the end of the session's
     transcript (``accounts.limit_from_transcript``) when a turn stops, is interrupted

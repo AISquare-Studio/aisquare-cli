@@ -226,7 +226,8 @@ def _dispatch(
         hooks.session_ended(
             cwd, session_id=session_id, reason=event.reason, transcript_path=usage, agent=adapter.id
         )
-        metrics.close_turn(session_id)
+        if adapter.capabilities.session_end_closes_turn:
+            metrics.close_turn(session_id)
     elif event.kind == "turn_failed":
         hooks.turn_failed(
             session_id=session_id,

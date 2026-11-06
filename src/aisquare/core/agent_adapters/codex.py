@@ -760,6 +760,7 @@ class CodexAdapter:
         # Its hooks are its home's `hooks.json` alone: started without, it runs blind.
         hooks_before_launch=True,
         stop_reason_as_prompt=True,
+        session_end_closes_turn=True,
         limits_in_transcript=True,
         native_telemetry=True,
         positional_prompt=True,

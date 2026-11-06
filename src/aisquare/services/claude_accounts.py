@@ -321,14 +321,19 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     """
     promoted = _promote_retired_defaults(store)
     listed = core.list_accounts()
+    registered = {record.slot for record in store.claude_accounts()}
     arranged: list[ClaudeAccount] = []
     for agent in core.account_agents():
         mine = [a for a in listed if a.agent == agent]
         if core.kind(agent).legacy_slots:
             arranged.extend(_arranged_claude(store, mine))
         else:
+            registered.update(record.slot for record in store.agent_accounts(agent))
             arranged.extend(_arranged_agent(store, agent, mine))
-    return _ranked(store, arranged, promoted)
+    # A slot registered only now is new: a rank it has is a removed slot's, whose number it
+    # took (review r40 of #113, finding 2).
+    fresh = {account.slot for account in listed} - registered
+    return _ranked(store, arranged, promoted, fresh=fresh)
 
 
 def _promote_retired_defaults(store: ContextStore) -> list[int]:
@@ -362,7 +367,11 @@ def default_agent() -> str:
 
 
 def _ranked(
-    store: ContextStore, arranged: Sequence[ClaudeAccount], promoted: Sequence[int] = ()
+    store: ContextStore,
+    arranged: Sequence[ClaudeAccount],
+    promoted: Sequence[int] = (),
+    *,
+    fresh: Iterable[int] = (),
 ) -> list[ClaudeAccount]:
     """``arranged`` (each agent's slots in its own order) in the one order across agents.
 
@@ -381,9 +390,17 @@ def _ranked(
     Once any rank exists the per-agent ``position`` columns are not read again: they are what
     an older build writes when it reorders a store it shares with this one, and that reorder
     is dropped, not merged (review r23 of #113, nit). The ranks are the one order.
+
+    ``fresh`` are the slots registered by this read (:func:`_arranged`): a rank one of them
+    has is an orphan, a removed slot's that :func:`forget_arrangement` left behind before it
+    dropped ranks too, and is not read. Read, the next ``accounts add`` took the removed
+    slot's number and its place, rank 1 and the machine default among them, where 0.9.2 put
+    a new account last (review r40 of #113, finding 2).
     """
-    ranks = store.account_ranks()
-    if ranks:
+    stored = store.account_ranks()
+    orphans = set(fresh)
+    ranks = {slot: rank for slot, rank in stored.items() if slot not in orphans}
+    if stored:
         known = sorted((a for a in arranged if a.slot in ranks), key=lambda a: ranks[a.slot])
         order = [*known, *(a for a in arranged if a.slot not in ranks)]
         for slot in promoted:
@@ -397,7 +414,7 @@ def _ranked(
         first = default_agent()
         order = sorted(arranged, key=lambda a: a.agent != first)
     slots = [a.slot for a in order]
-    if ranks != {slot: rank for rank, slot in enumerate(slots, start=1)}:
+    if stored != {slot: rank for rank, slot in enumerate(slots, start=1)}:
         store.rank_accounts(slots)
     return [a.model_copy(update={"position": rank}) for rank, a in enumerate(order, start=1)]
 
@@ -1221,6 +1238,13 @@ def forget_arrangement(slot: int, account: ClaudeAccount | None = None) -> None:
     """
     with contextlib.suppress(sqlite3.Error), store_session() as store:
         store.delete_claude_account(slot)
+        # Its place in the one order too: left, the next `accounts add` took this number and
+        # this place with it (review r40 of #113, finding 2).
+        ranks = store.account_ranks()
+        if slot in ranks:
+            store.rank_accounts(
+                [kept for kept in sorted(ranks, key=ranks.__getitem__) if kept != slot]
+            )
         for agent in core.account_agents():
             if not core.kind(agent).legacy_slots:
                 store.delete_agent_accounts(agent, [slot])

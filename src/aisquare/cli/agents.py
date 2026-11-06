@@ -257,18 +257,18 @@ def _list_roots(name: str | None) -> None:
         return
     console = stdout_console()
     if not found and name is not None:
+        # By its display name, as `agents list` says it ("for Cursor"), and the others' roots
+        # said in a sentence of their own (R9g2).
+        spec = agent_core.spec(name)
+        label = spec.label if spec is not None else name
         others = len(every)
-        also = (
-            f" ({others} {'is' if others == 1 else 'are'}, of other agents: "
-            "aisquare agents status --roots)"
-            if others
-            else ""
-        )
-        from aisquare.core.agent_adapters import recorded_adapter
-
-        adapter = recorded_adapter(name)
-        label = adapter.label if adapter is not None else name
-        console.print(f"no folder is recorded for {label}{also}", markup=False)
+        if others == 1:
+            also = " 1 is recorded for another agent: aisquare agents status --roots"
+        elif others:
+            also = f" {others} are recorded for other agents: aisquare agents status --roots"
+        else:
+            also = ""
+        console.print(f"no folder is recorded for {label}.{also}", markup=False)
         return
     if not found:
         console.print("no folder is recorded: every fleet worktree runs its repository's hooks")

@@ -630,13 +630,15 @@ def test_status_roots_of_an_agent_with_none_says_so_of_that_agent_alone(
         _root(tmp_path / name)
 
     none = _cli("agents", "status", "claude-code", "--roots")
+    cursor = _cli("agents", "status", "cursor", "--roots")
     unknown = _cli("agents", "status", "nosuch", "--roots")
     without = _cli("agents", "status", "nosuch")
 
     assert none.exit_code == 0, none.output
-    assert " ".join(none.stdout.split()) == (
-        "no folder is recorded for Claude Code (2 are, of other agents: "
-        "aisquare agents status --roots)"
+    others = "2 are recorded for other agents: aisquare agents status --roots"
+    assert " ".join(none.stdout.split()) == f"no folder is recorded for Claude Code. {others}"
+    assert " ".join(cursor.stdout.split()) == f"no folder is recorded for Cursor. {others}", (
+        "by its display name (R9g2)"
     )
     assert (
         (unknown.exit_code, unknown.output)
@@ -829,3 +831,51 @@ def test_a_typed_path_is_resolved_before_it_is_matched(
         assert result.exit_code == 0, (typed, result.output)
         with store_session() as store:
             assert recorded not in sandbox_roots.recorded(store), typed
+
+
+# --- R9g2 (#104, seq 11334): the --json forget key and a wrong NAME on such a root, pinned -------
+
+
+@pytest.mark.parametrize("agent", ["gemini-cli", ""], ids=["unknown-agent", "unreadable"])
+def test_the_json_forget_key_is_the_command_that_forgets_the_root(
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    agent: str,
+) -> None:
+    """MN: `--json agents status --roots`'s "forget" names the agent the forget takes, never the
+    one recorded there, and that command, pasted, forgets the root."""
+    from aisquare.core.shell_line import command_line
+
+    root = _root(tmp_path / "work", agent=agent)
+    argv = ["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)]
+
+    [entry] = json.loads(_cli("--json", "agents", "status", "--roots").stdout)
+    pasted = _cli(*argv[1:], "--yes")
+
+    assert entry["forget"] == command_line(argv), entry
+    assert entry["agent"] == (agent or None), "the record says what it holds"
+    assert pasted.exit_code == 0, pasted.output
+    with store_session() as store:
+        assert sandbox_roots.recorded(store) == {}
+
+
+@pytest.mark.parametrize("agent", ["gemini-cli", ""], ids=["unknown-agent", "unreadable"])
+def test_a_wrong_name_on_a_root_no_agent_of_this_release_recorded_is_refused(
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    agent: str,
+) -> None:
+    """MM: such a root is forgotten under the agent the line and the list name, and no other:
+    another NAME is refused with wrong_agent, and nothing is forgotten."""
+    root = _root(tmp_path / "work", agent=agent)
+
+    text = _cli("agents", "disconnect", "claude-code", "--forget-root", str(root), "--yes")
+    as_json = _cli(
+        "--json", "agents", "disconnect", "claude-code", "--forget-root", str(root), "--yes"
+    )
+
+    said = " ".join(text.output.split())
+    assert text.exit_code == 1 and "forget it with aisquare agents disconnect codex" in said, said
+    assert json.loads(as_json.stdout)["error"] == "wrong_agent", as_json.stdout
+    with store_session() as store:
+        assert root in sandbox_roots.recorded(store), "nothing forgotten"

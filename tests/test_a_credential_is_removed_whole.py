@@ -242,8 +242,8 @@ def test_a_block_is_one_marker_whatever_it_holds_inside() -> None:
 
 def _as_the_regular_expression_would(text: str) -> str:
     """``PEM_BLOCK.sub`` over ``text``, and then each header it left (one with no footer after
-    it) with its key's body (``_PEM_HEADER_ALONE``): the rule as it was, with a block cut short
-    taken to the end of its body."""
+    it) that has a key's body after it, with the body (``_PEM_HEADER_ALONE``): the rule as it
+    was, with a block cut short taken to the end of its body, and a header alone kept."""
     return redaction._PEM_HEADER_ALONE.sub(MARKER, PEM_BLOCK.sub(MARKER, text))
 
 
@@ -282,7 +282,8 @@ def test_the_linear_pass_removes_what_the_regular_expression_did(seed: int) -> N
 @pytest.mark.parametrize(
     ("text", "shown"),
     [
-        (HEADER, MARKER),
+        (HEADER, HEADER),  # no body after it: nothing secret, kept as 0.9.2 kept it (H1)
+        (f"{HEADER}\n", f"{HEADER}\n"),
         (f"{HEADER}\nMIIEowIBAAKCAQEA", MARKER),
         (f"head -3 id_rsa\n{HEADER}\nMIIEowIBAAKCAQEA\nQ29kZSBpcw==", f"head -3 id_rsa\n{MARKER}"),
         (f"{FOOTER} then {HEADER}\nMIIE", f"{FOOTER} then {MARKER}"),
@@ -290,7 +291,7 @@ def test_the_linear_pass_removes_what_the_regular_expression_did(seed: int) -> N
             f"{HEADER}\na\n{FOOTER}\nkeep {HEADER}\nb\nand this",
             f"{MARKER}\nkeep {MARKER}\nand this",
         ),
-        (f"{HEADER}\n{HEADER}\nMIIE", f"{MARKER}\n{MARKER}"),
+        (f"{HEADER}\n{HEADER}\nMIIE", f"{HEADER}\n{MARKER}"),
         ("-----BEGIN PRIVATE KEY-----\nMIIE", MARKER),
         ("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIE", MARKER),
     ],

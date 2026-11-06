@@ -5,7 +5,8 @@ the string value under any quoted name that held a credential's word (``"max_tok
 ``"auth_token_url": "https://…"``), and the rest of the text after a private-key header with no
 footer. Now a quoted name takes its value only when it IS a credential's name, and a header with
 no footer takes the key's body after it and no more. Removing less than the credential is a leak,
-so each pin here goes both ways, and every credential the rule took before is still taken.
+so each pin here goes both ways, and every credential the rule took before is still taken. A
+header with no body after it holds nothing secret, and is kept as 0.9.2 kept it (H1).
 """
 
 from __future__ import annotations
@@ -169,24 +170,27 @@ def test_a_credential_name_with_a_value_that_is_not_a_version_is_still_taken() -
     [
         (
             f"why does grep '{HEADER}' match nothing in my repo? Here is the output: none",
-            f"why does grep '{MARKER}' match nothing in my repo? Here is the output: none",
+            f"why does grep '{HEADER}' match nothing in my repo? Here is the output: none",
         ),
-        (f"{HEADER} is the first line of the file", f"{MARKER} is the first line of the file"),
-        (f"what is {HEADER} here", f"what is {MARKER} here"),
+        (f"{HEADER} is the first line of the file", f"{HEADER} is the first line of the file"),
+        (f"what is {HEADER} here", f"what is {HEADER} here"),
+        (HEADER, HEADER),
+        (f"{HEADER}\n\nthen what?", f"{HEADER}\n\nthen what?"),
         (
             f"{HEADER}\n{BODY[0]}\n\nWhat does this mean? It fails.",
             f"{MARKER}\n\nWhat does this mean? It fails.",
         ),
         (f"{HEADER}\n{BODY[0]}\nthen prose after it", f"{MARKER}\nthen prose after it"),
         (f"KEY={HEADER} {BODY[0]} end of it", f"KEY={MARKER} end of it"),
-        (f"./docs/keys.md:3:{HEADER}\n./b.sh:12:if", f"./docs/keys.md:3:{MARKER}\n./b.sh:12:if"),
+        (f"./docs/keys.md:3:{HEADER}\n./b.sh:12:if", f"./docs/keys.md:3:{HEADER}\n./b.sh:12:if"),
     ],
 )
 def test_a_header_with_no_footer_loses_its_body_and_the_prose_after_it_stays(
     text: str, shown: str
 ) -> None:
-    """The ruling's example and its kind: a header quoted, grepped for or named in a sentence is
-    removed alone, and a key's lines after it go with it, never the words after them."""
+    """The ruling's example and its kind: a header quoted, grepped for or named in a sentence has
+    no body after it, holds nothing secret, and is kept as 0.9.2 kept it (H1). A key's lines after
+    a header go with it, and never the words after them."""
     assert _both(text) == (shown, shown)
 
 
@@ -260,7 +264,8 @@ def test_a_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
 ) -> None:
     """``core.insights`` clips a prompt to 8,000 characters and THEN scrubs it, so the scrub sees a
     key cut wherever the clip fell, and the clip's ``…`` after it. At every cut from the end of
-    the header to the footer, nothing but the marker is left of the key."""
+    the header to the footer, nothing but the marker is left of the key, or the header alone where
+    the cut left no byte of the body after it."""
     monkeypatch.setattr(insights, "redaction_level", lambda: RedactionLevel.standard)
     joint = {
         "lines": "\n",
@@ -280,7 +285,7 @@ def test_a_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
 
         assert shown.endswith(mark), cut
         # what may be left: the padding, a separator, and half of an escaped one (``\``)
-        left = shown[: -len(mark)].replace(MARKER, "").replace(joint, "")
+        left = shown[: -len(mark)].replace(MARKER, "").replace(HEADER, "").replace(joint, "")
         assert set(left) <= {"#", "\n", "\r", " ", "\\"}, (layout, cut, shown[-150:])
 
 
@@ -289,8 +294,8 @@ def test_a_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
 #: What ``redact`` makes of each entry of the corpus that it changes, at ``standard``; every other
 #: entry comes back as it was given. Each line names how 0.9.2 differs:
 #:   = 0.9.2 makes the same of it (an unquoted name, read as 0.9.2 read it);
-#:   C a credential 0.9.2 missed;
-#:   H a private-key header with no key after it, removed alone (0.9.2 needed a footer).
+#:   C a credential 0.9.2 missed.
+#: A private-key header with no key after it (``grep for headers``) reads as 0.9.2's (H1).
 CHANGED = {
     # C: an access token in an OAuth token response
     "oauth token response": (
@@ -315,11 +320,6 @@ CHANGED = {
     "env grep": f"$ env | grep -i token\nGITHUB_TOKEN={MARKER}\nNO_TOKENS=1",  # =
     # C: a key's first lines, which 0.9.2 sent whole for want of a footer
     "head of a key": f"$ head -3 ~/.ssh/id_rsa\n{MARKER}\n$ why is this key rejected?",
-    # H
-    "grep for headers": (
-        f"$ grep -rn 'BEGIN RSA PRIVATE KEY' .\n./docs/keys.md:3:{MARKER}\n"
-        f"./scripts/check.sh:12:if grep -q '{MARKER}' \"$f\"; then"
-    ),
     "psql url": f'$ psql "postgresql://{MARKER}@db.internal:5432/app"',  # =
     "npmrc": f"Here is my .npmrc: //registry.npmjs.org/:_authToken={MARKER}",  # =
     # C: values under credential names; a fixture's are indistinguishable from a real one's

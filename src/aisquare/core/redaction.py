@@ -292,11 +292,12 @@ _BODY_RUN = 20
 #: last, short line of a key, a body that ``head`` or the end of the text cut); when it ends the
 #: text after a long run on its line; and the RFC 1421 lines of a legacy encrypted key
 #: (``Proc-Type:``, ``DEK-Info:``). The first run that is none of these, a word of prose after the
-#: header, ends it: ``grep '-----BEGIN RSA PRIVATE KEY-----' finds nothing`` loses the header and
-#: keeps the rest. Possessive throughout, and each run is read once: linear.
+#: header, ends it: ``grep '-----BEGIN RSA PRIVATE KEY-----' finds nothing`` has no body, and is
+#: kept whole. Possessive throughout, and each run is read once: linear.
 _LONG_RUN = _BASE64 + "{" + str(_BODY_RUN) + ",}+"
 _CUT_RUN = _BASE64 + "++(?=\\\\*+\u2026)"
-_PEM_BODY = re.compile(
+#: One run of a key's body, with what stands before it.
+_PEM_BODY_RUN = (
     "(?:"
     # a run that starts a line
     + _GAP + "*+" + _LINE_BREAK + "(?:" + _GAP + "|" + _LINE_BREAK + ")*+"
@@ -307,11 +308,14 @@ _PEM_BODY = re.compile(
     + ")"
     # a run on the header's line, or on the line of a run before it
     + "|" + _GAP + "*+(?:" + _LONG_RUN + "(?:" + _GAP + "*+" + _BASE64 + "++\\Z)?|" + _CUT_RUN + ")"
-    + ")*+"
+    + ")"
 )  # fmt: skip
-#: A header with no footer and its body, as one pattern: what the linear pass removes for one,
-#: for whoever asks it of a text (the tests' reference does).
-_PEM_HEADER_ALONE = re.compile(_PEM_BEGIN.pattern + _PEM_BODY.pattern)
+_PEM_BODY = re.compile(_PEM_BODY_RUN + "*+")
+#: A header with no footer and a body after it, as one pattern: what the linear pass removes for
+#: one, for whoever asks it of a text (the tests' reference does). A header with NO body after it
+#: (``grep`` quoting one, a doc naming one, the clip cutting right after its line) holds nothing
+#: secret, and is kept, as 0.9.2 kept it (R9k, H1).
+_PEM_HEADER_ALONE = re.compile(_PEM_BEGIN.pattern + _PEM_BODY_RUN + "++")
 
 #: ``strict`` only. Who typed it and where they were — identity, not secrets.
 _IDENTITY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -356,7 +360,7 @@ def redact(text: str, level: RedactionLevel) -> str:
 def _without_pem_blocks(text: str) -> str:
     """``text`` with each private-key block (:data:`PEM_BLOCK`) replaced by :data:`MARKER`,
     and a header with no footer after it replaced, with its key's body (:data:`_PEM_BODY`), by
-    one.
+    one. A header with no body after it is left as it is: it holds nothing secret.
 
     Done in one pass over the BEGIN lines and the END lines, each found once, so the cost is
     linear in the text: ``BEGIN .*? END`` as a regular expression reads to the end of the
@@ -370,7 +374,7 @@ def _without_pem_blocks(text: str) -> str:
     body, so the body goes with it, to its last run, and the prose after it stays: taking the
     text to its end (as #25 did) removed the question asked about the key, and the words after
     a header that was only quoted (R9k). No later BEGIN has an END either, and each is taken
-    with its own body."""
+    with its own body, or kept when it has none."""
     if "-----BEGIN " not in text:
         return text
     ends = [found.span() for found in _PEM_END.finditer(text)]
@@ -385,13 +389,16 @@ def _without_pem_blocks(text: str) -> str:
         if opens < at:
             continue  # inside a block already taken out
         nearest = bisect_left(ends, (closes, 0), nearest)
-        kept += [text[at:opens], MARKER]
         if nearest == len(ends):
             # A header and no footer after it: the header and its body, never what follows it.
             # The body may be empty, so the pattern always matches; ``closes`` is for the type.
             body = _PEM_BODY.match(text, closes)
-            at = body.span()[1] if body is not None else closes
+            stop = body.span()[1] if body is not None else closes
+            if stop > closes:  # no body, nothing secret: the header is kept, as 0.9.2 kept it
+                kept += [text[at:opens], MARKER]
+                at = stop
             continue
+        kept += [text[at:opens], MARKER]
         at = ends[nearest][1]
     kept.append(text[at:])
     return "".join(kept)

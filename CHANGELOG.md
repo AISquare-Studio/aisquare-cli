@@ -41,9 +41,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   (`--account 5`, `accounts remove 5`, a role bound to 5), aisquare names both accounts
   and acts on neither: name one as `codex:5` or `claude-code:5`, which every command that
   takes an account accepts. `aisquare accounts list` shows such a number in that form; a
-  number one account holds reads as before. From the moment 0.10.0 runs (its upgrade, any
-  read of the accounts, or a move back to 0.9.2), a Codex account keeps its number: 0.9.2
-  no longer gives it to an account it adds.
+  number one account holds reads as before. A Codex account keeps its number from 0.9.2
+  once 0.10.0 has read the accounts (any `aisquare accounts` command, a launch, asq) or
+  moved back to 0.9.2. Upgrading to 0.10.0 keeps it too, where aisquare's hooks are
+  connected.
 
 ### Codex support (beta)
 

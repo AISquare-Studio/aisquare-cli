@@ -482,3 +482,27 @@ def test_a_first_message_file_in_a_spawns_own_arguments_is_refused_before_any_wi
     assert result.exit_code == 1, result.output
     assert "--prompt" in " ".join(result.output.split()), result.output
     assert tmux.spawned == [] and file.read_text(encoding="utf-8") == "hello"
+
+
+def test_a_wrapper_not_on_path_is_refused_before_any_window_and_before_a_restart_stops(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    three_accounts: list[int],
+    runner: CliRunner,
+) -> None:
+    """A `--command` program that is not there: refused at the spawn before any window, as a
+    missing binary is; and a record whose wrapper has gone since is refused before the
+    restart stops the running agent, which is left as it was."""
+    fresh = runner.invoke(app, ["fleet", "spawn", "agent", "--command", "nosuchwrapper"])
+
+    assert fresh.exit_code == 1, fresh.output
+    assert "'nosuchwrapper' is not on your PATH" in " ".join(fresh.output.split())
+    assert tmux.spawned == []
+
+    row = fleet_service.spawn(project, "agent", worktree=False).agent
+    row = _as_0_9_2_recorded(row, ["--command", "gonewrapper"], slot=4)
+    with pytest.raises(fleet_service.FleetError, match="'gonewrapper' is not on your PATH"):
+        fleet_service.restart(project, row.label)
+    assert len(tmux.spawned) == 1, "no replacement window"
+    assert tmux.killed == [] and _row(project).id == row.id, "the running agent left running"

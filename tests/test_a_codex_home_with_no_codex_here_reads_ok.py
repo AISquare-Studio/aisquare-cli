@@ -144,3 +144,24 @@ def test_the_home_the_shell_names_is_not_graded_where_codex_is_installed_but_not
 
     assert [row.status for row in rows] == [CheckStatus.ok] * len(rows), rows
     assert _install_sh_amber(rows) == []
+
+
+def test_an_exported_empty_codex_home_with_no_codex_reads_not_detected(
+    codex_on_path: Callable[[bool], None], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r41 of #113, nit 3: the row said "Codex detected" for the folder CODEX_HOME names when
+    it was empty and Codex was not installed; 0.9.2 said "not detected". A home holding Codex's
+    files, or Codex on PATH, is still detected."""
+    _exported_codex_home(tmp_path, monkeypatch)
+
+    assert [row.detail for row in _codex_rows()] == ["Codex not detected on this machine"]
+
+    (tmp_path / "codex-home" / "auth.json").write_text("{}", encoding="utf-8")
+    assert [row.detail for row in _codex_rows()] == [
+        "Codex detected; AISquare integration not selected"
+    ], "a home with Codex's files in it"
+    (tmp_path / "codex-home" / "auth.json").unlink()
+    codex_on_path(True)
+    assert [row.detail for row in _codex_rows()] == [
+        "Codex detected; AISquare integration not selected"
+    ], "Codex installed"

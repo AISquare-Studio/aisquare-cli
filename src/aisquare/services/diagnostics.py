@@ -4257,6 +4257,30 @@ def _plugin_route_checks(
     return [_ok(adapter.id, f"{adapter.label}: connected through {where}, which runs {runs}")]
 
 
+def _found_here(adapter: AgentAdapter, detected: bool) -> bool:
+    """Whether ``adapter``'s agent is on this machine, as its doctor row says: ``agents.detect``'s
+    answer, except for a home the shell names (its ``home_env`` exported) that is an empty
+    folder, with the binary not on PATH. That is a variable, not the agent: the row said
+    "Codex detected" for an exported ``CODEX_HOME`` with no Codex installed, where 0.9.2 said
+    "not detected" (r41 of #113, nit 3). The agent's own default home is read as 0.9.2 read
+    it: there, it is detected. A home that cannot be listed is the agent's, as before."""
+    if not detected:
+        return False
+    if not os.environ.get(adapter.home_env, "").strip():
+        return True
+    if agent_core.on_path(adapter.id) is not None:
+        return True
+    home = agent_core.ambient_hook_dir(adapter.id)
+    if home is None:
+        return True
+    try:
+        return any(home.iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 @agent_core.inspection_snapshot()
 def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
     from aisquare.core.agent_adapters import adapters
@@ -4312,7 +4336,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
             or site.binary_state is not None
             or _plugin_install(adapter, path) is not None
         }
-        if info is None or (not info.detected and not sites):
+        if info is None or (not _found_here(adapter, info.detected) and not sites):
             checks.append(_ok(adapter.id, f"{adapter.label} not detected on this machine"))
             continue
         if not sites:

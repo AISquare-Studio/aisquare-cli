@@ -52,9 +52,23 @@ from tests.test_claude_native_accounts import asq_global
 from tests.test_claude_native_fleet import asq_json
 
 
+def _usage_recorded(session_id: str, requests: int, seconds: float = 20) -> None:
+    """Until the board's usage row for ``session_id`` counts ``requests`` requests, or
+    ``seconds`` pass: a test's own assertions then say what the row holds."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        with store_session() as store:
+            recorded = store.session_usage(session_id)
+        models = recorded.usage.get("models", {}) if recorded is not None else {}
+        if sum(counts.get("requests", 0) for counts in models.values()) >= requests:
+            return
+        time.sleep(0.1)
+
+
 def _steered_session(on: Native) -> tuple[Any, Path]:
     """A coder's session with an edit, an interruption and a denied permission, then a last
-    reply: its row and its transcript, once its last turn has ended."""
+    reply: its row and its transcript, once its last turn has ended and its Stop hook has
+    recorded the turn's usage."""
     receipt = on.spawn(prompt=f"edit it [[write {on.workspace / 'notes.txt'} hello]]")
     row = receipt.agent
     pane = row.pane_id
@@ -80,6 +94,11 @@ def _steered_session(on: Native) -> tuple[Any, Path]:
     on.type(pane, "last words [[say the end]]")
     on.heard("last words")
     on.until(lambda: on.state(row.session_id) == "waiting", 30, "its last Stop", pane)
+    # The Stop hook writes the row's state first and then reads the turn's usage onto the
+    # board, in the same hook, as 0.9.2's did (`hooks.turn_stopped`). The row says waiting
+    # before that record is in: 7-30 ms later on a laptop (2.1.318), and on a busy runner
+    # late enough that the board was read first (CI run 42284663137 read 2 of the 5 requests).
+    _usage_recorded(row.session_id, len(on.stub.turns))
     session = on.session(row.session_id)
     assert session is not None and session.transcript_path
     return row, Path(session.transcript_path)

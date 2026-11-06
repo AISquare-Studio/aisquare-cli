@@ -141,9 +141,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     key is replaced inside its quotes (`"access_token": "[redacted]"`, as `"PGPASSWORD"`,
     `"secret_id"`, `"API_KEY_SECONDARY"` and Docker's `"auth"` are), and such a value may
     be removed even when it is not a credential: `"password_hint"`, `"secret_name"`,
-    `"PWD"`, an i18n label such as `"login.password": "Password"`, a `"gen-token"` script.
-    A quoted value the 8,000-character clip cut before its closing quote is removed to the
-    cut. Kept are only these:
+    `"PWD"`, an i18n label such as `"login.password": "Password"`, a `"gen-token"` script,
+    a git or tarball URL under such a name. A quoted value the 8,000-character clip cut
+    before its closing quote is removed to the cut. Kept are only these:
     - documented fields, exactly as their APIs spell them (`max_tokens`,
       `max_completion_tokens`, `max_output_tokens`, `token_type`, `token_count`,
       `tokenizer`, `tokenizer_class`, the pagination cursors `NextToken`,
@@ -153,8 +153,8 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
       `token_endpoint`, `token_endpoint_auth_method`, Claude Code's `apiKeyHelper`), so a
       credential stored under one of those names is kept;
     - a package's version or spec as the whole value (`^4.24.5`, `beta`, `npm:pkg@^1`,
-      `github:owner/repo#ref`, `file:../path`, a git URL, an http(s) tarball or `#ref` URL
-      with no user in it), so a password shaped exactly so is kept;
+      `github:owner/repo#ref`, `file:../path`, `workspace:*`), so a password shaped
+      exactly so is kept;
     - a placeholder, a template's bare reference, a boolean or null (`<YOUR_API_KEY>`,
       `</s>`, `[CLS]`, `${localEnv:GITHUB_TOKEN}`, `{{access_token}}`, `true`, `null`), so
       a password written exactly so is kept, while a reference with a default

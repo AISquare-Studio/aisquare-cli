@@ -28,7 +28,6 @@ from aisquare.services import delivery
 from aisquare.services import fleet as fleet_service
 from tests.captain_screens import MARK
 from tests.test_delivery_guards import (  # noqa: F401 - fixtures, by name
-    FakeTmux,
     _box,
     _waiting,
     claude_on_path,
@@ -37,6 +36,7 @@ from tests.test_delivery_guards import (  # noqa: F401 - fixtures, by name
     repo,
     tmux,
 )
+from tests.test_fleet_service import FakeTmux
 
 TOLD = (
     "see /Users/anmol/.aisquare/cache/claude-accounts/3/claude-501/"

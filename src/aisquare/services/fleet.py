@@ -5561,6 +5561,9 @@ def spawn(
         # session choices were left out of it still holds them, and the board session
         # its hook joined is what shows the binary to be that agent's whatever its name.
         extra = _without_session_choice(resolution.binary, extra, family=family)
+    # The window's `launch` options among the spawn's own arguments, read by it as 0.9.2's was
+    # (#105): recorded with them below, so a restart reads them again.
+    launch_options, extra = _launch_options(extra, selected.adapter)
     # The model and the effort: what this spawn chose, else the role's settings, else
     # `[agents.models.<agent>]`, else the owner's last pick, else nothing (the account's own
     # default); a replay starts what the agent runs now (#441). Asked before the account, whose
@@ -5587,7 +5590,9 @@ def spawn(
     # restarted agent must not carry an old transcript path into the new one.
     # The same goes for a session the CALLER chose (`--session-id`, `--resume`,
     # `--continue`): see `_without_session_choice`.
-    recorded_args = _without_session_choice(resolution.binary, [*role_args, *extra])
+    recorded_args = _without_session_choice(
+        resolution.binary, [*role_args, *extra, *launch_options]
+    )
     forked: ForkArgs | None = None
     replay_lead: list[str] = []
     if resume is not None:
@@ -5914,7 +5919,20 @@ def spawn(
                 family=family,
             )
         except claude_accounts_service.NoSuchAccount as exc:
-            raise FleetError(str(exc)) from exc
+            message = str(exc)
+            if (
+                "-a" in selected.adapter.capabilities.value_options
+                and account is not None
+                and claude_accounts_core.slot_number(account) is None
+            ):
+                # `fleet spawn -a never` for an agent whose own -a that is: the spawn's -a is
+                # --account, as launch's is (#105), and launch's words say where the agent's
+                # goes.
+                message += (
+                    f". fleet spawn's -a is --account: for {selected.adapter.label}'s own -a, "
+                    f"pass -a {account} after --"
+                )
+            raise FleetError(message) from exc
     elif account is not None:
         raise FleetError(
             f"--account selects an account, and {selected.adapter.label} has no account slots"
@@ -6168,7 +6186,7 @@ def spawn(
             if cut + len(d):
                 flags += [agent_launch.BOUND_IN_LINE_FLAG, str(cut + len(d))]
     command = selfcli.argv_for_agent(
-        ["launch", role, *flags, "--", *window_line],
+        ["launch", role, *flags, *launch_options, "--", *window_line],
         sandboxes_tools=selected.adapter.capabilities.sandboxes_tools,
     )
     # The hub as THIS process resolves it, blank for none: the window's
@@ -6880,6 +6898,54 @@ def _in_place_of_recorded(
         )
     notes.append(f"{gone} — starting {today.binary!r} (chosen by: {today.source}) instead")
     return today
+
+
+#: The options of the window's `launch` that 0.9.2's `fleet spawn` let through to it among the
+#: spawn's own arguments (#105), lifted out of them here: its environment pairs, which a
+#: restart reads among the recorded arguments. `-a`, `-e` and `-c`/`--command` are `fleet
+#: spawn`'s own options now (`--account`, `--env`, `--bin`), as they are `launch`'s.
+LAUNCH_VALUE_OPTIONS = ("-e", "--env")
+
+
+def _launch_options(args: Sequence[str], adapter: AgentAdapter) -> tuple[list[str], list[str]]:
+    """``(the window launch's options, the rest)`` of a spawn's own arguments: each
+    :data:`LAUNCH_VALUE_OPTIONS` with its value (``-e K=V``, ``--env K=V``, ``--env=K=V``), as
+    0.9.2's window `launch`, whose line ended with them, read it (#105); its value checked as
+    `launch` checks it, here, before any window opens. Up to an argument ``--``, after which
+    every one is the agent's, and never an option the agent declares its own
+    (``capabilities.value_options`` / ``switch_options``)."""
+    agents_own = adapter.capabilities.value_options | adapter.capabilities.switch_options
+    owned: list[str] = []
+    rest: list[str] = []
+    items = list(args)
+    index = 0
+    while index < len(items):
+        token = items[index]
+        if token == "--":
+            rest.extend(items[index:])
+            break
+        name, _, inline = token.partition("=")
+        if name in LAUNCH_VALUE_OPTIONS and name not in agents_own:
+            value: str
+            if inline or (name.startswith("--") and "=" in token):
+                value = inline
+                index += 1
+            elif index + 1 < len(items):
+                value = items[index + 1]
+                index += 2
+            else:
+                rest.append(token)
+                index += 1
+                continue
+            try:
+                harness.parse_env_pairs([value])
+            except ValueError as exc:
+                raise FleetError(f"{name}: {exc}") from exc
+            owned += ["--env", value]
+            continue
+        rest.append(token)
+        index += 1
+    return owned, rest
 
 
 def _replayed_args(role: str, spec: LaunchSpec, config: FleetSettings) -> list[str]:

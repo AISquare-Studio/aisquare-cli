@@ -792,8 +792,9 @@ class CodexAdapter:
         # `codex exec resume <id> -c developer_instructions=Y` kept the thread's first X
         # and dropped Y; a later resume without -c still carried X (0.162.1).
         resume_keeps_system_prompt=True,
-        # -c and -a as well: `fleet spawn` owns neither. `launch` owns both, and keeps
-        # -c KEY=VALUE for Codex by its shape; its -a is --account (`launch --help`).
+        # -c and -a as well. `launch` and `fleet spawn` own both, as 0.9.2's window launch did
+        # (#105): -a is their --account, so Codex's own is spelled --ask-for-approval or given
+        # after --; -c is their binary, and -c KEY=VALUE stays Codex's by its shape.
         value_options=frozenset(
             {
                 "--model",

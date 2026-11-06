@@ -688,8 +688,10 @@ def test_native_option_values_cannot_swallow_aisquare_options(native: list[str])
         assert ctx.args == native
 
 
-@pytest.mark.parametrize("native", [["-c", "model=o3"], ["-a", "never"], ["-cmodel=o3"]])
+@pytest.mark.parametrize("native", [["-c", "model=o3"], ["-cmodel=o3"]])
 def test_fleet_spawn_forwards_codexs_short_options(native: list[str]) -> None:
+    """Codex's -c KEY=VALUE reaches it by its shape, as `launch` passes it: spelled out, since
+    the spawn's own -c is its binary, as launch's is (#105)."""
     from typer.core import TyperGroup
     from typer.main import get_command
 
@@ -701,7 +703,34 @@ def test_fleet_spawn_forwards_codexs_short_options(native: list[str]) -> None:
         "spawn", ["coder", "--agent", "codex", *native, "--label", "fix"]
     ) as ctx:
         assert ctx.params["label"] == "fix" and ctx.params["agent"] == "codex"
-        assert ctx.args == native
+        assert ctx.params["binary"] is None and ctx.args == ["--config=model=o3"]
+
+
+def test_fleet_spawns_a_is_the_account_and_codexs_own_goes_after_the_separator() -> None:
+    """`fleet spawn`'s -a is --account, as launch's is: 0.9.2's spawn ran `-a N` as the account,
+    through its window's launch (#105). Codex's own -a is given after --, or spelled out."""
+    from typer.core import TyperGroup
+    from typer.main import get_command
+
+    root = get_command(app)
+    assert isinstance(root, TyperGroup)
+    fleet_group = root.commands["fleet"]
+    assert isinstance(fleet_group, TyperGroup)
+    spawn = fleet_group.commands["spawn"]
+    with spawn.make_context(
+        "spawn", ["coder", "--agent", "codex", "-a", "never", "--label", "fix"]
+    ) as ctx:
+        assert ctx.params["account"] == "never" and ctx.params["label"] == "fix"
+        assert ctx.args == []
+    with spawn.make_context(
+        "spawn", ["coder", "--agent", "codex", "--label", "fix", "--", "-a", "never"]
+    ) as ctx:
+        assert ctx.params["account"] is None and ctx.args == ["-a", "never"]
+    with spawn.make_context(
+        "spawn", ["coder", "--agent", "codex", "--ask-for-approval", "never", "--label", "fix"]
+    ) as ctx:
+        assert ctx.params["account"] is None and ctx.params["label"] == "fix"
+        assert ctx.args == ["--ask-for-approval", "never"]
 
 
 def test_launch_a_is_the_account_and_names_codexs_spelling(

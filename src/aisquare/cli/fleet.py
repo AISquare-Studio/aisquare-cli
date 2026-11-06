@@ -251,7 +251,15 @@ def spawn(
         typer.Option("--approval", help="Codex approval policy: on-request, untrusted, never."),
     ] = None,
     binary: Annotated[
-        str | None, typer.Option("--bin", help="Agent executable (default: the role's binding).")
+        str | None,
+        typer.Option(
+            "--bin",
+            "--command",
+            "-c",
+            help="Agent executable (default: the role's binding). -c is this option's, as "
+            "launch's is; -c KEY=VALUE stays Codex's own, and Claude Code's -c is "
+            "--continue, or given after --.",
+        ),
     ] = None,
     prompt: Annotated[
         str | None,
@@ -265,10 +273,22 @@ def spawn(
         str | None,
         typer.Option(
             "--account",
+            "-a",
             help="Account to run under, one of the agent's own (Claude Code or Codex): a "
             "slot number, alias or email (see `aisquare accounts`); default: the role's "
-            "binding, the project default, then the machine default.",
+            "binding, the project default, then the machine default. -a is this option's, "
+            "as launch's is (Codex's own --ask-for-approval: spell it out, or after --).",
             metavar="ACCOUNT",
+        ),
+    ] = None,
+    env_pairs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--env",
+            "-e",
+            help="KEY=VALUE to set for the agent (repeatable), as launch's --env does; a "
+            "restart sets it again.",
+            metavar="KEY=VALUE",
         ),
     ] = None,
     persona: Annotated[
@@ -311,6 +331,11 @@ def spawn(
     """
     target = _project(project)
     try:
+        harness.parse_env_pairs(env_pairs or [])
+    except ValueError as exc:
+        # As `launch --env` refuses it, before any window opens (#105).
+        fail(str(exc), error="bad_env_pair")
+    try:
         receipt = fleet_service.spawn(
             target,
             role,
@@ -323,7 +348,9 @@ def spawn(
             binary=binary,
             agent=agent,
             prompt=prompt,
-            agent_args=list(ctx.args),
+            # The window's `launch` reads these among the spawn's arguments, as 0.9.2's did,
+            # and a restart reads them where they are recorded (#105).
+            agent_args=[*(f"--env={pair}" for pair in env_pairs or ()), *ctx.args],
             spawned_by=as_session or "user",
             account=account,
             persona=persona,

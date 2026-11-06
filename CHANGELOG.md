@@ -82,6 +82,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   commands, so a `fleet tell` right after a Codex turn waits for that moment (about a
   second, at most 5 s): a told `/clear` or `/compact` is not refused "while a task is in
   progress". Plain text is never lost: Codex holds it and runs it after the turn.
+- **`-a` is aisquare's.** In `launch` and `fleet spawn`, `-a N` is the account
+  (`--account`) for a Codex role too, and `-c BIN` the binary (Codex's `-c KEY=VALUE`
+  still reaches Codex). Give Codex's own `-a` as `--ask-for-approval` or after `--`, or
+  set it with `fleet spawn --approval`; `fleet spawn … -a never` is refused with a line
+  that says so.
 - **Known limits.**
   - Codex runs a hook only once it is trusted. `agents connect`, `accounts add` and
     `aisquare upgrade` record that trust for you; where they cannot (a `config.toml`
@@ -240,6 +245,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   nothing, as 0.9.2 did.
 - A restart keeps an agent that ran on no account on its own home, instead of moving it
   onto a binding or default set since.
+- `aisquare fleet spawn ROLE -a N` runs account N, as 0.9.2 did, and the agent's row now
+  names N: 0.9.2's named the default account, which it did not run. `-e KEY=VALUE`
+  (`--env`) sets that variable for the agent, as 0.9.2 did, wherever it stands among the
+  spawn's options, and a restart sets it again. `-c BIN` (`--command`) runs BIN, as
+  `--bin` does. Claude Code's own `-c` (`--continue`) goes after `--` or spelled out; a
+  bare one is refused before any window opens, where 0.9.2 opened the window first.
 - A locked login Keychain asks once at startup, not twice. Ids made in the same
   millisecond sort in the order they were made. A store aisquare may not write is no
   longer called damaged.

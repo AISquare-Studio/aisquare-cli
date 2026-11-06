@@ -38,13 +38,18 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   build made. 0.10.0 lists the newer of the two last. The Codex account keeps its place,
   and the newer one is never moved or made the default until it has a number of its own;
   `aisquare doctor` names the commands that give it one. Wherever you name that number
-  (`--account 5`, `accounts remove 5`, a role bound to 5), aisquare names both accounts
-  and acts on neither: name one as `codex:5` or `claude-code:5`, which every command that
-  takes an account accepts. `aisquare accounts list` shows such a number in that form; a
-  number one account holds reads as before. A Codex account keeps its number from 0.9.2
-  once 0.10.0 has read the accounts (any `aisquare accounts` command, a launch, asq) or
-  moved back to 0.9.2. Upgrading to 0.10.0 keeps it too, where aisquare's hooks are
-  connected.
+  (`--account 5`, `accounts remove 5`, a role bound to 5 with no agent), aisquare names
+  both accounts and acts on neither: name one as `codex:5` or `claude-code:5`, which every
+  command that takes an account accepts. To bind a role to one,
+  `aisquare team bind <role> --agent claude-code --account 5` is the form 0.9.2 still
+  reads after a rollback, and a role bound to an agent reads 5 as that agent's.
+  `team bind` takes an account only where the role's launch would run it, so
+  `--agent claude-code` with a Codex account's number is refused, with the reason every
+  launch of that binding would give. `aisquare accounts list` shows a shared number as
+  `codex:5` or `claude-code:5`; a number one account holds reads as before. A Codex
+  account keeps its number from 0.9.2 once 0.10.0 has read the accounts (any
+  `aisquare accounts` command, a launch, asq) or moved back to 0.9.2. Upgrading to 0.10.0
+  keeps it too, where aisquare's hooks are connected.
 
 ### Codex support (beta)
 

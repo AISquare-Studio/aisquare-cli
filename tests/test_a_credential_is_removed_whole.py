@@ -383,6 +383,15 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     "pem-prefixed-run": lambda size: f"# {HEADER}" + "\n# abcdefgh" * (size // 11),
     "pem-prefixed-headers-on-one-line": lambda size: "# " + (HEADER + " ") * (size // 32),
     "pem-prefixed-headers-alone": lambda size: ("x" * 200 + HEADER + "\ny\n") * (size // 234),
+    # the ruling after reopen 2: a quoted value the clip cut is taken to the clip's ellipsis
+    "quoted-values-unclosed-under-many-names": lambda size: (
+        ("a." * 20 + 'token="' + "x" * 40 + " ") * (size // 88)
+    ),
+    "quoted-values-escaped-quotes-then-a-clip": lambda size: 'token=\\"' * (size // 8) + "\u2026",
+    "quoted-values-unclosed-then-a-clip": lambda size: '"password": "ab ' * (size // 16) + "\u2026",
+    # short values between escaped quotes close no quoted form, and a run of a cut value that
+    # went through escaped quotes read from every name to the end of the text
+    "quoted-values-short-between-escaped-quotes": lambda size: 'token=\\"ab\\"' * (size // 12),
 }
 
 #: Four sizes, each four times the one before, the last 2 MB.

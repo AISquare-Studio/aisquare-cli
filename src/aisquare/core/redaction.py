@@ -81,6 +81,25 @@ _SECRET_NAME = (
 #: goes to its own rules instead of being read into this value.
 _VALUE_END = r"(?=[\s,;}\])]|\Z)"
 
+
+#: A quoted value that ``core.insights``' clip cut before the quote that closes it: an opening
+#: quote and 4 or more characters, then the clip's ``…`` (``{"password": "hunter2… [truncated
+#: by aisquare-cli]``). The value is taken to the ``…``, and the clip's notice stays (R9k, after
+#: reopen 2). The other quote is a character of the value (``"it's…``); its own quote, escaped
+#: or not, ends its run, so it reads no further than to the next one: through its escaped
+#: quotes, every name in ``token=\"ab\"`` x N read to the end of the text.
+def _clipped(quote: str) -> str:
+    """A value opened by ``quote`` and cut by the clip (:data:`_CLIPPED_VALUE`)."""
+    char = "[^" + quote + "\\\\\n\u2026]"
+    escape = "\\\\++[^" + quote + "\n\u2026]"
+    return (
+        "\\\\*+" + quote + "(?=(?:" + char + "|" + escape + "){4})"
+        + "(?:" + char + "++|" + escape + ")*+\\\\*+(?=\u2026)"
+    )  # fmt: skip
+
+
+_CLIPPED_VALUE = _clipped('"') + "|" + _clipped("'")
+
 #: A quoted value, to the quote that closes it. ``"ab\"cd"`` is one value that holds a quote (in
 #: JSON, in Python, in a shell), and the first quote is not its end: a pattern that stopped there
 #: shipped the rest of the value (``cd1234"}``), or all of it when fewer than four characters came
@@ -101,7 +120,8 @@ _QUOTED_VALUE = (
     + r"|'(?:[^'\\\n]|\\[^\n]){4,}+'"
     + _VALUE_END
     + r"|'[^'\n]{4,}+'"
-)
+    + "|" + _CLIPPED_VALUE
+)  # fmt: skip
 
 
 def _cased(words: tuple[str, ...]) -> str:
@@ -155,8 +175,8 @@ _NOT_CREDENTIALS = (
     "token_type",
     # how many tokens a text holds, as a model's usage record counts them
     "token_count",
-    # Hugging Face's tokenizer_config.json and a model's config: which tokenizer
-    "tokenizer",
+    # Hugging Face's tokenizer_config.json and a model's config: which tokenizer, and its class
+    "tokenizer", "tokenizer_class",
     # where a paged list goes on: AWS's APIs and CLI (NextToken), Amazon S3's ListObjectsV2
     # (ContinuationToken, NextContinuationToken), Azure's SDKs (continuationToken), Google's
     # APIs (pageToken, nextPageToken), Google Calendar's (syncToken, nextSyncToken), Google
@@ -168,9 +188,12 @@ _NOT_CREDENTIALS = (
     # the rules a new password must meet: Auth0's connection options (password_policy)
     "password_policy",
     # where a token is asked for, not the token: an OAuth client's settings (auth_token_url),
-    # Google's OAuth client file, client_secret.json (token_uri, auth_uri), and OpenID Connect's
-    # client registration (RFC 7591), how the client signs in (token_endpoint_auth_method)
-    "auth_token_url", "token_uri", "auth_uri", "token_endpoint_auth_method",
+    # Google's OAuth client file, client_secret.json (token_uri, auth_uri), OpenID Connect's
+    # discovery document, a URL (token_endpoint), and its client registration (RFC 7591), how
+    # the client signs in (token_endpoint_auth_method)
+    "auth_token_url", "token_uri", "auth_uri", "token_endpoint", "token_endpoint_auth_method",
+    # Claude Code's settings.json: the path of a script that prints the key, never the key
+    "apiKeyHelper",
 )  # fmt: skip
 
 #: A quoted name that takes its string value: one that holds a credential's word anywhere, as the
@@ -229,6 +252,8 @@ def _in_its_quotes(found: re.Match[str]) -> str:
     are the value's own, with the backslashes before them where the JSON sits in a string."""
     name, separator, value = found.group(1, 2, 3)
     opening = len(value) - len(value.lstrip("\\")) + 1
+    if len(value) <= opening or value[-1] != value[opening - 1]:
+        return name + separator + value[:opening] + MARKER  # cut by the clip: no closing quote
     inside = value[:-1]
     closing = 1 + min(opening - 1, len(inside) - len(inside.rstrip("\\")))
     return name + separator + value[:opening] + MARKER + value[-closing:]

@@ -58,6 +58,7 @@ NOT_CREDENTIALS = [
     "token_type",
     "token_count",
     "tokenizer",
+    "tokenizer_class",
     "NextToken",
     "ContinuationToken",
     "NextContinuationToken",
@@ -73,7 +74,9 @@ NOT_CREDENTIALS = [
     "auth_token_url",
     "token_uri",
     "auth_uri",
+    "token_endpoint",
     "token_endpoint_auth_method",
+    "apiKeyHelper",
 ]
 
 #: Names that hold no credential's word: kept, as the PR and 0.9.2 kept them.
@@ -198,12 +201,14 @@ REMOVED_NAMES = [
     "pagetoken",
     "TOKEN_TYPE",
     "Tokenizer",
+    "tokenizer_type",
+    "TokenEndpoint",
+    "apikeyhelper",
     "NextTokenSecret",
     "tokenizer_api_key",
     "my max_tokens",
     # names that only mention a word: their ordinary values go too (P3, accepted)
     "input_tokens",
-    "token_endpoint",
     "secret_name",
     "password_hint",
     "api_key_header",
@@ -638,6 +643,57 @@ def test_a_listed_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
         assert tail in allowed, (layout, cut, left)
 
 
+#: A quoted credential as each place writes it: (the text up to the value, the value's quote).
+QUOTED_FORMS = {
+    "json": ('{"password": "', '"'),
+    "python": ("{'api_key': '", "'"),
+    "json in a string": ('{\\"password\\": \\"', '\\"'),
+    "assignment": ('PASSWORD="', '"'),
+    "assignment, single": ("export TOKEN='", "'"),
+}
+
+
+@pytest.mark.parametrize("form", sorted(QUOTED_FORMS))
+def test_a_quoted_value_the_8000_character_clip_cuts_is_taken_to_the_cut(
+    form: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``core.insights`` clips, then scrubs: a value cut before its closing quote has none, and
+    neither rule took it, so its start shipped, in 0.9.2 and the PR too (the ruling after reopen
+    2). Taken to the clip's ``…``, the notice kept, at every cut that leaves 4 characters of it
+    or more (the floor every quoted value has)."""
+    monkeypatch.setattr(insights, "redaction_level", lambda: RedactionLevel.standard)
+    lead, quote = QUOTED_FORMS[form]
+    secret = "sk_live_" + "51HqZ8vR2mXk4Lp9Tn3A"
+    key = lead + secret + quote + ", and more" + " after it" * 20  # longer than the notice
+    mark = insights._TRUNCATION_MARK
+    limit = insights._MAX_TEXT - len(mark)
+    for cut in range(len(lead) + 4, len(lead) + len(secret) + 1):
+        pad = "#" * (limit - cut - 1) + "\n"
+
+        shown = insights._outbound(pad + key)
+
+        name = lead[: -len(quote)] if form.startswith("assignment") else lead
+        assert shown == pad + name + MARKER + mark, (form, cut, shown[-80:])
+
+
+def test_a_value_the_clip_cut_leaves_its_quote_and_not_a_character_of_it() -> None:
+    """The marker takes the value's opening quote and no closing one: what the clip left of
+    the value is all gone, its last character too."""
+    mark = insights._TRUNCATION_MARK
+    for text, shown in (
+        ('{"password": "hunter2' + mark, f'{{"password": "{MARKER}' + mark),
+        ("{'api_key': 'sk_live_51Hq" + mark, f"{{'api_key': '{MARKER}" + mark),
+        ('{\\"password\\": \\"hunter2\\' + mark, f'{{\\"password\\": \\"{MARKER}' + mark),
+        ('PASSWORD="hunter2' + mark, f"PASSWORD={MARKER}" + mark),
+        # the other quote is a character of the value
+        ('{"password": "it' + "'" + "s-hunter2" + mark, f'{{"password": "{MARKER}' + mark),
+        ("{'api_key': 'say \"hi\" sk_live" + mark, f"{{'api_key': '{MARKER}" + mark),
+        # under the floor every quoted value has, as '{"password": "abc"}' is (r24)
+        ('{"password": "hun' + mark, '{"password": "hun' + mark),
+    ):
+        assert _both(text) == (shown, shown), text
+
+
 # --- 3. ordinary prompts and code ------------------------------------------------------------
 
 #: What ``redact`` makes of each entry of the corpus that it changes, at ``standard``; every other
@@ -648,15 +704,10 @@ def test_a_listed_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
 #:     key, taken with it: the over-match reopen 2's policy accepts (P3), named in the R4 line.
 #: A private-key header with no key after it (``grep for headers``) reads as 0.9.2's (H1), and so
 #: do a documented field (``max_tokens``, ``token_type``, ``NextToken``), a package's spec and a
-#: placeholder (``<YOUR_API_KEY>``, ``</s>``, ``${localEnv:GITHUB_TOKEN}``).
+#: placeholder (``<YOUR_API_KEY>``, ``</s>``, ``${localEnv:GITHUB_TOKEN}``), and, since the ruling
+#: after reopen 2, OpenID Connect's ``token_endpoint``, Hugging Face's ``tokenizer_class`` and
+#: Claude Code's ``apiKeyHelper``.
 CHANGED = {
-    # O: OpenID Connect discovery's token endpoint, a URL
-    "oauth discovery": (
-        '{"issuer": "https://accounts.example.com", '
-        f'"token_endpoint": "{MARKER}", '
-        '"authorization_endpoint": "https://accounts.example.com/o/oauth2/v2/auth", '
-        '"token_endpoint_auth_methods_supported": ["client_secret_post"]}'
-    ),
     # C: an access token in an OAuth token response
     "oauth token response": (
         f'{{"access_token": "{MARKER}", "token_type": "Bearer", "expires_in": 3599, '
@@ -720,20 +771,16 @@ CHANGED = {
         f'{{"ARN": "arn:aws:secretsmanager:{MARKER}", '
         f'"SecretBinary": "{MARKER}", "VersionStages": ["AWSCURRENT"]}}'
     ),
-    # reopen 2 (G4), the tester's prompts. O: a tokenizer's class; the special tokens are kept
-    "hf tokenizer_config.json": (
-        '{"bos_token": "<s>", "eos_token": "</s>", "unk_token": "<unk>", "pad_token": "<pad>", '
-        f'"model_max_length": 2048, "tokenizer_class": "{MARKER}"}}'
-    ),
+    # reopen 2 (G4), the tester's prompts
     # O: an app's labels
     "i18n en.json": (
         f'{{"login.title": "Sign in", "login.password": "{MARKER}", '
         f'"login.forgot_password": "{MARKER}", "settings.api_key": "{MARKER}", '
         f'"settings.token": "{MARKER}"}}'
     ),
-    # O: Claude Code's apiKeyHelper, a script's path; the token is taken as 0.9.2 took it
+    # =: the token, taken as 0.9.2 took it; apiKeyHelper, a script's path, is on the list
     "claude settings.json": (
-        f'{{"apiKeyHelper": "{MARKER}", "env": {{"ANTHROPIC_AUTH_TOKEN": "{MARKER}"}}, '
+        f'{{"apiKeyHelper": "~/bin/get-key.sh", "env": {{"ANTHROPIC_AUTH_TOKEN": "{MARKER}"}}, '
         '"permissions": {"allow": ["Bash(npm run test:*)"]}}'
     ),
     # O: a script's command

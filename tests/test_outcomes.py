@@ -8,6 +8,7 @@ midnight is 18:30 UTC the day before: the week's edge the tests are about.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -2081,6 +2082,23 @@ def test_two_identical_tells_keep_an_origin_each_and_a_withdrawn_one_only_its_ow
 def test_the_oldest_live_marker_is_taken_first(as_human: None) -> None:
     prompt_origin.mark_origin("go", prompt_origin.TELL, by=prompt_origin.AGENT)
     prompt_origin.mark_origin("go", prompt_origin.TELL, by=prompt_origin.HUMAN)
+    assert [prompt_origin.take_origin("go"), prompt_origin.take_origin("go")] == [
+        "agent:tell",
+        "human:tell",
+    ]
+
+
+def test_two_markers_on_one_tick_of_the_clock_are_taken_oldest_first(
+    as_human: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows' clock ticks coarsely, so two markers written back to back share a stamp and
+    their counter decides. Unpadded, "-10" sorted before "-9", and the newer was taken first
+    (#107, CI 42259433436). The counter here crosses that boundary on one frozen tick."""
+    monkeypatch.setattr(time, "time_ns", lambda: 1_700_000_000_000_000_000)
+    monkeypatch.setattr(prompt_origin, "_WRITES", itertools.count(9))
+    prompt_origin.mark_origin("go", prompt_origin.TELL, by=prompt_origin.AGENT)
+    prompt_origin.mark_origin("go", prompt_origin.TELL, by=prompt_origin.HUMAN)
+
     assert [prompt_origin.take_origin("go"), prompt_origin.take_origin("go")] == [
         "agent:tell",
         "human:tell",

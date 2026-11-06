@@ -35,7 +35,7 @@ from tests.captain_screens import INPUT_BOX, REAL_IDLE_AFTER_STOP, REAL_TRUST, R
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import agent_opened, quiet, until
 from tests.test_ui_shell import Script, fleet_app, refreshed, row_for, seed, shown, status
-from tests.ui_workers import released, settle_page
+from tests.ui_workers import released, settle_page, settle_until
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -255,10 +255,12 @@ def test_the_captain_dialog_starts_the_captain_through_its_own_launch(
         await pilot.pause()
         dialog = app.screen
         assert isinstance(dialog, SpawnDialog)
-        await pilot.click("#spawn-submit")
-        await pilot.pause()
+        # The dialog reads the captain's agent before Spawn is enabled, and is laid out after
+        # its push: a click one pause in found it disabled or not yet there, and nothing
+        # started (#107, CI 42269055015, windows shard 10/10). Settled, it is what the owner sees.
         await settle_page(app)
-        await pilot.pause()
+        assert await pilot.click("#spawn-submit"), "the click landed beside Spawn"
+        await settle_until(app, lambda: started.calls)
 
     drive(body)
     assert len(started.calls) == 1

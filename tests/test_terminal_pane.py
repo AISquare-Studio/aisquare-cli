@@ -264,6 +264,19 @@ async def wait_until(
     raise AssertionError(f"condition not met within {timeout:.1f}s")
 
 
+async def _mirrored(pilot: Pilot[None], host: Any, copy: str) -> None:
+    """Wait, at most 5 s, for the paste-buffer mirror to have put ``copy`` on the clipboard.
+
+    The mirror reads on a timer (``BUFFER_MIRROR_DELAY``, ``BUFFER_MIRROR_RETRY``), and a
+    fixed pause a little longer than that was read before it on a loaded runner: ``'' ==
+    "the drag's copy"`` (#107, CI 42293248624, ubuntu captain-off shard 2/4). The copy is not
+    lost there, only late: it is the clipboard's once the timer has fired. A test that asserts
+    NO copy keeps its fixed pause, which a slow runner can only make pass."""
+    deadline = time.monotonic() + 5.0
+    while host.clipboard != copy and time.monotonic() < deadline:
+        await pilot.pause(0.02)
+
+
 def scroll_event(pane: TerminalPane, *, up: bool) -> events.MouseScrollUp | events.MouseScrollDown:
     cls = events.MouseScrollUp if up else events.MouseScrollDown
     return cls(pane, 1, 1, 0, -1 if up else 1, 0, False, False, False)
@@ -4724,7 +4737,7 @@ def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboar
             await pilot.mouse_down(widget, offset=(0, 0))
             fake.buffer = "what Claude selected"  # the program's release handler ran
             await pilot.mouse_up(widget, offset=(9, 0))
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            await _mirrored(pilot, host, "what Claude selected")
             copied, toasts = host.clipboard, list(host.notices)
             await pilot.mouse_down(widget, offset=(0, 1))  # a click: the buffer stands
             await pilot.mouse_up(widget, offset=(0, 1))
@@ -4868,7 +4881,7 @@ def test_the_same_words_copied_again_are_mirrored_again(fake: FakeTmux, tmp_path
             await press(pilot, widget, (0, 0))
             fake.buffer = "the same words"  # the program's release handler copies them again
             await release(pilot, widget, (9, 0))
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            await _mirrored(pilot, host, "the same words")
             return host.clipboard, list(host.notices)
 
     clipboard, toasts = run(drive())
@@ -4897,7 +4910,7 @@ def test_a_copy_that_lands_after_the_first_read_is_mirrored_by_the_second(
             # The press's read, then the first after the release: nothing new yet.
             await wait_until(pilot, lambda: _buffer_reads(fake) == 2)
             fake.buffer = "a late copy"
-            await pilot.pause(widget.BUFFER_MIRROR_RETRY + 0.1)
+            await _mirrored(pilot, host, "a late copy")
             return host.clipboard, list(host.notices)
 
     clipboard, toasts = run(drive())
@@ -4965,7 +4978,7 @@ def test_a_press_inside_the_first_delay_leaves_the_copy_to_its_read(
             await press(pilot, header, (1, 0))
             fake.buffer = "the drag's copy"  # written after the header's press
             await release(pilot, header, (1, 0))
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            await _mirrored(pilot, host, "the drag's copy")
             return host.clipboard, list(host.notices)
 
     clipboard, toasts = run(drive())

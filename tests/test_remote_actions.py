@@ -2501,6 +2501,11 @@ def test_every_write_tmux_did_not_answer_in_time_says_it_may_still_land_and_audi
     off the trail or ``delivered=no``. Every path says it the one way
     (``fleet.PaneWrite.late``), types nothing after it, and audits it as ``maybe``."""
     _row(project)
+    # The stale-key rule (a send-keys whose request reached the server 2 s before its lock is
+    # refused, "the machine was busy with other actions for 2 s") is not this test's: a loaded
+    # windows-latest runner took longer than that to bring the request to the lock, and the
+    # tmux call this is about was never made (#107, CI 42284663137, shard 10/10).
+    monkeypatch.setattr(remote_server, "SEND_KEYS_LOCK_WAIT_SECONDS", 60.0)
     needs.at_prompt = write.shows == "prompt"
     needs.dialog = write.shows == "dialog"
     if write.shows == "working":

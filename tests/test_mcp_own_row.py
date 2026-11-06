@@ -468,6 +468,15 @@ def test_wsl_and_unreadable_trees_are_a_team(
     assert _instructions(tree, monkeypatch, parent) == mcp_server.TEAM_INSTRUCTIONS
 
 
+def test_the_fake_tree_never_hands_out_the_tests_own_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tree's pids start at 4000, and a test asserts its own pid is never looked up: on a
+    Windows runner whose pid was 4000, a fake process held it (#107, CI 42272784634)."""
+    monkeypatch.setattr(os, "getpid", lambda: 4000)
+    tree = proc_tree.Tree()
+
+    assert [tree.spawn(CLAUDE) for _ in range(3)] == [4001, 4002, 4003]
+
+
 def test_a_recycled_pid_is_not_the_process_that_registered(
     runner: CliRunner, work_dir: Path, tree: Tree, monkeypatch: pytest.MonkeyPatch
 ) -> None:

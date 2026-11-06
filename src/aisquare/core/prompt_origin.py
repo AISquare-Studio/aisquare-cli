@@ -224,8 +224,11 @@ def mark_origin(
         folder.mkdir(parents=True, exist_ok=True)
         _forget_stale_markers(folder, when)
         # Nanoseconds first, so the names of one text sort oldest first; the pid and a counter
-        # keep two writes in one nanosecond, or two processes, apart.
-        nonce = f"{time.time_ns():020d}-{os.getpid()}-{next(_WRITES)}"
+        # keep two writes in one nanosecond, or two processes, apart. Both zero-padded, as the
+        # clock is: Windows' clock ticks coarsely, two writes back to back share a stamp, and the
+        # counter then decides, where "-10" sorted before "-9" and the newer marker was taken
+        # first (#107, CI 42259433436).
+        nonce = f"{time.time_ns():020d}-{os.getpid():010d}-{next(_WRITES):012d}"
         path = folder / f"{origin_digest(text)}.{nonce}.json"
         temp = folder / f".{path.name}.tmp"
         temp.write_text(json.dumps(marker), encoding="utf-8")

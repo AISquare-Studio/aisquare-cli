@@ -287,3 +287,43 @@ def test_real_claude_code_whose_hooks_never_ran_is_told_at_its_idle_prompt(
     told = asq_json(native, "fleet", "tell", row.label, "typed with no hooks")
     assert told["typed"] == "yes", told
     native.heard("typed with no hooks")
+
+
+@options()
+def test_real_claude_code_whose_reply_ends_in_a_yes_no_question_is_told_at_its_idle_prompt(
+    native: Native,  # noqa: F811
+) -> None:
+    """r40's nit: ``dialog_region`` drops the rules on the last rows (the box's top rule a
+    dialog was drawn over). A reply whose last line ends ``(y/n)?``, above the input box's
+    rule, must not read as a y/n prompt: the tell would be refused (F5), and the captain
+    could "press" y into the input box. Every frame of the turn is read, and the idle pane:
+    none is a prompt, and the tell types there, as 0.9.2 typed it."""
+    question = "Shall I go on (y/n)?"
+    receipt = native.spawn(prompt="before the question")
+    row = receipt.agent
+    native.heard("before the question")
+    native.until(lambda: native.state(row.session_id) == "waiting", 30, "idle", row.pane_id)
+    native.ready(row.pane_id)
+    native.type(row.pane_id, f"[[say {question}]]")
+    native.heard(question)
+    frames: list[list[str]] = []
+
+    def answered() -> bool:
+        frames.append(native.rows(row.pane_id))
+        return native.state(row.session_id) == "waiting" and any(
+            line.rstrip().endswith(question) and "heard you" in line for line in frames[-1]
+        )
+
+    native.until(answered, 30, "the reply on screen, idle", row.pane_id)
+    native.ready(row.pane_id)
+    frames.append(native.rows(row.pane_id))
+    misread = [
+        frame
+        for frame in frames
+        if claude_screen.prompt_showing(frame) is not None
+        or claude_screen.modal_showing(frame) is not None
+    ]
+    assert not misread, "\n---\n".join("\n".join(frame) for frame in misread[:2])
+    told = asq_json(native, "fleet", "tell", row.label, "told after the question")
+    assert told["typed"] == "yes", told
+    native.heard("told after the question")

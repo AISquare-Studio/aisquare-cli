@@ -33,6 +33,15 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   account you add is ranked last. Agents 0.9.2 spawns, restarts or switches meanwhile are
   managed by 0.10.0 when you upgrade again. `aisquare upgrade --version 0.9.2` says what it
   keeps and loses before it moves back.
+- Codex accounts across a rollback: 0.9.2 numbers its accounts by Claude Code's alone, so
+  an account you add there can take the number of a Codex account a pre-release 0.10.0
+  build made. 0.10.0 lists the newer of the two last. The Codex account keeps its place,
+  and the newer one is never moved or made the default until it has a number of its own;
+  `aisquare doctor` names the commands that give it one. Wherever you name that number
+  (`--account 5`, `accounts remove 5`, a role bound to 5), aisquare names both accounts
+  and acts on neither: name one as `codex:5` or `claude-code:5`, which every command that
+  takes an account accepts. Once 0.10.0 has read a Codex account, 0.9.2 no longer gives
+  its number to an account it adds.
 
 ### Codex support (beta)
 
@@ -121,11 +130,23 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `~/.aisquare/captain/mcp.json` is no longer written and 0.9.2's copy is left where it is.
   `persona import --engine manager` gives Claude Code the strict form of its answer's
   schema (every field required, no other).
-- **`fleet spawn --worktree` runs the repository's hooks**, as 0.9.2 did, in a project where
-  no Codex agent has run. Where one has, and for a Codex spawn, the worktree is made with
-  none of the repository's hooks: any of them (a script `.git/hooks` links into the tree, a
-  husky, lefthook or pre-commit config) may be one that agent changed, and it would run
-  outside its sandbox. The spawn says so in one line.
+- **`fleet spawn --worktree` runs the repository's hooks**, as 0.9.2 did, where no Codex
+  agent has run in the project or could write to the repository. Where one has or could,
+  and for a Codex spawn, the worktree is made with none of the repository's hooks: any of
+  them (a script `.git/hooks` links into the tree, a husky, lefthook or pre-commit config)
+  may be one that agent changed, and it would run outside its sandbox. The spawn says so
+  in one line.
+- **aisquare remembers every folder a Codex agent could write**: where it was launched or
+  started a session, each folder it was given with `--add-dir`, and each writable root its
+  config names. A repository inside one of them, or holding one, keeps its hooks off for
+  every later worktree, after `project fresh` too. A Codex session started in a folder
+  covers every repository under it, your home folder included; where that record alone
+  turns a spawn's hooks off, the spawn's line names the folder, the agent, the day and the
+  command that forgets it. `aisquare agents status --roots` lists the folders, and
+  `aisquare agents disconnect codex --forget-root <path>` forgets one (it asks first, or
+  takes `--yes`, and disconnects nothing else). The record stays on this machine:
+  `project fresh` and `project forget` keep it, and `aisquare uninstall --purge` clears it.
+  A machine where Codex never ran records nothing, and every hook runs, as on 0.9.2.
 - **`persona import <name>`** looks where 0.9.2 looked first, in its order (Claude Code's
   `~/.claude/skills`, then the repository's `.claude/skills`), then in the other agents'
   skill folders; `persona import --list` lists them in that order.

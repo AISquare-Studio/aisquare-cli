@@ -38,6 +38,7 @@ from tests.test_codex_accounts import _sign_in as _codex_sign_in
 from tests.test_one_priority_order_across_agents import (  # noqa: F401 - fixture, by name
     _claude,
     _codex,
+    _installed,
     machine,
 )
 from tests.test_two_agents_accounts_in_one_number import (  # noqa: F401 - fixture, by name
@@ -69,13 +70,23 @@ BIND_ONE_OF_5 = (
 
 
 def _launch(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, role: str
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, role: str, *flags: str
 ) -> tuple[Result, dict[str, str]]:
-    """`aisquare launch ROLE`, as the bound role's window runs it: its exec held, and the
-    environment it would have handed over kept (empty when it refused)."""
+    """`aisquare launch ROLE [flags]`, as the bound role's window runs it: its exec held, and
+    the environment it would have handed over kept (empty when it refused), the program it
+    ran under ``EXEC``."""
     seen: dict[str, str] = {}
-    monkeypatch.setattr(launch_cli, "_exec", lambda _binary, _argv, env: seen.update(env))
-    return runner.invoke(app, ["launch", role]), seen
+
+    def held(binary: str, _argv: list[str], env: dict[str, str]) -> None:
+        seen.update(env)
+        seen[EXEC] = binary
+
+    monkeypatch.setattr(launch_cli, "_exec", held)
+    return runner.invoke(app, ["launch", role, *flags]), seen
+
+
+#: Where `_launch` keeps the program a held launch ran, beside its environment.
+EXEC = "<the program>"
 
 
 def _runs(env: dict[str, str], account: ClaudeAccount) -> bool:
@@ -925,6 +936,11 @@ def test_b5_an_alias_two_accounts_hold_is_refused_in_the_launchs_own_words(
     assert result.exit_code == 1, result.output
     assert "Bind one as" not in _said(result)
     assert _said(result) == "✗ " + _said(launched).split("names account 'work': ", 1)[1]
+    # B6-3: met at the account step, an ambiguity is said as one, as the launch says it.
+    as_json = runner.invoke(
+        app, ["--json", "team", "bind", "al", "--agent", CLAUDE, "--account", "work"]
+    )
+    assert json.loads(as_json.stdout)["error"] == "ambiguous_account", as_json.stdout
 
 
 def test_b5_bind_reads_no_folders_default_where_the_binding_names_no_agent(
@@ -995,3 +1011,136 @@ def test_b5_a_claude_only_bind_of_a_slot_there_is_none_of_reads_as_0_9_2s(
 
         assert result.exit_code == 1, result.output
         assert _said(result) == f"✗ no Claude account in slot {typed} — see: aisquare accounts"
+
+
+# --- #100's reopen 6: B6-1 (only what the bind changes) and B6-2 (the folder decides only ---
+# --- where nothing named does) ---------------------------------------------------------------
+
+
+def test_b6_a_claude_only_bind_of_env_or_args_on_a_role_whose_account_was_removed_is_0_9_2s(
+    machine: Path,  # noqa: F811
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """tester-r9f's `dang` repro (seq 11427), a CLAUDE-ONLY regression: a role bound to an
+    account since removed. 0.9.2 and pre-#100 bound --env and --arg on it with a ✓; B5 refused
+    them for the account no bind touched. 0.9.2's line, byte for byte (its `_describe`)."""
+    for email in ("two@example.com", "three@example.com", "four@example.com"):
+        _claude(email)
+    _claude("seven@example.com")
+    team_service.activate(Path.cwd())
+    assert (
+        runner.invoke(app, ["team", "bind", "dang", "--account", "seven@example.com"]).exit_code
+        == 0
+    )
+    assert runner.invoke(app, ["accounts", "remove", "seven@example.com"]).exit_code == 0
+    path = settings_service.config_path()
+
+    env = runner.invoke(app, ["team", "bind", "dang", "--env", "PROBE_D=1"])
+    as_json = runner.invoke(app, ["--json", "team", "bind", "dang", "--env", "PROBE_D=1"])
+    args = runner.invoke(app, ["team", "bind", "dang", "--arg", "--verbose"])
+
+    assert env.exit_code == 0, env.output
+    assert env.stdout == f"✓ dang: PROBE_D=1  account=seven@example.com ({path})\n"
+    assert as_json.exit_code == 0, as_json.output
+    assert json.loads(as_json.stdout)["profile"]["account"] == "seven@example.com"
+    assert args.exit_code == 0, args.output
+    assert args.stdout == (
+        f"✓ dang: PROBE_D=1  args=--verbose  account=seven@example.com ({path})\n"
+    )
+    assert env.stderr == as_json.stderr == args.stderr == "", "no new warning"
+    # The binary alone, as 0.9.2 bound it: an account merely absent is no refusal (B6-1).
+    binary = runner.invoke(app, ["team", "bind", "dang", "--bin", "claude"])
+    assert binary.exit_code == 0, binary.output
+    # Its launch is refused from every folder while the account is away, as on 0.9.2: the
+    # binding names it, and nothing runs another in its place.
+    refused: dict[str, str] = {}
+    for name, folder in _folders(tmp_path).items():
+        monkeypatch.chdir(folder)
+        launched, environment = _launch(runner, monkeypatch, "dang")
+        refused[name] = f"✗ {_said(launched)}" if launched.exit_code else f"✓ {_ran(environment)}"
+    assert all(v.startswith("✗") and "seven@example.com" in v for v in refused.values()), refused
+
+
+def test_b6_an_env_bind_on_0_9_2s_own_binding_to_a_shared_number_is_bound(
+    collided: Pair,  # noqa: F811
+    runner: CliRunner,
+) -> None:
+    """The collided home's `tester = 5`, which 0.9.2 wrote: a bind of --env alone touches no
+    account, so it is bound (B6-1), where B5 refused it as ambiguous from every folder."""
+    team_service.activate(Path.cwd())
+    settings_service.bind_role("tester", account="5")
+
+    result = runner.invoke(app, ["team", "bind", "tester", "--env", "PROBE_T=1"])
+
+    assert result.exit_code == 0, result.output
+    profile = load_config().team.profiles["tester"]
+    assert (profile.account, profile.env) == ("5", {"PROBE_T": "1"})
+
+
+@pytest.mark.parametrize(
+    ("row", "steps", "runs"),
+    [
+        ("m5", ["--bin", "claude2"], None),
+        ("m6", ["--bin", "claude2", "--account", "3"], "claude-code:3"),
+        ("m7", ["--agent", CLAUDE, "--bin", "claude2", "--account", "5"], "claude-code:5"),
+    ],
+)
+def test_b6_a_bindings_unnamed_binary_is_the_default_agents_wrapper_from_every_folder(
+    signed: Pair,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    row: str,
+    steps: list[str],
+    runs: str | None,
+) -> None:
+    """11427 failure 2 (rows m5, m6, m7): `--bin claude2`, a binary no agent's name claims,
+    bound with a ✓, and every launch from a folder with a project default refused it, Claude
+    Code's default included. It is the machine default agent's wrapper, as 0.9.2 read it, from
+    every folder (B6-2), and bind's dry run agrees."""
+    _installed(monkeypatch, claude="/bin/claude", codex="/bin/codex", claude2="/bin/claude2")
+    folders = _folders(tmp_path)
+    monkeypatch.chdir(folders["codex"])
+    bound = runner.invoke(app, ["team", "bind", f"b6-{row}", *steps])
+    pairs = dict(zip(steps[::2], steps[1::2], strict=True))
+    settings_service.bind_role(
+        f"b6-{row}-twin",
+        agent=pairs.get("--agent"),
+        agent_bin=pairs.get("--bin"),
+        account=pairs.get("--account"),
+    )
+    seen: dict[str, str] = {}
+    for name, folder in folders.items():
+        monkeypatch.chdir(folder)
+        launched, env = _launch(runner, monkeypatch, f"b6-{row}-twin")
+        seen[name] = f"✓ {_ran(env)} {Path(env[EXEC]).name}" if launched.exit_code == 0 else "✗"
+    print(
+        f"\n| {row} | {' '.join(steps)} | {'✓' if bound.exit_code == 0 else '✗'} | "
+        + " | ".join(seen.values())
+        + " |"
+    )
+
+    assert bound.exit_code == 0, bound.output
+    assert len(set(seen.values())) == 1, seen
+    [verdict] = set(seen.values())
+    assert verdict.startswith("✓ ") and verdict.endswith(" claude2"), verdict
+    if runs is not None:
+        assert verdict == f"✓ {runs} claude2", verdict
+
+
+def test_b6_a_launchs_own_account_names_its_agent_above_the_folders_default(
+    signed: Pair, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The 11427 nit: from a folder whose default agent is Codex, `launch R --account 3`
+    (Claude Code's 3) read "this launch runs Codex" and refused. The account the launch names
+    names its agent above the folder's default, as a binding's does (B6-2)."""
+    folders = _folders(tmp_path)
+    seen: dict[str, str] = {}
+    for name, folder in folders.items():
+        monkeypatch.chdir(folder)
+        launched, env = _launch(runner, monkeypatch, "coder", "--account", "3")
+        seen[name] = f"✓ {_ran(env)}" if launched.exit_code == 0 else f"✗ {_said(launched)}"
+
+    assert set(seen.values()) == {"✓ claude-code:3"}, seen

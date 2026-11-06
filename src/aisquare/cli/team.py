@@ -971,10 +971,18 @@ def _as_every_launch_reads_it(
     - an account of another agent is refused with the launch's reason (what its binding rung
       found, as bind always said it), a later ``--agent`` or ``--bin`` too;
     - a number two agents hold, with nothing naming the agent, with B3-1's advice.
-    Every bind is asked, not only one that gives ``--account``."""
+    Only what the bind changes (#100's reopen 6, B6-1): a bind of none of the account, the
+    agent or the binary is not asked at all, and one of the agent or the binary alone is
+    refused for the account it leaves only where that account is there and another agent's."""
     from aisquare.core import config as config_core
     from aisquare.services import agent_launch
 
+    # B5's check covers what THIS bind changes, and nothing else (#100's reopen 6, B6-1). A bind
+    # of none of the account, the agent or the binary (--env, --arg alone) is 0.9.2's ✓,
+    # whatever the role's account is now: removed, signed out, or a number two agents hold.
+    gives_account = changes.get("account") is not None or bool(changes.get("clear_account"))
+    if not gives_account and changes.get("agent") is None and changes.get("agent_bin") is None:
+        return
     try:
         would_be = config_core.load_config()
     except Exception:  # an unreadable file is the write's to report, as before
@@ -1003,6 +1011,14 @@ def _as_every_launch_reads_it(
             # said. So a Claude-only bind of a slot there is none of reads as 0.9.2's did.
             cause = exc.__cause__
             reason = cause if isinstance(cause, claude_accounts_service.NoSuchAccount) else exc
+            if not gives_account and not (
+                isinstance(reason, claude_accounts_service.WrongAgent)
+                and reason.account is not None
+            ):
+                # A bind of the agent or the binary alone refuses the account it leaves only
+                # where that account is THERE and another agent's (P11, P12): one merely
+                # absent, or ambiguous, gets 0.9.2's ✓ (B6-1).
+                return
             ambiguous = claude_accounts_service.ambiguity_in(reason)
             if ambiguous is not None:
                 # An alias two accounts hold, which an agent narrows nothing of: its own words.

@@ -226,12 +226,11 @@ def resolve(
     that, the agent of the best account in the one priority order
     (``claude_accounts.agent_pick``), then the fallbacks.
 
-    The role binding's own account, where the launch names none, names its agent ABOVE the
-    project's default: a role binding is the machine's, so what it names outranks the folder,
-    and the project's default fills in only where the binding names nothing (#100's reopen 5,
-    B5 (b)). So: ``--agent``; the binding's agent; its binary's; the binding's account's;
-    the project's default; then the launch's own account's, and the order's. A number two
-    agents' accounts hold names no agent, and is refused from every folder.
+    The folder decides only where nothing named does (#100's reopens 5 and 6, B5 (b) and B6-2).
+    So: ``--agent``; the binding's agent; its binary's; the account the launch names, else
+    the binding's; the project's default; then the order's. A binding's binary no agent's
+    name claims is the machine default agent's wrapper, which no project's default re-reads.
+    A number two agents' accounts hold names no agent, and is refused from every folder.
     ``folder_default=False`` leaves the project's default out, for ``team bind``'s dry run of
     the binding it would store, which every folder's launch reads.
 
@@ -269,19 +268,24 @@ def resolve(
     # parent's executable family cannot identify an arbitrary wrapper.
     owned_family = os.environ.get(LAUNCH_AGENT_ENV) if chosen_binary.source == "default" else None
     above_the_folder = agent or (bound.agent if bound else None) or inferred
-    # The binding's own account, above the project's default (B5 (b)): asked only where
-    # nothing in the binding pins the agent, no binary was named (one that names no agent is
-    # the default agent's wrapper, as it always was), and the launch names no account itself.
-    bound_names = (
-        account_agent(None, role)
-        if not above_the_folder and chosen_binary.source == "default" and account is None
+    # THE FOLDER DECIDES ONLY WHERE NOTHING NAMED DOES (#100's reopen 6, B6-2).
+    # The account the launch names, else the one its binding names, names its agent above the
+    # project's default (B5 (b)): asked where nothing above pins the agent and no binary was
+    # named (one that names no agent is the default agent's wrapper, as it always was).
+    named = (
+        account_agent(account, role)
+        if not above_the_folder and chosen_binary.source == "default"
         else None
     )
-    pinned = above_the_folder or bound_names or preferred
+    if inferred is None and chosen_binary.source == "config":
+        # A binding's binary no agent's name claims (`team bind R --bin claude2`) is the
+        # machine default agent's wrapper, as 0.9.2 read it, from every folder: a project's
+        # default never re-reads a binding, and never refuses it as an unknown family.
+        preferred = None
+    pinned = above_the_folder or named or preferred
     # Nothing pins the agent and no binary was named: the agent of the best account, by
     # the one priority order and headroom (owner, PR #113).
     unpinned = not pinned and chosen_binary.source == "default"
-    named = account_agent(account, role) if unpinned and account is not None else None
     model = model_agent if unpinned and not named else None
     pick = (
         accounts_pick(measure=measure, family=family)
@@ -292,9 +296,8 @@ def resolve(
         (agent, "flag"),
         (bound.agent if bound else None, "role"),
         (inferred.id if inferred else None, chosen_binary.source),
-        (bound_names, "account"),
-        (preferred, "project"),
         (named, "account"),
+        (preferred, "project"),
         (model, "model"),
         (pick.agent if pick else None, "accounts"),
         (owned_family, "inherited"),

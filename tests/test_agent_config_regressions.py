@@ -63,7 +63,12 @@ def test_wrapper_launch_respects_defaults_and_legacy_claude_compatibility(
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: wrapper)
     result = runner.invoke(app, args)
-    if family_source == "user" and family == "claude-code":
+    if binary_source == "config" and family_source == "project":
+        # A role binding's unnamed binary is the machine default agent's wrapper from every
+        # folder: a project's default never re-reads it (#100's reopen 6, B6-2).
+        assert result.exit_code == 0, result.output
+        assert execute.call_args.args[2]["AISQUARE_LAUNCH_AGENT"] == "claude-code"
+    elif family_source == "user" and family == "claude-code":
         assert result.exit_code == 0, result.output
         assert execute.call_args.args[2]["AISQUARE_LAUNCH_AGENT"] == "claude-code"
     else:

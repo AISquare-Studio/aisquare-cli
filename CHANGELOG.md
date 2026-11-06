@@ -121,11 +121,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `~/.aisquare/captain/mcp.json` is no longer written and 0.9.2's copy is left where it is.
   `persona import --engine manager` gives Claude Code the strict form of its answer's
   schema (every field required, no other).
-- **`fleet spawn --worktree` runs the repository's hooks**, as 0.9.2 did, with one
-  exception. A hooks folder inside the work tree (husky's `.husky`, a `.githooks`) is
-  skipped where a Codex agent spawns or has run in the project. A hook it could have
-  written there would run outside its sandbox. The spawn says so in one line, naming why.
-  `.git/hooks` and a hooks folder outside the tree always run.
+- **`fleet spawn --worktree` runs the repository's hooks**, as 0.9.2 did, in a project where
+  no Codex agent has run. Where one has, and for a Codex spawn, the worktree is made with
+  none of the repository's hooks: any of them (a script `.git/hooks` links into the tree, a
+  husky, lefthook or pre-commit config) may be one that agent changed, and it would run
+  outside its sandbox. The spawn says so in one line.
 - **`persona import <name>`** looks where 0.9.2 looked first, in its order (Claude Code's
   `~/.claude/skills`, then the repository's `.claude/skills`), then in the other agents'
   skill folders; `persona import --list` lists them in that order.

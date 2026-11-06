@@ -31,8 +31,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   it as it is, and everything 0.10.0 added stays for when you upgrade again. While on
   0.9.2, an account reorder or a new default is dropped when you upgrade again, and an
   account you add is ranked last. Agents 0.9.2 spawns, restarts or switches meanwhile are
-  managed by 0.10.0 when you upgrade again. `aisquare upgrade --version 0.9.2` says what it
-  keeps and loses before it moves back.
+  managed by 0.10.0 when you upgrade again. `aisquare upgrade --version 0.9.2` says what
+  it keeps and loses before it moves back. A Codex account's hooks are left as they are on
+  the way back, since 0.9.2 runs none; the move names the
+  `aisquare agents disconnect codex --config-dir …` to run first. A hook the move back
+  could not rewrite is a warning with the command that rewrites it: the move back no
+  longer ends with an error for its hooks.
 - Codex accounts across a rollback: 0.9.2 numbers its accounts by Claude Code's alone, so
   an account you add there can take the number of a Codex account a pre-release 0.10.0
   build made. 0.10.0 lists the newer of the two last. The Codex account keeps its place,
@@ -89,10 +93,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   second, at most 5 s): a told `/clear` or `/compact` is not refused "while a task is in
   progress". Plain text is never lost: Codex holds it and runs it after the turn.
 - **`-a` is aisquare's.** In `launch` and `fleet spawn`, `-a N` is the account
-  (`--account`) for a Codex role too, and `-c BIN` the binary (Codex's `-c KEY=VALUE`
-  still reaches Codex). Give Codex's own `-a` as `--ask-for-approval` or after `--`, or
-  set it with `fleet spawn --approval`; `fleet spawn … -a never` is refused with a line
-  that says so.
+  (`--account`) for a Codex role too, and `-c BIN` (`--command BIN`) a program run as the
+  role's agent (Codex's `-c KEY=VALUE` still reaches Codex). Give Codex's own `-a` as
+  `--ask-for-approval` or after `--`, or set it with `fleet spawn --approval`;
+  `fleet spawn … -a never` is refused with a line that says so.
 - **Known limits.**
   - Codex runs a hook only once it is trusted. `agents connect`, `accounts add` and
     `aisquare upgrade` record that trust for you; where they cannot (a `config.toml`
@@ -285,10 +289,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - `aisquare fleet spawn ROLE -a N` runs account N, as 0.9.2 did, and the agent's row now
   names N: 0.9.2's named the default account, which it did not run. `-e KEY=VALUE`
   (`--env`) sets that variable for the agent, as 0.9.2 did, wherever it stands among the
-  spawn's options, and a restart sets it again. `-c BIN` (`--command`) runs BIN, as
-  `--bin` does. An agent 0.9.2 spawned with `-a N` or `--command BIN` keeps them too: its
-  `fleet restart`, `fleet switch` (to the account it names) and fork run that account and
-  binary, as 0.9.2's own restart did, and its row names them. 0.9.2 kept `-c BIN` as
+  spawn's options, and a restart sets it again. `--command BIN` (`-c BIN`) runs BIN as the
+  role's agent, as 0.9.2 did: a wrapper such as `claude-work` keeps the agent's session
+  and its board join, so a restart resumes the conversation; `--bin BIN` still reads the
+  agent from BIN. An agent 0.9.2 spawned with `-a N` or `--command BIN` keeps them too:
+  its `fleet restart`, `fleet switch` (to the account it names) and fork run that account
+  and binary, as 0.9.2's own restart did, and its row names them. 0.9.2 kept `-c BIN` as
   `BIN` alone, so such an agent restarts on the default binary with `BIN` among its
   arguments: spawn it again with `-c BIN` to run BIN. Claude Code's own `-c`
   (`--continue`) goes after `--` or spelled out; a bare one is refused before any window

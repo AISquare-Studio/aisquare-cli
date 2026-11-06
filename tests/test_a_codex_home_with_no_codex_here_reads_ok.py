@@ -129,3 +129,18 @@ def test_the_home_the_shell_names_is_graded_where_codex_is_the_selected_agent(
     rows = _codex_rows()
 
     assert CheckStatus.warn in [row.status for row in rows], rows
+
+
+def test_the_home_the_shell_names_is_not_graded_where_codex_is_installed_but_not_selected(
+    codex_on_path: Callable[[bool], None], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installed is not chosen: a Claude Code user with Codex on PATH who exported CODEX_HOME
+    reads ok, as on 0.9.2, and install.sh has nothing amber (#96, a mutant 11240 saw survive:
+    the shell's home graded wherever Codex is installed)."""
+    _exported_codex_home(tmp_path, monkeypatch)
+    codex_on_path(True)
+
+    rows = _codex_rows()
+
+    assert [row.status for row in rows] == [CheckStatus.ok] * len(rows), rows
+    assert _install_sh_amber(rows) == []

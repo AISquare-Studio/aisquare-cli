@@ -79,9 +79,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   prompt does. That includes a command inside a code-mode script, how Codex runs every
   call on GPT-6.1-Sol.
 - **Telling a Codex agent.** Codex reports a turn over a moment before it accepts
-  commands, so `fleet tell` to a Codex agent waits for that moment (at most 5 s): a told
-  `/clear` or `/compact` is not refused "while a task is in progress". Plain text is never
-  lost: Codex holds it and runs it after the turn.
+  commands, so a `fleet tell` right after a Codex turn waits for that moment (about a
+  second, at most 5 s): a told `/clear` or `/compact` is not refused "while a task is in
+  progress". Plain text is never lost: Codex holds it and runs it after the turn.
 - **Known limits.**
   - Codex runs a hook only once it is trusted. `agents connect`, `accounts add` and
     `aisquare upgrade` record that trust for you; where they cannot (a `config.toml`

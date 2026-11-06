@@ -169,12 +169,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   most 64 KiB. Over SSH, a launch takes the Mac's last usage readings as floors. Doctor
   has *fleet server env* and *accounts sharing* rows, and `aisquare upgrade` says *hooks
   already current* for a hooks file it left alone.
-- **Placement goes by the launch record:** `fleet attach` and a rename go by the tmux
-  session's id; a session you made by hand under the project's codename is no longer
-  renamed or shut down; `project fresh` stops only what the records name. A row the store
-  ended whose window still runs keeps its label and its tree against a new spawn, and
-  `fleet attach` refuses an ended 0.9.2 manager whose window lingers, naming how to attach
-  by hand.
+- **Placement goes by the launch record:** `fleet attach`, `fleet tell` and a rename go by
+  the tmux session's id; a session you made by hand under the project's codename is no
+  longer renamed or shut down; `project fresh` stops only what the records name. A row
+  the store ended whose window still runs keeps its label and its tree against a new
+  spawn, and `fleet attach` refuses an ended 0.9.2 manager whose window lingers, naming
+  how to attach by hand.
 - **New and changed commands:** `aisquare agents use <agent> [--project]` chooses the
   coding agent future launches run (a role's binding still wins). The captain
   (experimental) passes its MCP server to Claude Code inline (`--mcp-config '<json>'`), so

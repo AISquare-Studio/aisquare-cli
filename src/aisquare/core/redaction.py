@@ -229,19 +229,29 @@ _PACKAGE_SPEC = (
 )  # fmt: skip
 
 #: A whole value that stands for one and is not one: a placeholder (``<YOUR_API_KEY>``), a
-#: model's special tokens (``</s>``, ``<unk>``, ``[CLS]``, ``[MASK]``), a template's reference
+#: model's special tokens (``</s>``, ``<unk>``, ``[CLS]``, ``[MASK]``), a template's bare reference
 #: (``${localEnv:GITHUB_TOKEN}``, ``${{ secrets.NPM_TOKEN }}``, ``{{access_token}}``), and
-#: ``true``, ``false``, ``null`` and Python's ``None``. No issued credential is written so.
+#: ``true``, ``false``, ``null`` and Python's ``None``. No issued credential is written so. A
+#: reference with a literal default or a filter's arguments holds a value, and is one: a shell's
+#: ``${PGPASS:-…}``, ``${VAR=…}``, devcontainer's ``${localEnv:PGPASS:…}``, Jinja's ``{{ pw |
+#: default(…) }}`` (R9k, after reopen 2, N1).
+_REFERENCE = (
+    r"[ \t]*+(?:[A-Za-z_][A-Za-z0-9_]*+:)?[A-Za-z_][A-Za-z0-9_]*+(?:\.[A-Za-z_][A-Za-z0-9_]*+)*+"
+    r"[ \t]*+"
+)
 _PLACEHOLDER_BODY = (
     r"""<[^"'\\<>\n]*+>"""
-    r"""|\$\{[^"'\\\n]*+(?<=\})"""
-    r"""|\{\{[^"'\\\n]*+(?<=\}\})"""
-    r"|\[[A-Z][A-Z0-9_]*+\]"
-    r"|true|false|null|True|False|None|TRUE|FALSE|NULL"
-)
+    + r"|\$\{\{" + _REFERENCE + r"\}\}"
+    + r"|\$\{" + _REFERENCE + r"\}"
+    + r"|\{\{" + _REFERENCE + r"\}\}"
+    + r"|\[[A-Z][A-Z0-9_]*+\]"
+    + r"|true|false|null|True|False|None|TRUE|FALSE|NULL"
+)  # fmt: skip
+#: The whole value, to a closing quote with as many backslashes before it as the opening quote
+#: has: ``"<a>\" …"`` and ``"null\", …"`` hold more after the placeholder (N3).
 _PLACEHOLDER = (
-    r'(?:\\*+"(?:' + _PLACEHOLDER_BODY + r')\\*+"'
-    + r"|\\*+'(?:" + _PLACEHOLDER_BODY + r")\\*+')"
+    r'(?:(?P<dq>\\*+)"(?:' + _PLACEHOLDER_BODY + r')(?P=dq)"'
+    + r"|(?P<sq>\\*+)'(?:" + _PLACEHOLDER_BODY + r")(?P=sq)')"
     + r"(?=[\s,;}\])\\]|\Z)"
 )  # fmt: skip
 
@@ -250,7 +260,7 @@ def _in_its_quotes(found: re.Match[str]) -> str:
     """A quoted name's value replaced INSIDE its quotes: ``"password": "[redacted]"``, so JSON
     stays JSON, as 0.9.2 wrote a token it took from inside a value (R9k, reopen 2). The quotes
     are the value's own, with the backslashes before them where the JSON sits in a string."""
-    name, separator, value = found.group(1, 2, 3)
+    name, separator, value = found["name"], found["sep"], found["value"]
     opening = len(value) - len(value.lstrip("\\")) + 1
     if len(value) <= opening or value[-1] != value[opening - 1]:
         return name + separator + value[:opening] + MARKER  # cut by the clip: no closing quote
@@ -301,10 +311,10 @@ _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], 
     # and a value that stands for one (:data:`_PLACEHOLDER`). The value's quotes stay.
     (
         re.compile(
-            "(" + _QUOTED_CREDENTIAL_NAME + ")"
-            r"""(\\*+["'][ \t]*[:=][ \t]*)"""
+            "(?P<name>" + _QUOTED_CREDENTIAL_NAME + ")"
+            r"""(?P<sep>\\*+["'][ \t]*[:=][ \t]*)"""
             "(?!" + _PACKAGE_SPEC + "|" + _PLACEHOLDER + ")"
-            "(" + _QUOTED_VALUE + ")"
+            "(?P<value>" + _QUOTED_VALUE + ")"
         ),
         _in_its_quotes,
     ),
@@ -418,7 +428,9 @@ def _body_run(gutter: str) -> str:
         + "|" + _BASE64 + "++(?=" + _GAP + "*+(?:" + _LINE_BREAK + "|<|\\\\*+\\Z)|\\\\*+[\"'])"
         + ")"
         # a run on the header's line, or on the line of a run before it
-        + "|" + _GAP + "*+(?:" + _LONG_RUN + "(?:" + _GAP + "*+" + _BASE64 + "++\\Z)?"
+        + "|" + _GAP + "*+(?:" + _LONG_RUN
+        # and a short run after it that ends the text, or a string (a JSON array's last line)
+        + "(?:" + _GAP + "*+(?!" + _LONG_RUN + ")" + _BASE64 + "++(?=\\\\*+[\"']|\\Z))?"
         + "|" + _CUT_RUN + ")"
         + ")"
     )  # fmt: skip
@@ -434,11 +446,48 @@ _PEM_BODY_FILED = re.compile(
     "(?P<file>[^\\s:\"'\\\\>]{1,255}?)[:-](?:[0-9]++[:-])?" + _GAP + "*+"
     + _PEM_BEGIN.pattern + _body_run(_FILE_GUTTER) + "*+"
 )  # fmt: skip
+#: The rest of a line, to its break (as :data:`_LINE_BREAK` reads one) or to a clip's ``…``.
+_LINE_REST_PATTERN = "(?:[^\\r\\n\\\\<\u2026]++|\\\\++(?![rn])|<(?![bB][rR][ \\t]*+/?>))*+"
+#: One character of a line, a clip's or an ellipsis's ``…`` too: ``journalctl`` cuts a long line
+#: with one, and the key's next line follows it.
+_IN_LINE = "(?:[^\\r\\n\\\\<]|\\\\++(?![rn])|<(?![bB][rR][ \\t]*+/?>))"
+#: A run starts here: not inside another.
+_EDGE = "(?<![A-Za-z0-9+/=])"
+#: What may end a key's line after its run: ``cat -A``'s and ``sed -n l``'s ``$``, ``^M$`` for a
+#: CRLF line, a table's `` |``. Not a ``-``: ``Proc-…`` is an RFC 1421 label the clip cut.
+_LINE_SUFFIX = "[^A-Za-z0-9^\\-\\r\\n\\\\<\u2026]*+(?:\\^M)?[^A-Za-z0-9\\-\\r\\n\\\\<\u2026]*+"
+#: A line of a key's body WHATEVER WRAPS IT (R9k, after reopen 2, N2): ``cat -A``'s ``$``, ``git
+#: blame``'s or ``journalctl``'s prefix that changes on every line, a table's pipes. A line with
+#: a run that is a key's (:data:`_LONG_RUN`) anywhere on it, to its last; or, where the key ends,
+#: a line whose last run reads as base64 (four characters or more) with nothing but a suffix
+#: after it, or what the clip left of one; or a run the clip cut. Not a word of prose that ends
+#: a line, nor a path: neither reads as base64 data. An identifier in both cases does, and goes
+#: with the key: accepted.
+_WRAPPED_LINE = (
+    _LINE_BREAK
+    + "(?:"
+    + "(?:" + _IN_LINE + "*?" + _EDGE + _LONG_RUN + ")++"
+    + "|" + _IN_LINE + "*?" + _EDGE
+    + "(?![a-z/]*+(?![A-Za-z0-9+/=]))(?![A-Z/]*+(?![A-Za-z0-9+/=]))" + _BASE64 + "{4,}+"
+    + "(?=" + _LINE_SUFFIX + "(?:" + _LINE_BREAK + "|\\\\*+\\Z|\u2026))"
+    + "|" + _IN_LINE + "*?" + _EDGE + _CUT_RUN
+    + ")"
+)  # fmt: skip
+#: The lines after a key's body (or its header) that are still the key's: :data:`_WRAPPED_LINE`
+#: after :data:`_WRAPPED_LINE`, from the line break that ends the line the body ended on.
+#: The rest of a line, ``…`` and all, to its break: the match ends at a run's end, so a clip's
+#: notice after the run stays outside it.
+_TO_LINE_END = "(?:[^\\r\\n\\\\<]++|\\\\++(?![rn])|<(?![bB][rR][ \\t]*+/?>))*+"
+_PEM_WRAPPED = re.compile(_WRAPPED_LINE + "(?:" + _TO_LINE_END + _WRAPPED_LINE + ")*+")
 #: A header with no footer and a body after it, as one pattern: what the linear pass removes for
 #: one at the start of its line, for whoever asks it of a text (the tests' reference does). A
 #: header with NO body after it (``grep`` quoting one, a doc naming one, the clip cutting right
 #: after its line) holds nothing secret, and is kept, as 0.9.2 kept it (R9k, H1).
-_PEM_HEADER_ALONE = re.compile(_PEM_BEGIN.pattern + _PEM_BODY_RUN + "++")
+_PEM_HEADER_ALONE = re.compile(
+    _PEM_BEGIN.pattern
+    + "(?:" + _PEM_BODY_RUN + "++(?:" + _TO_LINE_END + _PEM_WRAPPED.pattern + ")?"
+    + "|" + _TO_LINE_END + _PEM_WRAPPED.pattern + ")"
+)  # fmt: skip
 
 #: How far before a header the start of its line is looked for. Farther, and what stands before
 #: the header is a sentence, not a gutter: its body is read as one with no gutter.
@@ -450,8 +499,7 @@ _A_LINE_BREAK = re.compile(_LINE_BREAK)
 _NUMBERED_PREFIX = re.compile("(?:^|(?<=[\\s\"'>]))" + _NUMBER_GUTTER + "\\Z")
 #: A prefix's last word that is a file's name and a line's number: ``id_rsa:2:``, ``id_rsa:``.
 _FILED_PREFIX = re.compile("[^\\s:\"'\\\\>]{1,255}?[:-](?:[0-9]++[:-])?")
-#: The rest of a line, to its break (as :data:`_LINE_BREAK` reads one) or to a clip's ``…``.
-_LINE_REST = re.compile("(?:[^\\r\\n\\\\<\u2026]++|\\\\++(?![rn])|<(?![bB][rR][ \\t]*+/?>))*+")
+_LINE_REST = re.compile(_LINE_REST_PATTERN)
 
 #: ``strict`` only. Who typed it and where they were — identity, not secrets.
 _IDENTITY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -518,6 +566,7 @@ def _without_pem_blocks(text: str) -> str:
     kept: list[str] = []
     at = 0
     nearest = 0
+    lines: _Lines | None = None  # found at the first header with no footer
     for begin in _PEM_BEGIN.finditer(text):
         # `span()`, not `start()` and `end()`: the hook path is held to the names it calls by
         # tests/test_remote_names_stay_off_the_hook_graph.py, which reads a `.end()` as a call
@@ -528,7 +577,8 @@ def _without_pem_blocks(text: str) -> str:
         nearest = bisect_left(ends, (closes, 0), nearest)
         if nearest == len(ends):
             # A header and no footer after it: the header and its body, never what follows it.
-            stop = _end_of_body(text, opens, closes)
+            lines = lines or _Lines(text)
+            stop = lines.past_wrapped(text, _end_of_body(text, opens, closes))
             if stop > closes:  # no body, nothing secret: the header is kept, as 0.9.2 kept it
                 kept += [text[at:opens], MARKER]
                 at = stop
@@ -537,6 +587,31 @@ def _without_pem_blocks(text: str) -> str:
         at = ends[nearest][1]
     kept.append(text[at:])
     return "".join(kept)
+
+
+class _Lines:
+    """Where a text's line breaks are, found once (a pass over the text), and
+    where each line break's key lines end (:data:`_PEM_WRAPPED`), read once: every header on a
+    line asks it of the same line break, and 7,000 of them reading the line after theirs again
+    each is the quadratic case the PEM rule is not a regular expression to avoid."""
+
+    def __init__(self, text: str) -> None:
+        self.breaks = [found.span()[0] for found in _A_LINE_BREAK.finditer(text)]
+        self.read: dict[int, int | None] = {}
+
+    def past_wrapped(self, text: str, at: int) -> int:
+        """``at``, a key's body's end, past the lines after it that are the key's whatever
+        wraps them (:data:`_PEM_WRAPPED`): from the line break that ends ``at``'s line (none
+        after the clip's notice, which ends the text), and ``at`` where there are none."""
+        nearest = bisect_left(self.breaks, at)
+        if nearest == len(self.breaks):
+            return at
+        brk = self.breaks[nearest]
+        if brk not in self.read:
+            found = _PEM_WRAPPED.match(text, brk)
+            self.read[brk] = found.span()[1] if found is not None else None
+        stop = self.read[brk]
+        return at if stop is None else stop
 
 
 def _matched_to(found: re.Match[str] | None, at: int) -> int:

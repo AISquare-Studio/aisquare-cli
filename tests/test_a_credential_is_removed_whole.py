@@ -392,6 +392,16 @@ HOSTILE: dict[str, Callable[[int], str]] = {
     # short values between escaped quotes close no quoted form, and a run of a cut value that
     # went through escaped quotes read from every name to the end of the text
     "quoted-values-short-between-escaped-quotes": lambda size: 'token=\\"ab\\"' * (size // 12),
+    # N2: a key's lines whatever wraps them, read line by line from the line after the body
+    "pem-headers-on-a-line-before-a-long-one": lambda size: (
+        (HEADER + " ") * (size // 64) + "\n" + "ab " * (size // 6)
+    ),
+    "pem-wrapped-lines": lambda size: (
+        HEADER + ("\n^a1b2c3d (A 2026-11-06 10:00:00 +0000 12) " + "A1b2" * 16) * (size // 107)
+    ),
+    "pem-lines-of-short-runs": lambda size: (HEADER + "\n" + "Ab1 " * 30 + "\n") * (size // 152),
+    "pem-a-long-line-of-short-runs": lambda size: HEADER + "\n" + "ab+ " * (size // 4),
+    "pem-a-lowercase-run-inside-a-line": lambda size: HEADER + "\nx " + "a" * (size - 40) + " x",
 }
 
 #: Four sizes, each four times the one before, the last 2 MB.

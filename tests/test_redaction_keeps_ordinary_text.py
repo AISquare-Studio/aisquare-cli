@@ -322,6 +322,8 @@ def test_a_credential_name_with_a_value_that_is_not_a_version_is_still_taken() -
         "${localEnv:GITHUB_TOKEN}",
         "${GITHUB_TOKEN}",
         "${{ secrets.NPM_TOKEN }}",
+        "${{ github.token }}",
+        "${env:API_KEY}",
         "{{access_token}}",
         "{{ api_key }}",
         # a boolean, and null
@@ -359,12 +361,37 @@ def test_a_value_that_stands_for_one_is_kept_under_any_name(value: str) -> None:
         "nullable",
         "Nonesuch",
         "[hunter2hunter2]",
+        # a reference with a literal default or a filter's arguments holds a value (N1)
+        "${localEnv:PGPASS:" + SECRET + "}",
+        "${PGPASS:-" + SECRET + "}",
+        "${STRIPE_KEY:-sk_live_" + SECRET + "}",
+        "{{ db_pw | default(" + SECRET + ") }}",
+        "${VAR=" + SECRET + "}",
+        "${VAR-" + SECRET + "}",
+        "${VAR:=" + SECRET + "}",
     ],
 )
 def test_a_value_that_only_starts_or_ends_like_a_placeholder_is_taken(value: str) -> None:
     """The placeholder is the WHOLE value, to its closing quote."""
     for text, shown in zip(_forms("api_key", value), _forms("api_key", MARKER), strict=True):
         assert _both(text) == (shown, shown)
+
+
+@pytest.mark.parametrize("start", ["<a>", "${x}", "true", "null"])
+@pytest.mark.parametrize("after", [" ", ", ", ""])
+def test_a_whole_value_shape_then_an_escaped_quote_is_not_the_whole_value(
+    start: str, after: str
+) -> None:
+    """N3: the shape's closing quote has as many backslashes as its opening quote, so a
+    ``\\"`` after it is a quote the value holds, and the value goes on past it."""
+    for text, shown in (
+        (f'{{"api_key": "{start}\\"{after}{SECRET}"}}', f'{{"api_key": "{MARKER}"}}'),
+        (
+            f'{{\\"api_key\\": \\"{start}\\\\\\"{after}{SECRET}\\"}}',
+            f'{{\\"api_key\\": \\"{MARKER}\\"}}',
+        ),
+    ):
+        assert _both(text) == (shown, shown), text
 
 
 def test_a_placeholder_and_an_escaped_quote_are_not_the_whole_value() -> None:
@@ -524,9 +551,11 @@ def test_a_keys_lines_after_a_listings_gutter_are_its_body(layout: str) -> None:
 def test_a_key_in_html_lines_and_a_read_result_in_json_are_taken() -> None:
     lines = [HEADER, *BODY]
     html = "<p>" + "<br>".join(lines) + "</p><p>why?</p>"
+    upper = "<P>" + "<BR>".join(lines) + "</P><P>why?</P>"
     read = '{"content": "' + _listed(GUTTERS["Read tool"], lines, "\\n") + '", "is_error": false}'
 
     assert _both(html) == (f"<p>{MARKER}</p><p>why?</p>",) * 2
+    assert _both(upper) == (f"<P>{MARKER}</P><P>why?</P>",) * 2
     assert _both(read) == (f'{{"content": "     1\u2192{MARKER}", "is_error": false}}',) * 2
 
 
@@ -601,6 +630,99 @@ def test_a_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
         # what may be left: the padding, a separator, and half of an escaped one (``\``)
         left = shown[: -len(mark)].replace(MARKER, "").replace(HEADER, "").replace(joint, "")
         assert set(left) <= {"#", "\n", "\r", " ", "\\"}, (layout, cut, shown[-150:])
+
+
+#: A key's lines as other tools print them (N2): a prefix that changes on every line, a suffix,
+#: or both; (the line ``n`` of the listing, the header line 1, as it prints ``line``, joint).
+WRAPS: dict[str, tuple[Callable[[int, str], str], str]] = {
+    "cat -A, sed -n l": (lambda n, line: f"{line}$", "\n"),
+    "cat -A of CRLF": (lambda n, line: f"{line}^M$", "\n"),
+    "git blame": (
+        lambda n, line: f"^a1b2c3d (Anmol Majithia 2026-11-06 10:00:00 +0000 {n:2}) {line}",
+        "\n",
+    ),
+    "journalctl": (lambda n, line: f"Nov 06 10:00:{n:02d} host app[4242]: {line}", "\n"),
+    "a table": (lambda n, line: f"| {n} | {line} |", "\n"),
+    "a YAML list": (lambda n, line: f"  - {line}", "\n"),
+    "a JSON array": (lambda n, line: f'"{line}"', ", "),
+    "a Python list": (lambda n, line: repr(line), ",\n "),
+}
+
+
+def _wrapped(layout: str, lines: list[str]) -> str:
+    wrap, joint = WRAPS[layout]
+    return joint.join(wrap(n, line) for n, line in enumerate(lines, start=1))
+
+
+@pytest.mark.parametrize("layout", sorted(WRAPS))
+def test_a_keys_lines_whatever_wraps_them_are_its_body(layout: str) -> None:
+    """N2 (the ruling after reopen 2): ``cat -A`` ends each line in ``$``, ``git blame`` and
+    ``journalctl`` put a prefix that changes on every line, a table pipes: a body read as lines
+    of base64 after a gap stopped at the first, and shipped the rest. Each line with a run that
+    reads as a key's goes with the header, its last short line too, and the line after the key
+    stays."""
+    text = "[" * (layout == "a Python list") + _wrapped(layout, [HEADER, *BODY])
+    text += "]" * (layout == "a Python list") + "\nsee the error below"
+
+    shown, strict = _both(text)
+
+    assert shown == strict and MARKER in shown and shown.endswith("\nsee the error below")
+    for line in BODY:
+        assert not any(line[at : at + 6] in shown for at in range(len(line) - 5)), (layout, shown)
+
+
+def test_a_keys_lines_that_journalctl_cut_with_an_ellipsis_are_its_body() -> None:
+    """``journalctl`` cuts a line too long for the terminal with ``…``, and the key's next
+    line comes after it: an ellipsis is no clip, and the lines after it are still the key's."""
+    lines = [HEADER, *BODY]
+    text = "\n".join(
+        f"Nov 06 10:00:{n:02d} host app[4242]: {line[:40]}\u2026" for n, line in enumerate(lines)
+    )
+
+    assert _both(text + "\nwhy?") == (f"Nov 06 10:00:00 host app[4242]: {MARKER}\u2026\nwhy?",) * 2
+    # and an ellipsis in the prefix, before the run: a unit name cut short
+    text = "\n".join(f"Nov 06 10:00:{n:02d} host app\u2026: {line}" for n, line in enumerate(lines))
+    assert _both(text + "\nwhy?") == (f"Nov 06 10:00:00 host app\u2026: {MARKER}\nwhy?",) * 2
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "^a1b2c3d (A 2026-11-06 10:00:00 +0000  5) " + HEADER + " is how it starts\n"
+        "^a1b2c3d (A 2026-11-06 10:00:00 +0000  6) and the body follows below",
+        f"| 1 | {HEADER} |\n| 2 | the first line of a key, above |",
+        f"{HEADER}$\nis what cat -A printed for the header line$",
+    ],
+)
+def test_a_wrapped_header_with_no_body_after_it_is_kept(text: str) -> None:
+    """H1 where a tool wraps the lines: prose after the header, a word ending each line."""
+    assert _both(text) == (text, text)
+
+
+@pytest.mark.parametrize("layout", sorted(WRAPS))
+def test_a_wrapped_key_the_8000_character_clip_cuts_leaves_no_byte_of_its_body(
+    layout: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each N2 layout cut by the clip at every point from the header to the footer: no four
+    characters of a body line are left, before the marker or after it."""
+    monkeypatch.setattr(insights, "redaction_level", lambda: RedactionLevel.standard)
+    lead, close = ("[", "]") if layout == "a Python list" else ("", "")
+    key = lead + _wrapped(layout, [HEADER, *BODY, FOOTER]) + close
+    mark = insights._TRUNCATION_MARK
+    limit = insights._MAX_TEXT - len(mark)
+    for cut in range(key.index(HEADER) + len(HEADER), key.index(FOOTER)):
+        pad = "#" * (limit - cut - 1) + "\n"
+
+        shown = insights._outbound(pad + key + "\nand what now?")
+
+        assert shown.startswith(pad) and shown.endswith(mark), (layout, cut)
+        left = shown[len(pad) : -len(mark)]
+        for line in BODY:
+            assert not any(line[at : at + 4] in left for at in range(len(line) - 3)), (
+                layout,
+                cut,
+                left[-120:],
+            )
 
 
 @pytest.mark.parametrize("layout", [*sorted(GUTTERS), "html", "Read result in JSON"])

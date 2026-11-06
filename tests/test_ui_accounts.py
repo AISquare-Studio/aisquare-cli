@@ -1708,7 +1708,7 @@ def _script_claude_sign_in(
     )
     account.config_dir.mkdir(parents=True)
 
-    def begin(slot: int | None, *, agent: str = core.AGENT) -> ClaudeAccount:
+    def begin(slot: int | str | None, *, agent: str = core.AGENT) -> ClaudeAccount:
         seen["begin"] = slot
         return account
 
@@ -1883,7 +1883,7 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
     overview = _overview(_status(1, "me@example.com"), _status(2, None))
 
-    async def go(pilot: Pilot[None]) -> tuple[int | None, str]:
+    async def go(pilot: Pilot[None]) -> tuple[int | str | None, str]:
         view = await open_accounts(pilot)
         await press(pilot, "#account-login-2")
         await settle(fleet_app(pilot))
@@ -1894,7 +1894,7 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
         return begun, notice(view)
 
     begun, said = drive(go, overview=overview)
-    assert begun == 2  # the row's button signs THAT slot in
+    assert begun == "2"  # the row's button signs THAT slot in, by the ref its row names (#100)
     assert seen["abandoned"] == []  # an existing slot is kept, login or not
     assert said.startswith("sign-in cancelled — cancelled; nothing changed")
 

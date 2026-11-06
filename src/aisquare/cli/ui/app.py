@@ -3379,9 +3379,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             await self.action_welcome()
             self.query_one(WelcomeView).back_from_sign_in()
         elif back.kind == "picker":
-            self._reopen_picker(back, event.slot)
+            self._reopen_picker(back, event.ref)
         else:
-            self._reopen_spawn(back, event.slot)
+            self._reopen_spawn(back, event.ref)
 
     def on_sign_in_abandoned(self, event: SignInAbandoned) -> None:
         """No login landed: nothing is reopened, and the one toast says so."""
@@ -3415,9 +3415,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         }
         self.query_one("#accounts", AccountsView).show_next_step(next_step(projects, managed))
 
-    def _reopen_picker(self, back: ReturnTo, slot: int) -> None:
+    def _reopen_picker(self, back: ReturnTo, slot: str) -> None:
         """The persona picker again, from the Personas tab that opened it, the new slot
-        highlighted (#215): what it is chosen for stays that tab's."""
+        highlighted (#215): what it is chosen for stays that tab's. ``slot`` is its number,
+        or ``codex:5`` where two agents' accounts hold it (``SignInLanded.ref``)."""
         try:
             tab = self.query_one(f"#project-{back.project_id}").query_one(PersonasTab)
         except NoMatches:
@@ -3431,15 +3432,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             filter_text=str(form.get("filter", "")),
         )
 
-    def _reopen_spawn(self, back: ReturnTo, slot: int) -> None:
+    def _reopen_spawn(self, back: ReturnTo, slot: str) -> None:
         """The Spawn dialog again, as it was typed, on the new account (#286)."""
         project = self.snapshot.project(back.project_id or "") if self.snapshot else None
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=6)
             return
-        dialog = SpawnDialog(
-            project, accounts=self._accounts, **{**back.form, "account": str(slot)}
-        )
+        dialog = SpawnDialog(project, accounts=self._accounts, **{**back.form, "account": slot})
         self.push_screen(dialog, callback=self.spawn_finished)
 
     async def on_settings_selected(self, event: SettingsSelected) -> None:

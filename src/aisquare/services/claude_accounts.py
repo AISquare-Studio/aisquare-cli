@@ -344,6 +344,24 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     # Claude Code's slots alone, added one in a Codex account's number) has its rank read as
     # the older account's, the one it was written for, and the newer one is unranked, last,
     # so the machine default never moves to it (seq 11271, #100).
+    unranked = _unranked_holders(store)
+    # A number another agent's account holds is kept from 0.9.2 on every read, for the Codex
+    # accounts an earlier build of this release made before it reserved them (#100's reopen, A).
+    for account in listed:
+        core.reserve_number(account)
+    arranged: list[ClaudeAccount] = []
+    for agent in core.account_agents():
+        mine = [a for a in listed if a.agent == agent]
+        if core.kind(agent).legacy_slots:
+            arranged.extend(_arranged_claude(store, mine))
+        else:
+            arranged.extend(_arranged_agent(store, agent, mine))
+    return _ranked(store, arranged, promoted, unranked=unranked)
+
+
+def _unranked_holders(store: ContextStore) -> set[tuple[str, int]]:
+    """The accounts, by agent and slot, whose number's rank is not theirs (:func:`_ranked`):
+    read before the rows are folded (:func:`_arranged` says why)."""
     ranks, written = store.account_ranks_written()
     holders: dict[int, list[tuple[datetime, str]]] = {}
     for agent in core.account_agents():
@@ -364,14 +382,42 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
             unranked.update((agent, slot) for at, agent in found if at > written)
             found = [(at, agent) for at, agent in found if at <= written]
         unranked.update((agent, slot) for _, agent in found[1:])
-    arranged: list[ClaudeAccount] = []
-    for agent in core.account_agents():
-        mine = [a for a in listed if a.agent == agent]
-        if core.kind(agent).legacy_slots:
-            arranged.extend(_arranged_claude(store, mine))
-        else:
-            arranged.extend(_arranged_agent(store, agent, mine))
-    return _ranked(store, arranged, promoted, unranked=unranked)
+    return unranked
+
+
+def shared_numbers(accounts: Sequence[ClaudeAccount]) -> list[list[ClaudeAccount]]:
+    """The numbers two or more agents' accounts hold among ``accounts``, each with its holders
+    in order (0.9.2, after a rollback, numbers its own by Claude Code's alone)."""
+    by_slot: dict[int, list[ClaudeAccount]] = {}
+    for account in accounts:
+        by_slot.setdefault(account.slot, []).append(account)
+    return [held for held in by_slot.values() if len(held) > 1]
+
+
+def _refuse_a_shared_numbers_rank(store: ContextStore, accounts: Sequence[ClaudeAccount]) -> None:
+    """A place in the one order is a number's (``account_rank`` keys it by slot), so the
+    account that shares its number with the one whose place it is cannot be given a place:
+    written, the place went to the other account, under a receipt that named this one (#100's
+    reopen, C). Refused, naming why and the commands that give it a number of its own."""
+    unranked = _unranked_holders(store)
+    arranged = _arranged(store)
+    for account in accounts:
+        others = [
+            other
+            for other in arranged
+            if other.slot == account.slot and other.agent != account.agent
+        ]
+        if not others or (account.agent, account.slot) not in unranked:
+            continue
+        add = "aisquare accounts add" + (
+            "" if core.kind(account.agent).legacy_slots else f" --agent {account.agent}"
+        )
+        raise AccountsError(
+            f"{core.agent_label(account.agent)}'s account {account.slot} shares its number with "
+            f"{core.agent_label(others[0].agent)}'s, whose place in the order it is: it is listed "
+            "last and cannot be moved or made the default. To give it a number of its own: "
+            f"aisquare accounts remove {core.qualified_ref(account)}, then {add}"
+        )
 
 
 def _promote_retired_defaults(store: ContextStore) -> list[int]:
@@ -646,10 +692,12 @@ def _signed_in_as(
         if account.agent not in first and matches(account):
             first[account.agent] = account
     if len(first) > 1:
-        raise NoSuchAccount(
+        raise AmbiguousAccount(
             f"{email!r} is signed in to "
             + " and ".join(f"{core.agent_label(a.agent)} (slot {a.slot})" for a in first.values())
-            + " — name the slot instead; see: aisquare accounts"
+            + " — name one as "
+            + " or ".join(core.qualified_ref(a) for a in first.values())
+            + "; see: aisquare accounts"
         )
     return next(iter(first.values()), None)
 
@@ -663,6 +711,19 @@ def _find_in(
 ) -> ClaudeAccount:
     text = str(ref).strip()
     whose = _whose(agent, accounts)
+    qualified = core.qualified_slot(text)
+    if qualified is not None:
+        # `codex:5`: exactly that agent's account in that number (#100's reopen, D).
+        owner, slot = qualified
+        account = next((a for a in accounts if (a.agent, a.slot) == qualified), None)
+        if account is None:
+            plain = core.find_account(slot)
+            if plain is not None and not plain.managed and plain.agent == owner:
+                return plain
+            raise NoSuchAccount(
+                f"no {core.kind(owner).noun} account in slot {slot} — see: aisquare accounts"
+            )
+        return account
     number = core.slot_number(text)
     if number is not None:
         matches = [a for a in accounts if a.slot == number]
@@ -681,9 +742,15 @@ def _find_in(
         return account
     wanted = text.lower()
     if "@" not in wanted:
-        by_alias = next((a for a in accounts if _same_alias(a.alias, text)), None)
-        if by_alias is not None:
-            return by_alias
+        by_alias = [a for a in accounts if _same_alias(a.alias, text)]
+        if len(by_alias) > 1:  # two accounts an older build let take one name: neither picked
+            raise AmbiguousAccount(
+                f"{text!r} names "
+                + " and ".join(core.qualified_ref(a) for a in by_alias)
+                + " — name one as such, and give one another alias; see: aisquare accounts"
+            )
+        if by_alias:
+            return by_alias[0]
     found = _signed_in_as(accounts, wanted, agent)
     if found is not None:
         return found
@@ -706,10 +773,10 @@ def _two_in_one_number(number: str, accounts: Sequence[ClaudeAccount]) -> str:
         return f"{core.agent_label(account.agent)}'s account {account.slot} ({who})"
 
     each = " and ".join(named_for_the_refusal(account) for account in accounts)
+    names = " or ".join(core.qualified_ref(account) for account in accounts)
     return (
         f"slot {number} is two accounts, {each}: 0.9.2, used after this release, numbers its "
-        "own accounts by Claude Code's alone. Name one by its alias or the email it is signed "
-        "in as, or with --agent where the command takes it; see: aisquare accounts"
+        f"own accounts by Claude Code's alone. Name one as {names}; see: aisquare accounts"
     )
 
 
@@ -1087,7 +1154,7 @@ def set_default(
         # launch, and only doctor said so (review of #205, third round).
         raise AccountsError(
             f"{core.label(account)} (slot {account.slot}) is disabled, so no launch would "
-            f"pick it — enable it first: aisquare accounts enable {account.slot}"
+            f"pick it — enable it first: aisquare accounts enable {ref_for(account)}"
         )
     try:
         with store_session() as store:
@@ -1111,6 +1178,7 @@ def set_default(
                 # resolve() would print "moved to rank 1" over an order nothing changed.
                 if account.slot not in arranged:
                     raise KeyError(account.slot)
+                _refuse_a_shared_numbers_rank(store, [account])
                 _rank_first(store, [account])
     except KeyError as exc:
         raise NoSuchAccount(_vanished(account, whose)) from exc
@@ -1172,7 +1240,8 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
         with store_session() as store:
             arranged = _arranged(store)
             if normalised is not None and any(
-                other.slot != account.slot and _same_alias(other.alias, normalised)
+                (other.agent, other.slot) != (account.agent, account.slot)
+                and _same_alias(other.alias, normalised)
                 for other in arranged
             ):
                 # Every agent's slots are arranged here: one name, one account, across all.
@@ -1190,7 +1259,9 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
                 ) from exc
             except KeyError as exc:
                 raise NoSuchAccount(_vanished(account)) from exc
-            return next(a for a in _arranged(store) if a.slot == account.slot)
+            return next(
+                a for a in _arranged(store) if (a.agent, a.slot) == (account.agent, account.slot)
+            )
     except sqlite3.Error as exc:
         raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
 
@@ -1209,7 +1280,9 @@ def set_disabled(ref: str, disabled: bool) -> ClaudeAccount:
                     store.set_agent_account_disabled(account.agent, account.slot, disabled)
             except KeyError as exc:
                 raise NoSuchAccount(_vanished(account)) from exc
-            return next(a for a in _arranged(store) if a.slot == account.slot)
+            return next(
+                a for a in _arranged(store) if (a.agent, a.slot) == (account.agent, account.slot)
+            )
     except sqlite3.Error as exc:
         raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
 
@@ -1226,7 +1299,17 @@ def reorder(refs: Sequence[str]) -> list[ClaudeAccount]:
     if [account for account in order if _take_on(account)]:
         accounts, note = _read_arranged()
         order = [_resolve_in(accounts, ref, note=note) for ref in refs]
+    _refuse_with_the_store(order)
     return _write_order(order)
+
+
+def _refuse_with_the_store(accounts: Sequence[ClaudeAccount]) -> None:
+    """:func:`_refuse_a_shared_numbers_rank` in a store of its own."""
+    try:
+        with store_session() as store:
+            _refuse_a_shared_numbers_rank(store, accounts)
+    except sqlite3.Error as exc:
+        raise AccountsUnreadable(f"the accounts registry cannot be read ({exc})") from exc
 
 
 def _take_on(account: ClaudeAccount) -> bool:
@@ -1279,8 +1362,11 @@ def move(ref: str, direction: Direction) -> list[ClaudeAccount]:
     if _take_on(account):
         accounts, note = _read_arranged()
         account = _resolve_in(accounts, ref, note=note)
+    _refuse_with_the_store([account])
     order = list(accounts)
-    index = next(at for at, a in enumerate(order) if a.slot == account.slot)
+    index = next(
+        at for at, a in enumerate(order) if (a.agent, a.slot) == (account.agent, account.slot)
+    )
     order.pop(index)
     if direction == "up":
         order.insert(max(index - 1, 0), account)
@@ -4955,26 +5041,54 @@ def not_installed(agent: str = AGENT) -> ClaudeNotInstalled:
     )
 
 
-def begin_sign_in(slot: int | None, *, agent: str = AGENT) -> ClaudeAccount:
+def begin_sign_in(slot: int | str | None, *, agent: str = AGENT) -> ClaudeAccount:
     """The account a sign-in is about: a fresh slot of ``agent`` when ``slot`` is ``None``.
 
-    Refuses without the agent installed, before making a directory nothing could use.
+    ``slot`` is a number, or an agent-qualified one (``codex:5``) where two agents'
+    accounts hold it (:func:`account_named`). Refuses without the agent installed, before
+    making a directory nothing could use.
     """
-    whose = agent
-    if slot is not None:
-        found = core.find_account(slot)
-        whose = found.agent if found is not None else agent
+    found = account_named(slot) if slot is not None else None
+    whose = found.agent if found is not None else agent
     if not install(whose).installed:
         raise not_installed(whose)
     if slot is None:
         return core.create_account(agent)
-    account = core.find_account(slot)
-    if account is None:
+    if found is None:
         raise NoSuchAccount(
             f"no {_whose(agent, core.list_accounts())} account in slot {slot} — "
             "see: aisquare accounts"
         )
-    return account
+    return found
+
+
+def account_named(ref: int | str) -> ClaudeAccount | None:
+    """The account ``ref`` names by its number (:func:`core.find_account`), or as
+    ``codex:5``; ``None`` when none holds it. A bare number two agents' accounts hold is
+    refused (:class:`AmbiguousAccount`), never taken for the first listed (#100's reopen:
+    a row's *Log in* and *Remove* acted on the other account)."""
+    text = str(ref).strip()
+    number = core.slot_number(text)
+    if number is not None:
+        held = [account for account in core.list_accounts() if account.slot == number]
+        if len(held) > 1:
+            raise AmbiguousAccount(_two_in_one_number(text, held))
+        return core.find_account(number)
+    if core.qualified_slot(text) is None:
+        return None
+    try:
+        return _find_in(core.list_accounts(), text, note=None, agent=None)
+    except NoSuchAccount:
+        return None
+
+
+def ref_for(account: ClaudeAccount, accounts: Iterable[ClaudeAccount] | None = None) -> str:
+    """How a command names ``account``: its number, or ``codex:5`` where another agent's
+    account holds that number too (among ``accounts``; by default the added ones, read from
+    their folders: a plain home's number is never another's), where the bare number is
+    refused (#100's reopen)."""
+    listed = core.all_managed_accounts() if accounts is None else accounts
+    return core.ref_among(account, listed)
 
 
 def sign_in_command(account: ClaudeAccount) -> list[str]:
@@ -4990,7 +5104,7 @@ def sign_in_command(account: ClaudeAccount) -> list[str]:
         "aisquare",
         "accounts",
         "run",
-        str(account.slot),
+        ref_for(account),
         *core.kind(account.agent).sign_in_args(),
     ]
 
@@ -5236,7 +5350,12 @@ def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
     # The alias too, from the registry itself: a caller holding a plain
     # directory record (``core.create_account`` hands one out) knows none.
     alias = account.alias or next(
-        (a.alias for a in _read_arranged()[0] if a.slot == account.slot), None
+        (
+            a.alias
+            for a in _read_arranged()[0]
+            if (a.agent, a.slot) == (account.agent, account.slot)
+        ),
+        None,
     )
     # The directory is leaving either way; a settings.json we cannot parse is not a stop.
     with contextlib.suppress(Exception):

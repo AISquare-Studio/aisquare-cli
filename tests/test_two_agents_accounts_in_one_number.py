@@ -74,8 +74,13 @@ def _codex_account_of_an_earlier_build() -> ClaudeAccount:
     """A Codex account made before this release reserved its number (as 11271's was)."""
     account = core.create_account(CODEX)
     _codex_sign_in(account.config_dir, "codex@example.com")
-    (core.accounts_root() / str(account.slot)).unlink()
+    _drop_the_reserve(account)
     return account
+
+
+def _drop_the_reserve(account: ClaudeAccount) -> None:
+    """As a build before the reserve left it: every read of this one writes it back (A)."""
+    (core.accounts_root() / str(account.slot)).unlink()
 
 
 @pytest.fixture
@@ -89,6 +94,7 @@ def collided(machine: Path, ticking: None) -> tuple[ClaudeAccount, ClaudeAccount
     assert codex.slot == 5
     service.move("5", "top")
     assert _order() == [(CODEX, 5), ("claude-code", 1), *(("claude-code", n) for n in (4, 2, 3))]
+    _drop_the_reserve(codex)  # those reads were this release's; the earlier build ran them
     added = _add_on_092()
     assert added.slot == 5, "0.9.2 took the Codex account's number"
     return codex, added
@@ -131,7 +137,7 @@ def test_a_bare_number_two_accounts_hold_is_refused_naming_both(
     assert "slot 5 is two accounts" in said
     assert "Codex's account 5 (codex@example.com)" in said
     assert "Claude Code's account 5 (not signed in)" in said
-    assert "--agent" in said and "alias" in said
+    assert "Name one as codex:5 or claude-code:5" in said, "the form every command takes (D)"
 
     assert service.resolve("5", agent=CODEX).agent == CODEX
     assert service.resolve("5", agent="claude-code").agent == "claude-code"

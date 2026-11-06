@@ -80,7 +80,7 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -481,6 +481,33 @@ def slot_number(text: str) -> int | None:
     return int(stripped) if stripped.removeprefix("-").isdecimal() else None
 
 
+def qualified_slot(text: str) -> tuple[str, int] | None:
+    """The agent and slot ``text`` names as ``<agent>:<slot>`` (``codex:5``, ``claude-code:5``),
+    ``None`` when it names none that way. Where two agents' accounts hold one number (0.9.2,
+    after a rollback, numbers its own by Claude Code's alone), it names exactly one; it is
+    taken wherever a slot is (#100's reopen, D)."""
+    agent, sep, number = text.strip().partition(":")
+    if not sep:
+        return None
+    slot = slot_number(number)
+    if slot is None or agent.strip() not in account_agents():
+        return None
+    return agent.strip(), slot
+
+
+def qualified_ref(account: ClaudeAccount) -> str:
+    """``<agent>:<slot>``: the reference that names ``account`` alone (:func:`qualified_slot`)."""
+    return f"{account.agent}:{account.slot}"
+
+
+def ref_among(account: ClaudeAccount, accounts: Iterable[ClaudeAccount]) -> str:
+    """How a command names ``account`` among ``accounts``: its number, or ``codex:5`` where
+    another agent's account holds that number too, where a bare number is refused (#100's
+    reopen)."""
+    shared = any(o.slot == account.slot and o.agent != account.agent for o in accounts)
+    return qualified_ref(account) if shared else str(account.slot)
+
+
 def _labelled_slot(name: str) -> int | None:
     """The slot whose :func:`default_label` ``name`` reads as, whatever its case, spacing and
     variation selectors (:func:`core.names.name_key`): ``account 3`` U+FE00 prints as slot 3's.
@@ -536,6 +563,8 @@ def normalise_alias(raw: str, *, slot: int | None = None) -> str:
         )
     if "@" in alias:
         raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
+    if qualified_slot(alias) is not None:
+        raise ValueError(f"{raw!r} reads as an agent's slot — an alias cannot be <agent>:<slot>")
     flaw = name_flaw(alias)
     if flaw == "control":
         raise ValueError(f"{raw!r} has a control character — an alias is one line of text")
@@ -590,7 +619,7 @@ def create_account(agent: str = AGENT) -> ClaudeAccount:
     if not kind(agent).legacy_slots:
         marker["agent"] = agent  # Claude Code's slots' markers have always gone without
     (account.config_dir / MARKER).write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
-    _reserve_number(account)
+    reserve_number(account)
     return account
 
 
@@ -598,7 +627,7 @@ def _legacy_number_paths(account: ClaudeAccount) -> list[Path]:
     """Where a release that numbers by the legacy agent's slots alone (0.9.2:
     ``AgentAccounts.legacy_slots``) would look for ``account``'s number: ``<its root>/<n>``,
     for an account of another agent; none for the legacy agent's own."""
-    if kind(account.agent).legacy_slots:
+    if kind(account.agent).legacy_slots or not account.managed:
         return []
     return [
         accounts_root(agent) / str(account.slot)
@@ -607,7 +636,7 @@ def _legacy_number_paths(account: ClaudeAccount) -> list[Path]:
     ]
 
 
-def _reserve_number(account: ClaudeAccount) -> None:
+def reserve_number(account: ClaudeAccount) -> None:
     """Keep ``account``'s number from an account 0.9.2 adds after a rollback: its
     ``next_free_slot`` takes the lowest number with no ``claude-accounts/<n>``, whatever is
     in ``codex-accounts``, and the two accounts then shared it (seq 11271, #100). A small
@@ -624,7 +653,7 @@ def _reserve_number(account: ClaudeAccount) -> None:
 
 
 def _release_number(account: ClaudeAccount) -> None:
-    """Free the number :func:`_reserve_number` kept, once its account is gone: the file
+    """Free the number :func:`reserve_number` kept, once its account is gone: the file
     alone, never a folder (an account 0.9.2 already added in it)."""
     for path in _legacy_number_paths(account):
         try:

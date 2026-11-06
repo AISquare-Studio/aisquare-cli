@@ -231,7 +231,7 @@ def bind_account(profile: RoleLaunchProfile, statuses: Iterable[ClaudeAccountSta
         slot = accounts_core.managed_slot(directory, agent)
         if slot is None:
             return directory.name or raw
-        return _account_text(slot, listed)
+        return _account_text(agent, slot, listed)
     return "this shell's account"
 
 
@@ -240,21 +240,27 @@ def _account_named(ref: str, agent: str | None, statuses: list[ClaudeAccountStat
     email, matched in the accounts already read as ``services.claude_accounts.resolve``
     matches them (the bind's agent's first); ``account <ref>`` when none is."""
     ordered = sorted(statuses, key=lambda status: status.account.agent != agent)
+    qualified = accounts_core.qualified_slot(ref)
     for status in ordered:
         account, identity = status.account, status.identity
         if (
             account.slot == accounts_core.slot_number(ref)
+            or qualified == (account.agent, account.slot)  # `codex:5` (#100's reopen)
             or (account.alias is not None and name_key(account.alias) == name_key(ref))
             or (identity is not None and "@" in ref and identity.email.lower() == ref.lower())
         ):
-            return _account_text(account.slot, statuses)
+            return _account_text(account.agent, account.slot, statuses)
     return f"account {ref}"
 
 
-def _account_text(slot: int, statuses: list[ClaudeAccountStatus]) -> str:
+def _account_text(agent: str, slot: int, statuses: list[ClaudeAccountStatus]) -> str:
+    """``account 3 · me@example.com``: ``agent``'s account in ``slot``, whose number another
+    agent's account may hold too after a rollback (#100)."""
     for status in statuses:
-        if status.account.slot == slot and status.identity is not None:
-            return f"account {slot} · {status.identity.email}"
+        if (status.account.agent, status.account.slot) == (agent, slot):
+            if status.identity is not None:
+                return f"account {slot} · {status.identity.email}"
+            break
     return f"account {slot}"
 
 
@@ -403,7 +409,11 @@ class AttachTargetScreen(ModalScreen[Target | None]):
             ]
         statuses = targets.accounts or []
         mixed = len({s.account.agent for s in statuses}) > 1
-        return [(f"account:{s.account.slot}", account_text(s, agent=mixed)) for s in statuses]
+        listed = [s.account for s in statuses]
+        return [
+            (f"account:{accounts_core.ref_among(s.account, listed)}", account_text(s, agent=mixed))
+            for s in statuses
+        ]
 
     def paint(self) -> None:
         self._arming.disarm()  # the rows are drawn again
@@ -463,8 +473,11 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                 binary=profile.bin if profile else None,
             )
         if kind == "account":
+            # By the ref its row was listed under: `codex:5` where two agents' accounts hold 5.
+            statuses = self.targets.accounts or []
+            listed = [s.account for s in statuses]
             slot = next(
-                (s for s in self.targets.accounts or [] if str(s.account.slot) == key), None
+                (s for s in statuses if accounts_core.ref_among(s.account, listed) == key), None
             )
             return Target("account", key, agent=slot.account.agent if slot else None, account=key)
         return None
@@ -786,7 +799,11 @@ class NewBindScreen(ModalScreen[str | None]):
         """The seat, and exactly what ``bind_role`` is called with."""
         env: dict[str, str] = {}
         slot = self.query_one("#bind-account", Select).value
-        status = next((s for s in self._statuses if str(s.account.slot) == slot), None)
+        agent = self.bind_agent()  # its own: another agent's account may hold the number (#100)
+        status = next(
+            (s for s in self._statuses if (s.account.agent, str(s.account.slot)) == (agent, slot)),
+            None,
+        )
         if status is not None:
             # What `launch --account <slot>` sets — none for the default slot.
             env.update(accounts_core.launch_env(status.account))

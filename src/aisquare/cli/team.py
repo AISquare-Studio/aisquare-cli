@@ -1107,9 +1107,15 @@ def bind(
                 # Against the agent the role launches (named here, or bound before):
                 # a Codex role bound to a Claude slot is refused now, naming both.
                 whose = _bound_agent(role_name, agent)
-                # Claude Code's bindings take any slot, as they did before Codex had slots.
+                # Claude Code's bindings take any slot, as they did before Codex had slots;
+                # a number two agents' accounts hold is the role's agent's (#100's reopen, D).
                 any_slot = claude_accounts_core.kind(whose).legacy_slots
-                claude_accounts_service.resolve(account, agent=None if any_slot else whose)
+                try:
+                    claude_accounts_service.resolve(account, agent=None if any_slot else whose)
+                except claude_accounts_service.AmbiguousAccount:
+                    if agent is None:
+                        raise
+                    claude_accounts_service.resolve(account, agent=whose)
             except claude_accounts_service.AccountsError as exc:
                 fail(str(exc), error="unknown_account", ref=account)
         try:

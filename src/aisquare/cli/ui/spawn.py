@@ -831,9 +831,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     ) -> list[tuple[str, str]]:
         """What the spawn runs on with no account (:attr:`_default_label`), then ``agent``'s
         slots: a launch refuses another agent's. None of them while the agent is being asked."""
+        listed = list(statuses)
+        accounts = [status.account for status in listed]
         options = [(self._default_label, THIS_SHELL)] + [
-            (account_choice(status), str(status.account.slot))
-            for status in statuses
+            # `codex:5` where two agents' accounts hold 5, which a bare 5 is refused for (#100)
+            (account_choice(status), accounts_core.ref_among(status.account, accounts))
+            for status in listed
             if agent is not None and status.account.agent == agent
         ]
         preset = self._preset_account
@@ -846,10 +849,18 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return options
 
     def _slot_agent(self, slot: str | None) -> str | None:
-        """The agent whose account ``slot`` is, once the accounts are read; slots are one
-        ladder, so it is never two agents'."""
-        status = next((s for s in self._account_statuses if str(s.account.slot) == slot), None)
-        return status.account.agent if status is not None else None
+        """The agent whose account ``slot`` is, once the accounts are read: ``codex:5`` names
+        its agent; a bare number, the one agent whose account holds it. Slots are one ladder,
+        but a rollback to 0.9.2 can number a Claude Code account as a Codex one is (#100):
+        a number two agents' accounts hold names neither."""
+        qualified = accounts_core.qualified_slot(slot or "")
+        if qualified is not None:
+            held = [
+                s for s in self._account_statuses if (s.account.agent, s.account.slot) == qualified
+            ]
+        else:
+            held = [s for s in self._account_statuses if str(s.account.slot) == slot]
+        return held[0].account.agent if len(held) == 1 else None
 
     def compose(self) -> ComposeResult:
         defaults = self._defaults(self._role)

@@ -77,6 +77,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.timer import Timer
+from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
@@ -185,10 +186,10 @@ SessionReader = Callable[[], "iam.Session | None"]
 
 
 class _RenameWrite(NamedTuple):
-    """A *Rename* write in flight: the slot, the text the field said when Enter sent it, and
-    which opening of that field sent it (``AccountRow.openings``)."""
+    """A *Rename* write in flight: its row's key (``AccountRow.key``), the text the field said
+    when Enter sent it, and which opening of that field sent it (``AccountRow.openings``)."""
 
-    slot: int
+    key: str
     submitted: str
     opening: int
 
@@ -238,11 +239,13 @@ class UsageRead(Message):
 
 
 class SignInLanded(Message):
-    """A Claude Code sign-in the page watched landed and was wired: ``slot`` holds it. The
-    shell goes back to where it was started from, or names the next step (#286)."""
+    """A Claude Code sign-in the page watched landed and was wired: ``slot`` holds it, and
+    ``ref`` names it (``codex:5`` where two agents' accounts hold the number). The shell
+    goes back to where it was started from, or names the next step (#286)."""
 
-    def __init__(self, slot: int) -> None:
+    def __init__(self, slot: int, ref: str | None = None) -> None:
         self.slot = slot
+        self.ref = ref if ref is not None else str(slot)
         super().__init__()
 
 
@@ -525,6 +528,26 @@ def marks_shown(statuses: Iterable[ClaudeAccountStatus]) -> bool:
     takes (two and a space) are the name's, which keeps the 12 a Claude-only machine's names
     have in 0.9.2 (the ui-tester at 874aeff6, r23 of #113)."""
     return len({status.account.agent for status in statuses}) > 1
+
+
+def shared_slots(statuses: Iterable[ClaudeAccountStatus]) -> set[int]:
+    """The numbers two agents' accounts hold among ``statuses``: 0.9.2, used after this
+    release, numbers its own by Claude Code's alone (#100)."""
+    accounts = [status.account for status in statuses]
+    return {held[0].slot for held in accounts_service.shared_numbers(accounts)}
+
+
+def row_key(account: ClaudeAccount, *, shared: bool) -> str:
+    """What a row's widget ids end in: its number, or ``5-codex`` where two agents' accounts
+    hold 5. By number alone, a page that listed both raised Textual's DuplicateIds (#100's
+    reopen, failure 7)."""
+    return f"{account.slot}-{account.agent}" if shared else str(account.slot)
+
+
+def row_ref(account: ClaudeAccount, *, shared: bool) -> str:
+    """How a row's commands name its account: its number, or ``codex:5`` where two agents'
+    accounts hold 5, which a bare number is refused for (``accounts_service.ref_for``)."""
+    return core.qualified_ref(account) if shared else str(account.slot)
 
 
 def offers_login_again(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
@@ -992,7 +1015,7 @@ class NameCell(Static):
             event.stop()
             row = next((node for node in self.ancestors if isinstance(node, AccountRow)), None)
             if row is not None:
-                row.post_message(AccountRow.RenameRequested(row.slot))
+                row.post_message(AccountRow.RenameRequested(row.key))
 
 
 class AccountRow(Vertical, can_focus=True):
@@ -1040,13 +1063,17 @@ class AccountRow(Vertical, can_focus=True):
     class RenameRequested(Message):
         """Double-click on the name, or Enter / F2 on the row: open its field."""
 
-        def __init__(self, slot: int) -> None:
+        def __init__(self, key: str) -> None:
             super().__init__()
-            self.slot = slot
+            self.key = key
 
-    def __init__(self, status: ClaudeAccountStatus, *, id: str | None = None) -> None:
+    def __init__(
+        self, status: ClaudeAccountStatus, *, shared: bool = False, id: str | None = None
+    ) -> None:
         super().__init__(id=id)
         self.status = status
+        self.shared = shared
+        """Whether another agent's account holds this row's number (:func:`row_key`)."""
         self.usage: ClaudeUsage | None = None
         self.trend: UsageTrend | None = None
         self._wait_ends: asyncio.TimerHandle | None = None
@@ -1063,15 +1090,25 @@ class AccountRow(Vertical, can_focus=True):
     def slot(self) -> int:
         return self.status.account.slot
 
+    @property
+    def key(self) -> str:
+        """What the row's widget ids end in (:func:`row_key`)."""
+        return row_key(self.status.account, shared=self.shared)
+
+    @property
+    def ref(self) -> str:
+        """How the row's commands name its account (:func:`row_ref`)."""
+        return row_ref(self.status.account, shared=self.shared)
+
     def compose(self) -> ComposeResult:
         with Horizontal(classes="account-line"):
             yield from self._cells()
             with Horizontal(classes="account-actions"):
                 for stem, label, width in _ACTIONS:
-                    button = Button(label, id=f"account-{stem}-{self.slot}", compact=True)
+                    button = Button(label, id=f"account-{stem}-{self.key}", compact=True)
                     button.styles.width = width
                     yield button
-        windows = Static(id=f"account-windows-{self.slot}", classes="account-windows")
+        windows = Static(id=f"account-windows-{self.key}", classes="account-windows")
         windows.display = False
         yield windows
 
@@ -1081,7 +1118,7 @@ class AccountRow(Vertical, can_focus=True):
             if column in MOVE_COLUMNS:
                 button = Button(
                     column.title,
-                    id=f"account-{column.key}-{self.slot}",
+                    id=f"account-{column.key}-{self.key}",
                     classes=classes,
                     compact=True,
                 )
@@ -1090,30 +1127,30 @@ class AccountRow(Vertical, can_focus=True):
             if column is LOGIN_COLUMN:
                 yield Button(
                     "Log in",
-                    id=f"account-login-{self.slot}",
+                    id=f"account-login-{self.key}",
                     classes=classes,
                     variant="primary",
                     compact=True,
                 )
                 continue
             if column.key != "name":
-                yield Static(classes=classes, id=f"account-cell-{column.key}-{self.slot}")
+                yield Static(classes=classes, id=f"account-cell-{column.key}-{self.key}")
                 if column.key == "week":
                     problem = Static(
                         classes=f"cell col-{PROBLEM_COLUMN.key}",
-                        id=f"account-cell-{PROBLEM_COLUMN.key}-{self.slot}",
+                        id=f"account-cell-{PROBLEM_COLUMN.key}-{self.key}",
                     )
                     problem.display = False
                     yield problem
                 continue
             with Horizontal(classes=classes):
-                yield Static(classes="account-agent", id=f"account-cell-agent-{self.slot}")
-                name = NameCell(id=f"account-name-{self.slot}")
+                yield Static(classes="account-agent", id=f"account-cell-agent-{self.key}")
+                name = NameCell(id=f"account-name-{self.key}")
                 name.tooltip = "double-click (or Enter / F2) to rename"
                 yield name
                 field = AliasInput(
                     placeholder=core.ALIAS_HINT,
-                    id=f"account-alias-{self.slot}",
+                    id=f"account-alias-{self.key}",
                     classes="account-alias",
                     max_length=core.ALIAS_MAX,
                     compact=True,
@@ -1131,7 +1168,7 @@ class AccountRow(Vertical, can_focus=True):
         self._paint()
 
     def action_rename(self) -> None:
-        self.post_message(self.RenameRequested(self.slot))
+        self.post_message(self.RenameRequested(self.key))
 
     @property
     def alias_field(self) -> AliasInput:
@@ -1242,7 +1279,7 @@ class AccountRow(Vertical, can_focus=True):
         """The cell of column ``key`` (``name`` is the label the field covers while open)."""
         if key == "name":
             return self.query_one(NameCell)
-        return self.query_one(f"#account-cell-{key}-{self.slot}", Static)
+        return self.query_one(f"#account-cell-{key}-{self.key}", Static)
 
     def _paint(self) -> None:
         account = self.status.account
@@ -1271,10 +1308,10 @@ class AccountRow(Vertical, can_focus=True):
         for key in ("session", "week"):
             self.cell(key).display = why is None
         windows = windows_text(self.status, self.usage)
-        line = self.query_one(f"#account-windows-{self.slot}", Static)
+        line = self.query_one(f"#account-windows-{self.key}", Static)
         line.update(windows or "")
         line.display = windows is not None
-        login = self.query_one(f"#account-login-{self.slot}", Button)
+        login = self.query_one(f"#account-login-{self.key}", Button)
         needed = needs_login(self.status, self.usage)
         login.label = "Log in" if needed else "Log in again"
         login.variant = "primary" if needed else "default"
@@ -1282,12 +1319,12 @@ class AccountRow(Vertical, can_focus=True):
         if not needed and core.kind(account.agent).network_usage:
             login.tooltip += " — a rate limit is not cleared by it"
         self._offer(login, needed or offers_login_again(self.status, self.usage))
-        self.query_one(f"#account-up-{self.slot}", Button).disabled = self.first
-        self.query_one(f"#account-down-{self.slot}", Button).disabled = self.last
-        toggle = self.query_one(f"#account-toggle-{self.slot}", Button)
+        self.query_one(f"#account-up-{self.key}", Button).disabled = self.first
+        self.query_one(f"#account-down-{self.key}", Button).disabled = self.last
+        toggle = self.query_one(f"#account-toggle-{self.key}", Button)
         toggle.label = "Enable" if account.disabled else "Disable"
         toggle.variant = "warning" if account.disabled else "default"
-        self._offer(self.query_one(f"#account-remove-{self.slot}", Button), account.managed)
+        self._offer(self.query_one(f"#account-remove-{self.key}", Button), account.managed)
 
     def _cell_tooltip(self, key: str, text: Text) -> str | None:
         if key == "name":
@@ -1387,8 +1424,9 @@ class AccountsView(Vertical):
         self._arranging = threading.Lock()  # one registry write at a time (arrange_accounts)
         self._renames: dict[Worker[Any], _RenameWrite] = {}
         """*Rename* writes sent and not yet reported, by worker (``rename_account``)."""
-        self._saved: dict[int, _Saved] = {}
-        """Names *Rename* saved, by slot, until the frames have caught up (``_settle_saved``)."""
+        self._saved: dict[tuple[str, int], _Saved] = {}
+        """Names *Rename* saved, by agent and slot, until the frames have caught up
+        (``_settle_saved``)."""
         self._completing = core.AGENT
         """The agent of the slot whose hooks the last sign-in is wiring (``_complete_finished``)."""
         self._on_screen = False
@@ -1587,16 +1625,19 @@ class AccountsView(Vertical):
         registry's word, another terminal's rename included. A frame that
         agrees, or that no longer has the slot, settles it at once.
         """
-        aliases = {status.account.slot: status.account.alias for status in frame.accounts}
-        for slot, saved in list(self._saved.items()):
-            if slot not in aliases or aliases[slot] == saved.alias or saved.outlived:
-                del self._saved[slot]
+        aliases = {
+            (status.account.agent, status.account.slot): status.account.alias
+            for status in frame.accounts
+        }
+        for whose, saved in list(self._saved.items()):
+            if whose not in aliases or aliases[whose] == saved.alias or saved.outlived:
+                del self._saved[whose]
             else:
                 saved.outlived = True
 
     def _as_saved(self, status: ClaudeAccountStatus) -> ClaudeAccountStatus:
         """``status`` as the row shows it: with the name *Rename* saved, while one stands."""
-        saved = self._saved.get(status.account.slot)
+        saved = self._saved.get((status.account.agent, status.account.slot))
         if saved is None or saved.alias == status.account.alias:
             return status
         account = status.account.model_copy(update={"alias": saved.alias})
@@ -1619,17 +1660,19 @@ class AccountsView(Vertical):
     def _paint_rows(self, holder: Vertical, statuses: list[ClaudeAccountStatus]) -> None:
         """Every agent's rows into the one table, in the one priority order; ↑/↓ end stops
         at its ends."""
-        existing = {row.slot: row for row in holder.query(AccountRow)}
+        existing = {row.key: row for row in holder.query(AccountRow)}
         count = len(statuses)
         marked = marks_shown(statuses)
+        shared = shared_slots(statuses)
         self.query_one("#accounts-header", AccountsHeader).mark(marked)
         for index, frame_status in enumerate(statuses):
             status = self._as_saved(frame_status)
             slot = status.account.slot
-            row = existing.pop(slot, None)
+            key = row_key(status.account, shared=slot in shared)
+            row = existing.pop(key, None)
             first, last = index == 0, index == count - 1
             if row is None:
-                row = AccountRow(status, id=f"account-row-{slot}")
+                row = AccountRow(status, shared=slot in shared, id=f"account-row-{key}")
                 row.usage = self.usage.get(slot)
                 row.trend = self.trends.get(slot)
                 row.first, row.last, row.marked = first, last, marked
@@ -1648,10 +1691,12 @@ class AccountsView(Vertical):
                 )
                 if index < len(holder.children) and holder.children[index] is not row:
                     holder.move_child(row, before=index)
+        listed = {status.account.slot for status in statuses}
         for stale in existing.values():
-            self.usage.pop(stale.slot, None)
-            self.trends.pop(stale.slot, None)  # a re-used slot must not inherit a projection
-            self._read_at.pop(stale.slot, None)
+            if stale.slot not in listed:  # a row re-keyed as its number came to be shared
+                self.usage.pop(stale.slot, None)  # keeps the number's readings
+                self.trends.pop(stale.slot, None)  # a re-used slot must not inherit a projection
+                self._read_at.pop(stale.slot, None)
             stale.remove()
 
     def _paint_fleet_summary(self, overview: AccountsOverview | None = None) -> None:
@@ -1667,17 +1712,42 @@ class AccountsView(Vertical):
         sentence = accounts_service.summary_sentence(summary, labels)
         self.query_one("#fleet-summary", Static).update(Text(sentence or "", style="bold"))
 
+    def _ref_of(self, account: ClaudeAccount) -> str:
+        """How a command names ``account``: its row's ref, else as the last frame lists it."""
+        row = self.row_for(account)
+        if row is not None:
+            return row.ref
+        listed = self.overview.accounts if self.overview is not None else []
+        return accounts_service.ref_for(account, [status.account for status in listed])
+
     def _name_of(self, account: ClaudeAccount) -> str:
         """What the page calls ``account``: its row's name (the alias, which a plain
         directory record does not carry), else the built-in one."""
-        row = self.row_of(account.slot)
+        row = self.row_for(account)
         return row.status.label if row is not None else core.label(account)
 
     def rows(self) -> list[AccountRow]:
         return list(self.query(AccountRow))
 
-    def row_of(self, slot: int) -> AccountRow | None:
-        return next((row for row in self.rows() if row.slot == slot), None)
+    def row_of(self, key: int | str) -> AccountRow | None:
+        """The row whose key (:func:`row_key`) is ``key``: its number, unless shared."""
+        return next((row for row in self.rows() if row.key == str(key)), None)
+
+    def row_for(self, account: ClaudeAccount) -> AccountRow | None:
+        """``account``'s row: the one of its agent and number."""
+        return next(
+            (
+                row
+                for row in self.rows()
+                if (row.status.account.agent, row.slot) == (account.agent, account.slot)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _row_holding(widget: Widget) -> AccountRow | None:
+        """The row a button or field is in: its ids end in a key that may hold dashes."""
+        return next((node for node in widget.ancestors if isinstance(node, AccountRow)), None)
 
     def _notice(self, text: str, tone: str = "dim") -> None:
         style = {"ok": "green", "warn": "yellow", "error": "bold red"}.get(tone, "dim")
@@ -2017,31 +2087,32 @@ class AccountsView(Vertical):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
+        row = self._row_holding(event.button)
+        if row is None or not button_id.startswith("account-"):
+            return
+        ref = row.ref  # the number, or `codex:5` where two agents' accounts hold 5 (#100)
         if button_id.startswith("account-login-"):
             event.stop()
-            self.begin_claude_sign_in(int(button_id.rsplit("-", 1)[1]))
+            self.begin_claude_sign_in(ref)
         elif button_id.startswith("account-remove-"):
             event.stop()
-            self.remove_claude_account(int(button_id.rsplit("-", 1)[1]))
+            self.remove_claude_account(ref)
         elif button_id.startswith("account-up-") or button_id.startswith("account-down-"):
             event.stop()
-            slot = int(button_id.rsplit("-", 1)[1])
             direction: accounts_service.Direction = (
                 "up" if button_id.startswith("account-up-") else "down"
             )
             self.arrange_accounts(
-                lambda: accounts_service.move(str(slot), direction),
-                done=f"✓ slot {slot} moved {direction} in the priority order",
+                lambda: accounts_service.move(ref, direction),
+                done=f"✓ slot {ref} moved {direction} in the priority order",
             )
         elif button_id.startswith("account-toggle-"):
             event.stop()
-            slot = int(button_id.rsplit("-", 1)[1])
-            current = self.row_of(slot)
-            disabling = current is None or not current.status.account.disabled
+            disabling = not row.status.account.disabled
             outcome = "disabled — never picked automatically" if disabling else "enabled"
             self.arrange_accounts(
-                lambda: accounts_service.set_disabled(str(slot), disabling),
-                done=f"✓ slot {slot} {outcome}",
+                lambda: accounts_service.set_disabled(ref, disabling),
+                done=f"✓ slot {ref} {outcome}",
             )
 
     # --- arranging (#145): order, disabled ----------------------------------------------
@@ -2093,22 +2164,26 @@ class AccountsView(Vertical):
     @on(AccountRow.RenameRequested)
     def _rename_requested(self, event: AccountRow.RenameRequested) -> None:
         event.stop()
-        self.open_rename(event.slot)
+        self.open_rename(event.key)
 
-    def open_rename(self, slot: int) -> None:
-        """Open the name's field on ``slot``'s row; another row's closes unsaved: one at a time."""
+    def open_rename(self, key: int | str) -> None:
+        """Open the name's field on the row keyed ``key`` (:func:`row_key`: its number, unless
+        shared); another row's closes unsaved: one at a time."""
+        key = str(key)
         for row in self.rows():
-            if row.slot != slot and row.renaming:
+            if row.key != key and row.renaming:
                 row.close_rename()
-        target = self.row_of(slot)
+        target = self.row_of(key)
         if target is not None:
-            on_its_way = [write.submitted for write in self._renames.values() if write.slot == slot]
+            on_its_way = [write.submitted for write in self._renames.values() if write.key == key]
             target.open_rename(on_its_way[-1] if on_its_way else None)  # the latest sent
 
     @on(Input.Submitted, ".account-alias")
     def _rename_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        self.commit_rename(int((event.input.id or "").rsplit("-", 1)[1]), event.value)
+        row = self._row_holding(event.input)
+        if row is not None:
+            self.commit_rename(row.key, event.value)
 
     @on(AliasInput.Left)
     def _rename_left(self, event: AliasInput.Left) -> None:
@@ -2119,46 +2194,46 @@ class AccountsView(Vertical):
         that write's own result closes the field.
         """
         event.stop()
-        slot = int((event.field.id or "").rsplit("-", 1)[1])
-        row = self.row_of(slot)
+        row = self._row_holding(event.field)
         if row is None or not row.renaming or not self.app.app_focus:
             return
         sent = [
             write.submitted
             for write in self._renames.values()
-            if write.slot == slot and write.opening == row.openings
+            if write.key == row.key and write.opening == row.openings
         ]
         if sent and sent[-1] == event.field.value:
             return
-        self.commit_rename(slot, event.field.value)
+        self.commit_rename(row.key, event.field.value)
 
-    def commit_rename(self, slot: int, typed: str) -> None:
+    def commit_rename(self, key: int | str, typed: str) -> None:
         """Save what the field says — or, when that is the name it opened with, just close it."""
-        row = self.row_of(slot)
+        row = self.row_of(key)
         if row is not None and row.unchanged(typed):
             row.close_rename()
             return
-        self.rename_account(slot, typed)
+        self.rename_account(key, typed)
 
     @on(AliasInput.Cancelled)
     def _rename_cancelled(self, event: AliasInput.Cancelled) -> None:
         event.stop()
-        slot = int((event.field.id or "").rsplit("-", 1)[1])
-        row = self.row_of(slot)
-        if row is not None:
-            row.close_rename()
-        if any(write.slot == slot for write in self._renames.values()):
+        row = self._row_holding(event.field)
+        if row is None:
+            return
+        row.close_rename()
+        if any(write.key == row.key for write in self._renames.values()):
             # Esc closes the field; it cannot stop a write already sent, so it must not
             # say nothing changed — that write's own notice follows (review of #258).
             self._notice(
-                f"slot {slot}: field closed — the name already sent is still being saved; "
+                f"slot {row.ref}: field closed — the name already sent is still being saved; "
                 "its result follows"
             )
         else:
-            self._notice(f"slot {slot}: rename cancelled — nothing changed")
+            self._notice(f"slot {row.ref}: rename cancelled — nothing changed")
 
-    def rename_account(self, slot: int, typed: str) -> None:
-        """Name ``slot`` ``typed`` (blank: unname it) off the UI thread, as ``accounts alias`` does.
+    def rename_account(self, key: int | str, typed: str) -> None:
+        """Name the row keyed ``key`` ``typed`` (blank: unname it) off the UI thread, as
+        ``accounts alias`` does.
 
         The service judges the name — :func:`core.normalise_alias`'s rules, and
         whether another slot has it — so nothing is checked here. A refusal is
@@ -2179,13 +2254,16 @@ class AccountsView(Vertical):
         nothing changed (review of #258).
         """
         alias = typed.strip() or None
+        key = str(key)
+        named = self.row_of(key)
+        ref = named.ref if named is not None else key  # `codex:5` where 5 is shared (#100)
 
         def work() -> _Renamed:
             with self._arranging:
-                account = accounts_service.set_alias(str(slot), alias)
+                account = accounts_service.set_alias(ref, alias)
             if alias is None:
-                return _Renamed(account, f"✓ slot {account.slot}: alias cleared")
-            return _Renamed(account, f"✓ slot {account.slot} is now called {account.alias}")
+                return _Renamed(account, f"✓ slot {ref}: alias cleared")
+            return _Renamed(account, f"✓ slot {ref} is now called {account.alias}")
 
         worker = self.run_worker(
             work,
@@ -2195,18 +2273,18 @@ class AccountsView(Vertical):
             exit_on_error=False,
         )
         # Before the worker can report: its state change is handled on this thread.
-        row = self.row_of(slot)
-        self._renames[worker] = _RenameWrite(slot, typed, row.openings if row is not None else 0)
+        row = self.row_of(key)
+        self._renames[worker] = _RenameWrite(key, typed, row.openings if row is not None else 0)
 
     def _rename_finished(self, worker: Worker[Any], state: WorkerState) -> None:
         write = self._renames.pop(worker, None)
         if state is WorkerState.SUCCESS and isinstance(worker.result, _Renamed):
             stored = worker.result.account
             self._notice(worker.result.said, "ok")
-            self._saved[stored.slot] = _Saved(stored.alias)
+            self._saved[(stored.agent, stored.slot)] = _Saved(stored.alias)
             if self.overview is not None:
                 self._paint_claude(self.overview)  # the label and the next prefill say it now
-            row = self.row_of(write.slot) if write is not None else None
+            row = self.row_of(write.key) if write is not None else None
             # Closed only if it is the opening that sent the write and still says what it
             # saved: anything typed since, or a field reopened since, is the next edit.
             sent_from_here = (
@@ -2219,7 +2297,7 @@ class AccountsView(Vertical):
                 row.close_rename()
         elif state is WorkerState.ERROR:
             self._notice(f"✗ {worker.error}", "error")
-            row = self.row_of(write.slot) if write is not None else None
+            row = self.row_of(write.key) if write is not None else None
             # Refused, the field stays open to correct — while the user is still in it.
             # A name saved by leaving the field is not left open behind them, unfocused.
             if (
@@ -2232,8 +2310,9 @@ class AccountsView(Vertical):
                 row.close_rename()
         self.post_message(AccountsChanged())
 
-    def begin_claude_sign_in(self, slot: int | None, *, agent: str | None = None) -> None:
-        """Open Claude Code on ``slot`` (a fresh slot when ``None``) in a pane, watched.
+    def begin_claude_sign_in(self, slot: int | str | None, *, agent: str | None = None) -> None:
+        """Open Claude Code on ``slot`` (a fresh slot when ``None``; ``codex:5`` names one of two
+        agents' accounts in one number) in a pane, watched.
 
         ``agent`` is whose fresh slot ``None`` makes, Claude Code's when ``None``: ``codex``
         opens ``codex login`` in a new Codex slot. An existing slot is its own agent's,
@@ -2395,7 +2474,7 @@ class AccountsView(Vertical):
         # the row says "reading usage…" until the next frame asks again (``show``).
         self.usage.pop(account.slot, None)
         self._asked.discard(account.slot)
-        row = self.row_of(account.slot)
+        row = self.row_for(account)
         if row is not None:
             row.show(row.status, None, trend=row.trend)
         if login.fresh:
@@ -2424,7 +2503,7 @@ class AccountsView(Vertical):
             self._notice(f"✓ {name}: {who} · {hooks}", "ok" if status.hooks_installed else "warn")
             if status.detail:
                 self._notice(status.detail, "warn")
-            self.post_message(SignInLanded(status.account.slot))
+            self.post_message(SignInLanded(status.account.slot, self._ref_of(status.account)))
         elif state is WorkerState.ERROR:
             self._notice(_hooks_did_not_install(worker.error, self._completing), "warn")
             self.post_message(SignInAbandoned())
@@ -2483,12 +2562,18 @@ class AccountsView(Vertical):
     def _cancel_login(self) -> None:
         self._abandon_login("cancelled")
 
-    def remove_claude_account(self, slot: int) -> None:
-        account = core.find_account(slot)
+    def remove_claude_account(self, slot: int | str) -> None:
+        """*Remove* on the row ``slot`` names: its number, or ``codex:5`` where shared."""
+        try:
+            account = accounts_service.account_named(slot)
+        except accounts_service.AccountsError as exc:
+            self._notice(f"✗ {exc}", "error")
+            return
         if account is None:
             self._notice(f"✗ no account in slot {slot} any more", "error")
             return
-        if self.login is not None and self.login.account.slot == slot:
+        login = self.login.account if self.login is not None else None
+        if login is not None and (login.agent, login.slot) == (account.agent, account.slot):
             self._notice("✗ finish or cancel the sign-in below first", "error")
             return
 

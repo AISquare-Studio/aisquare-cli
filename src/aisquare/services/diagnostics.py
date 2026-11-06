@@ -49,6 +49,7 @@ from aisquare.core.workspace import active_project, git_common_root
 from aisquare.models import (
     CheckStatus,
     ClaudeAccount,
+    ClaudeAccountStatus,
     DoctorCheck,
     FleetAgent,
     InjectionRecord,
@@ -158,6 +159,7 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
             *_check_other_agents(cwd),
             *_planned_agent_checks(),
             *_claude_accounts_checks(),
+            *_shared_number_checks(),
             *_other_accounts_checks(),
             *_optional(_undeclared_share_check()),
             *_check_role_bindings(),
@@ -1414,6 +1416,51 @@ def _planned_agent_checks() -> list[DoctorCheck]:
     return rows
 
 
+def _shared_number_checks() -> list[DoctorCheck]:
+    """A row for each number two agents' accounts hold (0.9.2, after a rollback, numbers its
+    own accounts by Claude Code's alone), naming both and the commands that give the one
+    listed last a number of its own (#100's reopen, F). None where no number is shared, so a
+    machine with one agent's accounts reads as it always did.
+
+    The added accounts' folders are read first (only they can share a number), and the
+    order only where two do: a machine with none opens no store and writes nothing
+    (``tests/test_doctor_does_not_create_state.py``)."""
+    try:
+        if not claude_accounts_service.shared_numbers(claude_accounts_core.all_managed_accounts()):
+            return []
+        accounts = claude_accounts_service.list_accounts()
+    except Exception:
+        return []
+    rows: list[DoctorCheck] = []
+    label, ref = claude_accounts_core.agent_label, claude_accounts_core.qualified_ref
+    for held in claude_accounts_service.shared_numbers(accounts):
+        named = " and ".join(f"{label(a.agent)}'s ({ref(a)})" for a in held)
+        last = held[-1]  # in the one order: the one whose number's place is the other's
+        add = "aisquare accounts add" + (
+            "" if claude_accounts_core.kind(last.agent).legacy_slots else f" --agent {last.agent}"
+        )
+        rows.append(
+            _warn(
+                "account-numbers",
+                f"slot {last.slot} is two accounts, {named}: name each as shown; the one listed "
+                "last cannot be moved or made the default",
+                f"aisquare accounts remove {claude_accounts_core.qualified_ref(last)}, then {add}",
+            )
+        )
+    return rows
+
+
+def _unsigned_refs(statuses: Sequence[ClaudeAccountStatus]) -> list[str]:
+    """How ``accounts run`` names each account of ``statuses`` not signed in: its number, or
+    ``codex:5`` where another agent's added account holds it too (#100). The folders alone
+    are read, and only when one is not signed in."""
+    unsigned = [status.account for status in statuses if not status.signed_in]
+    if not unsigned:
+        return []
+    added = claude_accounts_core.all_managed_accounts()
+    return [claude_accounts_core.ref_among(account, added) for account in unsigned]
+
+
 def _claude_accounts_checks() -> list[DoctorCheck]:
     """One line for the Claude accounts the CLI added, or none when it added none.
 
@@ -1444,7 +1491,7 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         for status in statuses
     ]
     detail = f"{len(statuses)} added beside the plain claude: " + " · ".join(parts)
-    unsigned = [status.account.slot for status in statuses if not status.signed_in]
+    unsigned = _unsigned_refs(statuses)
     if unsigned:
         return [
             _warn(
@@ -1499,7 +1546,7 @@ def _agent_accounts_checks(agent: str) -> list[DoctorCheck]:
         for status in statuses
     ]
     detail = f"{len(statuses)} added beside the {kind.plain_label}: " + " · ".join(parts)
-    unsigned = [status.account.slot for status in statuses if not status.signed_in]
+    unsigned = _unsigned_refs(statuses)
     name = f"{agent}-accounts"
     rest = [*_account_default_checks(agent), *_account_limit_checks(agent)]
     if unsigned:

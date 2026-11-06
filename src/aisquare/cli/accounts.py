@@ -141,6 +141,9 @@ def _group(ctx: typer.Context) -> None:
 def _resolve(ref: str) -> ClaudeAccount:
     try:
         return accounts_service.resolve(ref)
+    except accounts_service.AmbiguousAccount as exc:
+        # Under --json too, the refusal names both and how to name one (#100's reopen, E).
+        fail(str(exc), error="ambiguous_account", ref=ref, detail=str(exc))
     except accounts_service.NoSuchAccount as exc:
         fail(str(exc), error="unknown_account", ref=ref)
 
@@ -796,7 +799,8 @@ def _who(account: ClaudeAccount) -> str:
     email = f" ({identity.email})" if identity else ""
     legacy = core.kind(account.agent).legacy_slots
     agent = "" if legacy else f" · {core.agent_label(account.agent)}"
-    return f"slot {account.slot} · {core.label(account)}{email}{agent}"
+    # `codex:5` where two agents' accounts hold 5: the receipt names the one acted on (#100).
+    return f"slot {accounts_service.ref_for(account)} · {core.label(account)}{email}{agent}"
 
 
 def _project_for(ref: str) -> ProjectInfo:
@@ -811,6 +815,8 @@ def _arrangement_failed(exc: Exception) -> NoReturn:
     code = "unknown_account" if isinstance(exc, accounts_service.NoSuchAccount) else "accounts"
     if isinstance(exc, accounts_service.AccountsUnreadable):
         code = "store_unreadable"
+    if isinstance(exc, accounts_service.AmbiguousAccount):
+        fail(str(exc), error="ambiguous_account", detail=str(exc))
     fail(str(exc), error=code)
 
 
@@ -976,7 +982,7 @@ def default(
             # of #406, m1): say so, or the line above promises what the next launch skips.
             stdout_console().print(
                 f"  · it is not signed in, so launches skip it until it is: "
-                f"aisquare accounts run {chosen.slot}",
+                f"aisquare accounts run {accounts_service.ref_for(chosen)}",
                 markup=False,
             )
     else:
@@ -1049,10 +1055,11 @@ def alias(
     if get_state().json_output:
         typer.echo(json.dumps({"account": _account_json(account)}))
         return
+    named = accounts_service.ref_for(account)  # `codex:5` where 5 is two accounts' (#100)
     if clear:
-        stdout_console().print(f"✓ slot {account.slot}: alias cleared", markup=False)
+        stdout_console().print(f"✓ slot {named}: alias cleared", markup=False)
     else:
-        stdout_console().print(f"✓ slot {account.slot} is now called {account.alias}", markup=False)
+        stdout_console().print(f"✓ slot {named} is now called {account.alias}", markup=False)
 
 
 def _emit_order(accounts: list[ClaudeAccount]) -> None:

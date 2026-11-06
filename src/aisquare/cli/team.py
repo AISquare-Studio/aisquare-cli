@@ -709,7 +709,7 @@ def spawn(
             fail(str(exc), error="sandbox_writes_aisquare")
         if broker_note:
             typer.echo(broker_note, err=True)
-        agent_launch.prepare_sandbox(selected)
+        agent_launch.prepare_sandbox(selected, argv)
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)

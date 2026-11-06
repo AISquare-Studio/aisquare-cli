@@ -153,20 +153,46 @@ def start_broker(
         ) from exc
 
 
-def prepare_sandbox(selected: ResolvedAgent) -> None:
-    """Before an agent that sandboxes its tools is exec'd: make the store its profile
-    names (``types.prepare_store``), which its sandbox would otherwise leave an empty
+def prepare_sandbox(selected: ResolvedAgent, argv: Sequence[str] = ()) -> None:
+    """Before an agent that sandboxes its tools is exec'd with ``argv``: make the store its
+    profile names (``types.prepare_store``), which its sandbox would otherwise leave an empty
     file in place of, and take into the fleet's census the rows an aisquare that keeps no
     launch records spawned (``services.fleet.take_census``), as they stand before it runs.
     Nothing in a sandbox can write the store (``types.store_read_only``), so the census is
-    taken from rows no sandbox wrote whenever it is taken."""
+    taken from rows no sandbox wrote whenever it is taken.
+
+    And record where its sandbox may write (``core.sandbox_roots``), for good: a worktree
+    made in a repository there runs none of its hooks (#99)."""
     from aisquare.core.agent_adapters.types import prepare_store, store_dir
 
     if selected.adapter.capabilities.sandboxes_tools:
         prepare_store(store_dir())
+        record_sandbox_roots(selected, argv)
         from aisquare.services import fleet
 
         fleet.take_census()
+
+
+def record_sandbox_roots(selected: ResolvedAgent, argv: Sequence[str]) -> None:
+    """Record the roots the sandbox of ``selected`` launched with ``argv`` here may write
+    (``AgentAdapter.sandbox_writes``), the folder it starts in at the least
+    (``core.sandbox_roots``). Never stops a launch: the session it starts records its folder
+    too, and the fleet's guard also reads the project's sessions and rows."""
+    from aisquare.core import sandbox_roots
+
+    cwd = Path.cwd()
+    try:
+        writes = selected.adapter.sandbox_writes(list(argv)[1:], cwd, selected.config_dir)
+    except Exception:
+        writes = None
+    roots = [cwd]
+    if writes is not None:
+        roots += [root for root in writes.writable if root not in writes.temporary]
+    try:
+        with store_session() as store:
+            sandbox_roots.record(store, selected.adapter.id, roots)
+    except Exception:
+        return
 
 
 def project_default(cwd: Path | None = None) -> str | None:

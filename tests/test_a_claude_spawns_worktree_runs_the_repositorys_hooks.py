@@ -14,6 +14,7 @@ Both questions fail closed: a store that cannot say is a yes, a git that cannot 
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -82,10 +83,12 @@ def _post_checkout(work: ProjectInfo, tmp_path: Path, kind: str) -> Path:
     return marker
 
 
-def _codex_ran_here(work: ProjectInfo, *, session: bool = True) -> None:
+def _codex_ran_here(work: ProjectInfo, *, session: bool = True, ended: bool = False) -> None:
     """A Codex agent that ran in ``work``: its session, or (``session=False``) only its fleet
-    row, spawned and never registered."""
+    row, spawned and never registered; ``ended``, the agent has finished (#99: the case that
+    happens, a row ends as soon as its agent exits)."""
     now = datetime.now(tz=UTC)
+    over = now if ended else None
     with store_session() as store:
         if session:
             store.upsert_session(
@@ -95,6 +98,7 @@ def _codex_ran_here(work: ProjectInfo, *, session: bool = True) -> None:
                     role="coder",
                     started_at=now,
                     last_seen_at=now,
+                    ended_at=over,
                     agent="codex",
                 )
             )
@@ -110,6 +114,7 @@ def _codex_ran_here(work: ProjectInfo, *, session: bool = True) -> None:
                     pane_id="%77",
                     cwd=work.root,
                     created_at=now,
+                    ended_at=over,
                 )
             )
 
@@ -253,3 +258,170 @@ def test_repository_has_hooks_reads_every_place_a_hook_can_be(tmp_path: Path) ->
     assert not workspace.repository_has_hooks(tree), "no folder at all"
     subprocess.run(["git", "-C", str(tree), "config", "core.hooksPath", ".husky/_"], check=True)
     assert workspace.repository_has_hooks(tree), "a hooks folder of the repository's"
+
+
+# --- an agent that finished, and the durable record (#99, seq 11262) --------------------------
+
+
+@posix
+@pytest.mark.parametrize("session", [True, False], ids=["its-ended-session", "its-ended-row"])
+def test_a_codex_agent_that_has_finished_still_guards(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    session: bool,
+) -> None:
+    """The case that happens: the Codex agent exited (its row ends at once) or its session
+    ended. Counting only live rows or open sessions (11262's mutants M3, M4) ran the hook it
+    may have changed."""
+    marker = _post_checkout(project, tmp_path, "linked-script")
+    _codex_ran_here(project, session=session, ended=True)
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True)
+
+    assert not marker.exists()
+    assert len(_said(receipt)) == 1
+
+
+def _codex_session_start(tmp_path: Path, cwd: Path) -> None:
+    """Codex's SessionStart, through the hook command `agents connect codex` installs, in
+    ``cwd``: a Codex started there, by aisquare or by hand."""
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+
+    payload = {"session_id": "codex-here", "cwd": str(cwd), "hook_event_name": "SessionStart"}
+    home = tmp_path / "codex-home"
+    result = CliRunner().invoke(
+        app, ["hook", "codex", "--config-dir", str(home)], input=json.dumps(payload)
+    )
+    assert result.exit_code == 0, result.output
+
+
+@posix
+def test_project_fresh_does_not_forget_where_a_codex_agent_could_write(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """11262's F2 (a): `project fresh` deletes the project's sessions and rows, and the checkout
+    keeps the hooks the agent edited. The record of where it could write is kept."""
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+
+    marker = _post_checkout(project, tmp_path, "linked-script")
+    _codex_session_start(tmp_path, project.root)
+    fresh = CliRunner().invoke(app, ["project", "fresh", "-P", project.id, "--yes"])
+    assert fresh.exit_code == 0, fresh.output
+    with store_session() as store:
+        left = [session.agent for session in store.team_sessions(project.id)]
+        left += [row.agent for row in store.fleet_agents(project.id)]
+    assert "codex" not in left, "fresh forgot the Codex agent's session"
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True)
+
+    assert not marker.exists(), "the hook the Codex agent may have changed did not run"
+    [said] = _said(receipt)
+    assert "a Codex agent has run in this project" in said
+
+
+@posix
+@pytest.mark.parametrize("where", ["parent", "inside"])
+def test_a_codex_session_in_a_parent_folder_guards_every_repository_inside_it(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    where: str,
+) -> None:
+    """11262's F2 (b): a Codex started in a folder of several repositories (not one itself)
+    may write each of them; the repository, a project of its own, is guarded. So is one a
+    Codex ran inside (a folder of it, or a worktree of its)."""
+    parent = project.root.parent
+    assert not (parent / ".git").exists()
+    marker = _post_checkout(project, tmp_path, "husky")
+    inside = project.root / "packages" / "app"
+    inside.mkdir(parents=True)
+    _codex_session_start(tmp_path, parent if where == "parent" else inside)
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True)
+
+    assert not marker.exists()
+    assert len(_said(receipt)) == 1
+
+
+@posix
+def test_a_codex_launch_records_every_root_its_sandbox_may_write(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`aisquare launch` of Codex, in a folder of its own with a directory added: both are
+    recorded (``AgentAdapter.sandbox_writes``), the temporary directories are not, and the
+    repository it may write through ``--add-dir`` is guarded."""
+    from aisquare.core import sandbox_roots
+    from aisquare.services import agent_launch
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    selected = agent_launch.resolve("coder", agent="codex")
+    marker = _post_checkout(project, tmp_path, "git-hooks")
+
+    agent_launch.prepare_sandbox(selected, ["codex", "--add-dir", str(project.root)])
+
+    with store_session() as store:
+        roots = set(sandbox_roots.recorded(store))
+    assert {Path(os.path.realpath(elsewhere)), Path(os.path.realpath(project.root))} <= roots
+    assert Path(os.path.realpath("/tmp")) not in roots
+    receipt = fleet_service.spawn(project, "coder", worktree=True)
+    assert not marker.exists() and len(_said(receipt)) == 1
+
+
+@posix
+def test_a_claude_only_machine_records_nothing_and_runs_every_hook(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Claude Code's SessionStart records no root: its spawns run the hooks, as 0.9.2."""
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+    from aisquare.core import sandbox_roots
+
+    marker = _post_checkout(project, tmp_path, "linked-script")
+    payload = {"session_id": "claude-here", "cwd": str(project.root.parent)}
+    started = CliRunner().invoke(app, ["hook", "session-start"], input=json.dumps(payload))
+    assert started.exit_code == 0, started.output
+
+    receipt = fleet_service.spawn(project, "coder", worktree=True)
+
+    with store_session() as store:
+        assert sandbox_roots.recorded(store) == {}
+    assert marker.exists() and _said(receipt) == []
+
+
+def test_a_hooks_folder_git_cannot_name_has_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """11262's M1: `rev-parse --git-path hooks` failing, with no core.hooksPath set, is a
+    repository that may have hooks: the line is said."""
+    real = subprocess.run
+
+    def answering(argv: list[str], *args: object, **kwargs: object) -> object:
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 128, stdout="", stderr="fatal: no")
+        if "config" in argv:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+        return real(argv, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr("aisquare.core.workspace.subprocess.run", answering)
+    assert workspace.repository_has_hooks(tmp_path)

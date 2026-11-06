@@ -62,6 +62,7 @@ from aisquare.core import (
     paths,
     personas,
     prompt_origin,
+    sandbox_roots,
     selfcli,
 )
 from aisquare.core import load as load_core
@@ -2524,8 +2525,13 @@ def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> str | 
         why = f"{adapter.label} sandboxes its tools"
     else:
         ran: set[str | None] | None
+        root: tuple[Path, str] | None = None
         try:
             with store_session() as store:
+                # Where such an agent recorded it may write, for good (`core.sandbox_roots`:
+                # kept by `project fresh`, and naming a folder of several repositories), then
+                # the project's own sessions and rows, ended ones too (#99).
+                root = sandbox_roots.touching(project.root, sandbox_roots.recorded(store))
                 agents = {row.agent for row in store.fleet_agents(project.id)}
                 agents.update(session.agent for session in store.team_sessions(project.id))
             ran = set(agents)
@@ -2538,6 +2544,12 @@ def _repository_hooks_run(project: ProjectInfo, adapter: AgentAdapter) -> str | 
         ]
         if ran is None:
             why = "the store could not say whether an agent that sandboxes its tools ran here"
+        elif root is not None:
+            # Only an agent that sandboxes its tools records a root: one whose agent cannot
+            # be read is such an agent's still.
+            known = recorded_adapter(root[1]) if root[1] else None
+            label = known.label if known is not None else "sandboxed"
+            why = f"a {label} agent has run in this project"
         elif sandboxed:
             why = f"a {sandboxed[0].label} agent has run in this project"
         else:

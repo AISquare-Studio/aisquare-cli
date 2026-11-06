@@ -131,6 +131,19 @@ def _pending_fresh(value: object) -> bool:
     return 0 <= age < 180 and wall_age < 180
 
 
+def _record_where_it_writes(adapter: AgentAdapter, cwd: Path) -> None:
+    """A session of an agent that sandboxes its tools starts in ``cwd``: recorded for good as
+    a place it may write (``core.sandbox_roots``), whether aisquare launched it or not (a
+    Codex started by hand in a folder of several repositories, #99). Never fails the hook."""
+    from aisquare.core import sandbox_roots
+
+    try:
+        with store_session() as store:
+            sandbox_roots.record(store, adapter.id, [cwd])
+    except Exception:
+        return
+
+
 def _dispatch(
     adapter: AgentAdapter, event: AgentEvent, config_dir: Path, session_id: str | None
 ) -> str | None:
@@ -168,6 +181,8 @@ def _dispatch(
             metrics.close_turn(session_id)
         return None
     if event.kind == "session_start":
+        if adapter.capabilities.sandboxes_tools and cwd:
+            _record_where_it_writes(adapter, Path(cwd))
         return hooks.session_start_context(
             cwd,
             session_id=session_id,

@@ -316,6 +316,7 @@ def test_a_wrapper_is_replayed_as_the_roles_agent_with_its_session(
     started = _replayed(project, tmux, row, how)
 
     _runs_the_wrapper_as_claude_code(_command(tmux), started)
+    assert started.id != row.id, "a replacement, not the row replayed"
 
 
 @pytest.mark.parametrize(

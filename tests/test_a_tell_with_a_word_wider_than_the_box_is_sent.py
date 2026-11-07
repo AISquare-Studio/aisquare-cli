@@ -39,7 +39,7 @@ from tests.test_delivery_guards import (  # noqa: F401 - fixtures, by name
 from tests.test_fleet_service import FakeTmux
 
 TOLD = (
-    "see /Users/anmol/.aisquare/cache/claude-accounts/3/claude-501/"
+    "see /Users/me/.aisquare/cache/claude-accounts/30/claude-501/"
     + "-x" * 70
     + "/scratchpad/r4_lines.md now"
 )
@@ -50,8 +50,8 @@ CAPTURE = [
     "\x1b[38;5;246mnew task? \x1b[38;5;153m/clear\x1b[38;5;246m to save \x1b[38;5;153m1.2k "
     "tokens\x1b[39m",
     "\x1b[38;5;244m" + "─" * 110 + " coder-1 ─",
-    f"\x1b[39m{MARK}\xa0see /Users/anmol/.aisquare/cache/claude-accounts/3/claude-501/" + "-x" * 27,
-    "  " + "-x" * 43 + "/scratchpad/r4_lines.md now\x1b[7m \x1b[0m",
+    f"\x1b[39m{MARK}\xa0see /Users/me/.aisquare/cache/claude-accounts/30/claude-501/" + "-x" * 28,
+    "  " + "-x" * 42 + "/scratchpad/r4_lines.md now\x1b[7m \x1b[0m",
     "\x1b[38;5;244m" + "─" * 120,
     "\x1b[39m  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m",
 ]

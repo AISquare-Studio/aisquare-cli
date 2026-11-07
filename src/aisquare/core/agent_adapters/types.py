@@ -153,9 +153,10 @@ is that one line of the agent's adapter."""
 def stage_mark(adapter: AgentAdapter) -> str:
     """What every shared surface writes after an agent's name where a person chooses or sees
     that agent (Spawn's agent picker, the Accounts page and ``aisquare accounts``, doctor's
-    agent rows, Welcome, ``aisquare agents``, an ``--agent`` option's help): ``" (beta)"``
-    for a ``beta`` agent, and ``""`` for a ``stable`` one, whose name reads exactly as it
-    did before the slot (``tests/test_release_stage.py`` holds Claude Code's to that)."""
+    agent rows, Welcome, ``aisquare agents``, an ``--agent`` option's help, persona Export's
+    destinations): ``" (beta)"`` for a ``beta`` agent, and ``""`` for a ``stable`` one, whose
+    name reads exactly as it did before the slot (``tests/test_release_stage.py`` holds Claude
+    Code's to that)."""
     stage = adapter.release_stage
     return "" if stage == "stable" else f" ({stage})"
 

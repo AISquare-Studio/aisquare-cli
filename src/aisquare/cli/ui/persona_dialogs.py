@@ -64,6 +64,7 @@ from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
 from aisquare.core import paths
 from aisquare.core import personas as core
 from aisquare.core.agent_adapters import adapters
+from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.editor import editor_command
 from aisquare.core.personas import Layer, PersonaError
 from aisquare.core.tmux import TmuxError, TmuxServer
@@ -1002,7 +1003,8 @@ class ExportPersonaScreen(_Dialog):
     def _destinations(self) -> list[RadioButton]:
         """One button per agent and scope it reads skills in (``skill_target``): every
         agent's personal skills, then every agent's project skills, disabled outside a git
-        repository."""
+        repository. Each names its agent as ``types.staged_label`` does: ``Codex (beta)``,
+        ``Claude Code``."""
         buttons: list[RadioButton] = []
         for scope in ("user", "project"):
             for adapter in adapters():
@@ -1020,7 +1022,8 @@ class ExportPersonaScreen(_Dialog):
                 buttons.append(
                     RadioButton(
                         # Text, not str: a path is data, and a str label is parsed as markup.
-                        Text(f"{adapter.label} {which} skills — {where}"),
+                        # A beta agent's name carries its mark, as in every agent chooser.
+                        Text(f"{staged_label(adapter)} {which} skills — {where}"),
                         value=not buttons,
                         id=ident,
                         disabled=where == "needs a git repository",

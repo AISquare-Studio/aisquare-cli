@@ -8,7 +8,8 @@ through the slot. This file pins the owner's other half of the bar for the relea
 that works today in claude code breaks"): with the slot in, what Claude Code shows is byte for
 byte what the head before it showed, and Codex's differs by its mark alone. Where a person
 lists or chooses agents (SMOKE14, seq 11065), Codex is named with its mark: ``agents list``'s
-row, ``aisquare accounts``' last line and every ``--agent`` help that chooses a coding agent.
+row, ``aisquare accounts``' last line, every ``--agent`` help that chooses a coding agent, and
+the persona Export dialog's skill destinations (GATE #110's F1, seq 11514).
 The ``HEAD_`` goldens below were rendered at 11cd75ab, the PR's head before the slot, by these
 same calls.
 """
@@ -426,3 +427,46 @@ def test_the_empty_metrics_line_names_codex_only_where_it_is_and_marks_it(
             "No turns recorded yet. Connect your coding agent: aisquare agents connect "
             "claude-code or aisquare agents connect codex (beta)\n"
         )
+
+
+#: The persona Export dialog's destinations (``ExportPersonaScreen._destinations``), by radio
+#: id, as the head before Codex's rows took their mark rendered them (865bfcdc): each agent's
+#: personal skills, then each one's project skills. ``{…}`` is where the persona goes.
+HEAD_EXPORT = [
+    ("export-personal-claude-code", "Claude Code personal skills — {claude_user}"),
+    ("export-personal-codex", "Codex personal skills — {codex_user}"),
+    ("export-project-claude-code", "Claude Code project skills — {claude_project}"),
+    ("export-project-codex", "Codex project skills — {codex_project}"),
+]
+
+
+@pytest.mark.parametrize("in_a_repo", [True, False])
+def test_the_persona_export_dialogs_rows_read_as_the_head_but_for_codexs_mark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, in_a_repo: bool
+) -> None:
+    """Export chooses which agent's skills a persona goes to (GATE #110's F1, seq 11514).
+    Claude Code's rows read as the head's byte for byte, Codex's differ by the mark after its
+    name alone, the first row is still the one chosen, and outside a repository the project
+    rows are still offered disabled."""
+    from aisquare.cli.ui.persona_dialogs import ExportPersonaScreen
+    from aisquare.core import agents as agent_core
+
+    claude, repo = tmp_path / "claude", tmp_path / "repo"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    where = {
+        "claude_user": str(claude / "skills" / "pair"),
+        "codex_user": str(agent_core.home() / ".agents" / "skills" / "pair"),
+        "claude_project": str(repo / ".claude" / "skills" / "pair"),
+        "codex_project": str(repo / ".agents" / "skills" / "pair"),
+    }
+    if not in_a_repo:  # offered, but disabled
+        where.update({key: "needs a git repository" for key in where if key.endswith("project")})
+    head = [(ident, label.format(**where)) for ident, label in HEAD_EXPORT]
+
+    buttons = ExportPersonaScreen("pair", repo if in_a_repo else None)._destinations()
+    shown = [(str(button.id), str(button.label)) for button in buttons]
+
+    assert shown[0::2] == head[0::2]  # Claude Code's own rows, byte for byte
+    assert shown == [(ident, label.replace("Codex", f"Codex{MARK}", 1)) for ident, label in head]
+    assert [button.value for button in buttons] == [True, False, False, False]
+    assert [button.disabled for button in buttons] == [False, False, not in_a_repo, not in_a_repo]

@@ -297,6 +297,7 @@ def test_its_release_stage_marks_its_name_wherever_an_agent_is_chosen_or_seen(
     from types import SimpleNamespace
 
     from aisquare.cli import accounts as accounts_cli
+    from aisquare.cli.ui.persona_dialogs import ExportPersonaScreen
     from aisquare.cli.ui.spawn import SpawnDialog
     from aisquare.cli.ui.views import app_settings
     from aisquare.cli.ui.views.accounts import agent_title_text
@@ -323,6 +324,10 @@ def test_its_release_stage_marks_its_name_wherever_an_agent_is_chosen_or_seen(
     assert accounts_cli.whose_account_help().endswith(f" or {third.id}{mark}.")
     # `aisquare accounts`' last line names the agents `accounts add --agent` takes.
     assert f" | {third.id}{mark}]" in accounts_cli._other_agents_choice()
+    # The persona Export dialog's rows of its skills (GATE #110's F1).
+    rows = {str(b.id): str(b.label) for b in ExportPersonaScreen("pair", None)._destinations()}
+    assert rows[f"export-personal-{third.id}"].startswith(f"{shown} personal skills — ")
+    assert rows[f"export-project-{third.id}"] == f"{shown} project skills — needs a git repository"
 
 
 def test_first_run_finds_connects_and_reads_it_as_the_one_agent_here(

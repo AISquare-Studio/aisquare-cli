@@ -36,6 +36,7 @@ from typing import Any
 import pytest
 
 from aisquare.core import agents, paths, process_table, selfcli
+from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.config import load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
@@ -160,6 +161,22 @@ def loopback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Loopba
             thread.join(timeout=2)
 
 
+def _untrusted(home: Path) -> None:
+    """aisquare's hooks in ``home`` left UNTRUSTED, so Codex opens its "Hooks need review" at
+    its start, where these tests begin. The fixture's ``install_hooks`` records Codex's trust
+    of the hooks it writes (SMOKE12 O3 of #113), after which no review ever opened and these
+    tests waited for one in vain (0.166.0 and 0.167.0 alike, #113 R9p). Taken back as
+    ``agents disconnect`` takes it (``AgentHookTrust.record_trust`` with no handler), the hooks
+    left in place, so the spawn finds them installed and writes no trust of its own."""
+    settings_path = home / "hooks.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    trust = get_adapter("codex").hook_trust
+    assert trust is not None
+    trust.record_trust(home, settings_path, settings, ())
+    assert codex_config.hook_states(home) == {}, "no hook of aisquare's is trusted"
+    assert agents.connected("codex", home), "its hooks still installed"
+
+
 def test_real_codex_manager_is_compacted_at_a_quiet_point(loopback: Loopback) -> None:
     """A Codex manager over the line, idle at its prompt, is sent ``/compact`` by the worker
     its ``Stop`` armed; its rollout acknowledges it, and the resume line typed after runs with
@@ -232,6 +249,7 @@ def test_real_codex_first_message_held_behind_the_hook_review_is_acked_once_it_r
     """Codex's hooks not trusted: it opens at the hook review with the message held, and no
     hook ever fires, so the row has no session. At the dialog the listing says so and not
     "not taken"; passed with Esc, the message runs, and the rollout takes it."""
+    _untrusted(loopback.home)
     held = "first message held behind the review"
     agent = fleet.spawn(loopback.project, "coder", agent="codex", worktree=False, prompt=held).agent
 
@@ -321,6 +339,7 @@ def test_real_codex_with_its_hooks_untrusted_a_tell_of_other_words_takes_an_unse
     none ever fires) the row's attention said ``tell …`` and a tell of other words ran but did
     not clear it, because only the message's own digest did. The rollout is all such a row has,
     and it shows the agent took input after the row read ``unsent``: that clears it."""
+    _untrusted(loopback.home)
     lost = "a first message that never reached Codex"
     config = load_config()
     config.fleet.prompt_ack_seconds = 3.0
@@ -372,6 +391,7 @@ def test_real_codex_with_its_hooks_untrusted_another_agents_prompt_in_the_folder
     agent ran nothing and its message is lost, so the attention stays. The rollout is told
     apart by the process that holds it, which is below the pane's own (``core.process_table``);
     the row's own ``fleet tell`` still clears it."""
+    _untrusted(loopback.home)
     lost = "a first message that never reached Codex"
     theirs = "agent B own task"
     config = load_config()
@@ -456,6 +476,7 @@ def test_real_codex_with_the_process_table_unreadable_an_ended_agents_prompt_is_
     in its folder now, and B's old prompt is in the folder's rollouts and was not among those A
     saw when it read ``unsent``: it must not take A, whose agent ran nothing and idles at its
     empty prompt. Only A's message itself does, and the detail says so."""
+    _untrusted(loopback.home)
     monkeypatch.setattr(process_table, "open_files", lambda pids: None)
     process_table._HELD.clear()
     lost = "a first message that never reached Codex"

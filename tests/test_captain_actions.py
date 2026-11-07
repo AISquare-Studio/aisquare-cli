@@ -573,15 +573,23 @@ def test_every_tool_records_the_owners_words() -> None:
 
 
 def test_the_server_starts_and_answers_in_under_a_second() -> None:
+    """The captain's actions server is built, handshaken and listed at each captain start, a
+    wait the owner sits through: so the wall clock, and the least of up to three rounds
+    (#103's rule). CI's py3.13-ambient-proxy-up shard 3/4 once took 1.232 s for one round
+    (run 42329549169), a stall on a loaded runner, where a round takes ~0.3 s here; a start
+    that sleeps or blocks pays it in every round, and fails all three."""
+
     async def go() -> int:
         async with Client(actions.build_server(), mode="legacy") as client:
             return len((await client.list_tools()).tools)
 
-    started = time.perf_counter()
-    count = anyio.run(go)
-    elapsed = time.perf_counter() - started
-    assert count == len(CONTRACT_TOOLS)
-    assert elapsed < 1.0, f"build + handshake + list took {elapsed:.3f}s"
+    rounds: list[float] = []
+    while len(rounds) < 3 and (not rounds or min(rounds) >= 1.0):
+        started = time.perf_counter()
+        count = anyio.run(go)
+        rounds.append(time.perf_counter() - started)
+        assert count == len(CONTRACT_TOOLS)
+    assert min(rounds) < 1.0, f"build + handshake + list took {min(rounds):.3f}s at best: {rounds}"
 
 
 def test_a_call_the_sdk_rejects_before_the_tool_runs_is_audited_too(

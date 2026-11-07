@@ -41,7 +41,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet, quiet_compact, team
-from tests.test_codex_native import _answer, _message, _user_texts
+from tests.test_codex_native import _answer, _message, _user_texts, at_its_shortcuts_hint
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test"
@@ -100,7 +100,7 @@ class Loopback:
         return (
             fleet.status_of(agent).state == "waiting"
             and bool(lines)
-            and lines[-1].startswith("? for shortcuts")
+            and at_its_shortcuts_hint(lines[-1])
         )
 
 

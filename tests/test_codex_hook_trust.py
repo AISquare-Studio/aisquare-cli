@@ -1,13 +1,13 @@
 """aisquare's own Codex hooks are trusted where Codex records a human's yes (SMOKE12 O3 of #113).
 
-Codex 0.164.0 and 0.166.0 run a ``hooks.json`` hook only once it is trusted, and ask at their
-start, "Hooks need review · N hooks are new or changed", in a dialog that held a fleet window
-until a human answered it: on the first manager's home, and again on every Codex slot a
+Codex 0.164.0, 0.166.0 and 0.167.0 run a ``hooks.json`` hook only once it is trusted, and ask
+at their start, "Hooks need review · N hooks are new or changed", in a dialog that held a fleet
+window until a human answered it: on the first manager's home, and again on every Codex slot a
 ``fleet switch --to`` moved an agent onto. "Trust all and continue" writes one
 ``[hooks.state."<hooks.json>:<event>:<group>:<handler>"]`` table per hook into the home's
 ``config.toml``, its ``trusted_hash`` Codex's hash of the hook as it normalizes it. Once
 ``install_hooks`` has written aisquare's hooks it records the same tables for the handlers it
-wrote in that call and for no other; the fixtures are what both Codex versions wrote at that
+wrote in that call and for no other; the fixtures are what each Codex version wrote at that
 dialog.
 
 The reopen (seq 10437): a command anyone can write that read like aisquare's, in an event
@@ -41,7 +41,7 @@ from tests.test_lifecycle_uninstall import (  # noqa: F401 (fixtures: pytest fin
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
-VERSIONS = ("0.164.0", "0.166.0")
+VERSIONS = ("0.164.0", "0.166.0", "0.167.0")
 CODEX_HOOKS = len(get_adapter("codex").capabilities.hooks)
 
 

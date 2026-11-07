@@ -153,6 +153,19 @@ def _sandbox_refused(binary: str, where: Path) -> str | None:
     return None
 
 
+#: The hint 0.167.0's footer draws before ``? for shortcuts`` at its empty prompt, in its
+#: alternate screen (CI dispatch 42323988527, measured for #112).
+AGENTS_HINT = "\u2190 for agents · "
+
+
+def at_its_shortcuts_hint(last: str) -> bool:
+    """Whether ``last``, the last row of Codex's screen, stripped, is its footer at its empty
+    prompt: ``? for shortcuts``, 0.167.0's after :data:`AGENTS_HINT`, each with any
+    ``⚠ N warnings · f2 to view`` at the row's far end. The tests' own reading, kept apart
+    from the adapter's (``codex.idle_on_screen``), which these tests check."""
+    return last.removeprefix(AGENTS_HINT).startswith("? for shortcuts")
+
+
 def _warnings_shown(srv: Any, pane: str, shown: str) -> list[str]:
     """Each warning Codex's pane names in its footer (``⚠ N warning · f2 to view``), read one
     by one in its warnings panel, which F2 opens and Right pages; the panel closed after."""
@@ -693,7 +706,7 @@ def test_real_codex_panes_take_a_told_line_before_any_hook_and_the_managers_nudg
             return (
                 fleet.status_of(agent).state == "waiting"
                 and bool(lines)
-                and lines[-1].startswith("? for shortcuts")
+                and at_its_shortcuts_hint(lines[-1])
             )
 
         try:
@@ -1812,7 +1825,7 @@ def test_real_codex_at_its_usage_limit_reaches_the_board_with_no_stop(
             return (
                 fleet.status_of(agent).state == "waiting"
                 and bool(lines)
-                and lines[-1].startswith("? for shortcuts")
+                and at_its_shortcuts_hint(lines[-1])
             )
 
         try:
@@ -2495,7 +2508,7 @@ def test_real_codex_trust_one_slot_gave_reaches_another_and_its_spawn_asks_nothi
             return (
                 fleet.status_of(agent).state == "waiting"
                 and bool(lines)
-                and lines[-1].startswith("? for shortcuts")
+                and at_its_shortcuts_hint(lines[-1])
             )
 
         def pointed_at(option: str) -> bool:

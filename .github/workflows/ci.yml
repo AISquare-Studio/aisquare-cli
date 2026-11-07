@@ -54,9 +54,9 @@ permissions:
 #            core/agent_adapters and the shared seam, and holds their floors
 #            (tests/coverage_floors.py).
 #   codex    Codex's native integration (tests/run_codex_native.py) on each release the
-#            beta holds: 0.164.0, its floor, and 0.166.0, the current one; hooks, MCP,
-#            resume, usage, the automatic reviewer and the interactive fleet, a loopback
-#            endpoint. 0.166.0 runs on macOS too, where the sandbox and reviewer tests run
+#            beta holds: 0.164.0, its floor, 0.166.0, and 0.167.0, the current one; hooks,
+#            MCP, resume, usage, the automatic reviewer and the interactive fleet, a loopback
+#            endpoint. 0.167.0 runs on macOS too, where the sandbox and reviewer tests run
 #            (they skip on ubuntu). codex-latest runs it on the newest release, nightly
 #            and by hand.
 #   claude   Claude Code's native suite on the pinned CLI, ubuntu and macOS
@@ -596,21 +596,21 @@ jobs:
 
   codex:
     # Each release the Codex beta holds (tests/run_codex_native.py's CODEX_VERSIONS): the
-    # floor and the current one, which a new user gets. Both are required: ci-ok needs
-    # every leg. Moving the pin is a row here and one in CODEX_VERSIONS.
+    # floor, 0.166.0, and the current one, which a new user gets. Each is required: ci-ok
+    # needs every leg. Moving the pin is a row here and one in CODEX_VERSIONS.
     name: Codex native integration (${{ matrix.codex }}${{ matrix.os == 'macos-latest' && ', macOS' || '' }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'macos-latest' && 30 || 20 }}
     strategy:
       fail-fast: false
       matrix:
-        codex: ["0.164.0", "0.166.0"]
+        codex: ["0.164.0", "0.166.0", "0.167.0"]
         os: [ubuntu-latest]
         include:
           # The 7 tests of Codex's sandbox and its automatic reviewer skip on ubuntu, whose
           # bwrap cannot bring up loopback; macOS's Seatbelt runs them, on the current
           # release, and the leg fails if any is skipped (R7's verify, the manager's ruling).
-          - codex: "0.166.0"
+          - codex: "0.167.0"
             os: macos-latest
             every_test: "--no-skips"
     steps:

@@ -319,10 +319,10 @@ class CodexTelemetry:
 
 # --- the trust of a hooks.json, as Codex records a human's yes -------------------------------
 #
-# Codex runs a hook in a ``hooks.json`` of its home only once that hook is trusted, and 0.164.0
-# and 0.166.0 ask at their start, in a "Hooks need review · N hooks are new or changed" dialog
-# that holds a fleet window until a human answers it (SMOKE12 O3 of #113). The answer "Trust
-# all and continue" writes one table per hook into the home's ``config.toml``:
+# Codex runs a hook in a ``hooks.json`` of its home only once that hook is trusted, and 0.164.0,
+# 0.166.0 and 0.167.0 ask at their start, in a "Hooks need review · N hooks are new or
+# changed" dialog that holds a fleet window until a human answers it (SMOKE12 O3 of #113). The
+# answer "Trust all and continue" writes one table per hook into the home's ``config.toml``:
 #
 #     [hooks.state."<the hooks.json's path>:<event in snake case>:<group>:<handler>"]
 #     trusted_hash = "sha256:<hex>"
@@ -334,8 +334,8 @@ class CodexTelemetry:
 # its timeout defaulted and clamped as Codex runs it, its ``async`` given>]}``. Codex reads
 # that state from the user's ``config.toml`` and the launch's ``-c`` alone (``hook_states_from_
 # stack``: no project, plugin or managed layer may write it), and a hook whose hash differs is
-# "changed" and asked about again. :func:`hook_hash` is that hash, held to the hashes 0.164.0
-# and 0.166.0 wrote (``tests/fixtures/codex_hook_trust-<version>.json``), and
+# "changed" and asked about again. :func:`hook_hash` is that hash, held to the hashes 0.164.0,
+# 0.166.0 and 0.167.0 wrote (``tests/fixtures/codex_hook_trust-<version>.json``), and
 # :func:`sync_hook_trust` writes the tables, each where Codex's own write puts it, for the
 # handlers ``core.agents.install_hooks`` wrote and no other. It keeps a record of the tables it
 # wrote (:data:`TRUST_RECORD`), so it takes back exactly those and never writes over, nor

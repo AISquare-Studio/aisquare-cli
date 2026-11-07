@@ -127,9 +127,9 @@ def _job(text: str, name: str) -> str:
 
 def test_ci_runs_the_native_suite_on_every_release_the_beta_holds_and_latest_nightly() -> None:
     """R7 of 0.10.0: the ``codex`` job is a matrix of the beta's releases
-    (``run_codex_native.CODEX_VERSIONS``: the floor and the current one), each installed and
-    named to the runner, both required by ``ci-ok``; ``codex-latest`` runs the newest release
-    nightly and by hand with ``--any-version``, and decides no other run."""
+    (``run_codex_native.CODEX_VERSIONS``: the floor, 0.166.0 and the current one), each
+    installed and named to the runner, each required by ``ci-ok``; ``codex-latest`` runs the
+    newest release nightly and by hand with ``--any-version``, and decides no other run."""
     text = _strip_comments(
         (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
     )
@@ -141,9 +141,11 @@ def test_ci_runs_the_native_suite_on_every_release_the_beta_holds_and_latest_nig
     assert re.search(r"^ +npm install .+ @openai/codex@\$\{\{ matrix.codex \}\}$", native, re.M)
     run = r"^ +python -m tests.run_codex_native --version \$\{\{ matrix.codex \}\} "
     assert re.search(run + r"\$\{\{ matrix.every_test \}\}$", native, re.M)
-    # The sandbox and reviewer tests skip on ubuntu (bwrap): 0.166.0 runs on macOS as well,
-    # where they run, and a skip there fails the leg (R7's verify, the manager's ruling).
-    mac = r'^ +- codex: "0.166.0"\n +os: macos-latest\n +every_test: "--no-skips"$'
+    # The sandbox and reviewer tests skip on ubuntu (bwrap): the current release, the last
+    # of CODEX_VERSIONS, runs on macOS as well, where they run, and a skip there fails the
+    # leg (R7's verify, the manager's ruling).
+    current = re.escape(run_codex_native.CODEX_VERSIONS[-1])
+    mac = rf'^ +- codex: "{current}"\n +os: macos-latest\n +every_test: "--no-skips"$'
     assert re.search(mac, native, re.M), "the macOS leg, every test run"
     assert re.search(r"^    runs-on: \$\{\{ matrix.os \}\}$", native, re.M)
     latest = _job(text, "codex-latest")

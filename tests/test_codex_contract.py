@@ -889,6 +889,9 @@ CODEX_PROMPTS = {
         None,
         None,
     ],
+    "0.167.0: folder trust, asked in a git checkout no trust covers": ["trust", None, None],
+    "0.167.0: the hook review": ["dialog", None, None],
+    "0.167.0: an approval view, its rows a blank row apart": ["chooser", "1", "Escape"],
 }
 
 

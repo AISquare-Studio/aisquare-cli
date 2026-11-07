@@ -879,6 +879,85 @@ DRAFT = [
 ]
 
 
+#: Codex 0.167.0's screens, measured for #112 (``tests/fixtures/agent_screens/codex.json``,
+#: the entries named ``0.167.0: …``), by what each shows, that prefix dropped.
+CODEX_0_167 = {
+    shown["what"].removeprefix("0.167.0: "): shown["rows"]
+    for screens in [
+        json.loads(
+            (Path(__file__).parent / "fixtures" / "agent_screens" / "codex.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    ]
+    for part in ("dialogs", "not_dialogs")
+    for shown in screens[part]
+    if shown["what"].startswith("0.167.0: ")
+}
+
+
+@pytest.mark.parametrize(
+    "what",
+    [
+        "its empty prompt at its start, its logo drawn, a warning counted in its footer",
+        "its empty prompt after a turn",
+        "its empty prompt under --no-alt-screen",
+    ],
+)
+def test_tell_types_into_a_codex_0_167_agent_at_its_empty_prompt_before_any_hook(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    clock: FakeClock,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    what: str,
+) -> None:
+    """Codex 0.167.0's empty prompt ends ``← for agents · ? for shortcuts``: read as no empty
+    prompt, a tell to a quiet 0.167.0 coder before its first hook was a board note ("no
+    confirmed waiting native session and its pane is not at Codex's empty prompt", CI's
+    nightly, dispatch 42323988527). It takes the line, the Enter after its gap."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    tmux.screens[pane] = CODEX_0_167[what]
+    typed = _timed_input(tmux, clock, monkeypatch)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "reply ok")
+
+    assert told.delivered is True and "typed" in told.how, told
+    [(kind, text, _typed_at), (key, enter, _entered_at)] = typed
+    assert (kind, text, key, enter) == ("paste", "reply ok", "key", "Enter")
+    assert _notes_to(codex.project, codex.agent.label) == []
+
+
+@pytest.mark.parametrize(
+    "what",
+    [
+        "its agent command center, ← at its empty prompt",
+        "its warnings panel, F2 at its empty prompt",
+        "folder trust, asked in a git checkout no trust covers",
+        "the hook review",
+        "a draft",
+    ],
+)
+def test_a_codex_0_167_pane_off_its_empty_prompt_gets_the_note(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    what: str,
+) -> None:
+    """The control: 0.167.0's agent command center (``←``: ``n`` starts a task, Enter opens
+    one), its warnings panel (F2), its dialogs and a draft take no line."""
+    codex, _ = codex_agent
+    pane = codex.agent.pane_id
+    tmux.set_command(pane, "codex")
+    tmux.screens[pane] = CODEX_0_167[what]
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "reply ok")
+
+    assert told.delivered is False and "board note" in told.how
+    assert "not at Codex's empty prompt" in told.how
+    assert tmux.typed == []
+
+
 def test_tell_types_into_a_codex_agent_at_its_empty_prompt_before_any_hook(
     codex_agent: tuple[Codex, TeamTask],
     tmux: FakeTmux,  # noqa: F811

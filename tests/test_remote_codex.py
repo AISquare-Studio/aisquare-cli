@@ -10,6 +10,7 @@ reach it: its snapshot reads no screen, and its answers are the ones its own tes
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -89,6 +90,21 @@ SWITCH_DIALOG = [
 DRAFT = [*IDLE[:3], f"{CHEVRON} half a sentence of the human's", FOOTER]
 #: A turn running: the status line above the composer, the empty prompt kept under it.
 WORKING = [f"{CHEVRON} SLOW one", "• Working (2s • esc to interrupt)", *IDLE[3:]]
+#: Codex 0.167.0's screens, measured for #112 (``tests/fixtures/agent_screens/codex.json``,
+#: the entries named ``0.167.0: …``), by what each shows, that prefix dropped.
+CODEX_0_167 = {
+    shown["what"].removeprefix("0.167.0: "): shown["rows"]
+    for screens in [
+        json.loads(
+            (Path(__file__).parent / "fixtures" / "agent_screens" / "codex.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    ]
+    for part in ("dialogs", "not_dialogs")
+    for shown in screens[part]
+    if shown["what"].startswith("0.167.0: ")
+}
 #: What a Codex rollout reads as through the Claude transcript reader: no record it knows.
 ROLLOUT_UNREAD = TranscriptTail(
     pending=(), newest="none", newest_at=None, last_text=None, last_text_at=None, marker_key=None
@@ -325,6 +341,76 @@ def test_a_codex_showing_anything_over_its_empty_prompt_takes_no_prompt_tell(
     pane.screen = screen
     response = phone.post("agent/tell", agent=LABEL, text="carry on", mode="prompt")
     assert response.status_code == 409, why
+    assert response.json()["error"] == "dialog_open"
+    assert pane.sent == []
+
+
+@pytest.mark.parametrize("fresh", [True, False], ids=["before-any-hook", "after-its-stop"])
+@pytest.mark.parametrize(
+    "what",
+    [
+        "its empty prompt at its start, its logo drawn, a warning counted in its footer",
+        "its empty prompt after a turn",
+        "its empty prompt with no warning in its footer",
+        "its empty prompt under --no-alt-screen",
+    ],
+)
+def test_a_codex_0_167_at_its_empty_prompt_takes_a_prompt_tell(
+    phone: Phone,  # noqa: F811
+    scan: OneRowScan,
+    pane: CodexPane,
+    project: ProjectInfo,  # noqa: F811
+    what: str,
+    fresh: bool,
+) -> None:
+    """Codex 0.167.0's empty prompt ends its screen with ``← for agents · ? for shortcuts``
+    (and its warnings' count, ``⚠ 1 warning · f2 to view``, at that row's far end), where
+    0.166.0's said ``? for shortcuts``: read as something drawn over the prompt, every tell
+    to an idle Codex 0.167.0 was refused as one at a dialog (``dialog_open``, CI's nightly,
+    dispatch 42323988527). Its empty prompt takes the line and its Enter, in both layouts,
+    before its first hook and after a turn's ``Stop``."""
+    _row(project, session=None if fresh else "ses_codex")
+    if fresh:
+        scan.session, scan.tail, scan.state = None, None, "waiting"
+    else:
+        scan.session, scan.tail = _stopped_turn(project), ROLLOUT_UNREAD
+    pane.screen = CODEX_0_167[what]
+    response = phone.post("agent/tell", agent=LABEL, text="read the task", mode="prompt")
+    assert response.status_code == 200, response.text
+    assert response.json()["delivered"] is True
+    assert [(kind, sent) for _pane, kind, sent in pane.sent] == [
+        ("paste", "read the task"),
+        ("key", "Enter"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "what",
+    [
+        "its agent command center, ← at its empty prompt",
+        "its warnings panel, F2 at its empty prompt",
+        "a draft",
+        "its transcript after a second Esc",
+        "folder trust, asked in a git checkout no trust covers",
+        "the hook review",
+    ],
+)
+def test_a_codex_0_167_showing_anything_over_its_empty_prompt_takes_no_prompt_tell(
+    phone: Phone,  # noqa: F811
+    scan: OneRowScan,
+    pane: CodexPane,
+    project: ProjectInfo,  # noqa: F811
+    what: str,
+) -> None:
+    """The control: what 0.167.0 draws over its empty prompt still takes no line. Its agent
+    command center (``←``), where ``n`` starts a task and Enter opens one, and its warnings
+    panel (F2), where ``k`` keeps a warning, end on hints of their own, and its dialogs,
+    a draft and its transcript read as 0.166.0's."""
+    _row(project, session="ses_codex")
+    scan.session, scan.tail = _stopped_turn(project), ROLLOUT_UNREAD
+    pane.screen = CODEX_0_167[what]
+    response = phone.post("agent/tell", agent=LABEL, text="carry on", mode="prompt")
+    assert response.status_code == 409, response.text
     assert response.json()["error"] == "dialog_open"
     assert pane.sent == []
 

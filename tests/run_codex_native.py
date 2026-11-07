@@ -20,9 +20,10 @@ import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from pathlib import Path
 
-#: The Codex releases the beta is held to (R7 of 0.10.0): 0.164.0, its floor, and 0.166.0,
-#: the current one, which a new user gets and the owner runs. CI runs the suite on each.
-CODEX_VERSIONS = ("0.164.0", "0.166.0")
+#: The Codex releases the beta is held to (R7 of 0.10.0): 0.164.0, its floor, 0.166.0, which
+#: the owner runs, and 0.167.0, the current one, which a new user gets (#112). CI runs the
+#: suite on each.
+CODEX_VERSIONS = ("0.164.0", "0.166.0", "0.167.0")
 NATIVE_MODULE = Path(__file__).with_name("test_codex_native.py")
 
 

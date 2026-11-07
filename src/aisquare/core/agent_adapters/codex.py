@@ -418,6 +418,11 @@ _WRAPPED = "    "
 IDLE_PROMPT_MARK = "? for shortcuts"
 """The hint Codex's footer ends its screen with at an empty prompt, in its alternate screen
 (the default): a draft in the composer, or a dialog, takes its place (0.162.1)."""
+#: The hint 0.167.0's footer draws before :data:`IDLE_PROMPT_MARK` on that same last row,
+#: ``← for agents · ? for shortcuts`` (U+2190): the key to its agent command center, a list
+#: of its tasks whose own footer (``? help  esc back  ↑/↓ move  enter open  n new``) is no
+#: prompt. 0.164.0 and 0.166.0 draw the mark alone (measured under tmux, 120x40).
+_AGENTS_HINT = "\u2190 for agents · "
 #: What ends that screen in place of :data:`IDLE_PROMPT_MARK` once one Esc was pressed at the
 #: empty prompt of a session with a turn behind it, until the next key: the same prompt, where
 #: a typed line and its Enter land as one. A second Esc opens its transcript, where Enter
@@ -427,6 +432,9 @@ _ESC_AGAIN = "esc again to edit previous message"
 #: What Codex's empty composer reads: its placeholder, the same in every session, and the
 #: one a follow-up shows (0.162.1).
 _PLACEHOLDERS = frozenset({"Ask Codex to do anything", "Ask a follow-up question"})
+#: What starts the last row of its alternate screen at its empty prompt: the footer's hint,
+#: 0.167.0's or before it, or the row one Esc leaves there.
+_IDLE_ENDS = (IDLE_PROMPT_MARK, _AGENTS_HINT + IDLE_PROMPT_MARK, _ESC_AGAIN)
 
 
 def idle_on_screen(rows: Sequence[str]) -> bool:
@@ -434,22 +442,24 @@ def idle_on_screen(rows: Sequence[str]) -> bool:
     drawn over it (``AgentCapabilities.idle_on_screen``).
 
     Measured on 0.162.1 under tmux. In its alternate screen (the default) the last row is
-    the footer's :data:`IDLE_PROMPT_MARK`, which a draft in the composer, or any dialog,
-    replaces, or, after one Esc there, its ``esc again to edit previous message``
-    (:data:`_ESC_AGAIN`), the prompt all the same (Remote's Interrupt & tell sends that Esc
-    before its line, and so does a phone's key pad). In the terminal's own
-    (``--no-alt-screen``) the footer has no such hint: the
-    last chevron row (U+203A) is then the empty composer's placeholder with the footer
-    alone under it (``<model> <effort> · <directory>``). A dialog's last chevron row is its
-    chosen option, its other options and its key hint under it (``1. Switch to
-    gpt-6-luna`` … ``enter select · esc back``, after a turn near the limit; the folder-trust
-    and hook-review dialogs), and a draft replaces the placeholder. A turn running keeps
-    both layouts' empty prompt, its status line above the composer.
+    the footer's :data:`IDLE_PROMPT_MARK`, 0.167.0's after its :data:`_AGENTS_HINT` (and in
+    either, ``⚠ 2 warnings · f2 to view`` at the row's far end while it has any), which a
+    draft in the composer, or any dialog, replaces, or, after one Esc there, its ``esc again
+    to edit previous message`` (:data:`_ESC_AGAIN`), the prompt all the same (Remote's
+    Interrupt & tell sends that Esc before its line, and so does a phone's key pad). In the
+    terminal's own (``--no-alt-screen``) the footer has no such hint: the last chevron row
+    (U+203A) is then the empty composer's placeholder with the footer alone under it
+    (``<model> <effort> · <directory>``, 0.167.0's ending ``· ← for agents``). A dialog's
+    last chevron row is its chosen option, its other options and its key hint under it
+    (``1. Switch to gpt-6-luna`` … ``enter select · esc back``, after a turn near the limit;
+    the folder-trust and hook-review dialogs), and a draft replaces the placeholder. A turn
+    running keeps both layouts' empty prompt, its status line above the composer. 0.164.0's
+    and 0.166.0's screens read as 0.162.1's (measured in both layouts, 120x40).
     """
     lines = [row.rstrip() for row in rows if row.strip()]
     if not lines:
         return False
-    if lines[-1].strip().startswith((IDLE_PROMPT_MARK, _ESC_AGAIN)):
+    if lines[-1].strip().startswith(_IDLE_ENDS):
         return True
     composer = next(
         (index for index in range(len(lines) - 1, -1, -1) if lines[index].startswith(_CHEVRON)),

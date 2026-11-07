@@ -171,7 +171,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   already current* for a hooks file it left alone.
 - **Placement goes by the launch record:** `fleet attach`, `fleet tell` and a rename go by
   the tmux session's id; a session you made by hand under the project's codename is no
-  longer renamed or shut down; `project fresh` stops only what the records name. A row
+  longer renamed or shut down; `project fresh` stops only what the records name, and where
+  tmux cannot say whether a session stands, it refuses before it stops anything (0.9.2
+  stopped what it could and called the reset incomplete; neither removes anything). A row
   the store ended whose window still runs keeps its label and its tree against a new
   spawn, and `fleet attach` refuses an ended 0.9.2 manager whose window lingers, naming
   how to attach by hand.
@@ -205,7 +207,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `AISQUARE_LAUNCH_ID`, `AISQUARE_LAUNCH_AGENT` and `AISQUARE_LAUNCH_PID`; `accounts run`
   does not. The line `team spawn` prints is `<python> -P -m aisquare launch <role> --agent
   claude-code --command claude --no-bound-args --custom-role -- …`, where it was
-  `AISQUARE_ROLE=… claude …`; pasted, it prints launch's banner.
+  `AISQUARE_ROLE=… claude …`; pasted, it prints launch's banner. A fleet window's own
+  line, as `ps` and `tmux list-panes` show it, names its agent and carries the fleet's own
+  options (`launch <role> --command claude --agent claude-code --account N … -- …`); the
+  command line Claude Code itself runs with is unchanged.
 - **On Windows, `aisquare launch`** (and a pasted `team spawn` line) now waits for its
   agent and exits with its status; Ctrl-C goes to the agent.
 - **On Windows, `aisquare upgrade` and `aisquare uninstall`** name every session started
@@ -221,7 +226,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     `--agent` helps, `aisquare accounts`' last line, `[--agent codex (beta)]`). Doctor's
     Codex row, which said support was planned for 0.10, reports Codex's own integration
     (doctor reads every agent's hook sites). `accounts trust` says *on every account that
-    can hold it*; usage pages say *the agents' transcripts*; a `fleet switch` without a
+    can hold it*; usage pages say *the agents' transcripts*, and an empty range in
+    `metrics stats` and *Usage & stats* says *no agent was used in it*, where it said
+    *Claude Code was not used in it*; a `fleet tell` to an agent at Claude Code's
+    folder-trust dialog says its session *has not started*, where it said *it is
+    attention* (it still types nothing and files a note); a `fleet switch` without a
     reason tells the replacement it was moved *by its operator's `fleet switch`*, not by a
     usage limit; help texts say *the agent* or *Claude Code
     and Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose agent*,
@@ -250,6 +259,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
       Code, `ask` is `--permission-mode manual`, `auto` is `auto`, `never` is `dontAsk`
       (and `bypassPermissions` with `full`), and `read_only` denies the tools that edit
       files. Claude Code's own words (`auto`, `acceptEdits`, …) work as before.
+    - `launch --bound-args/--no-bound-args` (use the role's saved arguments, the default,
+      or not) and `launch --custom-role` (allow a role with no binding, as `team spawn`
+      does).
   - `persona import --list` has a column naming the agents that read each skill's folder
     (`claude-code`), and with no skill found it lists the folders it searched.
   - `--json` gains keys and loses none: `agent`, `detail` and `installs` in `accounts`;
@@ -273,7 +285,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     *Permission* field, one value each agent maps to its own flags (*role default* leaves
     the agent's own fields below it in charge). *App settings* gains *captain's agent*
     under the captain's box and *hand off across agents* among the accounts' rules. The
-    Settings hub's *Usage & stats* reads *all your agents' sessions*.
+    Settings hub's *Usage & stats* reads *all your agents' sessions*. asq's persona
+    *Export* dialog offers each agent's personal and project skill folders (*Claude Code
+    personal skills*, *Codex (beta) personal skills*, …), where it offered *Claude
+    personal skills* and *Project skills*; Claude Code's personal skills are still the
+    default.
   - On a machine with Codex accounts, the project's default agent
     (`aisquare agents use … --project`) decides only where nothing named does: a role
     bound to an account, and a launch's own `--account`, run that account's agent from any
@@ -308,7 +324,8 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   The default, `argv`, hands Claude Code the line on its command line and waits for
   nothing, as 0.9.2 did.
 - A restart keeps an agent that ran on no account on its own home, instead of moving it
-  onto a binding or default set since.
+  onto a binding or default set since. After a restart or resume, such an agent's row
+  names slot 1, the plain one, where it named no account.
 - `aisquare fleet spawn ROLE -a N` runs account N, as 0.9.2 did, and the agent's row now
   names N: 0.9.2's named the default account, which it did not run. `-e KEY=VALUE`
   (`--env`) sets that variable for the agent, as 0.9.2 did, wherever it stands among the

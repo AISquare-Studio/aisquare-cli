@@ -144,7 +144,7 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
 - [Claude Code](https://claude.com/claude-code) or
   [Codex](https://learn.chatgpt.com/docs/codex/cli) (beta; CLI 0.164.0 or newer;
-  tested on 0.164.0 and 0.166.0) for
+  tested on 0.164.0, 0.166.0 and 0.167.0) for
   the agents, either or both, and tmux 3.2+ for the fleet.
 - Node 22.12+, optional, for browser tools like the Chrome DevTools MCP; the one-liner
   offers both, Node and the MCP registered with Claude Code (`--with chrome-devtools`

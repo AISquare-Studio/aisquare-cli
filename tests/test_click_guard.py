@@ -159,9 +159,14 @@ def test_the_guard_comes_down_with_the_apps_queue_not_after_the_screens_callback
     a callback is queued with the frame that shows the button and runs until the test lets it
     go, so a guard that waited for the screen's callbacks is still up. Nothing here waits on
     a pause, a click or a clock (R9l2: the last click of the test above caught that only by
-    chance, 0 of 3 alone)."""
+    chance, 0 of 3 alone).
 
-    async def go(pilot: Pilot[None], host: Host) -> tuple[bool, bool, bool, bool]:
+    A canary goes down that late path right after the look, and must still be waiting at the
+    read and have run after the release. Without it, a hold that never engaged (a Textual 8
+    that paints after the layout signal, or runs those callbacks apart) passed the guard of
+    the late path 7 of 10 (tester-r9f, seq 11512)."""
+
+    async def go(pilot: Pilot[None], host: Host) -> dict[str, bool]:
         button = await _shown(pilot, host)
         shown_at = button.region
         host.query_one(ContentSwitcher).current = "one"
@@ -172,21 +177,33 @@ def test_the_guard_comes_down_with_the_apps_queue_not_after_the_screens_callback
         # The app is held, so the guard cannot come down from its queue before the look; the
         # screen lays out and paints apart, and queues the slow callback with that frame.
         await watch_until(lambda: button.region == shown_at)
-        up_at_the_paint = button.guarding
+        seen: dict[str, bool] = {"up at the paint": button.guarding}
+        canary = asyncio.Event()
+        button.call_after_refresh(canary.set)  # the late path, behind the slow callback
         app_free.set()
         judged = asyncio.Event()
         host.call_later(judged.set)  # behind everything the app had queued by the paint
         await watch_until(judged.is_set)
-        down_once_judged = judged.is_set() and not button.guarding
+        seen["down once judged"] = judged.is_set() and not button.guarding
+        seen["late path held"] = not canary.is_set()
         restyled.set()
         await settle_page(host)
-        return button.region == shown_at, up_at_the_paint, down_once_judged, button.guarding
+        await watch_until(canary.is_set)
+        seen["late path ran after"] = canary.is_set()
+        seen["shown"] = button.region == shown_at
+        seen["up after"] = button.guarding
+        return seen
 
-    shown, up_at_the_paint, down_once_judged, guarding_after = drive(go)
-    assert shown, "the button must come up where it was"
-    assert up_at_the_paint, "the guard must be up while the app has not judged its queue"
-    assert down_once_judged, "the guard waited for the screen's callbacks after its refresh"
-    assert not guarding_after
+    seen = drive(go)
+    assert seen["shown"], "the button must come up where it was"
+    assert seen["up at the paint"], "the guard must be up while the app has not judged its queue"
+    assert seen["late path held"], (
+        "the slow callback did not hold the screen's callbacks after its refresh: "
+        "this test can no longer tell the app's queue from that late path"
+    )
+    assert seen["down once judged"], "the guard waited for the screen's callbacks after its refresh"
+    assert seen["late path ran after"], "the screen's callbacks did not run once let go"
+    assert not seen["up after"]
 
 
 async def _shown_again(pilot: Pilot[None], host: Host) -> tuple[GuardedButton, Offset]:

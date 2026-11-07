@@ -753,9 +753,11 @@ def test_over_ssh_the_page_shows_the_macs_reading_and_whose_it_is(
             )
         )
     frame = _overview(_status(2, "slot2@example.com", root=tmp_path, token_state="unreadable"))
+    key = accounts_service._seen_key(frame.accounts[0].account)
+    assert key is not None, "a Claude Code slot's login is in the item it names"
     with store_session() as store:  # the login the Mac's asq saw in slot 2's Keychain item
         store.set_ui_state(
-            accounts_service._seen_key(frame.accounts[0].account),
+            key,
             accounts_service.SeenLogin(token="fp-two", expires_at=NOW + timedelta(hours=7)).dump(),
         )
 

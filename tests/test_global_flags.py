@@ -11,7 +11,11 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.global_flags import INJECTED_MARK, SHARED_FLAG_DECLARATIONS
+from aisquare.cli.global_flags import (
+    INJECTED_MARK,
+    SHARED_FLAG_DECLARATIONS,
+    forwards_arguments,
+)
 from aisquare.core import selfcli
 from aisquare.core.state import FLAGS, RuntimeState, get_state, reset_state, set_state
 from aisquare.services import team as team_service
@@ -54,7 +58,7 @@ def _declarations(command: Any) -> set[str]:
 
 def test_every_node_exposes_the_five_globals() -> None:
     for path, command in all_nodes():
-        if getattr(command, "context_settings", {}).get("ignore_unknown_options"):
+        if forwards_arguments(command):
             # Arg-forwarding commands (launch) are the documented exception:
             # flags after them belong to the exec'd program, so the globals
             # apply only BEFORE the subcommand — injection would parse them
@@ -164,6 +168,28 @@ def test_quoted_positional_containing_json_is_not_a_flag(runner: CliRunner, work
     assert without_flag.exit_code == 0, without_flag.output
     assert get_state().json_output is False  # the quoted value never parsed as a flag
     assert "--json stays text" in without_flag.output
+
+
+def test_a_command_that_takes_a_negative_slot_still_takes_the_flags_after_it(
+    runner: CliRunner,
+) -> None:
+    """The ``accounts`` commands that take a slot set ``ignore_unknown_options`` so that a
+    negative slot (``-2``, a third agent's plain slot) reads as one, and the globals were
+    left off them as off an arg-forwarding command: ``accounts usage --json`` read
+    ``--json`` as its slot and exited 1 ("no Claude account is called '--json'"), where
+    0.9.2 printed the JSON (R1 of #113's release, main's CLI tree against the head's). A
+    negative slot still reads as a slot, never as an unknown option."""
+    before = runner.invoke(app, ["--json", "accounts", "usage"])
+    after = runner.invoke(app, ["accounts", "usage", "--json"])
+    assert before.exit_code == 0, before.output
+    assert after.exit_code == 0, after.output
+    assert json.loads(after.stdout) == json.loads(before.stdout)
+    aliased = runner.invoke(app, ["accounts", "alias", "1", "work", "--json"])
+    assert aliased.exit_code == 0, aliased.output
+    assert json.loads(aliased.stdout)["account"]["alias"] == "work"
+    negative = runner.invoke(app, ["accounts", "default", "-2", "-q"])
+    assert "No such option" not in negative.output, negative.output
+    assert "no Claude account in slot -2" in negative.output, negative.output
 
 
 def _given(field: dataclasses.Field[Any]) -> Any:

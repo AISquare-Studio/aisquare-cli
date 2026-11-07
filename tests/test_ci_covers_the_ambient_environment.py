@@ -202,6 +202,40 @@ def plain_step(job: str) -> str:
     pytest.fail(f"no step gated `{PLAIN_GATE}` runs `{SUITE}`")
 
 
+def test_parent_agent_variables_reach_later_steps_and_the_codex_home_is_populated(
+    ambient: str,
+) -> None:
+    before_suite = ambient[: ambient.index(SUITE)]
+    exports = re.findall(r'^\s*\{\n(.*?)^\s*\} >> "\$GITHUB_ENV"$', before_suite, re.M | re.S)
+    for variable in (
+        "CODEX_HOME",
+        "AISQUARE_CODING_AGENT",
+        "AISQUARE_LAUNCH_AGENT",
+        "AISQUARE_LAUNCH_ID",
+        "AISQUARE_FLEET_AGENT",
+    ):
+        assert any(
+            re.search(rf'^\s*echo "{variable}=[^"\n]+"$', group, re.M) for group in exports
+        ), f"{variable} must be exported through GITHUB_ENV before pytest"
+    commands = _commands(before_suite)
+    mkdir = next(
+        (i for i, line in enumerate(commands) if re.match(r'^mkdir -p .*"\$CODEX_HOME"', line)),
+        None,
+    )
+    populate = next(
+        (
+            i
+            for i, line in enumerate(commands)
+            if line.startswith("printf '[otel]\\nexporter=")
+            and line.endswith('> "$CODEX_HOME/config.toml"')
+        ),
+        None,
+    )
+    assert mkdir is not None and populate is not None and mkdir < populate, (
+        "the exported CODEX_HOME must exist and contain native telemetry config before pytest"
+    )
+
+
 def test_the_ambient_steps_exist(ambient: str) -> None:
     """Deleting them should be a decision someone argues for, not a quiet edit."""
     names = [match.group(1) for match in _STEP.finditer(ambient)]

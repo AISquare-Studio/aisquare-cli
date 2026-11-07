@@ -36,7 +36,14 @@ from aisquare.services import settings as settings_service
 from aisquare.services import watch as watch_service
 from tests import test_fleet_autostop as autostop_suite
 from tests import test_fleet_service as fleet_suite
-from tests.test_fleet_service import FakeTmux, _coder, _git, _second_project, _settings
+from tests.test_fleet_service import (
+    FakeTmux,
+    _coder,
+    _ended_in_the_store,
+    _git,
+    _second_project,
+    _settings,
+)
 
 tmux = fleet_suite.tmux
 clock = fleet_suite.clock
@@ -1569,3 +1576,202 @@ def test_a_number_still_counts_the_manager_as_0_9_1_did(
     with pytest.raises(fleet_service.CapacityRefused):
         fleet_service.restart(project, "manager")
     assert machine.probes == 0 and fleet_service.holds() == []
+
+
+# --- review r36 of #113, finding 5: one count of a project's agents ---------------------------
+
+
+def test_a_held_spawn_and_its_holds_wake_count_alike_so_no_wake_is_for_a_spawn_held_again(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """The spawn counted a row the store ended while its window runs (by the windows), a
+    hold's wake and ``fleet capacity`` did not (the store's live rows): on a busy machine the
+    fourth spawn was held at 3, its hold freed at once at 2, the manager woken, the retry held
+    again, every watch tick. One count, the store's as on main: the fourth is admitted at 2,
+    the fifth held at 3, and neither the wake nor ``fleet capacity`` says otherwise."""
+    machine.busy()
+    first, _second, _third = _three(project)
+    _ended_in_the_store(first)
+    assert first.pane_id in tmux.facts, "its window runs"
+    assert list(fleet_service.capacity().live.values()) == [2]
+
+    fourth = fleet_service.spawn(project, "coder", worktree=False)
+    assert any("runs 2 of the 3 agents a project always gets" in n for n in fourth.notes), (
+        fourth.notes
+    )
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(project)
+
+    assert "it runs 3 live agents (busy_floor = 3)" in str(held.value)
+    assert fleet_service.freed_holds(NOW) == [], "no wake while the spawn would be held again"
+    report = fleet_service.capacity()
+    assert list(report.live.values()) == [3] and "held in" in report.reason, report.reason
+    now[0] = NOW + timedelta(seconds=30)
+    assert fleet_service.freed_holds(now[0]) == [], "nor at the next watch tick"
+
+
+def test_a_calm_machines_burst_settles_by_the_count_its_admission_read(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """The spawn read a row the store ended while its window runs as a seat, the burst's
+    settlement did not: the first admit past the spawn's floor sat below the settlement's,
+    was never recorded, and three were admitted past the floor with ``busy_burst = 2``.
+    Settled by the count its admission read, the project runs the floor plus the burst,
+    by that one count, and the burst's two admits are the ones past the floor."""
+    floor = _three(project)
+    _ended_in_the_store(floor[0])
+    admitted: list[FleetAgent] = []
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        for minute in range(1, 6):
+            now[0] = NOW + timedelta(minutes=minute)
+            admitted.append(_coder(project))
+
+    message = str(held.value)
+    assert "it runs 5 live agents (busy_floor = 3)" in message, message  # 3 + busy_burst 2
+    assert "burst: 2 agents started above busy_floor in the last 5 min, busy_burst = 2" in message
+    assert [ident for _at, ident in fleet_service._burst_admits_of(project.id)] == [
+        agent.id for agent in admitted[1:]
+    ], "the admits past the floor, the first one below it"
+    assert list(fleet_service.capacity().live.values()) == [5]
+    assert fleet_service.freed_holds(now[0]) == []
+
+
+def test_a_paused_agent_is_no_seat_toward_the_busy_floor_as_on_main(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, machine: Machine
+) -> None:
+    """A paused agent has no window and its row is ended, so it holds no seat (its resume is
+    admitted as the pause's, never auto's). Three coders, one paused, on a busy machine: a
+    fourth is admitted at 2 of the floor's 3."""
+    first, _second, _third = _three(project)
+    fleet_service.pause_agent(project, first.label, agent_id=first.id)
+    machine.busy()
+
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+
+    assert any(
+        "admitted: " in note and "runs 2 of the 3 agents a project always gets" in note
+        for note in receipt.notes
+    ), receipt.notes
+
+
+def _captain_and_its_home() -> tuple[FleetAgent, ProjectInfo]:
+    """The captain started, as ``aisquare captain`` starts it, and its home project."""
+    from aisquare.services.captain import brain
+    from aisquare.services.captain import state as captain_state
+
+    brain.start()
+    home = captain_state.home_project()
+    with store_session() as store:
+        [captain] = [a for a in store.fleet_agents(home.id, live_only=True) if a.role == "captain"]
+    return captain, home
+
+
+@pytest.mark.needs_captain
+def test_the_captain_counts_toward_its_home_projects_cap_and_not_the_fleets_budget(
+    tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As main 0.9.2 counts it: the captain's row is one of its home project's agents for the
+    fixed cap, so with ``max_agents_per_project = 3`` the captain and two coders fill it and
+    a third coder is refused; the fleet-wide budget, ``fleet capacity`` and the live total
+    leave it out (review r36 of #113, finding 5, second reopen)."""
+    _settings(monkeypatch, max_agents_per_project=3)
+    captain, home = _captain_and_its_home()
+    _coder(home)
+    _coder(home)
+
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(home)
+
+    assert refused.value.code == "capacity_project"
+    assert "already runs 3 agents (max_agents_per_project = 3)" in str(refused.value)
+    with store_session() as store:
+        assert captain.id not in fleet_service.live_ids(store), "never the fleet's"
+    assert list(fleet_service.capacity().live.values()) == [2]
+
+
+@pytest.mark.needs_captain
+def test_the_captain_counts_toward_its_home_busy_floor_and_the_wake_agrees(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    machine: Machine,
+    now: list[datetime],
+) -> None:
+    """Auto admission never holds the captain, but it counts toward ``busy_floor`` for the
+    agents after it (main's CHANGELOG [0.9.2]): on a busy machine the captain and two coders
+    are the floor's 3, and the third coder is held, a hold its wake does not free while the
+    machine reads busy."""
+    _captain, home = _captain_and_its_home()
+    _coder(home)
+    _coder(home)
+    machine.busy()
+
+    with pytest.raises(fleet_service.CapacityRefused) as held:
+        _coder(home)
+
+    assert held.value.code == "capacity_busy"
+    assert "it runs 3 live agents (busy_floor = 3)" in str(held.value)
+    assert fleet_service.freed_holds(NOW) == [], "no wake while the spawn would be held again"
+
+
+#: Each site that counts a project's agents, or every project's, and what it counts them for.
+COUNTS = {
+    "spawn": "the fixed cap and auto admission",
+    "_verify_cap": "the fixed cap's settlement, and the busy floor's",
+    "_after_stopping_finished": "auto admission's count after it stopped finished workers",
+    "_verify_burst": "the burst's settlement",
+    "freed_holds": "a hold's wake",
+    "_live_by_project": "`fleet capacity` (`capacity`) and the fleet-wide budget (`_admit`)",
+    "_verify_budget": "the fleet-wide budget's settlement",
+    "live_ids": "the sidebar's live total",
+}
+
+
+def test_every_count_of_a_projects_agents_is_made_by_the_one_function() -> None:
+    """Review r36 of #113, finding 5, the manager's ruling: one count of a project's agents,
+    made by one function (``fleet._counted_agents``), which every site in :data:`COUNTS` calls
+    and none counts around: no store query a count could be made of is asked there but
+    through it, and ``spawn`` counts neither its windows (``standing``) nor its rows."""
+    import ast
+
+    source = Path(fleet_service.__file__).read_text(encoding="utf-8")
+    functions = {
+        node.name: node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
+    }
+
+    def called(node: ast.AST) -> set[str]:
+        return {
+            call.func.id if isinstance(call.func, ast.Name) else call.func.attr
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, (ast.Name, ast.Attribute))
+        }
+
+    missing = [name for name in COUNTS if "_counted_agents" not in called(functions[name])]
+    assert not missing, f"count their agents another way: {missing}"
+    assert "_live_by_project" in called(functions["capacity"])
+    assert "_live_by_project" in called(functions["_live_per_project"])
+    queries = {"live_fleet_agents", "live_fleet_agent_ids_written", "fleet_agents"}
+    around = {
+        name: sorted(queries & called(functions[name]))
+        for name in [*COUNTS, "capacity", "_admit_by_load", "_admit_by_burst"]
+        if name != "spawn" and queries & called(functions[name])
+    }
+    assert not around, f"count the store's rows themselves: {around}"
+    written = [
+        name for name, fn in functions.items() if "live_fleet_agent_ids_written" in called(fn)
+    ]
+    assert written == ["_counted_agents"], written
+    lens = [
+        ast.unparse(call)
+        for call in ast.walk(functions["spawn"])
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "len"
+    ]
+    assert "len(_counted_agents(store, project.id))" in lens, lens
+    assert not {"len(standing)", "len(live)"} & set(lens), "spawn counts by its own rows"

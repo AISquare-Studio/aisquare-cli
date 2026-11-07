@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.9.2"
+version = "0.10.0"
 description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -222,6 +222,10 @@ dev = [
   # times in .test_durations; tests/shards.py proves the shards ran it exactly once.
   # A run without --splits is untouched, so `make test` is the whole suite as before.
   "pytest-split>=0.11",
+  # CI's py3.12 leg measures line and branch coverage across its shards, and the coverage
+  # job holds Claude Code's adapter and the shared seam to a floor (tests/coverage_floors.py).
+  # A run without --cov is untouched.
+  "pytest-cov>=7.0",
   "mypy>=1.10",
   "ruff>=0.5",
   # Both bounds are load-bearing, not caution. mcp 2.0.0 renamed FastMCP to
@@ -290,6 +294,24 @@ addopts = "-ra"
 # A test still running after 5 minutes dumps every thread's stack to stderr (it is not
 # failed: CI's job timeout does that), so a hang names itself in the log.
 faulthandler_timeout = 300
+
+[tool.coverage.run]
+# CI's py3.12 leg (`--cov`, ci.yml) and tests/coverage_floors.py, which combines its shards:
+# the modules it reports and floors alone. Measured whole, `aisquare` doubled the leg's time
+# (12.8-14.5 min a shard against 5-8) and two shards hit their timeout (run 42077682498).
+source_pkgs = [
+  "aisquare.core.agent_adapters",
+  "aisquare.services.fleet",
+  "aisquare.services.agent_launch",
+  "aisquare.services.handoff",
+  "aisquare.core.agents",
+  "aisquare.core.launch_seal",
+  "aisquare.services.claude_accounts",
+  "aisquare.core.claude_accounts",
+  "aisquare.services.store_broker",
+]
+branch = true
+relative_files = true
 
 [tool.ruff]
 line-length = 100

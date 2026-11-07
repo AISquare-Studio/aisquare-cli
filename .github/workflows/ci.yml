@@ -50,6 +50,21 @@ permissions:
 #   shards   reads what every shard collected and ran, and fails unless each leg's
 #            shards ran its collection exactly once (tests/shards.py).
 #   package  the sdist and wheel, built and smoke-tested.
+#   coverage combines the py3.12 leg's shards' coverage (`--cov` on that leg), reports
+#            core/agent_adapters and the shared seam, and holds their floors
+#            (tests/coverage_floors.py).
+#   codex    Codex's native integration (tests/run_codex_native.py) on each release the
+#            beta holds: 0.164.0, its floor, 0.166.0, and 0.167.0, the current one; hooks,
+#            MCP, resume, usage, the automatic reviewer and the interactive fleet, a loopback
+#            endpoint. 0.167.0 runs on macOS too, where the sandbox and reviewer tests run
+#            (they skip on ubuntu). codex-latest runs it on the newest release, nightly
+#            and by hand.
+#   claude   Claude Code's native suite on the pinned CLI, ubuntu and macOS
+#            (tests/run_claude_native.py): launch, every hook, the fleet, accounts,
+#            transcript and screen, on a loopback Messages stub. claude-latest runs it on
+#            the newest release, nightly and by hand.
+#   outbox-windows  the outbox's Windows error handling and durable retry receipts,
+#            on the one test file (tests/test_outbox_portability.py).
 #   ci-ok    passes only when every job above did: the one check for branch
 #            protection to require, whatever the number of legs or shards.
 #
@@ -88,6 +103,20 @@ permissions:
 # name the test once.
 
 jobs:
+  outbox-windows:
+    name: outbox (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Verify Windows error handling and durable retry receipts
+        run: python -m pytest -q tests/test_outbox_portability.py
+
   lint:
     # Once, not per leg: none of these depends on the platform or the interpreter
     # the suite runs on. Python 3.11 because mypy checks python_version 3.11
@@ -149,8 +178,10 @@ jobs:
     # About twice a shard's time on a slow runner: 5-9 minutes on Linux, 7-9 on
     # Windows, whose runners vary more (1.8 times, run 40240227553). A test past
     # pyproject's faulthandler_timeout prints every thread's stack first, and
-    # --durations names each shard's slowest tests.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 15 }}
+    # --durations names each shard's slowest tests. The py3.12 leg measures coverage
+    # (`--cov`), which made its shards' suites 9.5-12 minutes on the runners against 5-8
+    # (run 42087473244), and 15 cut three of them at 99%: it gets Windows' 25.
+    timeout-minutes: ${{ (matrix.os == 'windows-latest' || matrix.leg == 'py3.12') && 25 || 15 }}
     strategy:
       fail-fast: false
       # Each leg's suite as `shards` jobs: `leg` x `shard`, each leg's settings added
@@ -230,7 +261,7 @@ jobs:
       # tests/test_ci_covers_the_ambient_environment.py pins.
       - name: Test (pytest)
         if: matrix.ambient == 'none'
-        run: pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
+        run: pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json" ${{ matrix.leg == 'py3.12' && '--cov --cov-report=' || '' }}
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
 
@@ -312,6 +343,11 @@ jobs:
             # file branch is what needs a populated home to be real.
             # Set for anyone running the suite from inside a Claude session.
             echo "CLAUDE_CONFIG_DIR=$RUNNER_TEMP/claude-config"
+            echo "CODEX_HOME=$RUNNER_TEMP/codex-config"
+            echo "AISQUARE_CODING_AGENT=codex"
+            echo "AISQUARE_LAUNCH_AGENT=codex"
+            echo "AISQUARE_LAUNCH_ID=ci-parent-launch"
+            echo "AISQUARE_FLEET_AGENT=ci-parent-fleet"
             # The rest of what a launch onto a Claude account exports: the
             # scratch directory that goes with the config dir
             # (core.claude_accounts.LAUNCH_VARS), and the copies of the shell's
@@ -333,6 +369,8 @@ jobs:
           # that the suite must ignore, and a runner's real ~ stays empty so a
           # leak is unambiguous rather than accidental.
           mkdir -p "$AISQUARE_HOME" "$CLAUDE_CONFIG_DIR" "$CLAUDE_CODE_TMPDIR"
+          mkdir -p "$CODEX_HOME"
+          printf '[otel]\nexporter="none"\n' > "$CODEX_HOME/config.toml"
           cd "$(mktemp -d)"        # so `init` does not pack the checkout
           aisquare init --yes
           # No --proxy-url: the DEFAULT is 9090, and the default is what the
@@ -474,13 +512,24 @@ jobs:
           fi
 
           assert_proxy before
-          pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
+          pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json" ${{ matrix.leg == 'py3.12' && '--cov --cov-report=' || '' }}
           # Re-asserted on the far side, because a listener that died mid-suite
           # would otherwise leave a GREEN run that silently tested the other
           # ambient — and a job cannot notice that it tested the wrong thing.
           assert_proxy after
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
+
+      # The py3.12 leg's coverage data (`--cov` above) rides in its note's folder, as
+      # `<shard>.coverage` (no dot: upload-artifact leaves hidden files out), for the
+      # `coverage` job to combine; the shard check reads only the notes there.
+      - name: Keep this shard's coverage data for the coverage job
+        if: ${{ matrix.leg == 'py3.12' && !cancelled() }}
+        run: |
+          if [ -f .coverage ]; then
+            mkdir -p "$RUNNER_TEMP/shards/${{ matrix.leg }}"
+            mv .coverage "$RUNNER_TEMP/shards/${{ matrix.leg }}/${{ matrix.shard }}.coverage"
+          fi
 
       # Whatever the suite did, so a red shard's split is checked too. Its own
       # artifact per shard: the `shards` job merges them, one folder per leg.
@@ -517,6 +566,181 @@ jobs:
 
       - name: Check that each leg's shards ran its suite exactly once
         run: python3 -m tests.shards check "$RUNNER_TEMP/shards"
+
+  coverage:
+    # The py3.12 leg's four shards measured line and branch coverage (`--cov`); this
+    # combines them, puts per-module figures for core/agent_adapters and the shared seam
+    # in the run's summary, and fails when Claude Code's adapter (claude_*.py) or a seam
+    # module reads under its floor (tests/coverage_floors.py).
+    name: coverage (Claude Code's adapter and the seam)
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install "coverage>=7.10"
+      - name: Fetch every py3.12 shard's note and coverage data
+        uses: actions/download-artifact@v8
+        with:
+          pattern: shard-py3.12-*
+          path: ${{ runner.temp }}/shards
+          merge-multiple: true
+      - name: Report the figures and hold the floors
+        run: python -m tests.coverage_floors "$RUNNER_TEMP/shards/py3.12" --shards 4
+
+  codex:
+    # Each release the Codex beta holds (tests/run_codex_native.py's CODEX_VERSIONS): the
+    # floor, 0.166.0, and the current one, which a new user gets. Each is required: ci-ok
+    # needs every leg. Moving the pin is a row here and one in CODEX_VERSIONS.
+    name: Codex native integration (${{ matrix.codex }}${{ matrix.os == 'macos-latest' && ', macOS' || '' }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 30 || 20 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        codex: ["0.164.0", "0.166.0", "0.167.0"]
+        os: [ubuntu-latest]
+        include:
+          # The 7 tests of Codex's sandbox and its automatic reviewer skip on ubuntu, whose
+          # bwrap cannot bring up loopback; macOS's Seatbelt runs them, on the current
+          # release, and the leg fails if any is skipped (R7's verify, the manager's ruling).
+          - codex: "0.167.0"
+            os: macos-latest
+            every_test: "--no-skips"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install CLI, MCP and native terminal tools
+        run: |
+          python -m pip install -e ".[dev,serve]"
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install tmux; else sudo apt-get install -y tmux; fi
+          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@${{ matrix.codex }}
+          echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
+      - name: Time a fresh interpreter's first imports, as a launch's receiver starts one
+        # A macOS runner's first `python -E -P` of these modules is cold: the telemetry
+        # receiver missed its 15 s there (CI 42110645564). Timed twice, cold then warm.
+        if: runner.os == 'macOS'
+        run: |
+          for start in cold warm; do
+            echo "$start:"
+            /usr/bin/time -p python -E -P -c "import aisquare.services.native_telemetry, aisquare.services.fleet"
+          done
+      - name: Exercise hooks, MCP, resume, usage and the interactive fleet
+        run: |
+          # The fixture owns its temporary hooks and trusts only those. Its
+          # Responses endpoint is loopback; no login, model spend or gateway.
+          # The runner asserts the leg's version and a passing, unskipped test.
+          python -m tests.run_codex_native --version ${{ matrix.codex }} ${{ matrix.every_test }}
+
+  codex-latest:
+    # The same suite on Codex's newest release, nightly and by hand, so its drift shows
+    # here before a user meets it, as claude-latest does for Claude Code: it decides no
+    # pull request (the pinned legs are the merge gate), starts on every run because ci-ok
+    # needs every job, and off the nightly and a run by hand does nothing and passes. On
+    # those two a red here turns the run red: move the pins, or fix the drift.
+    name: Codex native integration (latest, nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Not the nightly or a run by hand
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: echo "Codex's latest release is tested nightly and by hand, not on this ${{ github.event_name }}"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      - name: Set up Python
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install CLI, MCP, tmux and Codex's latest release
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          python -m pip install -e ".[dev,serve]"
+          sudo apt-get install -y tmux
+          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@latest
+          echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
+      - name: Hooks, MCP, resume, usage and the interactive fleet on the latest codex
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python -m tests.run_codex_native --any-version
+
+  claude:
+    # Claude Code's native suite (tests/run_claude_native.py): the real `claude`, pinned to
+    # the version the owner runs, through the adapter seam exactly as a user drives it, on
+    # both OSes users run it on. A loopback Messages stub answers its turns (tool calls, a
+    # held turn, an API error, /compact): no account, network or model spend.
+    name: Claude Code native integration (2.1.318, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            ci/constraints.txt
+      - name: Install the CLI, tmux and Claude Code
+        run: |
+          uv pip install --system --compile-bytecode -c ci/constraints.txt -e ".[dev]"
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install tmux; else sudo apt-get install -y tmux; fi
+          npm install --global --prefix "$RUNNER_TEMP/claude" @anthropic-ai/claude-code@2.1.318
+          echo "$RUNNER_TEMP/claude/bin" >> "$GITHUB_PATH"
+      - name: Launch, hooks, fleet, accounts, transcript and screen on the real claude
+        run: |
+          # The runner asserts the pinned version, and that every module ran a test that
+          # passed, none failed and none skipped.
+          python -m tests.run_claude_native --no-skips
+
+  claude-latest:
+    # The same suite on Claude Code's newest release, nightly and by hand, so its drift
+    # shows here before a user meets it. It never decides a pull request: a new release
+    # would turn every PR red for a change no PR made, and the pinned `claude` job is the
+    # merge gate. It starts on every run because `ci-ok` needs every job and a skipped one
+    # fails it; off the nightly and a run by hand it does nothing and passes. On those two
+    # a red here turns the run red, which is the signal: move the pin, or fix the drift.
+    name: Claude Code native integration (latest, nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Not the nightly or a run by hand
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: echo "Claude Code's latest release is tested nightly and by hand, not on this ${{ github.event_name }}"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      - name: Set up Python
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install the CLI, tmux and Claude Code's latest release
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          python -m pip install -c ci/constraints.txt -e ".[dev]"
+          sudo apt-get install -y tmux
+          npm install --global --prefix "$RUNNER_TEMP/claude" @anthropic-ai/claude-code@latest
+          echo "$RUNNER_TEMP/claude/bin" >> "$GITHUB_PATH"
+      - name: Launch, hooks, fleet, accounts, transcript and screen on the latest claude
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python -m tests.run_claude_native --any-version --no-skips
 
   package:
     name: package (${{ matrix.os }})
@@ -685,7 +909,7 @@ jobs:
     # than skip: a skipped job satisfies a required check. Anything but `success`
     # fails it, a skipped job included: nothing here is skipped on purpose.
     name: ci-ok
-    needs: [lint, test, shards, package]
+    needs: [outbox-windows, lint, test, shards, coverage, codex, codex-latest, claude, claude-latest, package]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

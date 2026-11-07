@@ -5,8 +5,8 @@ claude), handoff, account". The dialog showed a dozen rows at once, and *Pick…
 opened the target picker, which picks an account too, beside the Account select. Now Role,
 *Hand off from* and Account are on show; everything else is in one *Advanced* section,
 folded until it is opened, or until it holds the reason *Spawn* is disabled. Role's first
-option is *(none) — general-purpose Claude*: ``fleet.PLAIN_ROLE``, a plain Claude Code
-session on the board with no standing cycle and no mission.
+option is *(none) — general-purpose agent*: ``fleet.PLAIN_ROLE``, a plain session of its
+agent on the board with no standing cycle and no mission.
 
 What these assert is what the owner meets: what ``Tab`` reaches, what a click on the title
 or ``Enter`` does, how tall the box is, and the keywords the spawn received.
@@ -242,7 +242,8 @@ def test_no_role_is_the_first_option_and_spawns_a_plain_claude_with_nothing_else
             note(dialog, "#spawn-role-note"),
             advanced(dialog).collapsed,
         ]
-        await pilot.click("#spawn-submit")
+        # The role's note moved *Spawn* a row: the click aims once that is laid out (#107).
+        assert await pilot.click("#spawn-submit"), "the click landed beside Spawn"
         await settle(pilot)
         return seen
 

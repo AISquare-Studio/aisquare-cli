@@ -57,9 +57,17 @@ class ScreenTmux(FakeTmux):
         env: Mapping[str, str] | None = None,
         width: int = tmux_core.DEFAULT_WINDOW_WIDTH,
         height: int = tmux_core.DEFAULT_WINDOW_HEIGHT,
+        create: bool = False,
     ) -> WindowInfo:
         window = super().spawn_window(
-            session, name=name, cwd=cwd, command=command, env=env, width=width, height=height
+            session,
+            name=name,
+            cwd=cwd,
+            command=command,
+            env=env,
+            width=width,
+            height=height,
+            create=create,
         )
         self.set_command(window.pane_id, "claude")
         return window

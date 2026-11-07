@@ -13,9 +13,10 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import AgentPath, fail
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+from aisquare.services import store_broker
 from aisquare.services import watch as watch_service
 
 app = typer.Typer(
@@ -131,7 +132,10 @@ def _print_watch_status() -> None:
 
 @app.command("show")
 def show(
-    path: Annotated[Path | None, typer.Argument(help="A detail file a watch line named.")] = None,
+    path: Annotated[
+        Path | None,
+        typer.Argument(help="A detail file a watch line named.", click_type=AgentPath()),
+    ] = None,
     last: Annotated[bool, typer.Option("--last", help="The newest detail file.")] = False,
 ) -> None:
     """Print the items a ``watch`` board line counted, from the file it names."""
@@ -139,6 +143,11 @@ def show(
         fail("give a path or --last, not both", error="usage", exit_code=2)
     try:
         data = watch_service.show(path)
+    except store_broker.OutOfScope as exc:
+        # Only a command a sandboxed agent's broker runs is refused here: recorded, as
+        # every scope refusal of one is (`cli.team._fail_team`).
+        store_broker.record_refusal(exc.kind, str(exc))
+        fail(str(exc), error="out_of_scope")
     except (FileNotFoundError, ValueError) as exc:
         fail(str(exc), error="no_such_file")
     if get_state().json_output:

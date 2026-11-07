@@ -1,0 +1,133 @@
+{
+  "about": "Gemini-shaped (tests/gemini_shaped_agent.py): payloads in the shape docs/hooks/reference.md gives Gemini CLI's (hook_event_name, session_id, transcript_path, cwd, timestamp), written from the docs: nothing measured.",
+  "events": {
+    "SessionStart": {
+      "payload": {
+        "session_id": "a1b2c3d4-gem-1",
+        "transcript_path": "/home/dev/.gemini/tmp/repo/chats/session-a1b2.json",
+        "cwd": "/repo",
+        "timestamp": "2026-10-22T10:00:00.000Z",
+        "source": "startup"
+      },
+      "expect": {
+        "kind": "session_start",
+        "session_id": "a1b2c3d4-gem-1",
+        "cwd": "/repo",
+        "source": "startup",
+        "transcript_path": "/home/dev/.gemini/tmp/repo/chats/session-a1b2.json"
+      }
+    },
+    "BeforeAgent": {
+      "payload": {
+        "session_id": "a1b2c3d4-gem-1",
+        "transcript_path": "/home/dev/.gemini/tmp/repo/chats/session-a1b2.json",
+        "cwd": "/repo",
+        "timestamp": "2026-10-22T10:00:00.000Z",
+        "prompt": "fix the flaky test"
+      },
+      "expect": {
+        "kind": "prompt",
+        "session_id": "a1b2c3d4-gem-1",
+        "prompt": "fix the flaky test"
+      }
+    },
+    "AfterAgent": {
+      "payload": {
+        "session_id": "a1b2c3d4-gem-1",
+        "transcript_path": "/home/dev/.gemini/tmp/repo/chats/session-a1b2.json",
+        "cwd": "/repo",
+        "timestamp": "2026-10-22T10:00:00.000Z",
+        "prompt": "fix the flaky test",
+        "prompt_response": "Fixed.",
+        "stop_hook_active": false
+      },
+      "expect": {
+        "kind": "stop",
+        "session_id": "a1b2c3d4-gem-1",
+        "stop_hook_active": false
+      }
+    },
+    "SessionEnd": {
+      "payload": {
+        "session_id": "a1b2c3d4-gem-1",
+        "transcript_path": "/home/dev/.gemini/tmp/repo/chats/session-a1b2.json",
+        "cwd": "/repo",
+        "timestamp": "2026-10-22T10:00:00.000Z",
+        "reason": "exit"
+      },
+      "expect": {
+        "kind": "session_end",
+        "session_id": "a1b2c3d4-gem-1",
+        "reason": "exit"
+      }
+    },
+    "Notification": {
+      "payload": {
+        "session_id": "a1b2c3d4-gem-1",
+        "transcript_path": "/home/dev/.gemini/tmp/repo/chats/session-a1b2.json",
+        "cwd": "/repo",
+        "timestamp": "2026-10-22T10:00:00.000Z",
+        "notification_type": "ToolPermission",
+        "message": "Gemini wants to run rm",
+        "details": {}
+      },
+      "expect": {
+        "kind": "attention",
+        "session_id": "a1b2c3d4-gem-1",
+        "message": "Gemini wants to run rm",
+        "notification_type": "ToolPermission"
+      }
+    },
+    "AfterTool": {
+      "payload": {
+        "session_id": "a1b2c3d4-gem-1",
+        "transcript_path": "/home/dev/.gemini/tmp/repo/chats/session-a1b2.json",
+        "cwd": "/repo",
+        "timestamp": "2026-10-22T10:00:00.000Z",
+        "tool_name": "run_shell_command",
+        "tool_input": {
+          "command": "make test"
+        },
+        "tool_response": {}
+      },
+      "expect": {
+        "kind": "tool_done",
+        "session_id": "a1b2c3d4-gem-1"
+      }
+    }
+  },
+  "version_output": "0.65.0",
+  "version": "0.65.0",
+  "hooks_off": {
+    "file": "settings.json",
+    "text": "{\"hooksConfig\": {\"enabled\": false}}"
+  },
+  "accounts": {
+    "login": {
+      ".gemini/oauth_creds.json": "{\"access_token\": \"a-one\", \"refresh_token\": \"r-one\", \"expiry_date\": 1798761600000}",
+      ".gemini/google_accounts.json": "{\"active\": \"one@example.com\", \"old\": []}",
+      ".gemini/quota.json": "{\"models\": {\"gemini-2.5-flash\": {\"used_percent\": 10, \"resets_at\": \"2026-10-25T00:00:00+00:00\"}, \"gemini-2.5-pro\": {\"used_percent\": 70, \"resets_at\": \"2026-10-25T00:00:00+00:00\"}}, \"recorded_at\": \"2026-10-24T09:00:00+00:00\"}"
+    },
+    "relogin": {
+      ".gemini/oauth_creds.json": "{\"access_token\": \"a-two\", \"refresh_token\": \"r-two\", \"expiry_date\": 1798761600000}"
+    }
+  },
+  "lasting": {
+    "files": {
+      "settings.json": "{\"mcpServers\": {\"memory\": {\"command\": \"uvx\", \"args\": [\"--from\", \"aisquare-cli\", \"aisquare\", \"serve\", \"--stdio\"]}, \"docs\": {\"command\": \"npx\", \"args\": [\"docs-mcp\"]}}}",
+      "extensions/aisquare/gemini-extension.json": "{\"name\": \"aisquare\", \"version\": \"0.9.0\"}"
+    },
+    "expect": [
+      [
+        "mcp",
+        "memory",
+        true
+      ],
+      [
+        "plugin",
+        "aisquare",
+        true
+      ]
+    ]
+  }
+}

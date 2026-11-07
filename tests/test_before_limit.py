@@ -1492,15 +1492,19 @@ def test_what_cannot_be_read_counts_as_a_turn_and_as_background_work(
         session = store.get_session(SESSION)
     assert session is not None
     gone = tmp_path / "gone.jsonl"
-    assert hooks_service._TurnEnd(now, None, None).begun_since(session)
-    assert hooks_service._TurnEnd(now, _transcript(work), None).begun_since(session)
-    assert hooks_service._TurnEnd(now, gone, 0).begun_since(session)
+    reader = hooks_service._reader_of(agent)
+    assert reader is not None
+    assert hooks_service._TurnEnd(now, None, None).begun_since(session, reader)
+    assert hooks_service._TurnEnd(now, _transcript(work), None).begun_since(session, reader)
+    assert hooks_service._TurnEnd(now, gone, 0).begun_since(session, reader)
     size = _transcript(work).stat().st_size
-    assert not hooks_service._TurnEnd(now, _transcript(work), size).begun_since(session)
+    assert not hooks_service._TurnEnd(now, _transcript(work), size).begun_since(session, reader)
+    assert hooks_service._TurnEnd(now, _transcript(work), size).begun_since(session, None)
     assert transcripts.activity_since(_transcript(work), size + 1)
-    assert hooks_service._background_work(None, agent.created_at)
-    assert hooks_service._background_work(gone, agent.created_at)
-    assert not hooks_service._background_work(_transcript(work), agent.created_at)
+    assert hooks_service._background_work(reader, None, agent.created_at)
+    assert hooks_service._background_work(reader, gone, agent.created_at)
+    assert hooks_service._background_work(None, _transcript(work), agent.created_at)
+    assert not hooks_service._background_work(reader, _transcript(work), agent.created_at)
 
     endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
     _settings(before_limit="switch")
@@ -1630,27 +1634,64 @@ round 2 captured: the spinner above an empty box, ``esc to interrupt`` in the fo
 prompt is on neither the board nor the transcript yet."""
 
 
+def _as_captured(frame: list[str]) -> list[str]:
+    """``frame`` with its input line as Claude Code 2.1.309 draws it under ``capture-pane -e``
+    (W0's capture, ``tests/test_delivery_guards.py``'s ``_box``): ``\x1b[39m`` before the mark,
+    then a no-break space."""
+    box = max(i for i, row in enumerate(frame) if row.startswith(captain_screens.MARK))
+    row = frame[box]
+    styled = f"\x1b[39m{captain_screens.MARK}\xa0{row[len(captain_screens.MARK) + 1 :]}"
+    return [*frame[:box], styled, *frame[box + 1 :]]
+
+
+def _footer_gapped(frame: list[str]) -> list[str]:
+    """``frame`` with blank rows between its box's bottom rule and its footer, most of them a
+    capture's lone escape: more rows below the rule than ``FOOTER_LINES`` until the blank ones
+    are dropped, as main's reading (``claude_screen.tail``) dropped them, escapes first (review
+    r28 of #113, n2)."""
+    bottom = max(i for i, row in enumerate(frame) if row.startswith("─" * 20))
+    gap = ["", "\x1b[39m", "\x1b[0m", "\x1b[39m"]
+    return [*frame[: bottom + 1], *gap, *frame[bottom + 1 :]]
+
+
 @pytest.mark.parametrize(
     ("frame", "shows"),
     [
         (captain_screens.REAL_IDLE, "idle"),
         (captain_screens.REAL_IDLE_AFTER_STOP, "idle"),
+        (_as_captured(captain_screens.REAL_IDLE), "idle"),
         (captain_screens.REAL_WORKING, "busy"),
+        (_as_captured(captain_screens.REAL_WORKING), "busy"),
         (_PROMPT_HOOK_RUNNING, "busy"),
+        (_footer_gapped(captain_screens.REAL_WORKING), "busy"),
         (captain_screens.REAL_CHOOSER, "unknown"),
         (captain_screens.REAL_TRUST, "unknown"),
         (None, "unknown"),
     ],
-    ids=["idle", "idle after a stop", "mid-turn", "prompt hook", "chooser", "trust", "no capture"],
+    ids=[
+        "idle",
+        "idle after a stop",
+        "idle as captured",
+        "mid-turn",
+        "mid-turn as captured",
+        "prompt hook",
+        "mid-turn, footer gapped",
+        "chooser",
+        "trust",
+        "no capture",
+    ],
 )
 def test_the_pane_is_read_from_real_frames(
     monkeypatch: pytest.MonkeyPatch, frame: list[str] | None, shows: str
 ) -> None:
     """R3-m2: ``_pane_shows`` on real captures — Claude Code idle at its prompt, mid-turn, its
     spinner while a prompt's hook runs, a dialog — and a capture that fails, which reads as
-    ``unknown``, never ``idle``."""
+    ``unknown``, never ``idle``. Its input line styled as the fleet's capture keeps it reads
+    the same: its box's reader takes plain rows, and handed the styled line it found no box
+    mid-turn, which read ``unknown`` (#39's reopen; Codex's own are
+    ``tests/test_codex_before_limit.py``'s)."""
     monkeypatch.setattr(fleet_service, "server_of", lambda agent, config=None: _Pane(frame))
-    agent = SimpleNamespace(pane_id="%3")
+    agent = SimpleNamespace(pane_id="%3", agent="claude-code")
 
     assert hooks_service._pane_shows(agent) == shows  # type: ignore[arg-type]
 

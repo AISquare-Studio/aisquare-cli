@@ -1,27 +1,37 @@
 """What the transcripts say about who steered: prompts, interrupts, denials, edits, cached.
 
 The weekly outcomes report (``services.outcomes``) needs five facts no table records, each with
-its moment, read off Claude Code's transcripts:
+its moment, read off each session's transcript by its agent's own reader
+(``AgentTranscript.facts``, ``core.agent_adapters.types``):
 
-- **prompt**: a message that opened a turn (``core.usage._is_prompt``), classed as ``text``,
-  ``wake`` (the fleet's nudge, :data:`~aisquare.services.fleet.NUDGE_TEXT`), ``notice`` (Claude
-  Code's own ``<task-notification>``, ``core.prompt_origin.only_task_notifications``) or
-  ``command`` (a slash command a person typed: harness blocks only, no notice). What decides the
+- **prompt**: a message that opened a turn, classed as ``text``, ``wake`` (the fleet's nudge,
+  :data:`~aisquare.services.fleet.NUDGE_TEXT`), ``notice`` (Claude Code's own
+  ``<task-notification>``) or ``command`` (a slash command a person typed). What decides the
   origin of a turn recorded before ``metric.origin`` existed.
-- **continuation**: a Stop hook that kept the turn going (its feedback entry, ``isMeta``, opens
-  with ``Stop hook feedback:``).
-- **interrupt**: the person pressed Esc while it worked: ``[Request interrupted by user]``.
-- **denial**: the person refused a tool at its permission prompt: the tool's result is ``The
-  user doesn't want to proceed with this tool use``. (The ``[Request interrupted by user for tool
-  use]`` that follows it is the same act, and is not counted again as an interrupt.)
-- **edit**: an ``Edit``, ``Write``, ``MultiEdit`` or ``NotebookEdit`` call, with the file it
-  named; a subagent's included.
+- **continuation**: a Stop hook that kept the turn going (Claude Code's ``Stop hook feedback:``
+  entry, Codex's ``<hook_prompt hook_run_id="stop:…">`` message).
+- **interrupt**: the person pressed Esc while it worked: Claude Code's ``[Request interrupted by
+  user]``, Codex's ``turn_aborted`` (``interrupted``).
+- **denial**: the person refused a tool at its permission prompt: Claude Code's ``The user
+  doesn't want to proceed with this tool use``, Codex's call stopped at its approval. (The
+  interruption that refusal makes is the same act, and is not counted again as an interrupt.)
+- **edit**: a file an edit named: Claude Code's ``Edit``, ``Write``, ``MultiEdit`` or
+  ``NotebookEdit`` (a subagent's included), Codex's ``apply_patch``.
+
+The reader is the one of the agent the session's rows recorded (``agents``); for a session that
+recorded none, the one of the agent whose transcript roots hold the file
+(``claude_accounts.transcript_home``), else the default agent's: a transcript from before
+adapters. An agent with no transcript reader gives none, and so does a recorded agent this
+install does not know (a plugin's not registered here, a row a newer install wrote): its
+transcript is skipped, never read by another agent's reader. The session's files are its
+transcript and those its reader names with it (``AgentTranscript.related_files``: Claude Code's
+subagents').
 
 **Read once.** A week of transcripts on a busy machine is over a gigabyte, so they are read
-incrementally, as the usage sweep reads them: each file from the byte offset reached last time
-(complete lines only), its facts appended to a cache, ``cache/transcript-facts.json``. A file that
-shrank was rewritten, and is read again from its start. Only the lines that can hold a fact are
-parsed: found by their marker in the raw bytes, never by splitting the file into lines.
+incrementally, as the usage sweep reads them: each file from the byte offset its reader reached
+last time (complete lines only), its facts appended to a cache, ``cache/transcript-facts.json``,
+beside the agent whose reader read it (a file read by another agent's reader is read again from
+its start). A file that shrank was rewritten, and is read again from its start.
 
 The cache is a cache: deleted, it is rebuilt from the transcripts that remain (Claude Code keeps
 them ``cleanupPeriodDays``, 30 by default). Facts older than :data:`KEEP` are dropped from it.
@@ -33,8 +43,7 @@ import contextlib
 import json
 import multiprocessing
 import os
-import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -42,18 +51,18 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import paths, prompt_origin
-from aisquare.core import usage as usage_core
+from aisquare.core.agent_adapters import types as adapter_types
 
 KEEP = timedelta(days=120)
 """How long a fact is kept in the cache after its moment."""
 
 CACHE_VERSION = 2
 
-PROMPT = "p"
-CONTINUATION = "c"
-INTERRUPT = "i"
-DENIAL = "d"
-EDIT = "e"
+PROMPT = adapter_types.FACT_PROMPT
+CONTINUATION = adapter_types.FACT_CONTINUATION
+INTERRUPT = adapter_types.FACT_INTERRUPT
+DENIAL = adapter_types.FACT_DENIAL
+EDIT = adapter_types.FACT_EDIT
 
 TEXT = "text"
 WAKE = "wake"
@@ -63,15 +72,6 @@ COMMAND = "command"
 
 NUDGE_TEXT = prompt_origin.WAKE_TEXT
 """The one line the fleet's nudge types (``services.fleet.NUDGE_TEXT``)."""
-
-_USER = b'"user"'
-"""In every user entry (its ``type`` and its ``role``), in no assistant's: the quoted word, as
-``core.usage`` finds its lines, whatever spacing the JSON was written with."""
-_TOOL_RESULT = b'"tool_result"'
-_DENIED = b"The user doesn't want to proceed with this tool use"
-_EDIT_CALL = re.compile(rb'"(?:Edit|Write|MultiEdit|NotebookEdit)"')
-_INTERRUPTED = "[Request interrupted by user]"
-_STOP_FEEDBACK = "Stop hook feedback:"
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,9 @@ class _FactFile:
     offset: int = 0
     facts: list[list[str]] = field(default_factory=list)
     """``[timestamp, kind, detail]``, as the cache holds them."""
+    agent: str = ""
+    """The agent whose reader read it; ``""`` in a cache from before the slot, whose facts
+    the default agent's reader read."""
 
 
 def facts_cache_path() -> Path:
@@ -117,19 +120,23 @@ def _load_facts_cache() -> dict[str, _FactFile]:
             ]
             if isinstance(facts, list)
             else [],
+            agent=str(entry.get("agent") or ""),
         )
     return out
 
 
 def _save_facts_cache(files: dict[str, _FactFile], now: datetime) -> None:
-    """Write the cache: each file's offset and its facts of the last :data:`KEEP`. A file that
-    is gone (Claude Code deleted it) is kept while it has a fact to keep, and then forgotten."""
+    """Write the cache: each file's offset, its reader's agent and its facts of the last
+    :data:`KEEP`. A file that is gone (its agent deleted it) is kept while it has a fact to
+    keep, and then forgotten."""
     oldest = (now - KEEP).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     kept: dict[str, dict[str, Any]] = {}
     for name, entry in sorted(files.items()):
         facts = [fact for fact in entry.facts if fact[0] >= oldest]
         if facts or os.path.exists(name):
             kept[name] = {"offset": entry.offset, "facts": facts}
+            if entry.agent:
+                kept[name]["agent"] = entry.agent
     payload = {"version": CACHE_VERSION, "files": kept}
     path = facts_cache_path()
     with contextlib.suppress(OSError):
@@ -140,21 +147,40 @@ def _save_facts_cache(files: dict[str, _FactFile], now: datetime) -> None:
 
 
 def read_facts(
-    transcripts: Iterable[Path], *, since: datetime, now: datetime | None = None
+    transcripts: Iterable[Path],
+    *,
+    since: datetime,
+    now: datetime | None = None,
+    agents: Mapping[Path, str | None] | None = None,
 ) -> dict[Path, list[Fact]]:
-    """The facts of each of ``transcripts`` (a session's main file; its subagents' files are read
-    with it), oldest first, the cache brought up to date first. A file the cache has not seen
-    and that was last written before ``since`` is not read: it holds nothing from ``since`` on."""
+    """The facts of each of ``transcripts`` (a session's main file, read with the files its
+    reader names with it: ``AgentTranscript.related_files``), oldest first, the cache brought up
+    to date first, each read by the reader of its agent (``agents``: the agent its session
+    recorded, ``None`` or missing where none did). A transcript no reader here reads
+    (:func:`_reader_agent`) is skipped: it gives no facts and is read by no other agent's
+    reader. A file the cache has not seen and that was last written before ``since`` is not
+    read: it holds nothing from ``since`` on."""
     when = now or datetime.now(UTC)
     cache = _load_facts_cache()
+    recorded = agents or {}
+    unread = _default_reader()
     files: dict[Path, list[str]] = {}
     jobs: list[_FactJob] = []
     for transcript in transcripts:
         keys = files.setdefault(transcript, [])
-        for order, path in enumerate(_fact_files(transcript)):
+        agent = _reader_agent(transcript, recorded.get(transcript))
+        if agent is None:
+            continue  # no reader of its agent here: it says nothing of who steered
+        for path in _fact_files(transcript, agent):
             key = str(path)
             keys.append(key)
             entry = cache.get(key)
+            stale = entry is not None and (entry.agent or unread) != agent
+            if stale:
+                # Read by another agent's reader (a rollout main's scan read): its own reads
+                # it again, from its start.
+                cache.pop(key)
+                entry = None
             try:
                 stat = path.stat()
             except OSError:
@@ -162,19 +188,20 @@ def read_facts(
             if entry is None and stat.st_mtime < since.timestamp():
                 continue
             offset = entry.offset if entry is not None else 0
-            if stat.st_size != offset:
+            if stale or stat.st_size != offset:
                 todo = stat.st_size - offset if stat.st_size > offset else stat.st_size
-                jobs.append(_FactJob(key, offset, order == 0, todo))
+                jobs.append(_FactJob(key, offset, agent, todo))
     for job, result in zip(jobs, _run_fact_jobs(jobs), strict=True):
         if result is None:
             continue
-        start, offset, rows = result
-        entry = cache.setdefault(job.path, _FactFile())
-        if start == 0:
-            entry.facts = rows
+        rows, offset = result
+        entry = cache.get(job.path)
+        if entry is None or job.offset == 0 or offset < job.offset:
+            # From its start: read for the first time, or rewritten (read again from it).
+            cache[job.path] = _FactFile(offset, rows, job.agent)
         else:
             entry.facts.extend(rows)
-        entry.offset = offset
+            entry.offset, entry.agent = offset, job.agent
     if jobs:
         _save_facts_cache(cache, when)
     out: dict[Path, list[Fact]] = {}
@@ -185,19 +212,50 @@ def read_facts(
     return out
 
 
-def _fact_files(transcript: Path) -> list[Path]:
-    """The session's transcript and its subagents' files, transcript first: what
-    ``core.usage.transcript_files`` lists, by ``scandir`` (a thousand ``glob`` calls cost half a
-    second, most of them of a folder that is not there)."""
-    files = [transcript]
-    with contextlib.suppress(OSError):
-        folder = transcript.with_suffix("") / "subagents"
-        files.extend(
-            sorted(
-                Path(entry.path) for entry in os.scandir(folder) if entry.name.endswith(".jsonl")
-            )
-        )
-    return files
+def _reader_agent(transcript: Path, recorded: str | None) -> str | None:
+    """The agent whose transcript reader reads ``transcript``: the one its session recorded;
+    for a session that recorded none, the one whose transcript roots hold it, else the default
+    agent (a transcript from before adapters, as ``core.agent_adapters.recorded_adapter`` reads
+    a missing agent). ``None`` for one with no reader, and for a recorded agent this install
+    does not know: its file is no other agent's to read (review r36 of #113, finding 4)."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    if recorded:
+        adapter = recorded_adapter(recorded)
+    else:
+        home = accounts_core.transcript_home(transcript)
+        adapter = recorded_adapter(home[0] if home is not None else None)
+    if adapter is None or adapter.transcript_reader is None:
+        return None
+    return adapter.id
+
+
+def _default_reader() -> str:
+    """The agent whose reader read a cache entry that names none (one from before the slot):
+    the default agent's, whose reader main's scan was."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(None)
+    return adapter.id if adapter is not None else ""
+
+
+def _fact_files(transcript: Path, agent: str) -> list[Path]:
+    """The session's files, its transcript first, then those ``agent``'s reader names with it
+    (``AgentTranscript.related_files``: Claude Code's subagents', none of Codex's). Which files
+    are a session's is the agent's to say, never a layout's here (review r36 of #113, finding
+    7)."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent)
+    reader = adapter.transcript_reader if adapter is not None else None
+    if reader is None:
+        return [transcript]
+    try:
+        related = [Path(path) for path in reader.related_files(transcript)]
+    except Exception:  # a reader that broke its word: the session's own file still counts
+        related = []
+    return [transcript, *(path for path in related if path != transcript)]
 
 
 PARALLEL_BYTES = 192 * 1024 * 1024
@@ -211,12 +269,16 @@ MAX_WORKERS = 8
 class _FactJob:
     path: str
     offset: int
-    main: bool
+    agent: str
+    """The agent whose reader reads it (``AgentAdapter.id``)."""
     size: int
     """How many bytes it reads, about: the larger ones are handed out first."""
 
 
-def _run_fact_jobs(jobs: list[_FactJob]) -> list[tuple[int, int, list[list[str]]] | None]:
+_JobResult = tuple[list[list[str]], int]
+
+
+def _run_fact_jobs(jobs: list[_FactJob]) -> list[_JobResult | None]:
     workers = min(MAX_WORKERS, os.cpu_count() or 1, len(jobs))
     if workers > 1 and sum(job.size for job in jobs) >= PARALLEL_BYTES:
         order = sorted(range(len(jobs)), key=lambda index: -jobs[index].size)
@@ -229,30 +291,27 @@ def _run_fact_jobs(jobs: list[_FactJob]) -> list[tuple[int, int, list[list[str]]
         except Exception:  # no pool here (a sandbox, a frozen build): read them in this process
             pass
         else:
-            results: list[tuple[int, int, list[list[str]]] | None] = [None] * len(jobs)
+            results: list[_JobResult | None] = [None] * len(jobs)
             for index, result in zip(order, done, strict=True):
-                results[index] = result
+                # A worker knows the agents registered at import; one registered here alone
+                # (a plugin's, at run time) is read here.
+                results[index] = result if result is not None else _run_fact_job(jobs[index])
             return results
     return [_run_fact_job(job) for job in jobs]
 
 
-def _run_fact_job(job: _FactJob) -> tuple[int, int, list[list[str]]] | None:
-    """Read ``job``'s file from its offset: ``(where it started, the offset past its last
-    complete line, the facts read)``, or ``None`` when it cannot be read. A file shorter than the
-    offset was rewritten, and is read from its start (``0``: its facts replace the cached)."""
-    path = Path(job.path)
-    try:
-        size = path.stat().st_size
-        start = job.offset if job.offset <= size else 0
-        with path.open("rb") as handle:
-            handle.seek(start)
-            data = handle.read()
-    except OSError:
+def _run_fact_job(job: _FactJob) -> _JobResult | None:
+    """Read ``job``'s file from its offset by its agent's reader (``AgentTranscript.facts``):
+    ``(the facts read, the offset to read on from)``, an offset below the job's when the file
+    was rewritten and read from its start; ``None`` when no reader of that agent is here."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(job.agent)
+    reader = adapter.transcript_reader if adapter is not None else None
+    if reader is None:
         return None
-    end = data.rfind(b"\n") + 1  # a last line still being written is read next time
-    if end != len(data):
-        data = data[:end]
-    return start, start + end, scan_fact_bytes(data, main=job.main)
+    facts, offset = reader.facts(Path(job.path), job.offset)
+    return [[fact.at, fact.kind, fact.detail] for fact in facts], offset
 
 
 def _fact_rows(rows: list[list[str]]) -> Iterator[Fact]:
@@ -267,146 +326,3 @@ def _fact_moment(stamp: str) -> datetime | None:
         return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(UTC)
     except ValueError:
         return None
-
-
-def scan_fact_bytes(data: bytes, *, main: bool) -> list[list[str]]:
-    """The facts in ``data`` (complete JSONL lines), as ``[timestamp, kind, detail]`` rows.
-    ``main``: the session's own file, whose user entries are its prompts; a subagent's file adds
-    its edits and denials only."""
-    found: list[tuple[int, list[str]]] = []
-    if main:
-        for position, line in _lines_holding(data, _USER, skip=_TOOL_RESULT):
-            fact = _user_fact(line)
-            if fact is not None:
-                found.append((position, fact))
-    for position, line in _lines_holding(data, _DENIED):
-        found.extend((position, fact) for fact in _denial_facts(line))
-    for position, line in _lines_matching_call(data, _EDIT_CALL):
-        found.extend((position, fact) for fact in _edit_facts(line))
-    found.sort(key=lambda item: item[0])
-    return [fact for _, fact in found]
-
-
-def _lines_holding(
-    data: bytes, marker: bytes, *, skip: bytes | None = None
-) -> Iterator[tuple[int, bytes]]:
-    """Each line of ``data`` holding ``marker`` (and not ``skip``), once, with where it starts."""
-    position = data.find(marker)
-    while position != -1:
-        start = data.rfind(b"\n", 0, position) + 1
-        end = data.find(b"\n", position)
-        if end == -1:
-            end = len(data)
-        if skip is None or data.find(skip, start, end) == -1:
-            yield start, data[start:end]
-        position = data.find(marker, end)
-
-
-def _lines_matching_call(data: bytes, pattern: re.Pattern[bytes]) -> Iterator[tuple[int, bytes]]:
-    position = 0
-    while (match := pattern.search(data, position)) is not None:
-        # `span`, not `start()` and `end()`: the call-graph guards resolve a call by its bare
-        # name, and both name hook-unsafe functions elsewhere (tests/test_config_writes_…).
-        found_at, found_end = match.span()
-        start = data.rfind(b"\n", 0, found_at) + 1
-        end = data.find(b"\n", found_end)
-        if end == -1:
-            end = len(data)
-        yield start, data[start:end]
-        position = end
-
-
-def _fact_entry(line: bytes) -> dict[str, Any] | None:
-    try:
-        entry = json.loads(line)
-    except ValueError:
-        return None
-    return entry if isinstance(entry, dict) else None
-
-
-def _fact_stamp(entry: dict[str, Any]) -> str | None:
-    stamp = entry.get("timestamp")
-    return stamp if isinstance(stamp, str) and stamp else None
-
-
-def _user_words(entry: dict[str, Any]) -> str | None:
-    """A user entry's words: its string content, or its text blocks joined."""
-    message = entry.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [
-            str(block.get("text", ""))
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ]
-        return "\n".join(parts) if parts else None
-    return None
-
-
-def _user_fact(line: bytes) -> list[str] | None:
-    entry = _fact_entry(line)
-    if entry is None or entry.get("type") != "user" or entry.get("isSidechain"):
-        return None
-    stamp = _fact_stamp(entry)
-    text = _user_words(entry)
-    if stamp is None or text is None:
-        return None
-    if entry.get("isMeta"):
-        return [stamp, CONTINUATION, ""] if text.startswith(_STOP_FEEDBACK) else None
-    if text.strip() == _INTERRUPTED:
-        return [stamp, INTERRUPT, ""]
-    if text.startswith("[Request interrupted by user"):
-        return None  # "… for tool use": the denial beside it is the fact
-    if not usage_core._is_prompt(entry):
-        return None
-    if " ".join(text.split()) == NUDGE_TEXT:
-        return [stamp, PROMPT, WAKE]
-    if prompt_origin.only_task_notifications(text):
-        return [stamp, PROMPT, NOTICE]
-    if prompt_origin.only_harness_blocks(text):
-        return [stamp, PROMPT, COMMAND]
-    return [stamp, PROMPT, TEXT]
-
-
-def _denial_facts(line: bytes) -> list[list[str]]:
-    entry = _fact_entry(line)
-    if entry is None or entry.get("type") != "user":
-        return []
-    stamp = _fact_stamp(entry)
-    message = entry.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if stamp is None or not isinstance(content, list):
-        return []
-    return [
-        [stamp, DENIAL, ""]
-        for block in content
-        if isinstance(block, dict)
-        and block.get("type") == "tool_result"
-        and usage_core._result_text(block.get("content")).startswith(_DENIED.decode())
-    ]
-
-
-def _edit_facts(line: bytes) -> list[list[str]]:
-    entry = _fact_entry(line)
-    if entry is None or entry.get("type") != "assistant":
-        return []
-    stamp = _fact_stamp(entry)
-    message = entry.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if stamp is None or not isinstance(content, list):
-        return []
-    out: list[list[str]] = []
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") != "tool_use":
-            continue
-        if block.get("name") not in usage_core.EDIT_TOOLS:
-            continue
-        tool_input = block.get("input")
-        target = None
-        if isinstance(tool_input, dict):
-            target = tool_input.get("file_path") or tool_input.get("notebook_path")
-        if isinstance(target, str) and target:
-            out.append([stamp, EDIT, target])
-    return out

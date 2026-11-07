@@ -272,13 +272,13 @@ def test_a_stop_reads_only_the_bytes_appended_since_the_last(
     """The regression that matters on the hook's path, held on bytes, not time: after
     the first record a Stop seeks to where the last one stopped and reads exactly what
     the turn appended, never the session's history again."""
-    from aisquare.core import usage as usage_core
+    from aisquare.core.agent_adapters import usage_tally
 
     transcript = tmp_path / f"{SESSION}.jsonl"
     _big_transcript(transcript)
     assert metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
     reads: list[tuple[int, int]] = []
-    real_read_from = usage_core._read_from
+    real_read_from = usage_tally.appended
 
     def counting(path: Path, start: int) -> tuple[list[bytes], int, bool]:
         lines, consumed, restarted = real_read_from(path, start)
@@ -286,7 +286,7 @@ def test_a_stop_reads_only_the_bytes_appended_since_the_last(
             reads.append((start, consumed))
         return lines, consumed, restarted
 
-    monkeypatch.setattr(usage_core, "_read_from", counting)
+    monkeypatch.setattr(usage_tally, "appended", counting)
     for n in range(3):
         before = transcript.stat().st_size
         _append(transcript, _assistant(f"new{n}", "Read"), _assistant(f"new{n}", "Read"))
@@ -339,3 +339,96 @@ def test_the_stop_hooks_recording_has_no_lock_wait_in_it(
     assert min(took) < budget(0.25), f"even the fastest of twenty Stops took {min(took):.3f} s"
     with store_session() as store:
         assert len(store.turn_usages(SESSION)) == 21
+
+
+# --- the merge of #274 into #113: the hooks go through the adapter (SCOPE #113 main-274, M1) ---
+
+
+def test_a_claude_code_stop_through_the_hook_command_records_its_turn(tmp_path: Path) -> None:
+    """#113 runs every hook through its agent's adapter (``cli.hook._installed``,
+    ``services.agent_events``), which handed the hooks no transcript: a Claude Code Stop
+    recorded no usage. It is read off the transcript the payload names, as main's ``hook
+    stop`` read it, and the session's end records its last stretch."""
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    hooks_service.prompt_submitted("do it", tmp_path, session_id=SESSION)
+    _append(transcript, _assistant("m1", "Read"))
+    payload = {"session_id": SESSION, "cwd": str(tmp_path), "transcript_path": str(transcript)}
+    runner = CliRunner()
+
+    stop = runner.invoke(app, ["hook", "stop"], input=json.dumps(payload))
+    _append(transcript, _assistant("m2"))
+    end = runner.invoke(app, ["hook", "session-end"], input=json.dumps(payload))
+
+    assert (stop.exit_code, end.exit_code) == (0, 0), (stop.output, end.output)
+    with store_session() as store:
+        turns = store.turn_usages(SESSION)
+        session = store.session_usage(SESSION)
+    assert [(turn.trigger, turn.total_tokens) for turn in turns] == [
+        ("stop", 1155),
+        ("session_end", 1155),
+    ]
+    assert session is not None and session.ended_at is not None
+
+
+def test_a_codex_stop_records_its_rollouts_tokens_priced_off_codexs_own_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 274, L2: the record reads through the session's own agent's reader
+    (``AgentTranscript.usage``). A Codex session recorded nothing, its transcript read with
+    Claude Code's shapes alone before this lane; its Stop records what its
+    rollout's ``token_usage_record`` lines add, priced off OpenAI's list, its session end
+    nothing twice, and ``metrics tokens`` names that list."""
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.services import agent_events
+
+    codex = get_adapter("codex")
+    rollout = tmp_path / "rollout-2026-10-24T20-40-11-native.jsonl"
+    fixture = Path(__file__).parent / "fixtures" / "agent_transcripts"
+    rollout.write_bytes((fixture / "codex-usage-0.164.0.jsonl").read_bytes())
+    reader = codex.transcript_reader
+    assert reader is not None
+    expected = reader.usage(rollout, None)
+    assert expected is not None and expected.delta.totals().total > 0
+    home = tmp_path / ".codex"
+    runner = CliRunner()
+    for event in ("Stop", "SessionEnd"):
+        payload = {
+            "session_id": "native",
+            "cwd": str(tmp_path),
+            "transcript_path": str(rollout),
+            "hook_event_name": event,
+            "turn_id": "one",
+        }
+        result = runner.invoke(
+            app, ["hook", "codex", "--config-dir", str(home)], input=json.dumps(payload)
+        )
+        assert result.exit_code == 0, result.output
+
+    board_id = agent_events.session_key(codex, home, "native")
+    with store_session() as store:
+        session = store.session_usage(board_id)
+        turns = store.turn_usages(board_id)
+    assert session is not None and session.ended_at is not None
+    assert session.total_tokens == expected.delta.totals().total
+    assert [turn.trigger for turn in turns] == ["stop"], "the end adds nothing twice"
+    assert set(session.usage["models"]) == {"gpt-6.1-sol"}
+    assert session.usage["models"]["gpt-6.1-sol"]["priced"] is True and session.cost_usd > 0
+    monkeypatch.chdir(tmp_path)  # `metrics tokens` sums the working directory's project
+    tokens = runner.invoke(app, ["metrics", "tokens", "--json"])
+    assert tokens.exit_code == 0, tokens.output
+    summary = json.loads(tokens.stdout)
+    assert [listed["agent"] for listed in summary["price_lists"]] == [codex.label], summary
+    assert codex.price_table is not None
+    assert summary["prices_as_of"] == codex.price_table.as_of
+
+    # A Claude Code teammate on the same board: each agent's list is named, its own line each.
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _append(transcript, _assistant("m1", "Read"))
+    claude = {"session_id": SESSION, "cwd": str(tmp_path), "transcript_path": str(transcript)}
+    assert runner.invoke(app, ["hook", "stop"], input=json.dumps(claude)).exit_code == 0
+    mixed = json.loads(runner.invoke(app, ["metrics", "tokens", "--json"]).stdout)
+    assert mixed["sessions"] == 2 and not mixed["unpriced_models"]
+    assert [listed["agent"] for listed in mixed["price_lists"]] == ["Claude Code", codex.label]
+    shown = runner.invoke(app, ["metrics", "tokens"]).stdout
+    assert f"{codex.label} prices as of {codex.price_table.as_of}" in shown, shown
+    assert "Claude Code prices as of" in shown, shown

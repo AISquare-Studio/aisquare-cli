@@ -497,6 +497,38 @@ def test_metrics_show_is_clean_with_nothing_recorded(
     assert "No turns recorded yet" in result.stdout
 
 
+@pytest.mark.parametrize("command", [["metrics", "show"], ["metrics", "tokens"], ["log"]])
+@pytest.mark.parametrize("codex_home", [False, True], ids=["claude-only", "codex-here"])
+def test_an_empty_listing_names_every_agent_it_can_connect(
+    isolated_home: Path,
+    runner: CliRunner,
+    command: list[str],
+    codex_home: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex is read for turns, tokens and prompts as Claude Code is (SCOPE #113 274, L7), so
+    the empty listing's hint names it once it is on this machine, with its beta mark. On a
+    machine without it the hint is 0.9.2's, Claude Code alone (the manager, seq 11130's
+    follow-up: a Claude-only machine reads as 0.9.2's)."""
+    from aisquare.core import agents as agent_core
+    from aisquare.core.agent_adapters import get_adapter
+
+    monkeypatch.setattr(agent_core, "on_path", lambda name: None)  # a codex on this PATH aside
+    if codex_home:
+        get_adapter("codex").config_dir(agent_core.home(), {}).mkdir(parents=True)
+    result = runner.invoke(app, command)
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.stdout.split())
+    if codex_home:
+        assert (
+            "Connect your coding agent: aisquare agents connect claude-code or aisquare agents "
+            "connect codex (beta)"
+        ) in said, said
+    else:
+        assert said.endswith("Connect Claude Code: aisquare agents connect claude-code"), said
+        assert "codex" not in said, said
+
+
 # --- hot path -----------------------------------------------------------------
 
 

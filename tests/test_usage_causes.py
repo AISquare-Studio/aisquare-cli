@@ -126,7 +126,7 @@ def _reading(
         return read((200, b"{}"))
     if cause is UsageCause.token_refreshing:  # a fake Claude Code whose refresh does not take
         _sign_in(account, "two@example.com", expires_in=timedelta(hours=-1))
-        monkeypatch.setattr(service, "_token_refresh_command", lambda: ["claude"])
+        monkeypatch.setattr(service, "_token_refresh_command", lambda _agent: ["claude"])
         monkeypatch.setattr(service, "_run_token_refresh", lambda _account, _command: True)
         return service.read_usage([account], now=NOW, fetch=_answering((200, b"{}")))[account.slot]
     _sign_in(account, "two@example.com")

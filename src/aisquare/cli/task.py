@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Annotated, NoReturn, get_args
@@ -9,7 +10,7 @@ from typing import Annotated, NoReturn, get_args
 import typer
 from rich.table import Table
 
-from aisquare.cli.common import fail, local_time
+from aisquare.cli.common import AgentPath, fail, local_time
 from aisquare.cli.team import (
     STORE_ERRORS,
     SessionRef,
@@ -24,6 +25,7 @@ from aisquare.core.state import get_state
 from aisquare.core.store import BriefChangedError
 from aisquare.models import TaskStatus, TeamTask
 from aisquare.services import briefs as briefs_service
+from aisquare.services import store_broker
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError
 
@@ -101,7 +103,7 @@ def add(
         typer.Option(
             "--detail-file",
             help="Read the contract from this file instead of --detail.",
-            dir_okay=False,
+            click_type=AgentPath(dir_okay=False),
         ),
     ] = None,
     rules: Annotated[
@@ -149,10 +151,7 @@ def add(
     if detail is not None and detail_file is not None:
         fail("give --detail or --detail-file, not both", error="invalid_brief", exit_code=2)
     if detail_file is not None:
-        try:
-            detail = detail_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            fail(f"--detail-file {detail_file}: {exc}", error="invalid_brief", exit_code=2)
+        detail = _detail_from(detail_file)
     if detail is not None or rules:
         try:
             brief = team_service.build_brief(detail or "", rules=rules or [])
@@ -210,6 +209,28 @@ def add(
             f"✓ {verb}: {team_service.task_label(task)} {task.title}"
             f"{note}{receipt_suffix(delivery)}"
         )
+
+
+def _detail_from(path: Path) -> str:
+    """``--detail-file``'s contract: the file's UTF-8 text, its line ends read as
+    ``read_text`` reads them.
+
+    Run by a sandboxed agent's broker, the command reads as the user, outside the sandbox, and
+    the board keeps what it read, where the sandbox reads it back: so there it reads only a
+    regular file of the launch's own tree, of at most ``store_broker.MAX_DETAIL_FILE`` bytes,
+    as ``brief evidence --artifact`` does, on its own board and a member's (``--project``)
+    alike. Any other path is refused, saying why and holding none of it, and logged as the
+    broker's other refusals are (review r38 of #113, finding 1). Any other command reads the
+    path as it always did."""
+    try:
+        body = store_broker.read_in_tree(path, store_broker.MAX_DETAIL_FILE)
+        if body is None:
+            return path.read_text(encoding="utf-8")
+        return io.TextIOWrapper(io.BytesIO(body), encoding="utf-8").read()
+    except store_broker.OutOfScope as exc:  # before OSError, which it is
+        _fail_team(store_broker.OutOfScope(f"--detail-file {exc}", kind=exc.kind))
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"--detail-file {path}: {exc}", error="invalid_brief", exit_code=2)
 
 
 @app.command("list")

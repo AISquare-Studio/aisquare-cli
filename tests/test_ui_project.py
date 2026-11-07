@@ -1570,7 +1570,10 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(
         "still works)" in m
         for m, _ in notices
     ), notices
-    assert sessions.renamed == [("asq-auth-wip", "asq-repo")]
+    # The session made by hand above is one no launch record names: #113 renames the
+    # project's sessions by the tmux id its records hold (review r7, finding 2), so this one
+    # is left as it is; `tests/test_project_codename_follows_rename.py` renames a spawned one.
+    assert sessions.renamed == []
 
 
 def test_a_nickname_the_store_refuses_is_said_and_nothing_is_written(

@@ -39,6 +39,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.css.stylesheet import Stylesheet
 from textual.dom import DOMNode
+from textual.errors import NoWidget
 from textual.geometry import Offset, Region
 from textual.pilot import Pilot
 from textual.widget import Widget
@@ -124,7 +125,7 @@ from aisquare.services.captain import state as captain_state
 from tests import guard_paint, toast_log
 from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import released, settle_page, settle_until_held, watch_until
+from tests.ui_workers import released, settle_page, settle_until, settle_until_held, watch_until
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -163,7 +164,10 @@ def status(
     exit_status: int | None = None,
 ) -> FleetAgentStatus:
     """A scripted agent; the id is derived so a test can address its row. A ``captain`` row
-    is launched as the captain's start launches it (``fleet.is_the_captains_row``)."""
+    is launched as the captain's start launches it (``fleet.is_the_captains_row``): in the
+    captain's brain folder (#113: its tools are never recorded, so its folder tells it)."""
+    from aisquare.services.captain import brain
+
     spec = (
         LaunchSpec(binary="claude", extra_args=["--strict-mcp-config", "--tools", ""])
         if role == "captain"
@@ -176,7 +180,7 @@ def status(
         role=role,
         pane_id="%1",
         tmux_socket=PRIVATE_SOCKET,  # never "asq", the developer's own fleet
-        cwd=Path("/w"),
+        cwd=brain.brain_dir() if role == "captain" else Path("/w"),
         created_at=T0 + timedelta(minutes=minute),
         ended_at=T0 + timedelta(minutes=minute + 1) if exit_status is not None else None,
         exit_status=exit_status,
@@ -502,7 +506,7 @@ def session_use(*by_slot: tuple[int, float]) -> Callable[..., HeadroomSummary]:
     """A headroom read answering ``by_slot`` as each account's five-hour window USED."""
 
     def read(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
-        return HeadroomSummary(level="good", percent_left=50.0, session_by_slot=dict(by_slot))
+        return HeadroomSummary(level="good", percent_left=50.0, limit_by_slot=dict(by_slot))
 
     return read
 
@@ -583,7 +587,7 @@ def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Acceptance (e): the figures on the rows and the info lines are the headroom read's
-    (``HeadroomSummary.session_by_slot``), handed to the widgets when it lands. Ticks of the
+    (``HeadroomSummary.limit_by_slot``), handed to the widgets when it lands. Ticks of the
     two-second clock read no usage, and any other usage read is recorded — not raised: every
     usage read runs in a thread worker that does not exit on error, where a raise only marks
     the worker failed (review of #267, 3). A view opened between two reads shows the last
@@ -3431,6 +3435,9 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
 
     The click lands as a person's would, once the view is on screen: after its paint, which
     is what the click guard (``click_guard``) waits for.
+
+    It returns once the dialog's buttons are laid out (:func:`stop_buttons_laid_out`), not a
+    pause after the click on Stop: the caller's next step is a click on one of them.
     """
     await pilot.click(row_for(app, agent_id))
     await pilot.pause()
@@ -3438,10 +3445,39 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
     view = app.current_view()
     assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
     await pilot.click(view.query_one("#agent-stop", Button))
-    await pilot.pause()
+    await settle_until(app, lambda: stop_buttons_laid_out(app), timeout=10)
     screen = app.screen
     assert isinstance(screen, StopAgentScreen), f"Stop opened {type(screen).__name__}"
+    assert stop_buttons_laid_out(app), "the Stop dialog opened, and its buttons were never laid out"
     return screen
+
+
+def stop_buttons_laid_out(app: FleetApp) -> bool:
+    """Whether the Stop dialog is up and a click on each of its buttons lands on that button.
+
+    ``Pilot.click`` aims at the corner of the button's region as it reads it at the call. A
+    pushed dialog is the current screen from its push and is laid out a turn of the loop or
+    more later, by its update timer, which on Windows sleeps on a thread of the default
+    executor and can fire late. Until then *Stop* has no region, the click went to (0, 0),
+    the dialog's backdrop, and nothing was pressed: ``[] == [stop call]`` on windows-latest
+    (CI 41797195272, attempt 2, shard 6, at fab09fdd). A hidden button (*Force* on an exited
+    row) is not clicked, so it is not waited for.
+    """
+    screen = app.screen
+    if not isinstance(screen, StopAgentScreen):
+        return False
+    shown = [button for button in screen.query(Button) if button.display]
+    return bool(shown) and all(_under_its_click(app, button) for button in shown)
+
+
+def _under_its_click(app: FleetApp, widget: Widget) -> bool:
+    region = widget.region
+    if not region:
+        return False
+    try:
+        return app.get_widget_at(*region.offset)[0] is widget
+    except NoWidget:
+        return False
 
 
 def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
@@ -3478,6 +3514,12 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
     screen, said = drive(go)
     assert screen == "StopAgentScreen", said
     assert not any("no longer listed" in line for line in said)
+
+
+def _viewing(app: FleetApp, label: str) -> bool:
+    """Whether the right pane shows the agent view of the agent labelled ``label``."""
+    view = app.current_view()
+    return isinstance(view, AgentView) and view.status.agent.label == label
 
 
 def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(
@@ -3824,10 +3866,12 @@ def test_stop_on_an_exited_row_removes_its_dead_window_through_the_same_dialog(
         question = screen.question().plain
         force_offered = screen.query_one("#stop-force", Button).display
         await pilot.click("#stop-cancel")
-        await pilot.pause()
+        await settle_until(app, lambda: not isinstance(app.screen, StopAgentScreen), timeout=10)
         app.sidebar.focus()
         await pilot.press("x")  # the row is still selected: a cancel leaves its view open
-        await pilot.pause()
+        # x's dialog is clicked next, so it is read once its buttons are laid out, as
+        # open_stop_dialog reads its own (stop_buttons_laid_out).
+        await settle_until(app, lambda: stop_buttons_laid_out(app), timeout=10)
         x_opens = isinstance(app.screen, StopAgentScreen)
         await pilot.click("#stop-confirm")
         await settle(app)
@@ -4005,6 +4049,25 @@ async def _through_the_app(pilot: Pilot[None]) -> None:
     await settle_page(pilot.app)
 
 
+async def _resized(pilot: Pilot[None], width: int, height: int) -> None:
+    """``Pilot.resize_terminal``, then wait until the screen is laid out at the new size.
+
+    The app hands a resize on to its screen from a 1/120 s timer, not from a queue, and
+    neither a pause nor ``settle_page`` waits for a timer: on windows-latest the Agent
+    view's header still measured 37 cells after a resize to 140 columns, its click and
+    settle done before the timer fired (CI run 40040410906, attempt 1). The screen lays its
+    widgets out as it takes the resize, so its laid-out size is the fact waited for (its
+    ``size`` is the app's, new at once), then what the widgets do about theirs.
+    """
+    await pilot.resize_terminal(width, height)
+    await settle_until_held(
+        pilot.app,
+        lambda: pilot.app.screen.outer_size == (width, height),
+        what=f"the screen laid out at {width}x{height}",
+    )
+    await settle_page(pilot.app)
+
+
 async def _mouse(
     pilot: Pilot[None], kind: type[events.MouseEvent], x: int, y: int, *, button: int = 1
 ) -> None:
@@ -4175,19 +4238,16 @@ def test_a_terminal_that_shrinks_re_clamps_the_navigator_and_keeps_the_divider_o
         seen: dict[str, object] = {"floor": _floor(app)}
         await _drag(pilot, app.sidebar.outer_size.width, SIZE[0] - 2)
         seen["wide"] = app.sidebar.outer_size.width
-        await pilot.resize_terminal(80, SIZE[1])
-        await _through_the_app(pilot)
+        await _resized(pilot, 80, SIZE[1])
         seen["shrunk"] = (
             app.sidebar.outer_size.width,
             app.content.outer_size.width,
             app.query_one(Divider).region.x,
         )
-        await pilot.resize_terminal(*SIZE)
-        await _through_the_app(pilot)
+        await _resized(pilot, *SIZE)
         seen["back"] = app.sidebar.outer_size.width
         # A key at the small size steps from what is ON SCREEN, not from the wide screen's number.
-        await pilot.resize_terminal(80, SIZE[1])
-        await _through_the_app(pilot)
+        await _resized(pilot, 80, SIZE[1])
         app.sidebar.focus()
         await pilot.press("less_than_sign")
         await settle(app)
@@ -4876,11 +4936,9 @@ def test_a_gesture_on_a_narrow_terminal_keeps_a_wider_remembered_width(
         await _settled(pilot)
         seen["after_drag"] = now()
         # The ask survives: room again, and the 90 is what is shown.
-        await pilot.resize_terminal(140, SIZE[1])
-        await _through_the_app(pilot)
+        await _resized(pilot, 140, SIZE[1])
         seen["after_room"] = now()
-        await pilot.resize_terminal(80, SIZE[1])
-        await _through_the_app(pilot)
+        await _resized(pilot, 80, SIZE[1])
         await pilot.press("less_than_sign")  # a step the screen shows is a real gesture
         await _settled(pilot)
         seen["after_narrower"] = now()
@@ -5086,8 +5144,7 @@ def test_a_min_width_of_zero_is_a_floor_of_zero(tmp_path: Path, script: Script) 
     async def ceiling(pilot: Pilot[None]) -> int | None:
         app = fleet_app(pilot)
         app.sidebar.styles.min_width = 0
-        await pilot.resize_terminal(1 + Panes.MIN_CONTENT, SIZE[1])  # room for the content alone
-        await _through_the_app(pilot)
+        await _resized(pilot, 1 + Panes.MIN_CONTENT, SIZE[1])  # room for the content alone
         return cells(app.sidebar.styles.max_width)
 
     assert drive(ceiling) == 0, "the container's ceiling honours a floor of 0 too"
@@ -5402,6 +5459,10 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         pilot: Pilot[None],
     ) -> tuple[str | None, str | None, list[str], list[str], bool]:
         app = fleet_app(pilot)
+        # Recorded as raised, not read off the screen: the restart's toast lives six seconds
+        # (``timeout=6``), and on windows-latest this test took ten (run 40496703168), so the
+        # rack was empty by the time it looked (``tests/toast_log.py``).
+        told = toast_log.record(app)
         await pilot.click(row_for(app, "agt_a_manager"))
         await settle(app)
         view = app.current_view()
@@ -5413,7 +5474,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         await pilot.pause()
         current = app.current_view()
         # The pane's own "(pane gone)" toast is there too: read them all.
-        toasts = await _toast_list(app)
+        toasts = list(told)
         rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
         typing_reaches = isinstance(current, AgentView) and app.focused is current.pane
         assert stop_shown is True  # the 💤 row's Stop removes its dead window

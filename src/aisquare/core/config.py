@@ -20,6 +20,8 @@ import re
 import shutil
 import tomllib
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -218,12 +220,13 @@ class RoleLaunchProfile(BaseModel):
     spec; we carry it.
 
     ``account`` is the ONE exception, and it is not that cut coming back: it
-    names a Claude account the CLI itself owns — a slot number, an alias or the
-    email it is signed in as (``aisquare accounts``) — never a path. It is
-    resolved at launch by the one account resolver
-    (``services.claude_accounts.choose``), after ``env``, so a binding that
-    carries both a hand-written ``CLAUDE_CONFIG_DIR`` and an ``account`` runs on
-    the account. Written by ``team bind <role> --account`` and App settings;
+    names an account the CLI itself owns, of the role's own agent (Claude Code
+    or Codex) — a slot number, an alias or the email it is signed in as
+    (``aisquare accounts``) — never a path. It is resolved at launch by the one
+    account resolver (``services.claude_accounts.choose``), after ``env``, so a
+    binding that carries both a hand-written home of its agent
+    (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``) and an ``account`` runs on the
+    account. Written by ``team bind <role> --account`` and App settings;
     ``None`` means the role expresses no preference and the project or machine
     default applies (#145).
 
@@ -238,6 +241,7 @@ class RoleLaunchProfile(BaseModel):
     takes the file's value; ``team bind`` keeps them apart.
     """
 
+    agent: str | None = None
     bin: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     env_files: dict[str, str] = Field(default_factory=dict)
@@ -248,8 +252,9 @@ class RoleLaunchProfile(BaseModel):
     def carries_launch(self) -> bool:
         """Whether it binds anything but its account: a writer that takes the account away
         drops the table when this is false, rather than leave an empty one that
-        ``launch._declared_roles`` reads as a role the operator declared."""
-        return bool(self.bin or self.env or self.env_files or self.args)
+        ``launch._declared_roles`` reads as a role the operator declared. A role bound to
+        an agent (``team bind --agent``) carries that binding."""
+        return bool(self.bin or self.env or self.env_files or self.args or self.agent)
 
 
 class TeamSettings(BaseModel):
@@ -297,21 +302,35 @@ and ``fleet restart --permission-mode`` takes nothing else, or ``""`` for no fla
 class FleetRoleSettings(BaseModel):
     """How the fleet launches one role — every field is a DEFAULT the user may change.
 
+    ``permission`` is the role's permission in no agent's vocabulary, one value for every
+    agent: ``WRITE:APPROVALS`` (``workspace:auto``, ``read_only:auto``, ``full:never``…,
+    ``core.agent_adapters.types.PermissionIntent``), which each agent's adapter maps to
+    its own flags (docs/fleet.md has the table). Set, it wins over the agent-specific
+    fields below; unset (``None``), they apply as they always did.
     ``permission_mode`` is any Claude Code ``--permission-mode`` value (``auto``,
     ``acceptEdits``, ``bypassPermissions``, ``manual``, ``dontAsk``, ``plan``); the
-    empty string means "pass no flag". ``worktree`` puts the agent in its own git
-    worktree; ``extra_args`` are appended to the agent command verbatim.
+    empty string means "pass no flag". ``sandbox``, ``approval_policy`` and
+    ``approve_for_me`` are Codex's; ``approve_for_me`` unset is Codex's
+    ``--approve-for-me`` for every role but a reviewer's seats, unless a sandbox or an
+    approval policy is chosen. ``worktree`` puts the agent in its own git
+    worktree. Legacy ``extra_args`` belong to Claude Code; ``agent_args`` maps
+    an agent ID to additional native arguments for that agent only.
     Precedence: per-spawn flag > this config > built-in. NOT the environment:
     no ``[fleet]`` value is read from an env var (the orchestrator's own knobs
     — ``AISQUARE_TEAM``, ``AISQUARE_MODEL_<ROLE>`` and friends — are a
     different surface, documented in the README).
     """
 
+    permission: str | None = None
     permission_mode: str = "auto"
+    sandbox: str | None = None
+    approval_policy: str | None = None
+    approve_for_me: bool | None = None
     worktree: bool = False
     extra_args: list[str] = Field(default_factory=list)
     """Fleet windows only: ``launch`` and ``team spawn`` never read them (#129 f). The
     tool and skill keys below apply wherever the role starts."""
+    agent_args: dict[str, list[str]] = Field(default_factory=dict)
     persona: str | None = None
     """The persona every spawn of this role gets unless ``--persona`` names another
     (docs/plans/spawn-personas.md §3.8). Checked at spawn, not at load: a name the
@@ -395,6 +414,14 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
         "ui-tester": FleetRoleSettings(),
         _plain_role(): FleetRoleSettings(),
     }
+
+
+def built_in_extra_args(role: str) -> list[str]:
+    """The ``extra_args`` ``role`` is born with (:func:`_default_fleet_roles`), which every
+    config ``init`` writes holds whether or not anyone chose them; ``[]`` for a role it
+    does not name."""
+    default = _default_fleet_roles().get(role)
+    return list(default.extra_args) if default is not None else []
 
 
 def _plain_role() -> str:
@@ -526,6 +553,24 @@ def split_denied_tools(args: Sequence[str]) -> tuple[set[str], list[str]]:
         kept.append(arg)
     denied.discard("")
     return denied, kept
+
+
+def denied_tools_at(args: Sequence[str]) -> int | None:
+    """Where ``args``' first ``--disallowedTools`` (either spelling) stands, which is its
+    place among what :func:`split_denied_tools` keeps of them too (nothing before it is
+    taken): the index its one merged token goes back to, so a line that already carried the
+    role's flags keeps them in its own order. ``None`` when none comes before a bare ``--``."""
+    for index, arg in enumerate(args):
+        if arg == "--":
+            return None
+        if is_denied_tools_flag(arg):
+            return index
+    return None
+
+
+def is_denied_tools_flag(arg: str) -> bool:
+    """Whether ``arg`` is a ``--disallowedTools`` token (either spelling, ``=`` or not)."""
+    return arg.partition("=")[0] in _DISALLOWED_TOOLS
 
 
 def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
@@ -891,6 +936,21 @@ class FleetSettings(BaseModel):
     to a server started after the change."""
 
 
+class AgentModelDefault(BaseModel):
+    model: str | None = None
+    effort: str | None = None
+
+
+class AgentModelSettings(AgentModelDefault):
+    roles: dict[str, AgentModelDefault] = Field(default_factory=dict)
+
+
+class AgentSettings(BaseModel):
+    mcp: bool = False
+    default: str | None = None
+    models: dict[str, AgentModelSettings] = Field(default_factory=dict)
+
+
 class WatchSource(BaseModel):
     """One operator command ``aisquare watch`` runs (``[watch.sources.<name>]``): it prints
     JSON lines ``{"id", "project", "kind", "summary"}``, every ``every_seconds``."""
@@ -1027,18 +1087,27 @@ class AccountsSettings(BaseModel):
     not read. The week is the shared seven-day window's reset, for every
     agent: a family week (Opus, Sonnet) only ever makes an account read fuller.
 
+    ``cross_agent_handover``, on by default, lets a limit's hand-over cross agents once the
+    agent's own other accounts were all read over ``switch_at`` (or it has none): the
+    replacement starts FRESH on the first account of another agent under the line, with a
+    brief of the work (``services.handoff``), since no conversation moves between agents.
+    An own account with room still resumes natively first; off, a hand-over stays on its
+    agent as before.
+
     ``share_trust``, on by default, copies a folder's trust into the account a launch
     runs on when any other account has it, so an agent never waits at Claude Code's
     "trust this folder?" for a folder the human already said yes to on another login.
     ``share_settings``, off by default, keeps every managed account's ``settings.json``
     a link to the plain claude's. Both: ``core.claude_sharing``.
 
-    ``share`` (P2-W7, #198), empty by default, names what every account has in common:
-    ``memory`` (one auto-memory directory per project under
-    ``~/.aisquare/claude-shared/memory``, passed to each launch as ``--settings``),
-    ``skills``, ``agents``, ``commands`` and ``claude_md`` (each managed slot's entry a
-    link to the plain claude's, its own kept beside it), and ``plugins`` (experimental).
-    ``aisquare accounts share`` turns parts on and off; a launch links a slot made since.
+    ``share`` (P2-W7, #198), empty by default, names what every account has in common, by
+    the parts each agent declares (``AgentAccounts.share_parts``): for Claude Code ``memory``
+    (one auto-memory directory per project under ``~/.aisquare/claude-shared/memory``,
+    passed to each launch), ``skills``, ``agents``, ``commands`` and ``claude_md``, and
+    ``plugins`` (experimental); for Codex ``agents_md`` and ``skills``. A linked part makes
+    each managed slot's entry a link to the plain home's, its own kept beside it. A name an
+    agent does not declare does nothing for it. ``aisquare accounts share`` turns parts on
+    and off; a launch links a slot made since.
 
     Read from the config file alone, like ``[fleet]``: there is no
     ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
@@ -1050,11 +1119,10 @@ class AccountsSettings(BaseModel):
     before_limit: Literal["off", "warn", "switch"] = "off"
     wait_if_reset_within_minutes: int = Field(default=15, ge=0)
     prefer: Literal["priority", "reset-soonest"] = "priority"
+    cross_agent_handover: bool = True
     share_trust: bool = True
     share_settings: bool = False
-    share: list[Literal["memory", "skills", "agents", "commands", "claude_md", "plugins"]] = Field(
-        default_factory=list
-    )
+    share: list[str] = Field(default_factory=list)
 
 
 class UpdatesSettings(BaseModel):
@@ -1112,6 +1180,7 @@ class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
     profile: str = "default"
+    agents: AgentSettings = Field(default_factory=AgentSettings)
     api_url: str = "https://api.aisquare.studio"
     default_pool: Pool = "project"
     capture: CaptureSettings = Field(default_factory=CaptureSettings)
@@ -1355,6 +1424,25 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     return merged
 
 
+_READ_SNAPSHOT: ContextVar[dict[Path, AppConfig | Exception] | None] = ContextVar(
+    "config_read_snapshot", default=None
+)
+
+
+@contextmanager
+def config_snapshot() -> Iterator[None]:
+    """One consistent file read for a diagnostic with multiple independent readers.
+
+    Scoped to the operation; subsequent commands see edits and repaired files.
+    Each reader gets its own model, so accidental changes cannot affect peers.
+    """
+    token = _READ_SNAPSHOT.set({})
+    try:
+        yield
+    finally:
+        _READ_SNAPSHOT.reset(token)
+
+
 #: The byte-order marks UTF-16 opens with, little-endian first: Windows PowerShell
 #: 5.1's ``>``, ``Out-File`` and ``Set-Content -Encoding Unicode`` write ``FF FE``.
 _UTF16_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
@@ -1411,6 +1499,24 @@ def one_load() -> Iterator[None]:
         _ONE_LOAD.reset(token)
 
 
+_AS_IF: ContextVar[tuple[Path, AppConfig] | None] = ContextVar(
+    "aisquare_config_as_if", default=None
+)
+
+
+@contextmanager
+def as_if(config: AppConfig, path: Path | None = None) -> Iterator[None]:
+    """Within it, :func:`load_config` of ``path`` (the standard file) reads ``config``, never the
+    file: a dry run of a change through the code that reads the file. ``team bind`` asks the
+    launch's own resolution of the binding it would store before it stores it, so the two
+    verdicts are one by construction (#100's reopen 5, B5). Each load is a copy, as ever."""
+    token = _AS_IF.set((path or paths.config_path(), config))
+    try:
+        yield
+    finally:
+        _AS_IF.reset(token)
+
+
 _LAST_PARSE: tuple[Path, bytes, AppConfig] | None = None
 """The last file :func:`load_config` parsed: its path, its bytes, and what they validated to,
 which no caller that may change it is handed (each gets a copy; ``copy=False`` reads it)."""
@@ -1434,6 +1540,27 @@ def load_config(path: Path | None = None, *, copy: bool = True) -> AppConfig:
     same bytes, in any caller, then copied (round 20).
     """
     target = path or paths.config_path()
+    imagined = _AS_IF.get()
+    if imagined is not None and imagined[0] == target:
+        return imagined[1].model_copy(deep=True) if copy else imagined[1]
+    snapshot = _READ_SNAPSHOT.get()
+    if snapshot is None:
+        return _load_config_file(target, copy=copy)
+    if target not in snapshot:
+        try:
+            # Kept for the snapshot's life and handed out only as a copy (below).
+            snapshot[target] = _load_config_file(target, copy=False)
+        except Exception as exc:
+            snapshot[target] = exc
+    value = snapshot[target]
+    if isinstance(value, Exception):
+        import copy as copying
+
+        raise copying.copy(value).with_traceback(None)
+    return value.model_copy(deep=True)
+
+
+def _load_config_file(target: Path, *, copy: bool = True) -> AppConfig:
     loaded = _ONE_LOAD.get()
     if loaded is not None and target in loaded:
         return loaded[target]

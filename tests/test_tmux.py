@@ -22,6 +22,7 @@ import contextlib
 import itertools
 import os
 import re
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -466,12 +467,17 @@ def test_has_session_targets_the_name_exactly(fake_bin: Path, conf: Path) -> Non
     ]
 
 
+_SPAWN_FORMAT = f"#{{window_id}}{_SEP}#{{pane_id}}{_SEP}#{{session_id}}{_SEP}#{{session_name}}"
+"""What ``spawn_window`` asks tmux to print of the window it made: the window, the pane, and
+the session as tmux answers it, its own id first (``$3``)."""
+
+
 def test_spawn_window_creates_the_session_when_it_is_absent(
     fake_bin: Path, conf: Path, tmp_path: Path
 ) -> None:
     fake = FakeTmux(
         Completed(1, "", "can't find session: asq-amber-fox"),  # has-session
-        Completed(0, f"@4{_SEP}%9\n", ""),  # new-session -P
+        Completed(0, f"@4{_SEP}%9{_SEP}$2{_SEP}asq-amber-fox\n", ""),  # new-session -P
     )
     info = _server(fake, fake_bin, conf).spawn_window(
         "asq-amber-fox",
@@ -483,7 +489,7 @@ def test_spawn_window_creates_the_session_when_it_is_absent(
         height=40,
     )
     assert fake.commands()[1] == [
-        "new-session", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
+        "new-session", "-d", "-P", "-F", _SPAWN_FORMAT,
         "-s", "asq-amber-fox", "-n", "coder-1", "-c", str(tmp_path), "-x", "120", "-y", "40",
         "-e", "AISQUARE_ROLE=coder", "-e", "X=a=b",
         "--", "claude", "--name", "coder-1", "-p", "--dangerously-skip",
@@ -497,7 +503,39 @@ def test_spawn_window_creates_the_session_when_it_is_absent(
         dead_status=None,
         current_command="claude",
         activity=False,
+        session_id="$2",
     )
+
+
+def test_spawn_window_joins_a_session_by_its_id_and_creates_only_by_a_name(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """A session given by tmux's own id (``$3``) is one that is there: the window goes into
+    it, whatever it is called now, or nowhere; ``create`` makes a session by a name only,
+    never joining one tmux already holds (``services.fleet._new_session_window``); and a
+    name that would read as an id is refused."""
+    fake = FakeTmux(
+        Completed(0, "", ""),  # has-session -t $3
+        Completed(0, f"@5{_SEP}%10{_SEP}$3{_SEP}asq-renamed\n", ""),  # new-window -P
+        Completed(0, "", ""),  # resize
+        Completed(1, "", "can't find session: $4"),  # has-session -t $4
+    )
+    server = _server(fake, fake_bin, conf)
+    info = server.spawn_window("$3", name="coder-2", cwd=tmp_path, command=["claude"])
+    assert fake.commands()[0] == ["has-session", "-t", "$3"]
+    assert fake.commands()[1][:7] == ["new-window", "-d", "-P", "-F", _SPAWN_FORMAT, "-t", "$3:"]
+    assert (info.session, info.session_id, info.pane_id) == ("asq-renamed", "$3", "%10")
+    with pytest.raises(TmuxError, match="no longer on the server"):
+        server.spawn_window("$4", name="coder-3", cwd=tmp_path, command=["claude"])
+    with pytest.raises(TmuxError, match="never by an id"):
+        server.spawn_window("$3", name="coder-3", cwd=tmp_path, command=["claude"], create=True)
+    with pytest.raises(TmuxError, match="tmux's id for a session"):
+        tmux_module._require_targetable("$9")
+    created = FakeTmux(Completed(0, f"@1{_SEP}%1{_SEP}$0{_SEP}asq-new\n", ""))
+    _server(created, fake_bin, conf).spawn_window(
+        "asq-new", name="m", cwd=tmp_path, command=["claude"], create=True
+    )
+    assert created.commands()[0][0] == "new-session", "no has-session asked: never joined"
 
 
 def test_spawn_window_takes_the_env_pairs_back_out_of_a_new_sessions_environment(
@@ -580,7 +618,7 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
     )
     new_window = fake.commands()[1]
     assert new_window == [
-        "new-window", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
+        "new-window", "-d", "-P", "-F", _SPAWN_FORMAT,
         "-t", "=asq-amber-fox:", "-n", "reviewer", "-c", str(tmp_path),
         "--", "sh", "-c", "exit 3",
     ]  # fmt: skip
@@ -656,7 +694,7 @@ def test_spawn_window_escapes_the_separator_in_every_argument_it_carries(
     # and is applied here exactly as the code applies it.
     escaped_cwd = str(directory).replace(";", "\\;")
     assert fake.commands()[1] == [
-        "new-window", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
+        "new-window", "-d", "-P", "-F", _SPAWN_FORMAT,
         "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", escaped_cwd,
         "-e", "K=v\\;",
         # "a;b" is data to tmux already: only a LAST ";" separates commands.
@@ -1533,7 +1571,10 @@ requires_tmux = pytest.mark.skipif(
 _SOCKETS = itertools.count()
 #: Prints one coloured line, then becomes `cat` so typed and pasted text echoes back.
 CAT = ["sh", "-c", 'printf "\\033[31mred\\033[0m plain\\n"; exec cat']
-EXIT_3 = ["sh", "-c", "exit 3"]
+#: Exits 3 half a second in: a command that died the instant tmux started it raced tmux's
+#: own setup of its pane, and once in many runs on CI's tmux 3.4 no dead pane with a status
+#: was ever listed (CI 42120386762, py3.12-captain-off shard 4/4; R7's flake list).
+EXIT_3 = ["sh", "-c", "sleep 0.5; exit 3"]
 
 
 def _wait(predicate: Callable[[], bool], *, timeout: float = 8.0) -> bool:
@@ -1907,13 +1948,24 @@ def test_live_a_finished_command_is_a_dead_pane_with_its_status(live: TmuxServer
             (w for w in live.list_windows("asq-test-fox") if w.pane_id == exiting.pane_id), None
         )
 
-    # tmux can report a pane dead a beat before it records the exit status: wait for the
-    # status itself, whatever it is, so a wrong one still fails the assertion below.
-    assert _wait(lambda: (found := dead()) is not None and found.dead_status is not None)
+    # Dead first, then its status: tmux can report a pane dead a beat before it records the
+    # status, so the status is waited for, bounded. And tmux 3.4 (CI's ubuntu) can report it
+    # dead and never record one: 8 s on, `(%1, dead, no status)` with remain-on-exit on (CI
+    # 42131769260; R7's flake list). So what is read is held to what tmux itself answers
+    # for the pane: its status, or none; where it records one (3.8, macOS), 3, and a status
+    # read wrong or dropped still fails.
+    assert _wait(lambda: (found := dead()) is not None and found.dead), (
+        [(w.pane_id, w.dead, w.dead_status) for w in live.list_windows("asq-test-fox")],
+        live.run("show-options", "-gv", "remain-on-exit").strip(),
+    )
+    _wait(lambda: (found := dead()) is not None and found.dead_status is not None)
+    said = live.run("display-message", "-p", "-t", exiting.pane_id, "#{pane_dead_status}")
+    status = int(said.strip()) if said.strip() else None
+    assert status in (3, None), said
     found = dead()
-    assert found is not None and (found.dead, found.dead_status) == (True, 3)
+    assert found is not None and (found.dead, found.dead_status) == (True, status)
     facts = live.pane_facts(exiting.pane_id)
-    assert facts is not None and (facts.dead, facts.dead_status) == (True, 3)
+    assert facts is not None and (facts.dead, facts.dead_status) == (True, status)
     # remain-on-exit: the window is still there to read…
     assert len(live.list_windows("asq-test-fox")) == 2
 
@@ -2355,6 +2407,29 @@ def test_a_server_the_fleet_starts_holds_no_team_variable(
     names = {line.partition("=")[0] for line in held if "=" in line and not line.startswith("-")}
     assert not names & set(spawn.TEAM_ENV_VARS), held
     assert "AISQUARE_HOME=/tmp/asq-home-kept" in held
+
+
+@requires_tmux
+def test_a_server_started_inside_claude_code_hands_its_mark_to_no_pane(
+    live: TmuxServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Claude Code sets ``CLAUDECODE`` in every process it starts (its ``process_env``). A
+    fleet server started from its tool shell kept it, and a pane opened there, a Codex
+    agent's or a person's, sent every tell and spawn as an agent's
+    (``prompt_origin.origin_sender``; review r36 of #113, finding 9). Started through our
+    seam, the server holds none of it, and a pane on it is handed none."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    seen = tmp_path / "seen.txt"
+    probe = f'printf %s "${{CLAUDECODE-unset}}" > {shlex.quote(str(seen))}.tmp'
+    probe += f" && mv {shlex.quote(str(seen))}.tmp {shlex.quote(str(seen))}; exec sleep 30"
+
+    live.run("new-session", "-d", "-s", "probe", "sleep 30")
+    live.run("new-window", "-d", "-t", "probe", probe)
+
+    held = live.run("show-environment", "-g").splitlines()
+    assert not [line for line in held if line.startswith("CLAUDECODE=")], held
+    assert _wait(seen.exists), "the pane never ran"
+    assert seen.read_text(encoding="utf-8") == "unset"
 
 
 # --- [fleet] pane_clipboard and mouse on (#83's tmux residuals: #100, #101) ----------------

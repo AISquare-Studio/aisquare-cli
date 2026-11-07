@@ -24,6 +24,7 @@ from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import destinations as dest
 from aisquare.services import diagnostics
 from aisquare.services import team as team_service
+from tests.wall_clock import after_the_tick
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +33,21 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work.mkdir()
     monkeypatch.chdir(work)
     return work
+
+
+@pytest.fixture(autouse=True)
+def the_doctor_asks_after_the_rows_were_made(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check names the rows ``prune --older-than 0`` drops: those last touched BEFORE now.
+    A row made in the tick the check reads is not, and a Windows clock ticks every 15 ms
+    (run 40450023264, #29). Each test made its rows and then asked; it waits for the clock to
+    move first, as a person typing the doctor's command would."""
+    real = diagnostics._check_captured_projects
+
+    def check() -> Any:
+        after_the_tick()
+        return real()
+
+    monkeypatch.setattr(diagnostics, "_check_captured_projects", check)
 
 
 def _rows() -> list[ProjectInfo]:
@@ -213,7 +229,9 @@ def test_team_spawn_adds_its_project_when_it_starts_the_session_not_when_it_prin
 ) -> None:
     """``--exec`` is ``launch`` by another door: the session it starts joins this board,
     so it adds the project as ``launch`` does. A printed line may never be run."""
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.executable", lambda _selected: "/usr/bin/claude"
+    )
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", lambda *_args: None)
 
     printed = runner.invoke(app, ["team", "spawn", "coder", "--no-probe"])

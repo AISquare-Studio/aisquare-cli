@@ -1,8 +1,9 @@
 """What each live agent consumes: ``aisquare fleet top`` and asq's *Agent resources* page.
 
 Per live fleet row: the CPU, the resident memory and the number of processes of the tree its
-tmux pane started (``claude`` and everything under it: MCP servers, a ``pytest``, a build),
-how long it has run, and what its session has spent so far in tokens and at list prices.
+tmux pane started (the agent's binary, whichever agent it is, and everything under it: MCP
+servers, a ``pytest``, a build), how long it has run, and what its session has spent so far in
+tokens and at list prices, read by its agent's own transcript reader.
 
 **One read of each thing per sample**, whatever the number of agents: the store's live rows
 (one query), one ``list-panes -a`` per tmux server the rows live on (one in practice, the
@@ -35,8 +36,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import process_table
 from aisquare.core import usage as usage_core
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import PanePids, TmuxError, TmuxServer
 from aisquare.models import FleetAgent
@@ -74,45 +77,52 @@ class SpendReader:
     gained since the one before (the page's tick every few seconds).
 
     The first read of a session starts from its recorded ``usage_session`` row when it has one
-    (its totals and its scan's position), else from the transcript's first line."""
+    (its totals and its scan's position), else from the transcript's first line. Read by the
+    agent's own reader (``AgentTranscript.usage``, the one its Stop hook records with), so a
+    Codex agent's rollout is scanned as Codex writes it, and the position a Stop recorded is
+    the same reader's (#113)."""
 
     def __init__(self) -> None:
-        self._seen: dict[str, tuple[Path, usage_core.Usage, usage_core.ScanState]] = {}
+        self._seen: dict[str, tuple[Path, usage_core.Usage, str | None, str | None]] = {}
 
-    def spend(self, store: ContextStore, session_id: str) -> Spend | None:
+    def spend(self, store: ContextStore, session_id: str, agent: str | None = None) -> Spend | None:
         """``session_id``'s spend now, or ``None`` when nothing of it can be read (no transcript
-        recorded, none on disk, no usage row)."""
+        recorded, none on disk, no usage row, an agent whose transcript holds no token record).
+        ``agent`` is the row's (its session's when ``None``)."""
         seen = self._seen.get(session_id)
         if seen is None:
-            seen = self._start(store, session_id)
+            seen = self._start(store, session_id, agent)
             if seen is None:
                 return None
-        transcript, total, state = seen
+        transcript, total, state, whose = seen
+        adapter = recorded_adapter(whose)
+        reader = adapter.transcript_reader if adapter is not None else None
+        if reader is None:
+            return None
         if transcript.is_file():
-            delta, state = usage_core.scan(transcript, state)
-            total.add(delta)
-        self._seen[session_id] = (transcript, total, state)
+            scan = reader.usage(transcript, state)
+            if scan is not None:
+                total.add(scan.delta)
+                state = scan.state
+        self._seen[session_id] = (transcript, total, state, whose)
         totals = total.totals()
         return Spend(totals.total, totals.cost_usd, totals.priced)
 
     @staticmethod
     def _start(
-        store: ContextStore, session_id: str
-    ) -> tuple[Path, usage_core.Usage, usage_core.ScanState] | None:
+        store: ContextStore, session_id: str, agent: str | None
+    ) -> tuple[Path, usage_core.Usage, str | None, str | None] | None:
         recorded = store.session_usage(session_id)
+        session = store.get_session(session_id)
         path = recorded.transcript_path if recorded is not None else None
         if not path:
-            session = store.get_session(session_id)
             path = session.transcript_path if session is not None else None
         if not path:
             return None
+        whose = agent or (session.agent if session is not None else None)
         if recorded is None:
-            return Path(path), usage_core.Usage(), usage_core.ScanState()
-        return (
-            Path(path),
-            usage_core.Usage.from_dict(recorded.usage),
-            usage_core.ScanState.parse(recorded.state),
-        )
+            return Path(path), usage_core.Usage(), None, whose
+        return Path(path), usage_core.Usage.from_dict(recorded.usage), recorded.state, whose
 
     def forget(self, keep: Collection[str]) -> None:
         """Drop every session but ``keep``'s: an agent that ended takes its memory with it."""
@@ -133,7 +143,8 @@ class AgentUse:
     label: str
     role: str
     account: str | None
-    """The account's label (its alias, ``plain claude``, ``account N``); ``None``: none chosen."""
+    """The account's label (its alias, an agent's plain home by its own name, ``plain claude`` or
+    ``plain codex``, else ``account N``); ``None``: none chosen."""
     account_slot: int | None
     session_id: str | None
     pane_id: str
@@ -276,7 +287,9 @@ def sample(
             if project_ids is None or row.project_id in project_ids
         ]
         projects = {row.project_id: store.get_project(row.project_id) for row in rows}
-        labels = accounts_service.slot_labels(store) if any(r.account_slot for r in rows) else {}
+        # Slot 0 is an account too (Codex's plain home): "none chosen" is None alone.
+        chosen = any(r.account_slot is not None for r in rows)
+        labels = accounts_service.slot_labels(store) if chosen else {}
     if not rows:  # nothing to read the processes of: neither tmux nor ps is asked
         spend.forget(())
         return TopReport([], datetime.now(tz=UTC), (time.perf_counter() - began) * 1000)
@@ -300,7 +313,7 @@ def sample(
                     pids,
                     table,
                     me,
-                    spend.spend(store, row.session_id) if row.session_id else None,
+                    spend.spend(store, row.session_id, row.agent) if row.session_id else None,
                 )
             )
     spend.forget({row.session_id for row in rows if row.session_id})
@@ -343,9 +356,12 @@ def _pane_pids(rows: list[FleetAgent], locate: ServerOf) -> tuple[dict[str, _Pan
 
 
 def _account(slot: int | None, labels: dict[int, str]) -> str | None:
+    """The slot's alias, else its built-in name, as ``fleet ls`` names it
+    (``core.claude_accounts.slot_name``: every agent's plain home by its own name, ``plain
+    claude``, ``plain codex``, else ``account N``); ``None`` for a row that chose none."""
     if slot is None:
         return None
-    return labels.get(slot) or ("plain claude" if slot == 1 else f"account {slot}")
+    return labels.get(slot) or accounts_core.slot_name(slot)
 
 
 def _agent_use(

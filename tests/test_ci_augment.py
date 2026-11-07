@@ -716,6 +716,29 @@ def test_a_credential_straddling_the_contract_cut_never_ships_in_the_clear(
     assert "[redacted]" in sent, "scrubbed before the cut, so the marker is what remains"
 
 
+@pytest.mark.parametrize("before_the_cut", [0, 500, 2_000, 4_000, 6_000])
+def test_a_private_key_longer_than_the_slack_that_straddles_the_cut_ships_nothing(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, before_the_cut: int
+) -> None:
+    """An RSA-8192 key is 6.5 KB, longer than the slack the scrubber looks past the cut. Its
+    footer is not in what is scrubbed when the header starts 2,000 characters before the cut,
+    and a header with no footer removed nothing: 1,979 characters of the key shipped (r24 11)."""
+    from aisquare.services.ci_contract import MAX_PROMPT_CHARS
+
+    body = "\n".join(f"MIIJKAIBAAKCAgEA{n:03d}" + "q9ZxK" * 9 + "w1" for n in range(100))
+    key = "-----BEGIN RSA PRIVATE KEY-----\n" + body + "\n-----END RSA PRIVATE KEY-----"
+    assert len(key) > 6_500
+    prompt = "x " * ((MAX_PROMPT_CHARS - before_the_cut) // 2) + key + "\nand more after the key"
+
+    hooks_service.prompt_submitted(prompt, tmp_path, session_id=SESSION)
+
+    sent = wired.requests[0]["prompt"]
+    assert len(sent) <= MAX_PROMPT_CHARS
+    for fragment in ("q9ZxK", "MIIJKAIBAAKCAgEA", "BEGIN RSA", "END RSA"):
+        assert fragment not in sent, (before_the_cut, fragment)
+    assert "[redacted]" in sent or "[clipped by aisquare-cli]" in sent
+
+
 @pytest.mark.parametrize(("published", "enforced"), [(60_000, 60_000), (600_000, 115_000)])
 def test_the_ceiling_never_exceeds_what_the_installed_hook_timeout_allows(
     wired: StubCI, isolated_home: Path, tmp_path: Path, published: int, enforced: int

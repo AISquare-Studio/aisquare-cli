@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 from typing import Literal
 
 NameFlaw = Literal["control", "undecodable", "invisible"]
@@ -89,6 +90,51 @@ def name_flaw(text: str) -> NameFlaw | None:
     if any(_hidden(text, at) for at in range(len(text))):
         return "invisible"
     return None
+
+
+def undecodable_argument(argv: Sequence[str]) -> str | None:
+    """Why ``argv`` is refused whole when one of its arguments holds half of a character (a
+    lone surrogate: how Python passes a byte of the command line that is not UTF-8,
+    ``$'\\xff'``), which no store, log or board can write; ``None`` when each is text. The
+    argument is named by its place and shown with the byte escaped (``x\\udcff``), cut to
+    200 characters. Asked of every command's argv where the CLI parses it
+    (``cli.global_flags.GlobalFlagsGroup``) and where a sandbox's broker takes it
+    (``services.store_broker.Broker.answer``): a ref, a label or free text holding one was a
+    traceback or the codec's own words in each command that met it (review r39 of #113,
+    finding 6, reopened)."""
+    for at, argument in enumerate(argv, start=1):
+        if not holds_utf8(argument):
+            return undecodable_said(f"argument {at}", argument)
+    return None
+
+
+def holds_utf8(text: str) -> bool:
+    """Whether UTF-8 can hold ``text``: it has no lone surrogate."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def undecodable_said(where: str, argument: str) -> str:
+    """The refusal of ``argument`` (``where`` names it: its place, or its parameter), which
+    holds a byte that is not UTF-8: shown with the byte escaped, cut to 200 characters."""
+    shown = as_text(argument)
+    shown = shown if len(shown) <= 200 else f"{shown[:199]}…"
+    return (
+        f"{where} ({shown}) holds a byte that is not UTF-8: aisquare takes its arguments as "
+        "UTF-8 text, and reads, runs or stores nothing for this command"
+    )
+
+
+def as_text(argument: str) -> str:
+    """``argument`` with each half of a character (a lone surrogate: a byte of the command
+    line that was not UTF-8) written as its escape (``\\udcff``), which UTF-8 holds: what
+    is stored or shown of an argument aisquare passes to another program as given (after a
+    ``--``: ``cli.global_flags.checked_arguments``), as ``asq exec``'s report and a fleet
+    spawn's agent arguments keep them."""
+    return argument.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def name_key(text: str) -> str:

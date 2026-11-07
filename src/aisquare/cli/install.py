@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -19,7 +20,10 @@ from typing import Annotated, Any
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.core import agents as agent_core
 from aisquare.core import selfcli
+from aisquare.core.agent_adapters import default_adapter, get_adapter
+from aisquare.core.agent_adapters.types import LastingInstall
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.version import __version__
@@ -49,9 +53,18 @@ def _say(line: str) -> None:
 def _site_json(site: lifecycle_service.HookSite) -> dict[str, Any]:
     return {
         "config_dir": str(site.config_dir),
+        "agent": site.agent,
         "programs": list(site.programs),
         "reason": site.reason,
     }
+
+
+def _place(config_dir: Path, agent: str) -> str:
+    """A hook site as the plan and the report name it: the default agent's directory as it
+    is (Claude Code's), another agent's with that agent named (a Codex home)."""
+    if agent == default_adapter().id:
+        return str(config_dir)
+    return f"{config_dir} ({lifecycle_service.agent_label(agent)})"
 
 
 def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
@@ -73,6 +86,10 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "command": plan.command,
         "argv": list(plan.argv),
         "refresh_hooks": [str(site.config_dir) for site in plan.refresh],
+        # The same sites, each with its agent: a Codex home's beside Claude Code's.
+        "refresh": [
+            {"config_dir": str(site.config_dir), "agent": site.agent} for site in plan.refresh
+        ],
         # The settings files, among those sites, that switch every hook off.
         "hooks_off": [str(site.hooks_off) for site in plan.refresh if site.hooks_off is not None],
         "hooks_left": [_site_json(site) for site in plan.left],
@@ -81,6 +98,8 @@ def _plan_json(plan: lifecycle_service.UpgradePlan) -> dict[str, Any]:
         "remote": plan.remote,
         # The asq UIs live on this home: the upgrade refuses while one runs.
         "asqs": list(plan.asqs),
+        # The `aisquare launch` sessions holding the install's files (Windows): the same.
+        "launchers": list(plan.launchers),
         # The roles a move back ignores the file-bound variables of, each with its keys.
         "env_files_dropped": list(plan.env_files_dropped),
         # The roles a move back launches with tools their safety list denies here.
@@ -191,12 +210,14 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     _say(f"  install: {plan.route.describe()}")
     _say(f"  runs:    {plan.command}")
     for site in plan.refresh:
+        label = lifecycle_service.agent_label(site.agent)
         if site.hooks_off is None:
-            _say(f"  then:    re-connects the Claude Code hooks in {site.config_dir}")
+            _say(f"  then:    re-connects the {label} hooks in {site.config_dir}")
         else:
+            setting = agent_core.HOOKS_OFF_SETTINGS.get(site.agent, f"{site.hooks_off}")
             _say(
-                f"  then:    rewrites the Claude Code hooks in {site.config_dir} (switched off "
-                'there: "disableAllHooks": true)'
+                f"  then:    rewrites the {label} hooks in {site.config_dir} (switched off "
+                f"there: {setting})"
             )
     for site in plan.left:
         _say(f"  leaves:  {site.config_dir} — {site.reason}")
@@ -206,9 +227,9 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
 
 
 def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False) -> None:
-    """The live fleet, a Remote on elsewhere, the role bindings a move back ignores and what
-    it reads otherwise in config.toml, said before anything is installed: in the plan, and
-    under --yes.
+    """The live fleet, a Remote on elsewhere, the role bindings a move back ignores, what it
+    reads otherwise in config.toml and what it keeps and loses of the store, said before
+    anything is installed: in the plan, and under --yes.
 
     Under ``--one-click`` the fleet and a Remote on elsewhere are said as facts, with no advice
     to stop, shut down or turn off anything: keeping the agents running is what asq's ⬆ update
@@ -227,6 +248,8 @@ def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False
         _say(f"⚠ {plan.tools_warning}")
     if plan.config_warning is not None:
         _say(f"⚠ {plan.config_warning}")
+    if plan.store_warning is not None:
+        _say(f"⚠ {plan.store_warning}")
 
 
 def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
@@ -246,9 +269,12 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
                 "hooks": [
                     {
                         "config_dir": str(hook.config_dir),
+                        "agent": hook.agent,
                         "refreshed": hook.ok,
                         "error": hook.error,
                         "hooks_off": None if hook.hooks_off is None else str(hook.hooks_off),
+                        # Rewritten into a definition the agent asks to be reviewed (/hooks).
+                        "review": hook.review,
                     }
                     for hook in report.hooks
                 ],
@@ -270,23 +296,42 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
     else:
         _say(f"✓ aisquare {report.version} (was {plan.current}) — checked in a new process")
     for hook in report.hooks:
+        where = _place(hook.config_dir, hook.agent)
         if hook.ok and hook.hooks_off is not None:
             # Not ✓ "re-connected": `agents connect` and init say the same of such a site.
+            # As the doctor says it: its dedicated row names Claude Code's key alone.
+            dedicated = get_adapter(hook.agent).capabilities.own_doctor_check
+            setting = (
+                '"disableAllHooks"'
+                if dedicated
+                else agent_core.HOOKS_OFF_SETTINGS.get(hook.agent, "the setting")
+            )
+            turn_on = f"remove {setting} from {hook.hooks_off} to turn them on"
+            _say(f"· hooks rewritten in {where}, but switched off: {turn_on}")
+        elif hook.ok and hook.review:
+            # Codex runs a changed definition only once it is trusted again: not a ✓ alone.
+            label = lifecycle_service.agent_label(hook.agent)
             _say(
-                f"· hooks rewritten in {hook.config_dir}, but switched off: remove "
-                f'"disableAllHooks" from {hook.hooks_off} to turn them on'
+                f"✓ hooks re-connected in {where} — {label} asks to review them again: "
+                f"open /hooks in {label} and trust them"
             )
         elif hook.ok:
-            _say(f"✓ hooks re-connected in {hook.config_dir}")
+            _say(f"✓ hooks re-connected in {where}")
         else:
             remedy = install_route.command_line(
-                ["aisquare", *lifecycle_service.REFRESH_HOOKS, "--config-dir", str(hook.config_dir)]
+                [
+                    "aisquare",
+                    *lifecycle_service.refresh_hooks_argv(hook.agent),
+                    "--config-dir",
+                    str(hook.config_dir),
+                ]
             )
-            _say(
-                f"✗ hooks in {hook.config_dir} were not re-connected ({hook.error}) — run: {remedy}"
-            )
+            # A move back is done whatever a hook says: a warning, with the command, never
+            # the exit 1 a move forward's failed hook gives (#105's reopen 2).
+            mark = "·" if plan.backwards else "✗"
+            _say(f"{mark} hooks in {where} were not re-connected ({hook.error}) — run: {remedy}")
     for site in plan.left:
-        _say(f"· {site.config_dir} left as it is: {site.reason}")
+        _say(f"· {_place(site.config_dir, site.agent)} left as it is: {site.reason}")
     for note in report.notes:
         _say(f"· {note}")
 
@@ -462,16 +507,19 @@ def upgrade(
         ),
     ] = False,
 ) -> None:
-    """Upgrade aisquare in place, then re-connect its Claude Code hooks.
+    """Upgrade aisquare in place, then re-connect its Claude Code and Codex hooks.
 
     Runs only for a uv tool install, which is what the one-line installer makes:
     it reinstalls with `uv tool install --force`, keeping the extras, the
     `--with` packages and the Python the install already has, checks the new
     version in a new process, and re-connects the hooks in every Claude Code
-    directory this machine connected. Any other install is told the command
-    that upgrades it, where one can, and exits 1; asking for the version that
-    already runs is nothing to do on every install. Asks first at a terminal;
-    off a terminal it is a dry run unless --yes.
+    directory and Codex home this machine connected, and in its Codex account
+    homes. It records Codex's trust of the hooks it rewrites, where Codex keeps
+    a review's yes: Codex asks for them to be reviewed again in its /hooks menu
+    only where that record could not be made, which the report says. Any other
+    install is told the command that upgrades it, where one can, and exits 1;
+    asking for the version that already runs is nothing to do on every install.
+    Asks first at a terminal; off a terminal it is a dry run unless --yes.
     """
     if not one_click:
         _upgrade(check=check, version=version, yes=yes, dry_run=dry_run, reopen=reopen)
@@ -542,6 +590,10 @@ def _upgrade(
         # The command goes in the MESSAGE: `fail` shows a human nothing else; there is none
         # for a pin the route cannot pick (a later review of #257).
         command = f" Upgrade it with: {plan.command}" if plan.argv else ""
+        # A reinstall run by hand beside a launcher that waits fails on files in use
+        # (Windows'): which to end first (review r40 of #113, finding 7).
+        held = lifecycle_service.launchers_refusal("upgrade", plan.launchers, again="run it")
+        command += f" {held}" if held else ""
         fail(
             f"aisquare does not upgrade this install itself ({plan.reason}).{command}",
             error="upgrade_unsupported_route",
@@ -581,7 +633,11 @@ def _upgrade(
     if plan.asqs_refusal is not None and yes and not dry_run:
         # Refused, not warned of as the fleet and a Remote are (#17): left running, an asq
         # runs the old release over the new one's files, two releases on one home.
-        fail(plan.asqs_refusal, error="asq_running", detail=", ".join(plan.asqs))
+        fail(
+            plan.asqs_refusal,
+            error="asq_running" if plan.asqs else "launcher_running",
+            detail=", ".join((*plan.asqs, *plan.launchers)),
+        )
     if dry_run or not yes:
         _emit_plan(plan)
         if dry_run or json_output:
@@ -643,7 +699,7 @@ def _upgrade(
             detail=report.problem,
         )
     _emit_report(report)
-    if any(not hook.ok for hook in report.hooks):
+    if any(not hook.ok for hook in report.hooks) and not plan.backwards:
         raise _HooksFailed()
     _reopen(reopen, one_click=one_click, installed=True, started=started)
 
@@ -656,12 +712,17 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
     blocking = plan.blocking
     return {
         "hooks": [
-            {"config_dir": str(site.config_dir), "programs": list(site.programs)}
+            {
+                "config_dir": str(site.config_dir),
+                "agent": site.agent,
+                "programs": list(site.programs),
+            }
             for site in plan.hooks
         ],
         "unreadable": [
             {
                 "config_dir": str(site.config_dir),
+                "agent": site.agent,
                 "reason": site.reason,
                 # False for a site inside the home this run deletes: it goes with it.
                 "blocks": site in blocking,
@@ -671,19 +732,22 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
         "mcp": [
             {
                 "name": entry.name,
+                "agent": entry.agent,
                 "file": str(entry.file),
                 "project": entry.project,
-                "remove": lifecycle_service.mcp_removal(entry),
+                "remove": entry.remove,
             }
             for entry in plan.mcp
         ],
         "plugins": [
             {
-                "config_dir": str(plugin.config_dir),
+                "agent": plugin.agent,
+                "config_dir": str(plugin.home),
+                "plugin": plugin.name,
                 "version": plugin.version,
                 "scope": plugin.scope,
-                "project": None if plugin.project is None else str(plugin.project),
-                "remove": lifecycle_service.plugin_removal(plugin),
+                "project": plugin.project,
+                "remove": plugin.remove,
             }
             for plugin in plan.plugins
         ],
@@ -699,6 +763,9 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             "exists": plan.home_exists,
             "entries": len(plan.home_entries),
             "accounts": list(plan.accounts),
+            "account_homes": [
+                {"agent": agent, "path": str(home)} for agent, home in plan.account_homes
+            ],
             "keychain_tokens_kept": plan.keychain and bool(plan.accounts),
             "action": "delete" if plan.purges else "keep",
         },
@@ -712,6 +779,7 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
         "fleet_error": plan.fleet_error,
         "remote": plan.remote,
         "asqs": list(plan.asqs),
+        "launchers": list(plan.launchers),
         "refusal": None if refusal is None else {"error": refusal.error, "message": str(refusal)},
     }
 
@@ -752,6 +820,10 @@ def _home_line(plan: lifecycle_service.UninstallPlan) -> str:
     what = f"{count} entr{'ies' if count != 1 else 'y'}: your memory, boards and settings"
     if plan.accounts:
         what += f", and the Claude Code logins in {'; '.join(plan.accounts)}"
+    homes = Counter(agent for agent, _home in plan.account_homes)
+    for agent, count in homes.items():
+        label = lifecycle_service.agent_label(agent)
+        what += f", and {count} {label} account home{'s' if count != 1 else ''}, sign-ins included"
     return f"{plan.home} — {what}"
 
 
@@ -768,12 +840,13 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         _say("  remove aisquare's hooks from:")
         for site in plan.hooks:
             runs = f" (they run {', '.join(site.programs)})" if site.programs else ""
-            _say(f"    {site.config_dir}{runs}")
+            _say(f"    {_place(site.config_dir, site.agent)}{runs}")
     elif not plan.unreadable:
-        _say("  find no aisquare hooks in any Claude Code directory")
+        _say("  find no aisquare hooks in any Claude Code directory or Codex home")
     blocking = plan.blocking
     for site in plan.unreadable:
-        _say(f"  ⚠ cannot take the hooks out of {site.config_dir}: {site.reason}")
+        where = _place(site.config_dir, site.agent)
+        _say(f"  ⚠ cannot take the hooks out of {where}: {site.reason}")
         if site not in blocking:
             _say(f"    they are deleted with {plan.home}")
     if plan.purges:
@@ -804,20 +877,24 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         with_it = " (and this with it)" if plan.home_exists else " (delete it with --purge)"
         for answers in plan.plugin_answers:
             _say(f"  {_plugin_answers_line(answers)}{with_it if offer else ''}")
-    lasting_mcp = plan.lasting_mcp
-    if lasting_mcp:
-        _say("  MCP servers that run aisquare (Claude Code owns .claude.json; remove each with")
+    by_agent: dict[str, list[LastingInstall]] = {}
+    for entry in plan.lasting_mcp:
+        by_agent.setdefault(entry.agent, []).append(entry)
+    for agent, entries in by_agent.items():
+        owner = lifecycle_service.agent_label(agent)
+        files = ", ".join(dict.fromkeys(entry.file.name for entry in entries))
+        _say(f"  MCP servers that run aisquare ({owner} owns {files}; remove each with")
         _say("  the command under it):")
-        for entry in lasting_mcp:
+        for entry in entries:
             _say(f"    {entry.name} in {lifecycle_service.mcp_place(entry)}")
-            _say(f"      {lifecycle_service.mcp_removal(entry)}")
+            _say(f"      {entry.remove}")
     for plugin in plan.lasting_plugins:
-        # Claude Code's to remove, and it keeps running aisquare: said, never silent.
+        # The agent's to remove, and it keeps running aisquare: said, never silent.
         where = lifecycle_service.plugin_place(plugin)
         _say(f"  the aisquare plugin in {where}, which keeps running aisquare")
         _say("  there (through uvx once the package is gone) — remove it with:")
-        _say(f"    {lifecycle_service.plugin_removal(plugin)}")
-    _say("  uv, tmux, Node, gh and Claude Code")
+        _say(f"    {plugin.remove}")
+    _say(f"  {lifecycle_service.stays_installed(plan)}")
     if plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
     elif plan.unlistened:
@@ -838,7 +915,12 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
             {
                 "dry_run": False,
                 "hooks": [
-                    {"config_dir": str(hook.config_dir), "removed": hook.ok, "error": hook.error}
+                    {
+                        "config_dir": str(hook.config_dir),
+                        "agent": hook.agent,
+                        "removed": hook.ok,
+                        "error": hook.error,
+                    }
                     for hook in report.hooks
                 ],
                 "home": {
@@ -872,9 +954,9 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
     for hook in report.hooks:
         if hook.ok:
-            _say(f"✓ hooks removed from {hook.config_dir}")
+            _say(f"✓ hooks removed from {_place(hook.config_dir, hook.agent)}")
         else:
-            _say(f"✗ hooks in {hook.config_dir} were not removed: {hook.error}")
+            _say(f"✗ hooks in {_place(hook.config_dir, hook.agent)} were not removed: {hook.error}")
     if report.purged:
         _say(f"✓ deleted {plan.home}")
     elif report.purge_error is not None:
@@ -945,9 +1027,10 @@ def uninstall(
         bool,
         typer.Option(
             "--purge",
-            help="Also delete the aisquare home (~/.aisquare): memory, boards, settings and "
-            "its Claude Code account slots (on macOS their sign-in tokens stay in the Keychain), "
-            "and the Claude Code plugin's answers about uv (~/.cache/aisquare).",
+            help="Also delete the aisquare home (~/.aisquare): memory, boards, settings, "
+            "its Claude Code account slots (on macOS their sign-in tokens stay in the Keychain) "
+            "and Codex account homes, and the Claude Code plugin's answers about uv "
+            "(~/.cache/aisquare).",
         ),
     ] = False,
     yes: Annotated[
@@ -965,13 +1048,16 @@ def uninstall(
         ),
     ] = False,
 ) -> None:
-    """Remove aisquare: its Claude Code hooks, then the package. Keeps ~/.aisquare.
+    """Remove aisquare: its Claude Code and Codex hooks, then the package. Keeps ~/.aisquare.
 
     Takes aisquare's hooks out of every Claude Code directory it finds (the ones
     this machine connected, $CLAUDE_CONFIG_DIR, ~/.claude* and the account
-    slots), leaving every other hook as it was. Refuses while fleet agents are
-    running. ~/.aisquare is kept unless --purge, which waits until an enabled
-    aisquare plugin is removed (the plan names the command). The package goes
+    slots) and every Codex home ($CODEX_HOME, ~/.codex*, the connected ones and
+    the Codex account homes), leaving every other hook as it was. MCP servers
+    and plugins that run aisquare are named with the `claude` or `codex` command
+    that removes each; their files are never rewritten. Refuses while fleet
+    agents are running. ~/.aisquare is kept unless --purge, which waits until an
+    enabled aisquare plugin is removed (the plan names the command). The package goes
     last: a uv tool install, whatever it was installed from, is removed with
     `uv tool uninstall`; any other install, and any install on native Windows,
     is told its command. Asks first at a terminal; off a terminal it is a dry

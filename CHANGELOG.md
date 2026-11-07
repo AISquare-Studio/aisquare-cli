@@ -104,10 +104,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     `aisquare upgrade` record that trust for you; where they cannot (a `config.toml`
     aisquare may not write, or the Codex plugin's hooks), trust aisquare's hooks in
     Codex's `/hooks`. Until then doctor says so, and the board sees nothing from that Codex.
-  - CI tests Codex 0.164.0 and 0.166.0 (the current release, which `install.sh` installs),
-    both pinned, 0.166.0 on macOS too, where the tests of Codex's sandbox and its automatic
-    reviewer run; and the newest release nightly. Treat a release past 0.166.0 as untested
-    until the nightly says otherwise, and tell us what breaks.
+  - CI tests Codex 0.164.0, 0.166.0 and 0.167.0 (the current release, which `install.sh`
+    installs), all pinned, 0.167.0 on macOS too, where the tests of Codex's sandbox and its
+    automatic reviewer run; and the newest release nightly. Treat a release past 0.167.0 as
+    untested until the nightly says otherwise, and tell us what breaks.
   - Usage sharing covers Claude Code only: Codex sessions are counted on this machine and
     never shared, whatever your consent.
   - Not on Codex yet: Remote Control, `asq-statusline` and `share_settings`. A login kept
@@ -228,9 +228,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     (doctor reads every agent's hook sites). `accounts trust` says *on every account that
     can hold it*; usage pages say *the agents' transcripts*, and an empty range in
     `metrics stats` and *Usage & stats* says *no agent was used in it*, where it said
-    *Claude Code was not used in it*; a `fleet tell` to an agent at Claude Code's
-    folder-trust dialog says its session *has not started*, where it said *it is
-    attention* (it still types nothing and files a note); a `fleet switch` without a
+    *Claude Code was not used in it*; with the board on, a `fleet tell` to an agent at
+    Claude Code's folder-trust dialog says its session *has not started*, where it said
+    *it is attention* (it still types nothing and files a note); a `fleet switch` without a
     reason tells the replacement it was moved *by its operator's `fleet switch`*, not by a
     usage limit; help texts say *the agent* or *Claude Code
     and Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose agent*,

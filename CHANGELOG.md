@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-11-05
+## [0.10.0] - 2026-11-10
 
 **Codex support, in beta: run OpenAI's Codex CLI beside Claude Code, or instead of it, with
 the same memory, board, fleet, accounts and asq, and hand work from one to the other. Codex

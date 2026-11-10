@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.9.2"
+version = "0.9.3"
 description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -42,7 +42,11 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "typer>=0.26.8",
+  # <0.29: typer 0.29.0 (2026-11-09) vendors click and changed TyperOption's
+  # constructor (a required type_descriptor), so cli/global_flags.py's hand-built
+  # options raised on every command, --version included, in every fresh install.
+  # tests/test_dependency_bounds.py fails if this cap goes.
+  "typer>=0.26.8,<0.29",
   "rich>=14.3",  # rich.cells.split_graphemes (cli/ui/terminal) exists from 14.3.0
   "pydantic>=2.13.4",
   "tomli-w>=1.2.0",

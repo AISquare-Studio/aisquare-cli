@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-10
+
+**A hotfix: a fresh install works again.**
+
+### Fixed
+- Since typer 0.29.0 reached PyPI on 2026-11-09, every fresh install of aisquare-cli
+  failed on every command, `aisquare --version` included, with `TypeError:
+  TyperOption.__init__() missing 1 required keyword-only argument: 'type_descriptor'`.
+  typer 0.29.0 changed how a command's options are built, and aisquare builds its five
+  shared flags by hand. aisquare now requires typer below 0.29. An install made before
+  typer 0.29.0 still works: `aisquare upgrade` (or asq's update) takes it to 0.9.3. An
+  install that fails cannot run `aisquare upgrade`, and running install.sh again leaves
+  it as it is: install.sh reads it as not installed, and uv finds aisquare-cli already
+  there. Repair it with `uv tool upgrade aisquare-cli` (install.sh installs with uv), or,
+  installed another way, upgrade aisquare-cli with the tool that installed it.
+
 ## [0.9.2] - 2026-11-03
 
 **Run asq at the Mac and over SSH into the same Mac at once, on one home: each asq shows
@@ -6476,7 +6492,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...v0.9.0

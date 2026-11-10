@@ -37,7 +37,7 @@ explainability = [
 
 [[package]]
 name = "aisquare-cli"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
@@ -145,7 +145,7 @@ requires-dist = [
     { name = "tree-sitter-typescript", marker = "extra == 'code'", specifier = ">=0.23" },
     { name = "tree-sitter-typescript", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "truststore", specifier = ">=0.10" },
-    { name = "typer", specifier = ">=0.26.8" },
+    { name = "typer", specifier = ">=0.26.8,<0.29" },
     { name = "types-jsonschema", marker = "extra == 'dev'", specifier = ">=4.18" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },

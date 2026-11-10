@@ -48,7 +48,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--no-skips",
         action="store_true",
-        help="fail when any test skipped (the macOS leg, where Codex's sandbox runs them all)",
+        help="fail when any test skipped (every CI leg: one whose sandbox cannot run them fails)",
     )
     asked = parser.parse_args(argv)
     version = installed_version()

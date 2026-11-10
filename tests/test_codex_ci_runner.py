@@ -140,17 +140,21 @@ def test_ci_runs_the_native_suite_on_every_release_the_beta_holds_and_latest_nig
     )
     assert re.search(r"^ +npm install .+ @openai/codex@\$\{\{ matrix.codex \}\}$", native, re.M)
     run = r"^ +python -m tests.run_codex_native --version \$\{\{ matrix.codex \}\} "
-    assert re.search(run + r"\$\{\{ matrix.every_test \}\}$", native, re.M)
-    # The sandbox and reviewer tests skip on ubuntu (bwrap): the current release, the last
-    # of CODEX_VERSIONS, runs on macOS as well, where they run, and a skip there fails the
-    # leg (R7's verify, the manager's ruling).
+    # Every leg runs every test: the sandbox and reviewer tests run on ubuntu since its
+    # bwrap brings up loopback (ubuntu-26.04, #114), and a runner whose bwrap cannot fails
+    # the leg instead of skipping them unseen (the manager's ruling on seq 11678).
+    assert re.search(run + r"--no-skips$", native, re.M)
+    assert "every_test" not in native, "no leg may skip"
+    # The current release, the last of CODEX_VERSIONS, on macOS as well (Seatbelt).
     current = re.escape(run_codex_native.CODEX_VERSIONS[-1])
-    mac = rf'^ +- codex: "{current}"\n +os: macos-latest\n +every_test: "--no-skips"$'
-    assert re.search(mac, native, re.M), "the macOS leg, every test run"
+    mac = rf'^ +- codex: "{current}"\n +os: macos-latest$'
+    assert re.search(mac, native, re.M), "the macOS leg"
     assert re.search(r"^    runs-on: \$\{\{ matrix.os \}\}$", native, re.M)
     latest = _job(text, "codex-latest")
     assert re.search(r"^ +npm install .+ @openai/codex@latest$", latest, re.M)
-    assert re.search(r"^ +run: python -m tests.run_codex_native --any-version$", latest, re.M)
+    assert re.search(
+        r"^ +run: python -m tests.run_codex_native --any-version --no-skips$", latest, re.M
+    )
     gate = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
     assert latest.count(f"if: {gate}") >= 4, "every step but the notice runs only then"
     needs = re.search(r"^    needs: \[(.*)\]$", _job(text, "ci-ok"), re.M)

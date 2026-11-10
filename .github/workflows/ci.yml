@@ -56,8 +56,10 @@ permissions:
 #   codex    Codex's native integration (tests/run_codex_native.py) on each release the
 #            beta holds: 0.164.0, its floor, 0.166.0, and 0.167.0, the current one; hooks,
 #            MCP, resume, usage, the automatic reviewer and the interactive fleet, a loopback
-#            endpoint. 0.167.0 runs on macOS too, where the sandbox and reviewer tests run
-#            (they skip on ubuntu). codex-latest runs it on the newest release, nightly
+#            endpoint. 0.167.0 runs on macOS too. Every leg runs every test (--no-skips):
+#            the sandbox and reviewer tests run on ubuntu too since its bwrap brings up
+#            loopback (ubuntu-26.04), and a runner whose bwrap cannot fails the leg, a
+#            signal, not a flake. codex-latest runs it on the newest release, nightly
 #            and by hand.
 #   claude   Claude Code's native suite on the pinned CLI, ubuntu and macOS
 #            (tests/run_claude_native.py): launch, every hook, the fleet, accounts,
@@ -607,12 +609,9 @@ jobs:
         codex: ["0.164.0", "0.166.0", "0.167.0"]
         os: [ubuntu-latest]
         include:
-          # The 7 tests of Codex's sandbox and its automatic reviewer skip on ubuntu, whose
-          # bwrap cannot bring up loopback; macOS's Seatbelt runs them, on the current
-          # release, and the leg fails if any is skipped (R7's verify, the manager's ruling).
+          # The current release on macOS too, where Codex's sandbox is Seatbelt's.
           - codex: "0.167.0"
             os: macos-latest
-            every_test: "--no-skips"
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
@@ -638,8 +637,10 @@ jobs:
         run: |
           # The fixture owns its temporary hooks and trusts only those. Its
           # Responses endpoint is loopback; no login, model spend or gateway.
-          # The runner asserts the leg's version and a passing, unskipped test.
-          python -m tests.run_codex_native --version ${{ matrix.codex }} ${{ matrix.every_test }}
+          # The runner asserts the leg's version and that no test skipped: the 7 tests of
+          # Codex's sandbox and its automatic reviewer skip only where bwrap cannot bring up
+          # loopback (ubuntu-24.04's could not, 26.04's can: #114), and there the leg fails.
+          python -m tests.run_codex_native --version ${{ matrix.codex }} --no-skips
 
   codex-latest:
     # The same suite on Codex's newest release, nightly and by hand, so its drift shows
@@ -670,7 +671,7 @@ jobs:
           echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
       - name: Hooks, MCP, resume, usage and the interactive fleet on the latest codex
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: python -m tests.run_codex_native --any-version
+        run: python -m tests.run_codex_native --any-version --no-skips
 
   claude:
     # Claude Code's native suite (tests/run_claude_native.py): the real `claude`, pinned to

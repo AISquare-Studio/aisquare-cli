@@ -412,6 +412,11 @@ else
 
     # No AISQUARE_INSTALL_PACKAGE: the PyPI-named target is the only one with a
     # "latest" to move to.
+    #
+    # UV_CONSTRAINT can go once 0.9.3, which caps typer itself, is PyPI's latest:
+    # the move then lands a capped release without it. The staging's --with
+    # above stays, since 0.5.0 never caps typer. Whether the latest release
+    # works as a user gets it is release-cell.sh's to say, uncapped.
     # shellcheck disable=SC2086
     env -u AISQUARE_INSTALL_PACKAGE UV_CONSTRAINT="$typer_cap" \
         sh "$INSTALLER" --yes $AGENT_FLAG >"${TMPDIR:-/tmp}/run4.log" 2>&1 ||

@@ -1844,6 +1844,26 @@ def launch_paths(
     return tuple(dict.fromkeys(protect)), tuple(dict.fromkeys(writable))
 
 
+@contextmanager
+def sandbox_mount_targets(root: Path) -> Iterator[None]:
+    """In a command this broker runs (:func:`brokered_call`), read ``root``'s source as the
+    disk holds it without the agent's sandbox: what the sandbox holds read-only and bwrap
+    made a mount target for, while the agent's command that asked runs, is no file
+    (``core.source_revision.mount_targets``): the paths :func:`launch_paths` names for
+    ``root``, as the launch named them to its sandbox. Outside one, nothing changes."""
+    from aisquare.core.source_revision import mount_targets
+
+    if not brokered_call():
+        yield
+        return
+    try:
+        protect, _ = launch_paths(os.environ, _resolved(root))
+    except Exception:
+        protect = ()
+    with mount_targets(protect):
+        yield
+
+
 def _socket_dirs(env: Mapping[str, str], configured: str) -> list[Path]:
     """The directories tmux keeps sockets in for this launch: the one its window's server
     listens in (``$TMUX``), tmux's own (``$TMUX_TMPDIR`` or ``/tmp``, then

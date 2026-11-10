@@ -280,7 +280,8 @@ class _Sources:
         cached = self._files.get(root)
         if cached is None:
             try:
-                cached = source_file_hashes(Path(root))
+                with store_broker.sandbox_mount_targets(Path(root)):
+                    cached = source_file_hashes(Path(root))
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 cached = f"the source in {root} cannot be read ({exc})"
             self._files[root] = cached
@@ -397,7 +398,10 @@ def _pass_refusals(
         return why
     root = report.source_root
     try:
-        current = source_file_hashes(Path(root))
+        # A brokered call runs while the sandboxed command that asked does, and bwrap's
+        # mount targets are in the checkout until it ends.
+        with store_broker.sandbox_mount_targets(Path(root)):
+            current = source_file_hashes(Path(root))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         why.append(f"the source in {root} cannot be read now ({exc})")
         return why

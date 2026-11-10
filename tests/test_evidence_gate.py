@@ -1615,3 +1615,65 @@ def test_end_to_end_with_real_git_and_a_real_pytest_run(repo: Path, runner: CliR
     check = asq("brief", "check", "B1")
     assert check.exit_code == 0, check.output
     assert "PROVEN" in check.stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Codex's Linux sandbox; Windows has none")
+def test_a_brokered_pass_reads_its_sandboxs_mount_targets_as_no_files(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While a Codex agent's sandboxed command runs, bwrap keeps an empty file no one may
+    write at each missing path the sandbox holds read-only, in the checkout itself; a board
+    call from that command, which its broker runs then, read them as new files, and every
+    report the sandbox saved was refused (CI 42842656612; probe 42866990895 on #114)."""
+    from aisquare.services import store_broker
+
+    _, task = _linked()
+    report = _run(_py("print('ok')"), task=task)
+    saved = reports.load_source_files(report.id)
+    for name in (".claude", ".mcp.json", ".aisquare-worktrees"):
+        (repo / name).write_bytes(b"")
+        (repo / name).chmod(0o444)
+    assert briefs._pass_refusals(report, saved), "outside a brokered call they are files"
+    monkeypatch.setenv(store_broker.CALLER_ENV, "1")
+    assert briefs._pass_refusals(report, saved) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Codex's Linux sandbox; Windows has none")
+def test_a_brokered_staleness_check_reads_its_sandboxs_mount_targets_as_no_files(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same mount targets, read by the staleness check ``task done`` and ``brief check``
+    run through the broker (``_Sources.files``): a recorded pass stays fresh."""
+    from aisquare.services import store_broker
+
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    evidence = briefs.show(brief.id).brief.evidence[-1]
+    assert briefs._source_stale(evidence, briefs._Sources()) is None
+    for name in (".claude", ".mcp.json", ".aisquare-worktrees"):
+        (repo / name).write_bytes(b"")
+        (repo / name).chmod(0o444)
+    assert briefs._source_stale(evidence, briefs._Sources()), "outside a brokered call, files"
+    monkeypatch.setenv(store_broker.CALLER_ENV, "1")
+    assert briefs._source_stale(evidence, briefs._Sources()) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the file's mode is POSIX's")
+def test_outside_a_broker_an_empty_file_no_one_may_write_is_source_as_before(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent that does not sandbox (Claude Code: no broker) reads its checkout as it did
+    before the sandbox's mount targets were read as no files (#114): an empty ``.claude``
+    no one may write, made after a run, stales the pass it backed and refuses another."""
+    from aisquare.services import store_broker
+
+    monkeypatch.delenv(store_broker.CALLER_ENV, raising=False)
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    assert _check(brief) == {"R1": "pass"}
+    later = _run(_py("print('again')"), task=task)
+    (repo / ".claude").write_bytes(b"")
+    (repo / ".claude").chmod(0o444)
+    assert _check(brief) == {"R1": "stale"}
+    with pytest.raises(ValueError, match=r"has changed since it ran: \.claude"):
+        _record(brief, task, later)

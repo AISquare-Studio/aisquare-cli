@@ -389,9 +389,22 @@ elif [ "$latest" = "$pinned" ]; then
     echo "SKIP: PyPI's latest IS $pinned, so an upgrade assertion would be vacuous"
 else
     echo "pinning to $pinned, expecting the installer to reach $latest"
+    # TYPER BELOW 0.29, for the staged release and for the move off it. typer
+    # 0.29.0 (2026-11-09) breaks every command of every release up to 0.9.2,
+    # --version included, and none of them caps typer: staged as they shipped,
+    # this run read "aisquare is , wanted 0.5.0". A pin is the fixture here and
+    # the move is what is under test, not the latest release's dependencies:
+    # release-cell.sh installs that release uncapped, as a user gets it. Both
+    # uv runs take the cap, so the move to a release before 0.9.3 (which caps
+    # it itself) stays green: `--with` for the staging, and UV_CONSTRAINT for
+    # the installer's own `uv tool install --force`, whose new environment
+    # does not keep the staging's `--with`.
+    typer_cap=${TMPDIR:-/tmp}/typer-cap.txt
+    printf '%s\n' 'typer<0.29' >"$typer_cap"
     # An EXACT PIN, deliberately — that is the shape `uv tool upgrade` refuses
     # to move, and installing without the pin would test nothing.
-    uv tool install --force --python 3.13 --with tiktoken "aisquare-cli==$pinned" >/dev/null 2>&1 ||
+    uv tool install --force --python 3.13 --with tiktoken --with 'typer<0.29' \
+        "aisquare-cli==$pinned" >/dev/null 2>&1 ||
         fail "could not stage the $pinned install"
     hash -r 2>/dev/null || true
     staged=$(aisquare --version | cut -d' ' -f2)
@@ -400,7 +413,8 @@ else
     # No AISQUARE_INSTALL_PACKAGE: the PyPI-named target is the only one with a
     # "latest" to move to.
     # shellcheck disable=SC2086
-    env -u AISQUARE_INSTALL_PACKAGE sh "$INSTALLER" --yes $AGENT_FLAG >"${TMPDIR:-/tmp}/run4.log" 2>&1 ||
+    env -u AISQUARE_INSTALL_PACKAGE UV_CONSTRAINT="$typer_cap" \
+        sh "$INSTALLER" --yes $AGENT_FLAG >"${TMPDIR:-/tmp}/run4.log" 2>&1 ||
         {
             cat "${TMPDIR:-/tmp}/run4.log"
             fail "the upgrade run failed"

@@ -356,6 +356,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   allow its command, not asking until the command ends.
 - A Codex launch whose resolver is slow keeps its native telemetry (its local receiver no
   longer looks up its own name).
+- A fresh install runs again: with typer 0.29.0 (out 2026-11-09), every command stopped
+  with a traceback, `--version` included. aisquare asks for typer below 0.29 for now.
+  0.9.2 had this too.
 
 ## [0.9.2] - 2026-11-03
 

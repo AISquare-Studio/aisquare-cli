@@ -42,7 +42,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "typer>=0.26.8",
+  "typer>=0.26.8,<0.29",  # 0.29.0 dropped TyperPath (cli/common) and changed TyperOption (cli/global_flags)
   "rich>=14.3",  # rich.cells.split_graphemes (cli/ui/terminal) exists from 14.3.0
   "pydantic>=2.13.4",
   "tomli-w>=1.2.0",

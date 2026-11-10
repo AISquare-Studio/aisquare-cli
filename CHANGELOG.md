@@ -8,7 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.9.3] - 2026-11-10
 
-**A hotfix: a fresh install works again.**
+**A hotfix: a fresh install works again, and running the installer again repairs one that
+broke.**
 
 ### Fixed
 - Since typer 0.29.0 reached PyPI on 2026-11-09, every fresh install of aisquare-cli
@@ -17,10 +18,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   typer 0.29.0 changed how a command's options are built, and aisquare builds its five
   shared flags by hand. aisquare now requires typer below 0.29. An install made before
   typer 0.29.0 still works: `aisquare upgrade` (or asq's update) takes it to 0.9.3. An
-  install that fails cannot run `aisquare upgrade`, and running install.sh again leaves
-  it as it is: install.sh reads it as not installed, and uv finds aisquare-cli already
-  there. Repair it with `uv tool upgrade aisquare-cli` (install.sh installs with uv), or,
-  installed another way, upgrade aisquare-cli with the tool that installed it.
+  install that fails cannot run `aisquare upgrade`: run the one-line installer again, or
+  `uv tool upgrade aisquare-cli`. install.sh used to read an `aisquare` whose `--version`
+  fails as not installed, and left it as it was; it now says the install is broken and
+  reinstalls it with `uv tool install --force`, as an upgrade does.
 
 ## [0.9.2] - 2026-11-03
 

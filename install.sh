@@ -171,6 +171,8 @@ HAVE_WGET=0
 
 UV_VERSION=""
 CLI_VERSION=""
+# 1 when an `aisquare` is on PATH and `aisquare --version` fails or prints nothing.
+CLI_BROKEN=0
 CLAUDE_VERSION=""
 TMUX_VERSION=""
 GH_VERSION=""
@@ -178,7 +180,7 @@ GIT_VERSION=""
 NODE_VERSION=""
 LATEST_VERSION=""
 
-CLI_ACTION=""    # install | upgrade | current
+CLI_ACTION=""    # install | upgrade | repair | current
 TMUX_ACTION=""   # install | current
 GH_ACTION=""     # install | current
 GIT_ACTION=""    # install | current
@@ -894,6 +896,11 @@ survey() {
 
     have uv && UV_VERSION=$(version_of_uv || true)
     have aisquare && CLI_VERSION=$(version_of_aisquare || true)
+    # On PATH with no version is a BROKEN install, not an absent one: typer 0.29.0
+    # broke every command of a fresh 0.9.2, --version included. Read as absent, it
+    # got `uv tool install` without --force, which leaves an install uv finds as it
+    # is ("already installed", exit 0), so running this script again repaired nothing.
+    have aisquare && [ -z "$CLI_VERSION" ] && CLI_BROKEN=1
     have claude && CLAUDE_VERSION=$(version_of_claude || true)
     have tmux && TMUX_VERSION=$(version_of_tmux || true)
     have gh && GH_VERSION=$(version_of_gh || true)
@@ -903,7 +910,11 @@ survey() {
     devtools_mcp_registered && DEVTOOLS_MCP=registered
 
     _report uv "$UV_VERSION"
-    _report aisquare "$CLI_VERSION"
+    if [ "$CLI_BROKEN" = 1 ]; then
+        note "aisquare — broken: \`aisquare --version\` fails"
+    else
+        _report aisquare "$CLI_VERSION"
+    fi
     _report "Claude Code" "$CLAUDE_VERSION"
     _report tmux "$TMUX_VERSION"
     _report gh "$GH_VERSION"
@@ -982,6 +993,7 @@ resolve() {
         LATEST_VERSION=""
         CLI_ACTION=install
         [ -n "$CLI_VERSION" ] && CLI_ACTION=upgrade
+        [ "$CLI_BROKEN" = 1 ] && CLI_ACTION=repair
         note "installing from $INSTALL_TARGET (AISQUARE_INSTALL_PACKAGE)"
         _resolve_system
         return 0
@@ -1003,7 +1015,11 @@ resolve() {
         fi
     fi
 
-    if [ -z "$CLI_VERSION" ]; then
+    if [ "$CLI_BROKEN" = 1 ]; then
+        # Reinstalled as an upgrade is (`install --force`), to the version an
+        # upgrade would take: the pin, else the latest.
+        CLI_ACTION=repair
+    elif [ -z "$CLI_VERSION" ]; then
         CLI_ACTION=install
     elif [ "$FORCE" = 1 ]; then
         CLI_ACTION=upgrade
@@ -1194,6 +1210,7 @@ banner() {
     _plan=""
     [ "$CLI_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Python $PYTHON_VERSION + $PYPI_PACKAGE + tiktoken (via uv, into its own venv)"
     [ "$CLI_ACTION" = upgrade ] && _plan="$_plan$_bn_nl  upgrade  $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
+    [ "$CLI_ACTION" = repair ] && _plan="$_plan$_bn_nl  repair   $PYPI_PACKAGE (a broken install) -> ${LATEST_VERSION:-latest}"
     [ "$CLI_ACTION" = current ] && _plan="$_plan$_bn_nl  keep     $PYPI_PACKAGE $CLI_VERSION"
     [ -z "$UV_VERSION" ] && _plan="$_plan$_bn_nl  install  uv (the bootstrap: a static binary that brings its own Python)"
     # Named like Claude Code's own updater below: `uv self update` replaces uv
@@ -1243,14 +1260,14 @@ banner() {
     _written=""
     [ -z "$UV_VERSION" ] && _written="uv"
     case "$CLI_ACTION" in
-        install | upgrade) _written="${_written:+$_written, }aisquare, asq" ;;
+        install | upgrade | repair) _written="${_written:+$_written, }aisquare, asq" ;;
     esac
     [ "$WANT_AGENT" = 1 ] && [ "$CLAUDE_ACTION" = install ] && _written="${_written:+$_written, }claude"
     say ""
     say "Written to:"
     [ -n "$_written" ] && note "~/.local/bin/                     $_written"
     case "$CLI_ACTION" in
-        install | upgrade) note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment" ;;
+        install | upgrade | repair) note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment" ;;
     esac
     # Where this run's init writes, as aisquare resolves it: AISQUARE_HOME and
     # CLAUDE_CONFIG_DIR redirect both, and the one-liner inherits them.
@@ -1366,8 +1383,12 @@ Rerun with --verbose to see uv's own output."
             fi
             INSTALLED_LIST="$INSTALLED_LIST $PYPI_PACKAGE"
             ;;
-        upgrade)
-            step "Upgrading $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
+        upgrade | repair)
+            if [ "$CLI_ACTION" = repair ]; then
+                step "Repairing a broken $PYPI_PACKAGE install -> ${LATEST_VERSION:-latest}"
+            else
+                step "Upgrading $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
+            fi
             # NEVER `uv tool upgrade`. Measured (§3.9.1): a tool installed with
             # an exact pin is NOT moved by it — "Nothing to upgrade", exit 0,
             # and a machine still on the old version. A script that trusted that
@@ -1413,7 +1434,12 @@ uv puts it in ~/.local/bin; add that to your PATH and rerun:
     _now=$(version_of_aisquare || true)
     # The upgrade is VERIFIED and not assumed, because §3.9.1's failure mode is
     # a successful exit code over an unchanged version.
-    if [ "$CLI_ACTION" = upgrade ] && [ -n "$LATEST_VERSION" ] && [ "$_now" != "$LATEST_VERSION" ]; then
+    if [ "$CLI_ACTION" = repair ] && [ -z "$_now" ]; then
+        die "$PYPI_PACKAGE was reinstalled, but \`aisquare --version\` still fails.
+Run it to see why, and please report it."
+    fi
+    if { [ "$CLI_ACTION" = upgrade ] || [ "$CLI_ACTION" = repair ]; } &&
+        [ -n "$LATEST_VERSION" ] && [ "$_now" != "$LATEST_VERSION" ]; then
         die "the upgrade reported success but \`aisquare --version\` still says
 $_now, not $LATEST_VERSION. That is a silent no-op (a success code over an
 unchanged version) — please report it."

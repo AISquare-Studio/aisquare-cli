@@ -44,7 +44,7 @@ from aisquare.models import FleetAgent, TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import FLEET_ROLES
-from tests.cycles import unscoped
+from tests.cycles import MANAGER_MERGE_RULE, unscoped
 from tests.projects import add_project
 
 MANAGER = "aaaa1111-0000-0000-0000-000000000000"
@@ -1082,13 +1082,13 @@ def _cycle(role: str) -> str:
     return " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
 
 
-def test_the_manager_cycle_names_fleet_spawn_and_the_two_prohibitions() -> None:
+def test_the_manager_cycle_names_fleet_spawn_and_when_it_may_merge() -> None:
     text = _cycle("manager")
 
     assert text, "the manager has a briefing"
     assert "fleet spawn" in text
     assert "never write code" in text.lower()
-    assert "never merge" in text.lower()
+    assert MANAGER_MERGE_RULE in text
     assert "Stay in your lane (manager)" in text, "the lane rule closes the manager's cycle too"
     assert "fleet spawn coder" in text, "asked to fix, the manager spawns a coder"
     assert "abcd1234" in text, "the commands are pre-filled with the session id"
@@ -1160,7 +1160,8 @@ def test_the_manager_briefing_is_injected_at_session_start(
 
     assert "Your standing cycle (manager)" in result.stdout
     assert "fleet spawn" in result.stdout
-    assert "Never write code. Never merge." in result.stdout
+    assert f"Never write code. {MANAGER_MERGE_RULE}" in result.stdout
+    assert "Never merge" not in result.stdout
 
 
 # --- numbered seats ride their role's cycle and ladder --------------------------------

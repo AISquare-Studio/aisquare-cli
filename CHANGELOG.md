@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- A fleet's manager may now merge a PR, but only when a person approved it on GitHub and
+  every CI check on its head is green. It still never writes code, and it never pushes.
+  Every other role is still told never to merge.
+
 ## [0.9.2] - 2026-11-03
 
 **Run asq at the Mac and over SSH into the same Mac at once, on one home: each asq shows

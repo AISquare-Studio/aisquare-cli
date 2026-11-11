@@ -14,7 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.core import harness
-from tests.cycles import unscoped
+from tests.cycles import MANAGER_MERGE_RULE, unscoped
 from tests.projects import add_project
 
 # --- profiles & resolution ------------------------------------------------------
@@ -323,13 +323,28 @@ def test_the_manager_cycle_names_the_label_limit() -> None:
     ) in manager
 
 
-def test_no_role_reads_never_merge_twice() -> None:
-    """The manager's and reviewer's cycles already forbid merging; the lane rule
-    adds the prohibition only where the core does not say it, so no briefing
-    repeats the same rule two paragraphs apart."""
-    for role in harness.ROLE_PROFILES:
-        text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped)).lower()
-        assert text.count("never merge") == 1, (role, text.count("never merge"))
+@pytest.mark.parametrize("escalate", [False, True])
+def test_the_manager_merges_only_an_approved_pr_with_every_check_green(escalate: bool) -> None:
+    """The manager's cycle carries its merge rule and no "Never merge"."""
+    text = " ".join(
+        harness.role_cycle("manager", "abcd1234", fleet=unscoped, escalate_to_parent=escalate)
+    )
+    assert MANAGER_MERGE_RULE in text
+    assert "never merge" not in text.lower()
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        *(role for role in harness.ROLE_PROFILES if role != "manager"),
+        pytest.param("captain", marks=pytest.mark.needs_captain),
+    ],
+)
+def test_every_role_but_the_manager_reads_never_merge_once(role: str) -> None:
+    """Every other role is told "Never merge" exactly once, by its cycle or its lane rule."""
+    text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
+    assert text.lower().count("never merge") == 1, (role, text.lower().count("never merge"))
+    assert MANAGER_MERGE_RULE not in text, role
 
 
 def test_the_planner_lane_routes_a_fix_to_tasks_and_names_the_hand_off() -> None:

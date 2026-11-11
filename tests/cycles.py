@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+MANAGER_MERGE_RULE = (
+    "Merge a PR only when a person approved it on GitHub and every CI check on its head is "
+    "green. Never push."
+)
+"""The manager's merge rule, word for word as its cycle states it."""
+
 
 def unscoped(verb: str) -> str:
     """A cycle's fleet command as it read before it named the project: what the tests of a

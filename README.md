@@ -88,7 +88,8 @@ tmux server (agents in it couldn't read the Keychain).
 [Running more than one asq](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/multi-instance.md)
 has the rest, including what happens when the two run different releases.
 
-The manager never writes code and never merges — a human does that.
+The manager never writes code and never pushes. It merges a PR only when a
+person approved it on GitHub and every CI check on its head is green.
 
 ## Everything is also a command
 

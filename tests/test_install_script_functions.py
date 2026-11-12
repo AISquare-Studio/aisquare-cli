@@ -699,9 +699,22 @@ def test_a_fresh_machine_and_a_working_install_resolve_as_before(
         assert f"would run: {command}\n" in result.stdout, result.stdout
 
 
-@pytest.mark.parametrize("now", [None, "0.10.0"], ids=["still-broken", "repaired"])
-def test_a_repair_is_verified_like_an_upgrade(tmp_path: Path, now: str | None) -> None:
-    """uv's success over an install that still fails is an error, not "aisquare "."""
+@pytest.mark.parametrize(
+    ("now", "refused"),
+    [
+        (None, "was reinstalled, but `aisquare --version` still fails"),
+        # A repair that runs but lands on another version is refused as an upgrade's is
+        # (the tester's survivor on #498: dropping the version check for a repair).
+        ("0.9.2", "still says\n0.9.2, not 0.10.0"),
+        ("0.10.0", None),
+    ],
+    ids=["still-broken", "wrong-version", "repaired"],
+)
+def test_a_repair_is_verified_like_an_upgrade(
+    tmp_path: Path, now: str | None, refused: str | None
+) -> None:
+    """uv's success over an install that still fails is an error, not "aisquare ", and so
+    is one over an install that now runs but says another version than it went for."""
     home = tmp_path / "home"
     home.mkdir()
     result = sh(
@@ -711,12 +724,13 @@ def test_a_repair_is_verified_like_an_upgrade(tmp_path: Path, now: str | None) -
         path=f"{_machine(tmp_path, now)}:{base_path(tmp_path)}",
     )
     said = result.stdout + result.stderr
-    if now is None:
+    assert "Repairing a broken aisquare-cli install -> 0.10.0" in said, said
+    if refused is not None:
         assert result.returncode != 0, said
-        assert "was reinstalled, but `aisquare --version` still fails" in said, said
+        assert refused in said, said
+        assert "NOW=" not in result.stdout, said
     else:
         assert result.returncode == 0, said
-        assert "Repairing a broken aisquare-cli install -> 0.10.0" in said, said
         assert "NOW=0.10.0" in result.stdout, said
 
 

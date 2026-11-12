@@ -911,25 +911,12 @@ def harness_status() -> None:
         return
     console = stdout_console()
     console.print(f"base effort: {base} ({base_source})", markup=False)
+    several = _agents_in_play()
     for row in rows:
         if "error" in row:
             console.print(f"{row['role']:<10} ⚠ {row['detail']} Fix: {row['fix']}", markup=False)
             continue
-        ladder = "→".join(row["ladder"]) or "native default"
-        # Keys only, a file-bound one's too: the values are paths and tokens, and this is
-        # a terminal.
-        env_keys = ",".join(sorted({*row["env"], *row["env_files"]}))
-        env_note = f" env={env_keys}" if env_keys else ""
-        # ...and hid the role's own flags, the axis this matrix is read for
-        # after a ui-tester did or did not open a browser.
-        role_note = f"  role_args={' '.join(row['default_args'])}" if row["default_args"] else ""
-        console.print(
-            f"{row['role']:<10} {row['agent']} [{row['agent_source']}] "
-            f"{ladder} effort={row['effort'] or 'native'} "
-            f"→ {row['resolves_to'] or 'native default'} [{row['source']}] "
-            f"bin={row['binary']} [{row['binary_source']}]{env_note}{role_note}",
-            markup=False,
-        )
+        console.print(_harness_line(row, named=several), markup=False)
         for note in row["notes"]:
             console.print(f"  {note}", markup=False)
         if row["refusal"] is not None:
@@ -948,8 +935,53 @@ def harness_status() -> None:
     if interference:
         console.print(f"⚠ env overrides model selection: {', '.join(interference)}", markup=False)
     console.print(
-        "Resolution shown without probing; native defaults stay with the selected agent.",
+        "Resolution shown without probing; native defaults stay with the selected agent."
+        if several
+        else "Resolution shown without probing — `aisquare team spawn <role>` verifies live.",
         markup=False,
+    )
+
+
+def _agents_in_play() -> bool:
+    """Whether ``team harness`` names each role's agent: with accounts of more than one agent,
+    the test ``aisquare accounts`` (``several``) and the Accounts page (``marks_shown``) name
+    agents by, over the same accounts. A Claude-only machine reads 0.9.2's matrix (C1 of #120,
+    the audit's ``team harness`` row)."""
+    return len({account.agent for account in claude_accounts_service.list_accounts()}) > 1
+
+
+def _harness_line(row: Mapping[str, Any], *, named: bool) -> str:
+    """One role's line of ``team harness``, 0.9.2's:
+
+    ``<role> <ladder> effort=<effort>(<offset>) → <model> [<source>]``, then ``bin=`` for a
+    binary that is not the default, ``env=<keys>+<N>args`` for a role that carries any,
+    and ``role_args=``. With ``named``, the agent and why it is the role's
+    (``agent=claude-code [default]``) come after the model. A role whose agent walks no ladder
+    (Codex) says ``native default`` for it."""
+    ladder = "→".join(row["ladder"]) or "native default"
+    offset = f"+{row['effort_offset']}" if row["effort_offset"] else " 0"
+    effort = row["effort"] or "native"
+    agent_note = f"  agent={row['agent']} [{row['agent_source']}]" if named else ""
+    # The executable that runs the role, when it is not the agent's own: half the launch
+    # decision, and on 0.9.2's line only then.
+    bin_note = (
+        ""
+        if row["binary_source"] == "default"
+        else f"  bin={row['binary']} [{row['binary_source']}]"
+    )
+    # The env the role carries, the axis a parallel-install operator steers by: keys only,
+    # a file-bound one's too, as the values are paths and tokens; and how many arguments.
+    if row["env"] or row["env_files"] or row["extra_args"]:
+        carried = ",".join(sorted({*row["env"], *row["env_files"]}))
+        extra = f"+{len(row['extra_args'])}args" if row["extra_args"] else ""
+        bin_note = f"{bin_note}  env={carried}{extra}"
+    # ...and the role's own flags, the axis this matrix is read for after a ui-tester did or
+    # did not open a browser.
+    if row["default_args"]:
+        bin_note = f"{bin_note}  role_args={' '.join(row['default_args'])}"
+    return (
+        f"{row['role']:<10} {ladder:<20} effort={effort:<10}({offset}) "
+        f"→ {row['resolves_to'] or 'native default'} [{row['source']}]{agent_note}{bin_note}"
     )
 
 

@@ -72,6 +72,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   and resume, `fleet top`, `fleet adopt`), Welcome, doctor, Usage & stats, personas and
   Remote, each through Codex's own hooks, flags and screens. Teams can mix agents, and a
   restart resumes the agent's Codex thread.
+- **Which agent is which.** With accounts of more than one agent, as the Accounts page
+  marks its rows, asq's Agent view header and Manager tab name the agent after its
+  account and use (`codex-1 · 42%  codex`), and `team harness` says each role's after
+  its model (`agent=codex [role]`); *Adopt a conversation…* names each conversation's
+  agent when it lists two agents', as `fleet adopt --list` does. Otherwise these read as
+  in 0.9.2.
 - **Accounts.** `aisquare accounts add --agent codex` adds a slot and signs it in with a
   device code (`codex login --device-auth`): Codex prints a link and a one-time code, and
   you open the link on any device, phone included, and enter the code. Nothing waits for a
@@ -278,15 +284,29 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
       does).
   - `persona import --list` has a column naming the agents that read each skill's folder
     (`claude-code`), and with no skill found it lists the folders it searched.
+  - `team harness` adds a line under a role that a `fleet spawn` would launch on another
+    model, effort or arguments than `team spawn` (`fleet: …`; an `AISQUARE_MODEL_<ROLE>`
+    pin reaches `team spawn` alone), and one saying how the agent reads an effort set by
+    the role's own arguments.
   - `--json` gains keys and loses none: `agent`, `detail` and `installs` in `accounts`;
     `readiness`, `detail` and `route` in `agents list`, `scan` and `status`, and
     `readiness` and `detail` in `agents connect`;
     `agent` and `exit_command` in `fleet ls`; a session's `agent` and `native_session_id`
     in `fleet ls` and `board`; `agent` in `upgrade`'s and `uninstall`'s rows (and `plugin`
     in uninstall's plugin rows) and in `persona export`; `killed` in `fleet stop`;
+    `from_agent` and `to_agent` in `fleet switch`; `agent` in `fleet adopt --list`;
     `price_lists` in `metrics tokens`; `launchers` in `upgrade`'s and `uninstall`'s
-    plans; `exit_command` in Remote's needs cards; each skill's `agents` and the `roots`
-    searched in `persona import --list`; and in `config list`, `agents.default` and each
+    plans, `refresh` (each hook site with its agent) in upgrade's, each hook's `review` in
+    its report, and `account_homes` in uninstall's; `exit_command` in Remote's needs cards;
+    each skill's `agents` and the `roots` searched in `persona import --list`; each usage
+    reading's `windows` (every window the agent's plan has) and `limiting` (the one that
+    limits) in `accounts usage` and `accounts list`, and `limit_by_slot` in `accounts
+    usage --summary`; `agents` (each other agent's `machine_default` and
+    `project_default`) in `accounts default`; each change's `agent` in `accounts trust`;
+    `trust_left` in `agents disconnect`; `agent` and `agent_source` in `team spawn` and in
+    each role of `team harness`, which also gains `notes` and `fleet` (and `error`,
+    `detail` and `fix` for a role whose agent cannot be resolved); each profile's `agent`
+    in `team bind` and `team bindings`; and in `config list`, `agents.default` and each
     role's `approval_policy`, `approve_for_me`, `permission` and `sandbox` (unset unless
     you set them).
   - Files: `launch-seals/` is new; `agents.json` gains `hook_files_made`; a saved

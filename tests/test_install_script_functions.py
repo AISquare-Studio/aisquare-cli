@@ -587,6 +587,140 @@ def test_offline_does_not_reach_the_network_at_all(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# a broken install: on PATH, and `aisquare --version` fails (repaired from 0.10.0 on)
+# ---------------------------------------------------------------------------
+
+#: What a fresh 0.9.2 printed on every command once typer 0.29.0 was out: nothing on stdout.
+_TYPER_029 = (
+    'echo "TypeError: TyperOption.__init__() missing 1 required keyword-only argument: '
+    "'type_descriptor'\" >&2\nexit 1"
+)
+
+#: A machine with no aisquare at all.
+_ABSENT = "absent"
+
+
+def _machine(tmp_path: Path, aisquare: str | None) -> str:
+    """A PATH entry holding ``uv`` and ``curl`` (preflight wants a downloader; ``--offline``
+    never calls it) and an ``aisquare`` that reports the version ``aisquare``, or one that
+    fails as 0.9.2 did under typer 0.29.0 (``None``), or none (:data:`_ABSENT`)."""
+    cli = stub_dir(tmp_path, "cli", "uv", body='printf "uv 0.13.0\\n"')
+    stub_dir(tmp_path, "cli", "curl", body="exit 1")
+    if aisquare != _ABSENT:
+        body = _TYPER_029 if aisquare is None else f'printf "aisquare {aisquare}\\n"'
+        stub_dir(tmp_path, "cli", "aisquare", body=body)
+    return str(cli)
+
+
+def _dry_run(tmp_path: Path, path: str, pin: str, **env: str) -> subprocess.CompletedProcess[str]:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    return sh(
+        "main --dry-run --yes --no-project --offline --no-agent --no-system-deps",
+        env={"AISQUARE_INSTALL_VERSION": pin, "HOME": str(home), "AISQUARE_HOME": "", **env},
+        path=f"{path}:{base_path(tmp_path)}",
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [_TYPER_029, "exit 0", 'printf "\\n"'],
+    ids=["traceback-exit-1", "silent-exit-0", "blank-line"],
+)
+def test_an_aisquare_whose_version_fails_is_broken_not_absent(tmp_path: Path, body: str) -> None:
+    """Read as absent, a broken install got `uv tool install` without --force, which uv
+    answers "already installed", exit 0, leaving it broken: running the one-liner again
+    repaired nothing (measured on 0.9.2 with typer 0.29.0). It is a repair now."""
+    cli = stub_dir(tmp_path, "cli", "aisquare", body=body)
+    result = sh(
+        'OFFLINE=1; survey 2>&1; resolve >/dev/null 2>&1; printf "ACTION=%s\\n" "$CLI_ACTION"',
+        env={"AISQUARE_INSTALL_VERSION": ""},
+        path=f"{cli}:{base_path(tmp_path)}",
+    )
+    assert "ACTION=repair" in result.stdout, result.stdout + result.stderr
+    assert "aisquare — broken: `aisquare --version` fails" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("pin", "package", "spec"),
+    [
+        ("", None, "aisquare-cli@latest"),
+        ("0.10.0", None, "aisquare-cli@0.10.0"),
+        ("", "/w/aisquare.whl", "/w/aisquare.whl"),
+    ],
+    ids=["latest", "pinned", "local-build"],
+)
+def test_a_broken_install_is_reinstalled_with_force_as_an_upgrade_is(
+    tmp_path: Path, pin: str, package: str | None, spec: str
+) -> None:
+    """The repair is the upgrade's own command, `uv tool install --force` with
+    `--with tiktoken`, to the version an upgrade would take, and it says so."""
+    extra = {"AISQUARE_INSTALL_PACKAGE": package} if package else {}
+    result = _dry_run(tmp_path, _machine(tmp_path, None), pin, **extra)
+    out = result.stdout
+    assert result.returncode == 0, out + result.stderr
+    assert "repair   aisquare-cli (a broken install)" in out, out
+    assert "==> Repairing a broken aisquare-cli install" in out, out
+    assert f"would run: uv tool install --force --python 3.13 --with tiktoken {spec}\n" in out, out
+
+
+_FRESH = "uv tool install --python 3.13 --with tiktoken aisquare-cli"
+_UP = "uv tool install --force --python 3.13 --with tiktoken aisquare-cli@0.10.0"
+
+
+@pytest.mark.parametrize(
+    ("installed", "pin", "action", "command"),
+    [
+        (_ABSENT, "", "install", _FRESH),
+        (_ABSENT, "0.10.0", "install", f"{_FRESH}==0.10.0"),
+        ("0.9.2", "", "current", None),
+        ("0.9.2", "0.10.0", "upgrade", _UP),
+        ("0.10.0", "0.10.0", "current", None),
+    ],
+    ids=["fresh", "fresh-pinned", "working", "working-pinned-up", "working-pinned-same"],
+)
+def test_a_fresh_machine_and_a_working_install_resolve_as_before(
+    tmp_path: Path, installed: str, pin: str, action: str, command: str | None
+) -> None:
+    """The repair changes nothing else: a machine without aisquare installs it without
+    --force, and a working one is kept or upgraded by its version, as in 0.9.2. These pass
+    on 0.9.2's install.sh too (which has no CLI_BROKEN, hence the default)."""
+    path = _machine(tmp_path, installed)
+    probe = sh(
+        "OFFLINE=1; survey >/dev/null 2>&1; resolve >/dev/null 2>&1; "
+        'printf "ACTION=%s BROKEN=%s\\n" "$CLI_ACTION" "${CLI_BROKEN:-0}"',
+        env={"AISQUARE_INSTALL_VERSION": pin},
+        path=f"{path}:{base_path(tmp_path)}",
+    )
+    assert f"ACTION={action} BROKEN=0" in probe.stdout, probe.stdout + probe.stderr
+    result = _dry_run(tmp_path, path, pin)
+    assert "epair" not in result.stdout, result.stdout
+    if command is not None:
+        assert f"would run: {command}\n" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("now", [None, "0.10.0"], ids=["still-broken", "repaired"])
+def test_a_repair_is_verified_like_an_upgrade(tmp_path: Path, now: str | None) -> None:
+    """uv's success over an install that still fails is an error, not "aisquare "."""
+    home = tmp_path / "home"
+    home.mkdir()
+    result = sh(
+        "INSTALL_TARGET=$PYPI_PACKAGE; CLI_ACTION=repair; CLI_BROKEN=1; PIN_VERSION=; "
+        'LATEST_VERSION=0.10.0; install_cli; printf "NOW=%s\\n" "$CLI_VERSION"',
+        env={"HOME": str(home)},
+        path=f"{_machine(tmp_path, now)}:{base_path(tmp_path)}",
+    )
+    said = result.stdout + result.stderr
+    if now is None:
+        assert result.returncode != 0, said
+        assert "was reinstalled, but `aisquare --version` still fails" in said, said
+    else:
+        assert result.returncode == 0, said
+        assert "Repairing a broken aisquare-cli install -> 0.10.0" in said, said
+        assert "NOW=0.10.0" in result.stdout, said
+
+
+# ---------------------------------------------------------------------------
 # choose_project — §4, "which project?"
 # ---------------------------------------------------------------------------
 

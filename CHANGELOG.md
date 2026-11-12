@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-11-10
+## [0.10.0] - 2026-11-12
 
 **Codex support, in beta: run OpenAI's Codex CLI beside Claude Code, or instead of it, with
 the same memory, board, fleet, accounts and asq, and hand work from one to the other. Codex
@@ -18,6 +18,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - Run `aisquare upgrade`, or use asq's own *Update* button. From a shell, quit asq first
   (and `aisquare serve` or `remote serve`): one left open runs 0.9.2 until it is started
   again.
+- A 0.9.2 installed fresh since 2026-11-09 fails on every command, `aisquare --version`
+  included (typer 0.29.0, under *Fixed*), so it cannot run `aisquare upgrade`: run the
+  one-line installer again, which repairs it, or `uv tool upgrade aisquare-cli`. A 0.9.2
+  that works upgrades with `aisquare upgrade`, as above.
 - `aisquare upgrade` keeps your `config.toml`, hooks, accounts, their order and the
   default (rank 1). The store goes from 0.9.2's v43 to v50 on the first command after the
   upgrade, in about 0.3 s on a store of 10,000 board events. Each step adds a table or a
@@ -356,9 +360,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   allow its command, not asking until the command ends.
 - A Codex launch whose resolver is slow keeps its native telemetry (its local receiver no
   longer looks up its own name).
-- A fresh install runs again: with typer 0.29.0 (out 2026-11-09), every command stopped
-  with a traceback, `--version` included. aisquare asks for typer below 0.29 for now.
-  0.9.2 had this too.
+- A fresh install runs again. Since typer 0.29.0 reached PyPI on 2026-11-09, every
+  command of a fresh install failed with a traceback, `aisquare --version` included
+  (0.9.2's reads `TypeError: TyperOption.__init__() missing 1 required keyword-only
+  argument: 'type_descriptor'`): typer 0.29.0 changed how a command's options are built,
+  and aisquare builds its shared flags by hand. aisquare now requires typer below 0.29.
+  0.9.2 had this too; *Upgrading* says how to move a 0.9.2 that fails this way.
+- Running the one-line installer again repairs a broken install: an `aisquare` on your
+  PATH whose `--version` fails is reinstalled with `uv tool install --force`, as an
+  upgrade is, and then checked. install.sh used to read it as not installed and leave it
+  as it was.
 
 ## [0.9.2] - 2026-11-03
 

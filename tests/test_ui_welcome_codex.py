@@ -160,7 +160,8 @@ def test_sign_in_asks_for_the_managers_account_and_opens_accounts_on_it() -> Non
         return text, list(host.received)
 
     text, received = hosted(machine, go)
-    assert "not signed in (0 · plain codex)" in text and "`codex login`" in text
+    assert "not signed in (0 · plain codex)" in text
+    assert "Sign in opens `codex login --device-auth` on the Accounts page" in text
     assert [state.agent for state in machine.sign_ins] == ["codex"]
     opened = [m for m in received if isinstance(m, AccountsSelected)]
     assert len(opened) == 1 and opened[0].sign_in == 0

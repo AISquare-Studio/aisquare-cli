@@ -16,7 +16,7 @@ the one it goes back to:
    while it is shown, and on *Check again*. With more than one agent installed and
    nothing more specific than the user default choosing, *Use …* saves the pick as
    the user default (``agents use``). *Sign in* opens the Accounts page (for Codex,
-   with ``codex login`` already open on the account the manager will use), and the
+   with ``codex login --device-auth`` already open on the account the manager will use), and the
    shell comes back here once a sign-in started there lands (#286): the page looks
    again and the keyboard goes to the next step, which is step 3's button when the
    sign-in was all it waited on (:meth:`WelcomeView.back_from_sign_in`).
@@ -286,6 +286,17 @@ def _install_text(text: Text, claude: ClaudeState, platform: str) -> None:
     text.append("\nThis page notices it within a few seconds.", style="dim")
 
 
+def _sign_in_opens(agent: str) -> str:
+    """What step 2's *Sign in* opens for ``agent``: its own sign-in on the Accounts page
+    (``AgentAccounts.sign_in_args``: Codex's ``codex login --device-auth``), else the page
+    alone, where an agent that signs in from its TUI does so, as Claude Code's line says."""
+    adapter = get_adapter(agent)
+    args = adapter.accounts.sign_in_args() if adapter.accounts is not None else ()
+    if not args:
+        return "Sign in opens Accounts"
+    return f"Sign in opens `{' '.join((adapter.binary, *args))}` on the Accounts page"
+
+
 def _other_agent_text(text: Text, claude: ClaudeState) -> Text:
     """Step 2's body for an agent other than Claude Code (Codex): the same four facts —
     installed, signed in, connected, trusted — read the way that agent keeps them."""
@@ -303,9 +314,7 @@ def _other_agent_text(text: Text, claude: ClaudeState) -> Text:
         text.append("\n· ", style="yellow")
         text.append(f"not signed in{who} — ")
         text.append(
-            f"Sign in opens `{name.lower()} login` on the Accounts page; {name} also asks "
-            "when it first starts",
-            style="dim",
+            f"{_sign_in_opens(claude.agent)}; {name} also asks when it first starts", style="dim"
         )
     # In full, as this platform spells it, like the binary above and a hooks-off file: a
     # short_path under the user's folder read ~/AppData/... on Windows, which neither cmd

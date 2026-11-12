@@ -675,6 +675,13 @@ class GeminiShapedAccounts:
     def sign_in_args(self) -> tuple[str, ...]:
         return ()  # no login subcommand: its TUI signs in on its first run in the slot
 
+    sign_in_steps = ""  # its TUI says what to do
+
+    def browser_sign_in_args(self) -> tuple[str, ...]:
+        return ()  # one sign-in, its TUI's
+
+    browser_sign_in_hint = ""
+
     def refresh_args(self) -> tuple[str, ...]:
         return ()  # no quiet refresh: a stale token reads as it is
 

@@ -638,7 +638,8 @@ def test_every_adapter_declares_its_accounts_slot() -> None:
         (),
         0,
     )
-    assert claude.sign_in_args() == () and codex_slot.sign_in_args() == ("login",)
+    assert claude.sign_in_args() == ()
+    assert codex_slot.sign_in_args() == ("login", "--device-auth")
     assert claude.network_usage and not codex_slot.network_usage
     plain = {a.accounts.plain_slot for a in adapters() if a.accounts is not None}
     assert len(plain) == len([a for a in adapters() if a.accounts is not None])  # never shared
@@ -899,7 +900,7 @@ def test_accounts_run_execs_codex_in_the_slots_home(
     assert captured["argv"] == ["/opt/bin/codex", "login"]
     assert captured["env"]["CODEX_HOME"] == str(slot.config_dir)
     assert core.CONFIG_DIR_VAR not in captured["env"]
-    assert service.sign_in_command(slot)[-3:] == ["run", str(slot.slot), "login"]
+    assert service.sign_in_command(slot)[-4:] == ["run", str(slot.slot), "login", "--device-auth"]
 
 
 def test_accounts_default_shows_rank_one_and_refuses_to_clear_it(

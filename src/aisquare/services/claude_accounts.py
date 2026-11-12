@@ -1509,8 +1509,8 @@ _FAMILIES = core.MODEL_FAMILY_NAMES
 def _log_in(agent: str | None = None) -> str:
     """How a slot of ``agent`` (Claude Code's when ``None``) is signed in: *Log in* on its
     row, or in a terminal ``aisquare accounts run <slot>`` with the agent's own sign-in
-    command after it (``AgentAccounts.sign_in_args``: Codex's ``login``, as the doctor's
-    accounts row says it), else with what to type once its TUI opens (``relogin``: Claude
+    command after it (``AgentAccounts.sign_in_args``: Codex's ``login --device-auth``, as the
+    doctor's accounts row says it), else with what to type once its TUI opens (``relogin``: Claude
     Code's ``/login``). Never another agent's remedy (SCOPE #113 091, item 17)."""
     accounts = core.kind(agent or core.AGENT)
     run = "aisquare accounts run {slot}"
@@ -5144,8 +5144,9 @@ def sign_in_command(account: ClaudeAccount) -> list[str]:
     """What a sign-in window runs: our own ``accounts run``, so one place sets the environment.
 
     With the agent's own sign-in arguments after the slot: none for Claude Code,
-    whose first session signs in; ``login`` for Codex (``accounts run <n> login``
-    is ``codex login`` in the slot's home).
+    whose first session signs in; ``login --device-auth`` for Codex (``accounts run <n>
+    login --device-auth`` is ``codex login --device-auth`` in the slot's home: a URL and a
+    one-time code to enter on any device).
     """
     return [
         sys.executable,
@@ -5246,8 +5247,8 @@ def open_sign_in_window(
 ) -> WindowInfo:
     """Start a Claude Code session for ``account`` in the fleet's tmux server, detached.
 
-    For a Codex account the window runs ``codex login`` in the slot's home instead
-    (:func:`sign_in_command`), which writes ``auth.json`` and exits.
+    For a Codex account the window runs ``codex login --device-auth`` in the slot's home
+    instead (:func:`sign_in_command`), which writes ``auth.json`` and exits.
 
     The UI renders the window in a pane and polls :func:`sign_in_landed`; the
     working directory is the home directory, exactly what a fresh terminal

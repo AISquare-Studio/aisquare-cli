@@ -123,6 +123,19 @@ RoleOpt = Annotated[
     ),
 ]
 
+BrowserOpt = Annotated[
+    bool,
+    typer.Option(
+        "--browser",
+        help="Codex: sign in with the browser (`codex login`), not a device code, for a "
+        "ChatGPT login that does not allow device codes.",
+    ),
+]
+
+BROWSER_STEPS = "finish the sign-in in the browser it opens"
+"""What ``accounts add --browser`` asks of the human: the agent's browser sign-in
+(``AgentAccounts.browser_sign_in_args``) opens a browser on this machine."""
+
 _DASH = "—"
 
 
@@ -1156,13 +1169,22 @@ def enable(ref: SlotRef) -> None:
 
 
 @app.command("add")
-def add(agent: AgentOpt = None) -> None:
+def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
     """Add an account: a fresh slot, signed in through the agent's own login.
 
     Claude Code's first session signs in; ``--agent codex`` runs ``codex login``
     in the slot's own ``CODEX_HOME``. Either way the slot's hooks are connected after.
     """
     whose = _agent(agent)
+    slots = core.kind(whose)
+    if browser and not slots.browser_sign_in_args():
+        choosing = [a for a in core.account_agents() if core.kind(a).browser_sign_in_args()]
+        fail(
+            f"--browser is for {' or '.join(f'--agent {a}' for a in choosing)} only: "
+            f"{core.agent_label(whose)} has one sign-in, its own login",
+            error="usage",
+            ref=whose,
+        )
     if get_state().json_output:
         fail(
             "accounts add hands the terminal to Claude Code and has no --json form — "
@@ -1182,7 +1204,8 @@ def add(agent: AgentOpt = None) -> None:
     except accounts_service.ClaudeNotInstalled as exc:
         _fail_not_installed(exc, whose)
     console = stderr_console()
-    adapter, sign_in = get_adapter(whose), core.kind(whose).sign_in_args()
+    adapter = get_adapter(whose)
+    sign_in = slots.browser_sign_in_args() if browser else slots.sign_in_args()
     if not sign_in:  # it signs in from its own TUI (``AgentAccounts.sign_in_args``)
         console.print(
             f"Slot {account.slot} is ready. {adapter.label} opens now with its own login — "
@@ -1190,10 +1213,10 @@ def add(agent: AgentOpt = None) -> None:
             "the account."
         )
     else:
+        steps = BROWSER_STEPS if browser else slots.sign_in_steps
         console.print(
             f"Slot {account.slot} is ready. `{' '.join((adapter.binary, *sign_in))}` runs now "
-            "in it — finish the sign-in in the browser it opens, and this command records "
-            "the account."
+            f"in it — {steps}, and this command records the account."
         )
     try:
         status = accounts_service.run_session(account, sign_in)
@@ -1210,11 +1233,14 @@ def add(agent: AgentOpt = None) -> None:
     if landed is None:
         accounts_service.abandon_sign_in(account)
         how = f"status {status}" if status >= 0 else f"signal {-status}"
-        fail(
+        said = (
             f"no sign-in landed in slot {account.slot} ({core.agent_label(whose)} exited with "
-            f"{how}) — nothing was added",
-            error="not_signed_in",
+            f"{how}) — nothing was added"
         )
+        if not browser and slots.browser_sign_in_args():  # its other way, the browser's
+            browser_add = f"aisquare accounts add --agent {whose} --browser"
+            said += f". {slots.browser_sign_in_hint}: {browser_add}"
+        fail(said, error="not_signed_in")
     described = accounts_service.complete_sign_in(account)
     name = core.kind(whose).noun
     console.print(
@@ -1631,8 +1657,8 @@ def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
 def run(ctx: typer.Context, slot: SlotRef) -> None:
     """Open the agent on one account — what a c1/c2 alias did. Extra arguments go to it.
 
-    ``claude`` on a Claude slot, ``codex`` on a Codex one (``run <n> login`` is the
-    Codex sign-in the Accounts page opens).
+    ``claude`` on a Claude slot, ``codex`` on a Codex one (``run <n> login --device-auth``
+    is the Codex sign-in the Accounts page opens).
     """
     if get_state().json_output:
         fail(

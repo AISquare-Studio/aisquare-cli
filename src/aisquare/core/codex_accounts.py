@@ -71,6 +71,19 @@ PLAIN_SLOT = 0
 """The plain ``codex``'s reserved number: slot 1 is the plain ``claude``'s, and every
 managed slot of either agent is 2 or more on one ladder."""
 INSTALL_COMMAND = "npm install -g @openai/codex"
+DEVICE_SIGN_IN_ARGS = ("login", "--device-auth")
+"""How every Codex sign-in aisquare starts runs (``CodexAccounts.sign_in_args``): Codex prints
+a URL and a one-time code, the human opens the URL on any device and enters the code, and
+Codex writes the same ``auth.json`` its browser sign-in does. Nothing waits on the browser
+sign-in's ``http://localhost:1455/auth/callback``, which a browser on another machine cannot
+reach (an SSH login, a headless box). Measured on the releases the beta holds, its floor
+included: 0.164.0, 0.166.0 and 0.167.0 each take the flag (hidden from ``codex login
+--help``) and print the URL and the code. OpenAI's own docs make it the preferred
+sign-in, in beta, and say device-code login must be on: in the ChatGPT security settings
+for a personal account, in the workspace permissions (its admin) for a workspace."""
+BROWSER_SIGN_IN_ARGS = ("login",)
+"""``codex login``'s browser sign-in (``CodexAccounts.browser_sign_in_args``), what
+``aisquare accounts add --agent codex --browser`` runs where device codes are refused."""
 API_KEY_IDENTITY = "API key"
 """What an API-key login reads as: it has no email to show."""
 
@@ -629,8 +642,21 @@ class CodexAccounts:
         return None  # no Keychain item: auth.json is its login
 
     def sign_in_args(self) -> tuple[str, ...]:
-        # Codex's own browser (or device-code) sign-in; it writes auth.json and exits.
-        return ("login",)
+        # Codex's device-code sign-in: a URL and a one-time code entered on any device, with
+        # no localhost callback, so it works over SSH; it writes auth.json and exits.
+        return DEVICE_SIGN_IN_ARGS
+
+    sign_in_steps = "open the URL it prints, on any device, and enter the code it shows"
+
+    def browser_sign_in_args(self) -> tuple[str, ...]:
+        # Its browser's sign-in, whose login comes back to http://localhost:1455.
+        return BROWSER_SIGN_IN_ARGS
+
+    browser_sign_in_hint = (
+        "If your ChatGPT login does not allow device-code sign-in, turn it on in ChatGPT's "
+        "security settings (for a workspace, its admin turns it on in the workspace "
+        "permissions), or sign in with the browser"
+    )
 
     def refresh_args(self) -> tuple[str, ...]:
         # None: Codex renews auth.json itself in its sessions, and its usage is read offline,

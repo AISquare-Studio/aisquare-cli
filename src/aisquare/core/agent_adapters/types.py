@@ -2438,6 +2438,11 @@ class AgentAccounts(Protocol):
     def sign_in_args(self) -> tuple[str, ...]:
         """Arguments to the agent's binary that start its own sign-in in a slot's env.
 
+        Codex's are ``login --device-auth``: Codex prints a URL and a one-time code, and the
+        human opens the URL on any device and enters the code there, so no browser on this
+        machine and no localhost callback it must reach are needed, and it works over SSH
+        (:meth:`browser_sign_in_args` keeps its browser's).
+
         ``()`` means the agent has no sign-in command: it signs in from its own TUI, which
         starts its first-run sign-in in a slot that has none (Claude Code's, whose ``/login``
         does it again; Gemini CLI's). A sign-in window then starts the binary in the slot
@@ -2447,6 +2452,27 @@ class AgentAccounts(Protocol):
         it, after ``aisquare accounts run <slot>``, else with :attr:`relogin`: the doctor's
         accounts row and the Accounts page's ``!`` (``claude_accounts.usage_fix``)."""
         ...
+
+    sign_in_steps: str
+    """What the human does in :meth:`sign_in_args`'s sign-in, as ``accounts add`` and the
+    sign-in pane say it after the command they name: Codex's ``open the URL it prints, on any
+    device, and enter the code it shows``. ``""`` for an agent that signs in from its TUI,
+    whose own words say what to do there."""
+
+    def browser_sign_in_args(self) -> tuple[str, ...]:
+        """Arguments to the agent's binary for its sign-in through a browser on this machine,
+        where :meth:`sign_in_args` signs in without one: Codex's ``login``, whose browser
+        sends the login to a localhost callback. ``aisquare accounts add --browser`` runs
+        them, for a login that refuses the other way (a ChatGPT workspace that does not allow
+        device codes). ``()`` for an agent with no such choice, Claude Code's: ``--browser``
+        is refused for it."""
+        ...
+
+    browser_sign_in_hint: str
+    """When :meth:`sign_in_args`'s sign-in fails and :meth:`browser_sign_in_args` is the way,
+    as a sign-in that ended with no login says it, before the command that runs the browser's:
+    Codex's names where device-code sign-in is turned on. ``""`` for an agent with no browser
+    sign-in to choose."""
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         """The plain home, from the shell's own launch variables (``plain``)."""

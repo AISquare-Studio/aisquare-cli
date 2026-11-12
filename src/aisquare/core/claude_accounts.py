@@ -2105,6 +2105,13 @@ class ClaudeCodeAccounts:
         # No non-interactive login: a first session in the slot runs Claude Code's own.
         return ()
 
+    sign_in_steps = ""  # its TUI's own login says what to do
+
+    def browser_sign_in_args(self) -> tuple[str, ...]:
+        return ()  # one sign-in, its TUI's: `accounts add --browser` is refused for it
+
+    browser_sign_in_hint = ""
+
     def refresh_args(self) -> tuple[str, ...]:
         return TOKEN_REFRESH_ARGS
 

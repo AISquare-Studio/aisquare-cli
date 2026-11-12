@@ -803,10 +803,11 @@ def _sign_in_opens(agent: str) -> str:
 
 
 def _sign_in_prompt(agent: str) -> str:
-    """The sign-in pane's header, after "Logging in to …"."""
+    """The sign-in pane's header, after "Logging in to …": the agent's sign-in command and
+    what the human does in it (``AgentAccounts.sign_in_steps``: Codex's device code)."""
     accounts = core.kind(agent)
     if accounts.sign_in_args():
-        return f" — finish `{_sign_in_command(agent)}` in this pane."
+        return f" — `{_sign_in_command(agent)}` runs in this pane: {accounts.sign_in_steps}."
     if accounts.relogin:
         return f" — type {accounts.relogin} if {core.agent_label(agent)} does not prompt you."
     return f" — sign in to {core.agent_label(agent)} in this pane."
@@ -1412,6 +1413,8 @@ class AccountsView(Vertical):
         self._abandoning: str | None = None
         """Why the fresh slot being settled (:data:`ABANDON_WORKER`) was given up: kept beside
         the worker, as one that raises hands back no result to carry it."""
+        self._abandoning_then = ""
+        """What follows its notice when nothing landed (``_abandon_login``'s ``then``)."""
         self._login_timer: Timer | None = None
         self._usage_timer: Timer | None = None
         self._usage_worker: Worker[Any] | None = None
@@ -2315,8 +2318,8 @@ class AccountsView(Vertical):
         agents' accounts in one number) in a pane, watched.
 
         ``agent`` is whose fresh slot ``None`` makes, Claude Code's when ``None``: ``codex``
-        opens ``codex login`` in a new Codex slot. An existing slot is its own agent's,
-        whatever is passed.
+        opens ``codex login --device-auth`` in a new Codex slot. An existing slot is its own
+        agent's, whatever is passed.
 
         *Add* and *Log in* both come here. A slot still holding a login — an
         expired or rejected token, a Codex ``auth.json`` ``codex login`` replaces — is
@@ -2447,7 +2450,26 @@ class AccountsView(Vertical):
         facts = login.server.pane_facts(login.pane_id)
         if facts is None or facts.dead:
             name = core.agent_label(login.account.agent)
-            self._abandon_login(f"{name} closed before a sign-in landed")
+            self._abandon_login(
+                f"{name} closed before a sign-in landed", then=self._browser_hint(login)
+            )
+
+    def _browser_hint(self, login: _ClaudeLogin) -> str:
+        """What a sign-in whose agent closed with no login adds: where its sign-in is turned
+        on, and the command that signs in with the browser instead
+        (``AgentAccounts.browser_sign_in_args``): ``accounts add --browser`` for a new slot,
+        the browser's sign-in run on the slot for a *Log in*. ``""`` for an agent with one
+        sign-in (Claude Code's)."""
+        accounts = core.kind(login.account.agent)
+        args = accounts.browser_sign_in_args()
+        if not args:
+            return ""
+        command = (
+            f"aisquare accounts add --agent {login.account.agent} --browser"
+            if login.fresh
+            else " ".join(("aisquare accounts run", self._ref_of(login.account), *args))
+        )
+        return f"{accounts.browser_sign_in_hint}: {command}"
 
     def _close_login_window(self) -> _ClaudeLogin | None:
         login = self.login
@@ -2509,19 +2531,22 @@ class AccountsView(Vertical):
             self.post_message(SignInAbandoned())
         self.post_message(AccountsChanged())
 
-    def _abandon_login(self, reason: str) -> None:
+    def _abandon_login(self, reason: str, *, then: str = "") -> None:
         """Close the window; a fresh slot is settled off the UI thread (:data:`ABANDON_WORKER`):
-        a login that landed after the last poll keeps it, wired, and nothing is deleted."""
+        a login that landed after the last poll keeps it, wired, and nothing is deleted.
+        ``then`` follows the notice that nothing landed (:meth:`_browser_hint`)."""
         login = self._close_login_window()
         if login is None:
             return
+        after = f". {then}" if then else ""
         if not login.fresh:
-            self._notice(f"sign-in cancelled — {reason}; nothing changed", "warn")
+            self._notice(f"sign-in cancelled — {reason}; nothing changed{after}", "warn")
             self.post_message(SignInAbandoned())
             self.post_message(AccountsChanged())
             return
         account = login.account
         self._abandoning = reason
+        self._abandoning_then = after
         self._completing = account.agent  # a login that landed after all is wired as its agent's
         self.run_worker(
             lambda: (account, accounts_service.settle_sign_in(account)),
@@ -2537,6 +2562,7 @@ class AccountsView(Vertical):
         hooks then failed reads as ``_complete_finished`` reads it, and any other failure
         says the slot was left as it is (review of #259, round 16)."""
         reason, self._abandoning = self._abandoning or "cancelled", None
+        after, self._abandoning_then = self._abandoning_then, ""
         result = worker.result if state is WorkerState.SUCCESS else None
         settled = result[1] if isinstance(result, tuple) else None
         if isinstance(result, tuple) and isinstance(settled, ClaudeAccountStatus):
@@ -2553,7 +2579,7 @@ class AccountsView(Vertical):
             )
         else:
             what = "the new slot was discarded" if settled is True else "nothing changed"
-            self._notice(f"sign-in cancelled — {reason}; {what}", "warn")
+            self._notice(f"sign-in cancelled — {reason}; {what}{after}", "warn")
         # Cancelled, so nothing is reopened, even a login that landed and was kept.
         self.post_message(SignInAbandoned())
         self.post_message(AccountsChanged())

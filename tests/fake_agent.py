@@ -558,6 +558,13 @@ class FakeAccounts:
     def sign_in_args(self) -> tuple[str, ...]:
         return ("auth",)
 
+    sign_in_steps = "finish the sign-in in the browser it opens"
+
+    def browser_sign_in_args(self) -> tuple[str, ...]:
+        return ()  # one sign-in: `accounts add --browser` is refused for it
+
+    browser_sign_in_hint = ""
+
     def refresh_args(self) -> tuple[str, ...]:
         return ()  # no quiet refresh: a stale token reads as it is
 

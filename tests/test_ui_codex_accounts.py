@@ -58,6 +58,8 @@ from tests.test_ui_accounts import (  # noqa: F401 — `no_real_tmux` is an auto
 from tests.ui_workers import settle_until
 
 CODEX = "codex"
+DEVICE_AUTH = ["login", "--device-auth"]
+"""Every Codex sign-in the page opens: ``codex login --device-auth`` (R13 of #113)."""
 NOW = datetime.now(tz=UTC).replace(microsecond=0)
 
 
@@ -279,14 +281,17 @@ def test_a_codex_row_says_how_old_its_reading_is_and_never_asks_to_open_a_sessio
 def test_a_codex_rows_fix_is_codexs_own_sign_in_never_claudes(slot: int) -> None:
     """SCOPE #113 091, item 17: the ``!``'s hover said Claude Code's remedy for a Codex row
     with no login ("…, then /login"). Its fix is Codex's own sign-in command
-    (``AgentAccounts.sign_in_args``: ``login``) run on that slot, as the doctor's accounts row
+    (``AgentAccounts.sign_in_args``: ``login --device-auth``) run on that slot, as the doctor's
+    accounts row
     words it, so it signs in the slot it names, the plain home or a managed one; a Claude row's
     keeps Claude Code's ``/login`` (``relogin``)."""
     for signed_in, email in ((False, "me@example.com"), (None, None)):  # incomplete, then none
         tip = problem_tooltip(_codex_status(slot, email, signed_in=signed_in), None, now=NOW)
         assert tip is not None
         fix = tip.splitlines()[-1]
-        assert fix == f"fix: press Log in (in a terminal: aisquare accounts run {slot} login)"
+        assert fix == (
+            f"fix: press Log in (in a terminal: aisquare accounts run {slot} login --device-auth)"
+        )
         assert "/login" not in tip and "Claude" not in tip
     claude = ClaudeAccountStatus(
         account=ClaudeAccount(slot=3, config_dir=Path("/h/.aisquare/claude-accounts/3")),
@@ -300,7 +305,7 @@ def test_a_codex_rows_fix_is_codexs_own_sign_in_never_claudes(slot: int) -> None
     # The same words where there is no hover (``accounts usage``, ``accounts list --usage``).
     problem = accounts_service.usage_problem(_codex_status(slot, None), None)
     assert problem is not None and accounts_service.explain_usage(problem).endswith(
-        f"aisquare accounts run {slot} login)"
+        f"aisquare accounts run {slot} login --device-auth)"
     )
 
 
@@ -431,9 +436,10 @@ def test_add_codex_account_opens_codex_login_in_a_new_slot_and_records_it(
     assert marker["agent"] == CODEX
     [window] = windows
     assert window["socket"] == PRIVATE_SOCKET and window["session"] == "asq-accounts"
-    assert window["command"][-4:] == ["accounts", "run", str(account.slot), "login"]
+    assert window["command"][-5:] == ["accounts", "run", str(account.slot), *DEVICE_AUTH]
     assert "CLAUDE_CONFIG_DIR" not in window["env"]  # a Codex window carries Codex's own
-    assert "`codex login`" in seen["header"] and "Claude Code's login" not in seen["header"]
+    assert "`codex login --device-auth`" in seen["header"]
+    assert "Claude Code's login" not in seen["header"]
     assert seen["still_open"] and not seen["box"]
     assert completed == [(account.slot, CODEX)]
     assert seen["notice"].startswith(f"✓ account {account.slot}: new@example.com")
@@ -469,7 +475,7 @@ def test_sign_in_on_an_existing_codex_slot_runs_codex_login_there_and_keeps_the_
     shown_button, said = drive(go, overview=overview)
     assert shown_button
     [window] = windows
-    assert window["command"][-4:] == ["accounts", "run", str(slot), "login"]
+    assert window["command"][-5:] == ["accounts", "run", str(slot), *DEVICE_AUTH]
     assert "Codex closed before a sign-in landed" in said and "nothing changed" in said
     assert abandoned == [] and account.config_dir.is_dir()  # an existing slot is never discarded
 
@@ -519,7 +525,7 @@ def test_log_in_over_a_codex_slots_stale_login_waits_for_codex_login_to_replace_
     assert waited, "the login it was opened over did not land"
     assert closed and completed == [account.slot]
     [window] = windows
-    assert window["command"][-4:] == ["accounts", "run", str(account.slot), "login"]
+    assert window["command"][-5:] == ["accounts", "run", str(account.slot), *DEVICE_AUTH]
 
 
 def test_a_codex_account_moves_above_a_claude_one_in_the_one_order_at_80x24(

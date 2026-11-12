@@ -375,14 +375,28 @@ def help_console(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+#: ``accounts add --help``'s one new option, Codex's ``--browser`` (R13 of #113): the only
+#: rows a Claude Code user finds there that the head did not draw.
+BROWSER_OPTION_ROWS = [
+    "│ --browser                  Codex: sign in with the browser (`codex login`), not a device "
+    "code,   │",
+    "│                            for a ChatGPT login that does not allow device codes.         "
+    "        │",
+]
+
+
 @pytest.mark.usefixtures("help_console")
 def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> None:
     result = CliRunner().invoke(app, ["accounts", "add", "--help"])
     assert result.exit_code == 0, result.output
     # Each line as the head drew it, the padding Rich ends a plain line with aside (a box's
-    # line ends in its border, so it is compared whole).
+    # line ends in its border, so it is compared whole), and Codex's --browser after --agent.
     head = [line.rstrip() for line in HEAD_ACCOUNTS_ADD_HELP.rstrip("\n").splitlines()]
     now = [line.rstrip() for line in result.output.rstrip("\n").splitlines()]
+    at = next(i for i, line in enumerate(now) if "--browser" in line)
+    assert now[at : at + len(BROWSER_OPTION_ROWS)] == BROWSER_OPTION_ROWS, result.output
+    assert "--agent  " in now[at - 1], "--browser follows --agent"
+    del now[at : at + len(BROWSER_OPTION_ROWS)]
     assert len(now) == len(head), result.output
     for was, line in zip(head, now, strict=True):
         if "--agent  " in was:  # its help grew by the mark, and the box's padding shrank by it

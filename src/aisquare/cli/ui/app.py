@@ -155,6 +155,7 @@ from aisquare.cli.ui.views.accounts import (
     SignInLanded,
     UsageRead,
     WelcomeRequested,
+    marks_shown,
     next_step,
     read_session,
 )
@@ -1254,6 +1255,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Slot → its window that limits, percent USED, from the last headroom read
         (``HeadroomSummary.limit_by_slot``): what the agent rows and info lines show. It
         is the slow read's, handed on when it lands — the two-second tick reads no usage."""
+        self.agents_named = False
+        """Whether the agent info lines name each agent (``views.agent.info_line``'s ``named``):
+        exactly when the Accounts page marks its rows with their agent, accounts of more
+        than one agent listed (``views.accounts.marks_shown`` over the same frame). A
+        Claude-only machine never names one, as 0.9.2 did not (C1 of #120). From the
+        accounts read, handed on when it lands; a read that failed leaves it as it was."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         ui = settings_service.ui_settings()
         self.always_show_project_path = ui.always_show_project_path
@@ -1944,6 +1951,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return  # still running, or cancelled with the app: nothing to paint or owe
         sidebar = self.sidebar
         self.accounts_overview = overview
+        if overview is not None:
+            self._show_agents_named(marks_shown(overview.accounts))
         session_known = True
         try:
             session = read_session()
@@ -2385,12 +2394,24 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
 
+    def _show_agents_named(self, named: bool) -> None:
+        """Hand :attr:`agents_named` to every open Agent view and Manager tab when it changes,
+        through the switcher that holds them, as the headroom read hands the usage."""
+        if named == self.agents_named:
+            return
+        self.agents_named = named
+        content = self.content
+        for view in content.query(AgentView):
+            view.show_named(named)
+        for project_view in content.query(ProjectView):
+            project_view.show_named(named)
+
     def _project_view(self, project: ProjectInfo, view_id: str) -> ProjectView:
         """A new Project view, handed the frame already read: its Settings tab names the
         session to attach to at once, not "no live tmux session" until the next tick
         (review of #267, 7). Not a frame whose fleet read failed open, as
         :meth:`_feed_open_views` does not push one."""
-        view = ProjectView(project, id=view_id, usage=self.session_usage)
+        view = ProjectView(project, id=view_id, usage=self.session_usage, named=self.agents_named)
         snapshot = self.snapshot
         if snapshot is not None and snapshot.notices.get(project.id) is None:
             view.refresh_status(
@@ -2443,8 +2464,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _agent_view(self, status: FleetAgentStatus, view_id: str) -> AgentView:
         """The view for one agent's row: the captain's has its own bar (T4)."""
         if self._is_the_captain(status.agent):
-            return CaptainView(status, usage=self.session_usage, id=view_id)
-        return AgentView(status, usage=self.session_usage, id=view_id)
+            return CaptainView(
+                status, usage=self.session_usage, named=self.agents_named, id=view_id
+            )
+        return AgentView(status, usage=self.session_usage, named=self.agents_named, id=view_id)
 
     def on_captain_requested(self, event: CaptainRequested) -> None:
         """*▶ Start captain*: the captain's view when live, else the Spawn dialog preset to it.

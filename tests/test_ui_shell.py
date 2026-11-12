@@ -59,7 +59,14 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import app as ui_app
-from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HeadroomReader, HelpScreen, Panes
+from aisquare.cli.ui.app import (
+    SIDEBAR_WIDTH_KEY,
+    AccountsReader,
+    FleetApp,
+    HeadroomReader,
+    HelpScreen,
+    Panes,
+)
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
@@ -107,8 +114,11 @@ from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import Completed, TmuxServer
 from aisquare.models import (
+    AccountsOverview,
     CheckStatus,
     ClaudeAccount,
+    ClaudeAccountStatus,
+    ClaudeInstall,
     DoctorCheck,
     FleetAgent,
     FleetAgentStatus,
@@ -233,13 +243,15 @@ def drive(
     notifications: bool = False,
     size: tuple[int, int] = SIZE,
     headroom: HeadroomReader | None = None,
+    accounts: AccountsReader | None = None,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` (no timer refresh; a stub doctor).
 
     ``notifications`` opts the screen's ``ToastRack`` in — ``run_test`` leaves it
     out by default, and without it a ``notify`` goes nowhere to be read.
     ``size`` is the terminal's; a test about a laptop passes a narrow one.
-    ``headroom`` stands in for the slow usage read; the app's own when not given.
+    ``headroom`` stands in for the slow usage read; the app's own when not given, and
+    ``accounts`` for the accounts read.
 
     The start-up doctor run has been painted before ``fn`` starts. It is a thread
     worker, and a test that ended before its result was handled had that result
@@ -249,11 +261,12 @@ def drive(
     """
 
     async def run() -> T:
-        app = (
-            FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
-            if headroom is None
-            else FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []), headroom=headroom)
-        )
+        readers: dict[str, Any] = {}
+        if headroom is not None:
+            readers["headroom"] = headroom
+        if accounts is not None:
+            readers["accounts"] = accounts
+        app = FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []), **readers)
         async with app.run_test(size=size, notifications=notifications) as pilot:
             await pilot.pause()
             await settle(app)
@@ -799,6 +812,82 @@ def test_at_90_columns_the_manager_tab_cuts_its_info_line_and_shows_its_hint_who
     assert " ".join(hint).startswith("type to the manager as you would to any Claude session")
     assert len(gone) > 2 and not any(r.endswith("…") for r in gone), gone  # prose wraps
     assert "has no manager yet" in " ".join(gone) and hint_after is False
+
+
+def _accounts_frame(*agents: str) -> AccountsOverview:
+    """An accounts read listing one account of each of ``agents``: Claude Code's slot 2
+    (``work``), Codex's slot 3."""
+    homes = {"claude-code": (2, "claude-accounts"), "codex": (3, "codex-accounts")}
+    statuses = [
+        ClaudeAccountStatus(
+            account=ClaudeAccount(
+                slot=homes[agent][0],
+                config_dir=Path(f"/h/.aisquare/{homes[agent][1]}/{homes[agent][0]}"),
+                managed=True,
+                agent=agent,
+            ),
+            label="work" if agent == "claude-code" else "account 3",
+        )
+        for agent in agents
+    ]
+    return AccountsOverview(
+        claude=ClaudeInstall(installed=True, binary="/opt/bin/claude"), accounts=statuses
+    )
+
+
+def test_the_headers_name_the_agent_only_beside_another_agents_accounts_and_after_its_use(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1 (tester's seq 11708 on #120), mounted in a 90-column terminal: with Claude Code's
+    accounts alone, the Agent view's header and the Manager tab's are 0.9.2's, so the
+    account and its use stay whole in the Agent view's 37 cells. #113 had put
+    ``claude-code`` before the state and cut them off. Once the accounts read lists another
+    agent's accounts (``marks_shown``, the Accounts page's test), the open headers name the
+    agent after the use, and stop naming it when the read lists one agent's again."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    row = on_slot(status("prj_a", "manager", "manager", "waiting"), 2)
+    script["prj_a"] = [
+        row.model_copy(update={"agent": row.agent.model_copy(update={"agent": "claude-code"})})
+    ]
+    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work"})
+    frame = [_accounts_frame("claude-code")]
+
+    def rows(widget: Widget) -> list[str]:
+        width, height = widget.outer_size
+        lines = widget.render_lines(Region(0, 0, width, height))
+        return [strip.text.strip() for strip in lines]
+
+    async def go(pilot: Pilot[None]) -> list[tuple[bool, int, list[str], int, list[str]]]:
+        app = fleet_app(pilot)
+        await settle(app)
+        seen = []
+        for agents in (("claude-code",), ("claude-code", "codex"), ("claude-code",)):
+            frame[0] = _accounts_frame(*agents)
+            app.refresh_accounts()  # the views stay open across the reads after the first
+            await settle(app)
+            await pilot.click(row_for(app, "agt_a_manager"))
+            await settle(app)
+            agent_header = app.query_one("#agent-agt_a_manager #agent-header", Static)
+            agent = agent_header.content_size.width, rows(agent_header)
+            await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+            await settle(app)
+            manager_header = app.query_one("#project-prj_a #manager-header", Static)
+            manager = manager_header.content_size.width, rows(manager_header)
+            seen.append((app.agents_named, *agent, *manager))
+        return seen
+
+    alone, mixed, alone_again = drive(
+        go, headroom=session_use((2, 42.0)), accounts=lambda: frame[0], size=(90, 30)
+    )
+    named, agent_width, agent_line, manager_width, manager_line = alone
+    assert (named, agent_width, manager_width) == (False, 37, 57)
+    assert agent_line == ["🧭 manager  ⏸ waiting  work · 42%  %1"], agent_line  # 0.9.2's
+    assert manager_line == ["🧭 manager  ⏸ waiting  work · 42%  %1"], manager_line
+    named, _, agent_line, _, manager_line = mixed
+    assert named is True
+    assert agent_line == ["🧭 manager  ⏸ waiting  work · 42%  c…"], agent_line
+    assert manager_line == ["🧭 manager  ⏸ waiting  work · 42%  claude-code  %1"], manager_line
+    assert alone_again == alone
 
 
 def test_a_project_opened_between_two_ticks_names_its_session_at_once(

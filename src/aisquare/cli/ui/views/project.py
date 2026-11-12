@@ -202,6 +202,7 @@ class ManagerTab(Vertical):
         *,
         escape_key: str,
         usage: Mapping[int, float] | None = None,
+        named: bool = False,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
@@ -212,6 +213,9 @@ class ManagerTab(Vertical):
         """The manager's account named as the Agent view names it, read off the UI thread."""
         self.usage: Mapping[int, float] = usage or {}
         """Slot → session percent USED, as the shell's slow headroom read last handed it."""
+        self.named = named
+        """Whether the header names the agent (``views.agent.info_line``'s ``named``), as the
+        shell's accounts read last handed it."""
 
     def compose(self) -> ComposeResult:
         yield InfoLine(id="manager-header")
@@ -238,6 +242,12 @@ class ManagerTab(Vertical):
             self.usage = usage
             self._paint_manager()
 
+    def show_named(self, named: bool) -> None:
+        """Whether the header names the agent, from the shell's accounts read."""
+        if named != self.named:
+            self.named = named
+            self._paint_manager()
+
     @on(Worker.StateChanged)
     def _labels_answered(self, event: Worker.StateChanged) -> None:
         if self.labels.answered(event):
@@ -247,7 +257,7 @@ class ManagerTab(Vertical):
         """Repaint the header for the manager on show — the no-manager text is left as it is."""
         if self.status is not None and self.is_mounted:
             header = self.query_one("#manager-header", InfoLine)
-            header.show_line(self.status, self.labels.labels, self.usage)
+            header.show_line(self.status, self.labels.labels, self.usage, named=self.named)
 
     def show_team(self, agents: Sequence[FleetAgentStatus]) -> None:
         """The team strip for the shell's frame: hidden while nobody but the manager runs."""
@@ -316,7 +326,7 @@ class ManagerTab(Vertical):
             if pane.pane_id is not None:
                 pane.attach(None)
             return
-        header.show_line(status, self.labels.labels, self.usage)
+        header.show_line(status, self.labels.labels, self.usage, named=self.named)
         self.labels.ask(self)
         button.display = False
         pane.display = True
@@ -406,7 +416,8 @@ class ProjectView(TabbedContent):
     """One project: its manager's pane first, then the board, settings and personas.
 
     ``usage`` is the shell's last per-slot session use (``HeadroomSummary.limit_by_slot``),
-    so a view opened between two headroom reads shows the figure at once.
+    so a view opened between two headroom reads shows the figure at once; ``named`` is the
+    shell's :attr:`FleetApp.agents_named`, handed on the same way.
     """
 
     TAB_IDS: ClassVar[tuple[str, ...]] = (
@@ -423,6 +434,7 @@ class ProjectView(TabbedContent):
         id: str | None = None,
         refresh_seconds: float = 2.0,
         usage: Mapping[int, float] | None = None,
+        named: bool = False,
     ) -> None:
         super().__init__(id=id)
         self.project = project
@@ -434,7 +446,9 @@ class ProjectView(TabbedContent):
         panes = (
             TabPane(
                 "Manager",
-                ManagerTab(project, escape_key=escape_key, usage=usage, id="manager-tab"),
+                ManagerTab(
+                    project, escape_key=escape_key, usage=usage, named=named, id="manager-tab"
+                ),
                 id="tab-manager",
             ),
             TabPane(
@@ -489,6 +503,11 @@ class ProjectView(TabbedContent):
         """The accounts' session use from the shell's slow headroom read, for the Manager tab."""
         for tab in self.query(ManagerTab):
             tab.show_usage(usage)
+
+    def show_named(self, named: bool) -> None:
+        """Whether the Manager tab's header names the agent, from the shell's accounts read."""
+        for tab in self.query(ManagerTab):
+            tab.show_named(named)
 
     def on_mount(self) -> None:
         if self._pending is not None:

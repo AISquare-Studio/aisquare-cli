@@ -590,8 +590,10 @@ def test_a_codex_rows_line_and_sidebar_figure_come_from_its_own_readings(tmp_pat
     usage = accounts_service.limit_by_slot([claude, codex])
     assert usage == {2: 87.0, CODEX_SLOT: 42.0}
     status = _codex_status(_codex_turn(tmp_path))
-    line = info_line(status, {CODEX_SLOT: "codex-1"}, usage)
-    assert line.plain == "🔨 coder-1  codex  ▶ working  codex-1 · 42%  gpt-5.5-codex high  %7"
+    # A Codex row is listed beside Claude Code's accounts, so its line names its agent, after
+    # the account and its use (C1 of #120).
+    line = info_line(status, {CODEX_SLOT: "codex-1"}, usage, named=True)
+    assert line.plain == "🔨 coder-1  ▶ working  codex-1 · 42%  codex  gpt-5.5-codex high  %7"
     assert agent_row_text(status, usage.get(CODEX_SLOT)).plain.endswith("▶ #5·42%")
     # Control: Claude Code's summary alone — what the line read before — has no figure for it.
     alone = info_line(status, {CODEX_SLOT: "codex-1"}, claude.limit_by_slot).plain

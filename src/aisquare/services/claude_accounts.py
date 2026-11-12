@@ -3746,6 +3746,7 @@ def fleet_headroom(
         return HeadroomSummary(level="unknown")
     left_by_slot: dict[int, float] = {}
     used_by_slot: dict[int, float] = {}
+    session_by_slot: dict[int, float] = {}
     week_left: dict[int, float] = {}
     resets: list[tuple[datetime, int]] = []
     taken: list[datetime] = []
@@ -3759,6 +3760,8 @@ def fleet_headroom(
             continue
         left_by_slot[account.slot] = min(100.0, max(0.0, 100.0 - used))
         used_by_slot[account.slot] = used
+        if reading.session_percent is not None:
+            session_by_slot[account.slot] = reading.session_percent
         if reading.week_percent is not None:
             week_left[account.slot] = max(0.0, 100.0 - reading.week_percent)
             if reading.week_resets_at is not None:
@@ -3776,6 +3779,7 @@ def fleet_headroom(
         needs_login=needs_login,
         left_by_slot=left_by_slot,
         limit_by_slot=used_by_slot,
+        session_by_slot=session_by_slot,
         fetched_at=min(taken, default=None),
         week_left_by_slot=week_left,
         week_percent_left=sum(week_left.values()) / len(week_left) if week_left else None,

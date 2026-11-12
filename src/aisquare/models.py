@@ -652,6 +652,11 @@ class HeadroomSummary(BaseModel):
     """Each usable account's window that limits (``ClaudeUsage.limiting``: the five-hour one
     unless another, the week, a model's daily quota, is fuller), percent USED: what the
     sidebar's agent rows and the agent info line show beside an agent's account."""
+    session_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's five-hour window, percent USED — never another window — and no
+    entry for one whose reading has none: 0.9.2's key, kept as 0.9.2 filled it, so a script
+    that reads ``accounts usage --summary --json`` reads what it did (C1's audit of #120).
+    What an agent row shows is :attr:`limit_by_slot`."""
     fetched_at: datetime | None = None
     """The OLDEST reading behind the figure: the summary is no staler than this."""
     week_left_by_slot: dict[int, float] = Field(default_factory=dict)

@@ -15,19 +15,20 @@ import os
 import re
 import subprocess
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.adopt_picker import adoptable, conversation_text
+from aisquare.cli.ui.adopt_picker import adoptable, agents_named, conversation_text
 from aisquare.core import claude_accounts as core
 from aisquare.core import launch_seal, process_table
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.store import SqliteStore, store_session
-from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo
+from aisquare.models import AdoptableConversation, ClaudeAccount, FleetAgent, ProjectInfo
 from aisquare.services import adopt as adopt_service
 from aisquare.services import agent_events
 from aisquare.services import fleet as fleet_service
@@ -1248,8 +1249,60 @@ def test_the_list_holds_both_agents_conversations_and_the_picker_names_each(
         str(project.root),
     )
     assert adoptable(thread)
-    row = conversation_text(thread, thread.last_activity).plain
+    assert agents_named(listed)  # two agents' conversations: each row names its own
+    row = conversation_text(thread, thread.last_activity, named=agents_named(listed)).plain
     assert row.startswith(f"{THREAD[:8]}  Codex  ") and "tidy the parser" in row
+    session = conversation_text(listed[1], thread.last_activity, named=True).plain
+    assert session.startswith(f"{SESSION[:8]}  Claude Code  "), session
+
+
+#: 0.9.2's picker rows (6a77e650's ``conversation_text``) for one Claude Code conversation:
+#: free, held by a running claude, and outside every onboarded project.
+ADOPT_ROWS_0_9_2 = {
+    "free": "3f9a1c2e  account 3  /w/repo  5m ago\n  fix the login bug",
+    "held": (
+        "3f9a1c2e  account 3  /w/repo  5m ago\n  fix the login bug\n"
+        "  a claude still runs it (pid 4242)"
+    ),
+    "no-project": "3f9a1c2e  account 3  —  5m ago\n  its directory is no onboarded project",
+}
+
+
+def _conversation(**fields: Any) -> AdoptableConversation:
+    now = datetime(2026, 11, 12, 12, 0, tzinfo=UTC)
+    base: dict[str, Any] = {
+        "session_id": "3f9a1c2e-0000-4000-8000-000000000001",
+        "transcript_path": "/c/projects/-w-repo/3f9a1c2e.jsonl",
+        "slot": 3,
+        "account": "account 3",
+        "cwd": "/w/repo",
+        "last_activity": now - timedelta(minutes=5),
+        "first_prompt": "fix the login bug",
+        "project_id": "prj_1",
+    }
+    return AdoptableConversation(**{**base, **fields})
+
+
+@pytest.mark.parametrize(
+    ("case", "fields"),
+    [
+        ("free", {}),
+        ("held", {"held_by": 4242}),
+        ("no-project", {"project_id": None, "cwd": None, "first_prompt": None}),
+    ],
+)
+def test_one_agents_conversations_read_as_0_9_2s_in_the_picker(
+    case: str, fields: dict[str, Any]
+) -> None:
+    """C1 of #120's audit: the picker named the agent on every row and ``a Claude Code still
+    runs it``, where 0.9.2 named none. One agent's conversations listed, a Claude-only
+    machine's, now read as 0.9.2's, as ``fleet adopt --list`` already did (r28 of #113, n5)."""
+    conversation = _conversation(**fields)
+    assert not agents_named([conversation, _conversation(session_id="other")])
+    now = datetime(2026, 11, 12, 12, 0, tzinfo=UTC)
+    assert conversation_text(conversation, now).plain == ADOPT_ROWS_0_9_2[case]
+    named = conversation_text(conversation, now, named=True).plain
+    assert named.startswith("3f9a1c2e  Claude Code  account 3  "), named
 
 
 def test_a_codex_thread_the_fleet_owns_is_left_out_of_the_list(

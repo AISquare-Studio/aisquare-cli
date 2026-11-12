@@ -39,12 +39,29 @@ def _agent_label(conversation: AdoptableConversation) -> str:
     return adapter.label if adapter is not None else conversation.agent
 
 
-def conversation_text(conversation: AdoptableConversation, now: datetime) -> Text:
-    """One row: short id, agent, account, directory, age; the first prompt under it; why it
-    cannot be adopted, when it cannot. A Text, never markup: every field is the user's."""
-    agent = _agent_label(conversation)
+def _program(conversation: AdoptableConversation) -> str:
+    """The program a holder of ``conversation`` runs: ``claude``, as 0.9.2 said it."""
+    adapter = recorded_adapter(conversation.agent)
+    return adapter.binary if adapter is not None else conversation.agent
+
+
+def agents_named(conversations: Sequence[AdoptableConversation]) -> bool:
+    """Whether the rows name their agent: only where it tells them apart, with more than one
+    agent's conversations listed, as ``fleet adopt --list`` does (review r28 of #113, n5).
+    One agent's read as 0.9.2's did (C1 of #120)."""
+    return len({conversation.agent for conversation in conversations}) > 1
+
+
+def conversation_text(
+    conversation: AdoptableConversation, now: datetime, *, named: bool = False
+) -> Text:
+    """One row: short id, the agent when ``named`` (:func:`agents_named`), account,
+    directory, age; the first prompt under it; why it cannot be adopted, when it cannot. A
+    Text, never markup: every field is the user's."""
+    agent = _agent_label(conversation) if named else _program(conversation)
     text = Text(conversation.session_id[:8], style="bold")
-    text.append(f"  {agent}  {conversation.account}  {conversation.cwd or '—'}  ")
+    shown = f"  {agent}" if named else ""
+    text.append(f"{shown}  {conversation.account}  {conversation.cwd or '—'}  ")
     text.append(_ago(now, conversation.last_activity), style="dim")
     if conversation.first_prompt:
         text.append(f"\n  {conversation.first_prompt}", style="dim")
@@ -89,10 +106,11 @@ class AdoptPicker(ModalScreen[str | None]):
 
     def on_mount(self) -> None:
         picker = self.query_one("#adoptlist", OptionList)
+        named = agents_named(self._conversations)
         for conversation in self._conversations:
             picker.add_option(
                 Option(
-                    conversation_text(conversation, self._now),
+                    conversation_text(conversation, self._now, named=named),
                     id=conversation.session_id,
                     disabled=not adoptable(conversation),
                 )

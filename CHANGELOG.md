@@ -72,9 +72,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   and resume, `fleet top`, `fleet adopt`), Welcome, doctor, Usage & stats, personas and
   Remote, each through Codex's own hooks, flags and screens. Teams can mix agents, and a
   restart resumes the agent's Codex thread.
-- **Accounts.** `aisquare accounts add --agent codex` adds a slot and runs `codex login` in
-  it. Usage is read off each account's own sessions, and an agent at its limit can move to
-  the Codex account with the most room.
+- **Accounts.** `aisquare accounts add --agent codex` adds a slot and signs it in with a
+  device code (`codex login --device-auth`): Codex prints a link and a one-time code, and
+  you open the link on any device, phone included, and enter the code. Nothing waits for a
+  browser on this machine, so it works over SSH and on a machine with no screen. *+ Add*
+  and *Log in* in asq's Accounts page sign in the same way. Device-code sign-in must be
+  turned on for your ChatGPT login: in ChatGPT's security settings, or for a workspace, by
+  its admin in the workspace permissions. Where it is off, `aisquare accounts add --agent
+  codex --browser` signs in with the browser as before (`codex login`); a sign-in that
+  ends with no login says both. Usage is read off each account's own sessions, and an
+  agent at its limit can move to the Codex account with the most room.
 - **Your own Codex home** (`~/.codex`, or `$CODEX_HOME`) is one of your accounts only once
   aisquare has taken it on: connected (`agents connect codex`, `install.sh --agent codex`),
   an account of Codex added (`accounts add --agent codex`), signed in from Welcome, or
@@ -167,6 +174,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     `grep -n`, `git blame`, `journalctl` or Claude Code's Read tool print its lines, or
     with its lines joined by `&#10;` or HTML tags) is removed with its body, while the
     text after it, and a header with no key after it, are kept.
+- `aisquare accounts add --help` lists one new option, `--browser`, which applies to Codex
+  accounts only: with Claude Code it is refused, and Claude Code's sign-in is unchanged.
+  `aisquare accounts run --help` names Codex's sign-in as `run <n> login --device-auth`.
 - The Spawn dialog has an *Agent* field (blank: the role's agent), and its *Model* and
   *Effort* follow it. *Settings* shows each role's agent, account, permission and flags.
 - `--as` takes a fleet label. A manager's `state.md` is read only as a regular file of at

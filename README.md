@@ -85,7 +85,10 @@ it back.
 You can open `asq` over SSH into the same Mac while the Mac's own is open: both
 show the same fleet, and a line in the sidebar says where each one runs. Start
 the first agent at the Mac, since on macOS an SSH login can't start the fleet's
-tmux server (agents in it couldn't read the Keychain).
+tmux server (agents in it couldn't read the Keychain). A Codex account signs in with a
+device code, so `aisquare accounts add --agent codex` works over SSH too: open the link
+it prints on any device and enter the code (`--browser` signs in with this machine's
+browser instead).
 [Running more than one asq](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/multi-instance.md)
 has the rest, including what happens when the two run different releases.
 

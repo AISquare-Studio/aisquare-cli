@@ -76,8 +76,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   marks its rows, asq's Agent view header and Manager tab name the agent after its
   account and use (`codex-1 · 42%  codex`), and `team harness` says each role's after
   its model (`agent=codex [role]`); *Adopt a conversation…* names each conversation's
-  agent when it lists two agents', as `fleet adopt --list` does. Otherwise these read as
-  in 0.9.2.
+  agent when it lists two agents', as `fleet adopt --list` does; and asq's *New bind* form
+  has an *Agent* field, as `team bind --agent` does, also on a binding that runs Codex.
+  Otherwise these read as in 0.9.2.
 - **Accounts.** `aisquare accounts add --agent codex` adds a slot and signs it in with a
   device code (`codex login --device-auth`): Codex prints a link and a one-time code, and
   you open the link on any device, phone included, and enter the code. Nothing waits for a

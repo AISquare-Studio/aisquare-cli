@@ -29,6 +29,7 @@ from textual.widgets import Button, Input, OptionList, Select
 from aisquare.cli.ui.attach import AttachTargetScreen, NewBindScreen, Target, args_hint
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.config import RoleLaunchProfile
 from aisquare.core.orchestrator import team_project
 from aisquare.models import (
     AccountsOverview,
@@ -284,3 +285,54 @@ def test_new_binds_extra_args_example_is_the_agents_own_model_flag(
     shown = drive(project, scenario)
     assert shown == [args_hint("claude-code"), args_hint("codex")]
     assert all("opus" not in hint for hint in shown), shown
+
+
+class BindHost(App[None]):
+    """The *New bind* / *Edit bind* form alone, over ``accounts``."""
+
+    def __init__(
+        self,
+        accounts: list[ClaudeAccountStatus],
+        editing: tuple[str, RoleLaunchProfile] | None,
+    ) -> None:
+        super().__init__()
+        self.accounts = accounts
+        self.editing = editing
+
+    def on_mount(self) -> None:
+        self.push_screen(NewBindScreen(self.accounts, editing=self.editing))
+
+
+@pytest.mark.parametrize(
+    ("agents", "editing", "shown"),
+    [
+        (("claude-code",), None, False),  # a Claude-only machine's form is 0.9.2's
+        (("claude-code", "codex"), None, True),
+        (("claude-code",), ("coder2", RoleLaunchProfile(agent="codex", bin="codex")), True),
+        (("claude-code",), ("coder3", RoleLaunchProfile(bin="codex")), True),
+        (("claude-code",), ("coder4", RoleLaunchProfile(env={"FOO": "1"})), False),
+    ],
+    ids=["claude-only", "two-agents", "bound-to-codex", "codex-binary", "claude-binding"],
+)
+def test_the_bind_form_offers_an_agent_only_beside_another_agents_accounts(
+    project: ProjectInfo,
+    agents: tuple[str, ...],
+    editing: tuple[str, RoleLaunchProfile] | None,
+    shown: bool,
+) -> None:
+    """C1's audit of #120: the *Agent* row was on every New/Edit bind form, offering *Codex
+    (beta)* on a machine with Claude Code's accounts alone. It is offered where the accounts
+    section names agents (more than one agent's listed) or the binding runs another agent;
+    elsewhere the form is 0.9.2's and the bind runs its binary's agent."""
+    accounts = [_slot(2 + index, agent) for index, agent in enumerate(agents)]
+
+    async def run() -> tuple[bool, str]:
+        host = BindHost(accounts, editing)
+        async with host.run_test(size=(120, 50)) as pilot:
+            form = await wait_for(pilot, NewBindScreen)
+            return bool(form.query_one("#bind-agent-row").display), form.bind_agent()
+
+    row, agent = asyncio.run(run())
+    assert row is shown
+    if editing is None and not shown:
+        assert agent == "claude-code", "the binary's agent, as 0.9.2 ran it"

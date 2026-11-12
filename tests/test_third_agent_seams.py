@@ -40,7 +40,7 @@ from aisquare.core.selfcli import CliResult
 from aisquare.models import ClaudeAccount, ClaudeUsage
 from aisquare.services import agents as agents_service
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import first_run, lifecycle
+from aisquare.services import diagnostics, first_run, lifecycle, onboarding
 from tests.fake_agent import FakeAgentAdapter
 from tests.gemini_shaped_agent import GeminiShapedAccounts, GeminiShapedAdapter
 from tests.test_first_run import admitted
@@ -355,6 +355,28 @@ def test_first_run_finds_connects_and_reads_it_as_the_one_agent_here(
 
     agents_service.connect(third.id, home)
     assert first_run.probe_fleet(which=on_path(third.binary)).connected
+
+
+def test_the_doctors_sign_in_for_its_slot_is_one_click_by_its_own_sign_in_args(
+    third: AgentAdapter,
+) -> None:
+    """The doctor's row for a slot of it with no login names its own sign-in after the slot
+    (the fake's ``auth``; nothing for the Gemini-shaped one's TUI), and that hint is the
+    Doctor page's *Sign in* button with no entry of the fix table edited for it."""
+    assert third.accounts is not None
+    slot = accounts_core.create_account(third.id)
+
+    checks = diagnostics._agent_accounts_checks(third.id)
+    [check] = [c for c in checks if c.name == f"{third.id}-accounts"]
+
+    run = " ".join(("aisquare accounts run", str(slot.slot), *third.accounts.sign_in_args()))
+    assert check.fix is not None and check.fix.endswith(run)
+    [fix] = onboarding.fix_commands([check])
+    assert (fix.argv, fix.interactive, fix.sign_in_slot) == (
+        ("accounts", "run", str(slot.slot)),
+        True,
+        slot.slot,
+    )
 
 
 # --- usage: windows of its own -------------------------------------------------------------

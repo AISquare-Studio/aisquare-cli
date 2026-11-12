@@ -18,6 +18,7 @@ sign-in it is told to expect, so a test sees the very argv aisquare built reach 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -27,29 +28,36 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.app import App, ComposeResult
 from textual.pilot import Pilot
-from textual.widgets import Static
+from textual.widgets import Button, Static
 from typer.testing import CliRunner
 
 from aisquare.cli import accounts as accounts_cli
 from aisquare.cli.app import app
+from aisquare.cli.ui.sidebar import AccountsSelected
 from aisquare.cli.ui.views import accounts as accounts_view
+from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.core import claude_accounts as core
 from aisquare.core import codex_accounts
 from aisquare.core.tmux import TmuxServer
-from aisquare.models import ClaudeAccount
+from aisquare.models import ClaudeAccount, DoctorCheck
 from aisquare.services import claude_accounts as service
+from aisquare.services import diagnostics, onboarding
 from tests.fakebin import executable_fake, prepend_to_path
 from tests.run_codex_native import CODEX_VERSIONS
 from tests.test_claude_accounts import _sign_in as claude_sign_in
 from tests.test_release_stage import help_console  # noqa: F401 — used by name
 from tests.test_ui_accounts import (  # noqa: F401 — `no_real_tmux` is an autouse fixture
+    _overview,
     _script_claude_sign_in,
+    _status,
     drive,
     fleet_app,
     no_real_tmux,
     notice,
     open_accounts,
+    press,
     settle,
     shown,
 )
@@ -59,6 +67,7 @@ from tests.test_ui_codex_accounts import (  # noqa: F401 — `windows` is a fixt
     _sign_in_codex,
     windows,
 )
+from tests.ui_workers import settle_page
 
 CODEX = "codex"
 CLAUDE = core.AGENT
@@ -211,6 +220,127 @@ def test_a_claude_sign_in_pane_and_its_closing_say_what_they_said_before(
     )
     assert said == (
         "sign-in cancelled — Claude Code closed before a sign-in landed; the new slot was discarded"
+    )
+
+
+@pytest.mark.parametrize(
+    ("ending", "notice_said"),
+    [
+        (
+            "closed",
+            "sign-in cancelled — Claude Code closed before a sign-in landed; nothing changed",
+        ),
+        ("cancel", "sign-in cancelled — cancelled; nothing changed"),
+    ],
+    ids=["closed", "cancel"],
+)
+def test_a_claude_log_in_on_an_existing_slot_says_what_it_said_before(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ending: str, notice_said: str
+) -> None:
+    """*Log in* on Claude slot 2, which exists: the pane's header, and the whole notice when
+    its Claude Code closes with no login or *Cancel* is pressed. Nothing follows "nothing
+    changed" for Claude Code (a Codex *Log in* names its browser sign-in there)."""
+    _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    overview = _overview(_status(1, "me@example.com"), _status(2, None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app_ = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await press(pilot, "#account-login-2")
+        await settle(app_)
+        assert view.login is not None and not view.login.fresh
+        header = shown(view.query_one("#login-header", Static))
+        if ending == "closed":
+            view._poll_login()  # the recorder answers "no server": the pane closed
+            await pilot.pause()
+        else:
+            await pilot.click("#login-cancel")
+        await settle(app_)
+        return header, notice(view)
+
+    header, said = drive(go, overview=overview)
+    assert header == (
+        "Logging in to account 2 — type /login if Claude Code does not prompt you. This "
+        "pane closes by itself once the login is recorded; F12 hands focus back to the "
+        "sidebar."
+    )
+    assert said == notice_said
+
+
+class _DoctorHost(App[None]):
+    """The Doctor page alone, keeping the slot each ``AccountsSelected`` asked to sign in."""
+
+    def __init__(self, view: DoctorView) -> None:
+        super().__init__()
+        self.view = view
+        self.sign_ins: list[int | None] = []
+
+    def compose(self) -> ComposeResult:
+        yield self.view
+
+    def on_accounts_selected(self, message: AccountsSelected) -> None:
+        self.sign_ins.append(message.sign_in)
+
+
+def _doctor_buttons(
+    checks: Sequence[DoctorCheck],
+) -> tuple[list[tuple[str, str]], list[int | None]]:
+    """The Doctor page's fix buttons for ``checks``, each ``(label, tooltip)``, and the
+    slots the sign-ins they open asked for, each button pressed once."""
+
+    async def press_each() -> tuple[list[tuple[str, str]], list[int | None]]:
+        view = DoctorView(refresh=lambda cwd: list(checks))
+        host = _DoctorHost(view)
+        async with host.run_test(size=(140, 40)) as pilot:
+            view.show(list(checks))
+            await settle_page(host)
+            buttons = list(view.query("#doctor-fixes Button").results(Button))
+            seen = [(str(button.label), str(button.tooltip)) for button in buttons]
+            for button in buttons:
+                await pilot.click(f"#{button.id}")
+                await settle_page(host)
+            return seen, host.sign_ins
+
+    return asyncio.run(press_each())
+
+
+def test_claude_codes_doctor_row_and_sign_in_button_for_a_slot_with_no_login_are_as_before(
+    fake_home: Path,
+) -> None:
+    """The doctor's row for a Claude slot with no login, and the button the Doctor page
+    makes of it, *Sign in account 3*: it opens that slot's *Log in* on the Accounts page and
+    runs nothing itself."""
+    two, _three = core.create_account(), core.create_account()
+    claude_sign_in(two, "two@example.com")
+
+    checks = diagnostics._claude_accounts_checks()
+
+    hint = "Sign in from asq → Accounts, or: aisquare accounts run 3"
+    assert [(c.name, c.status.value, c.detail, c.fix) for c in checks] == [
+        (
+            "claude-accounts",
+            "warn",
+            "2 added beside the plain claude: 2 two@example.com · 3 not signed in",
+            hint,
+        )
+    ]
+    assert onboarding.fix_commands(checks) == [
+        onboarding.FixCommand(
+            check="claude-accounts",
+            argv=("accounts", "run", "3"),
+            scope="machine",
+            source=hint,
+            interactive=True,
+        )
+    ]
+    assert _doctor_buttons(checks) == (
+        [
+            (
+                "Sign in account 3",
+                f"{hint}\nOpens the Accounts page with aisquare accounts run 3 in its pane.",
+            )
+        ],
+        [3],
     )
 
 
@@ -496,6 +626,39 @@ def test_asq_log_in_on_a_codex_slot_runs_login_device_auth_there(
     assert _replay(window, runner, monkeypatch) == 0
     assert codex.argvs() == [DEVICE]
     assert core.identity(account) is not None
+
+
+def test_the_doctors_sign_in_for_a_codex_slot_stays_one_click_that_opens_its_log_in() -> None:
+    """The doctor's row for a Codex slot with no login names its device-code sign-in after
+    the slot, and the Doctor page still makes it one click, *Sign in account 2*, which opens
+    that slot's *Log in* (where ``login --device-auth`` runs): a button admits after a slot
+    any token of an agent's own ``sign_in_args``, read from the agents."""
+    account = core.create_account(CODEX)  # a slot whose login never landed
+
+    [check] = diagnostics._agent_accounts_checks(CODEX)
+
+    run = " ".join(("aisquare accounts run", str(account.slot), *DEVICE))
+    hint = f"Sign in from asq → Accounts, or: {run}"
+    assert (check.name, check.fix) == ("codex-accounts", hint)
+    assert onboarding.fix_commands([check]) == [
+        onboarding.FixCommand(
+            check="codex-accounts",
+            argv=("accounts", "run", str(account.slot)),
+            scope="machine",
+            source=hint,
+            interactive=True,
+        )
+    ]
+    assert _doctor_buttons([check]) == (
+        [
+            (
+                f"Sign in account {account.slot}",
+                f"{hint}\nOpens the Accounts page with aisquare accounts run "
+                f"{account.slot} in its pane.",
+            )
+        ],
+        [account.slot],
+    )
 
 
 def test_a_codex_pane_that_closes_with_no_login_names_the_browser_sign_in(

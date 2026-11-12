@@ -457,6 +457,11 @@ class _KnownFix:
     agent: bool = False
     """The hint names an agent first, a registered adapter's id (``core.agent_adapters``,
     asked when the hint is read), passed through verbatim: one row for every agent."""
+    sign_in: bool = False
+    """The hint may carry, after its slot, an agent's own sign-in that ``argv`` already
+    covers: any token of a registered agent's ``sign_in_args()`` (:func:`_sign_in_tokens`,
+    asked when the hint is read), Codex's ``login --device-auth``. Read from the agents,
+    never listed here, so a change to an agent's sign-in keeps its button."""
     interactive: bool = False
     """It hands the terminal to an agent's own sign-in: never run under ``--json``
     (:func:`apply_fix` refuses it); the UI opens it in the Accounts page's pane."""
@@ -478,14 +483,14 @@ KNOWN_FIXES: tuple[_KnownFix, ...] = (
         "project onboard", ("project", "onboard", "--refresh"), "project", frozenset({"--refresh"})
     ),
     _KnownFix("doctor --fix", ("doctor", "--fix", "--yes"), "machine", frozenset({"--yes", "-y"})),
-    # A slot's sign-in (`accounts run <n>`, `accounts run <n> login` for Codex): the
-    # agent's own login in a terminal, which the Accounts page opens in its pane.
+    # A slot's sign-in (`accounts run <n>`, `accounts run <n> login --device-auth` for
+    # Codex): the agent's own login in a terminal, which the Accounts page opens in its pane.
     _KnownFix(
         "accounts run",
         ("accounts", "run"),
         "machine",
-        frozenset({"login"}),
         slot=True,
+        sign_in=True,
         interactive=True,
     ),
 )
@@ -526,6 +531,18 @@ class FixCommand:
         return int(self.argv[2])
 
 
+def _sign_in_tokens() -> frozenset[str]:
+    """Every token of a registered agent's own sign-in (``AgentAccounts.sign_in_args``), as
+    the doctor's accounts rows write it after ``accounts run <n>``: Codex's ``login`` and
+    ``--device-auth``; none for an agent that signs in from its own TUI, Claude Code's."""
+    return frozenset(
+        token
+        for adapter in adapters()
+        if adapter.accounts is not None
+        for token in adapter.accounts.sign_in_args()
+    )
+
+
 def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:
     """The argv for one mention, or None when the hint carries something we will not run.
     Read as the shell reads the hint (``install_route.split_line``), so a quoted
@@ -534,6 +551,7 @@ def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:
         tokens = install_route.split_line(rest.strip().rstrip(".,:"))
     except ValueError:
         return None
+    flags = (known.flags | _sign_in_tokens()) if known.sign_in else known.flags
     argv = list(known.argv)
     index = 0
     if known.slot:
@@ -548,7 +566,7 @@ def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:
         index = 1
     while index < len(tokens):
         token = tokens[index]
-        if token in known.flags:
+        if token in flags:
             index += 1
         elif token in known.valued and index + 1 < len(tokens):
             argv += [token, tokens[index + 1]]

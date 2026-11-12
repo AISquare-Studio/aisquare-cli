@@ -32,6 +32,7 @@ from aisquare.cli.ui.views.app_settings import (
     launch_line,
 )
 from aisquare.cli.ui.views.doctor import DoctorView
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.models import (
     CheckStatus,
@@ -42,6 +43,7 @@ from aisquare.services import agent_launch, diagnostics, onboarding
 from aisquare.services import agents as agents_service
 from tests.test_ui_app_settings import AppHost
 from tests.test_ui_app_settings import drive as drive_app_settings
+from tests.test_ui_codex_accounts import _sign_in_codex
 from tests.ui_workers import settle_page
 
 # --------------------------------------------------------------------------- Settings
@@ -172,11 +174,13 @@ def test_the_trust_row_names_its_step_and_offers_no_connect(
 
 
 def test_a_slots_sign_in_is_one_click_that_opens_accounts_never_a_json_run() -> None:
-    check = DoctorCheck(
-        name="codex-accounts",
-        status=CheckStatus.warn,
-        detail="2 added beside the plain codex: 3 not signed in · 4 a@x",
-        fix="Sign in from asq → Accounts, or: aisquare accounts run 3 login",
+    # The doctor's own row, never a hint written here: its words name Codex's sign-in after
+    # the slot (`accounts run 3 login --device-auth`), and the button must follow them.
+    _sign_in_codex(claude_accounts_core.create_account("codex").config_dir, "a@x.example")
+    claude_accounts_core.create_account("codex")  # 3, with no login
+    [check] = diagnostics._agent_accounts_checks("codex")
+    assert check.fix is not None and check.fix.endswith(
+        " ".join(("aisquare accounts run 3", *claude_accounts_core.kind("codex").sign_in_args()))
     )
     (fix,) = onboarding.fix_commands([check])
     assert fix.interactive and fix.sign_in_slot == 3 and fix.argv == ("accounts", "run", "3")

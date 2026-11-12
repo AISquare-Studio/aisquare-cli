@@ -29,8 +29,8 @@ docs/plans/claude-accounts.md. Two halves, one page:
   shown once Codex is installed or has a slot. The usage is what the
   account's own sessions recorded — read offline from its rollouts, never
   over the network — so a row says how old that reading is. *Add* (and *Log
-  in*) opens ``codex login`` in the slot's ``CODEX_HOME`` (``accounts run <n>
-  login``) in the same watched pane, and the account is recorded, hooks and
+  in*) opens ``codex login --device-auth`` in the slot's ``CODEX_HOME`` (``accounts run
+  <n> login --device-auth``) in the same watched pane, and the account is recorded, hooks and
   all, the moment ``auth.json`` lands.
 - **Arranging** (#145) — each row carries *↑*/*↓* and *Disable*/*Enable*: the
   priority order (one across agents: *↑* moves a Codex account past a Claude one),

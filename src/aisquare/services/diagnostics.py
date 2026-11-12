@@ -1533,7 +1533,8 @@ def _agent_accounts_checks(agent: str) -> list[DoctorCheck]:
     Reads only, like Claude Code's: ``managed_accounts`` lists directories and
     ``describe`` reads the files the agent left in them (for Codex, ``auth.json``'s
     id-token claims — never a token). An unsigned slot's fix is the agent's own
-    sign-in in it (``aisquare accounts run <n> login`` for Codex).
+    sign-in in it (``aisquare accounts run <n> login --device-auth`` for Codex), which
+    the Doctor page makes its *Sign in* button (``onboarding.KNOWN_FIXES``).
     """
     kind = claude_accounts_core.kind(agent)
     managed = claude_accounts_core.managed_accounts(agent)

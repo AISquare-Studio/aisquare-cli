@@ -6,7 +6,7 @@ fix for each, and where the fix is one of our own commands it is one click
 text). A click runs ``apply_fix`` in a thread worker with the project's cwd,
 then re-runs the doctor and posts :class:`DoctorRefreshed` so the shell's report
 can follow. The UI process never changes directory. A slot's sign-in (``aisquare
-accounts run <n>``, ``… login`` for Codex) needs the agent's own terminal, so its
+accounts run <n>``, ``… login --device-auth`` for Codex) needs the agent's own terminal, so its
 button (*Sign in account N*) runs nothing here: it posts
 ``AccountsSelected(sign_in=n)``, and the Accounts page opens that sign-in in its
 pane and records the account when it lands.

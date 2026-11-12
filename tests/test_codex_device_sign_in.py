@@ -42,6 +42,7 @@ from aisquare.services import claude_accounts as service
 from tests.fakebin import executable_fake, prepend_to_path
 from tests.run_codex_native import CODEX_VERSIONS
 from tests.test_claude_accounts import _sign_in as claude_sign_in
+from tests.test_release_stage import help_console  # noqa: F401 — used by name
 from tests.test_ui_accounts import (  # noqa: F401 — `no_real_tmux` is an autouse fixture
     _script_claude_sign_in,
     drive,
@@ -97,7 +98,10 @@ def test_claude_codes_sign_in_argv_and_window_are_byte_identical_to_before(
         tmp_dir=tmp_path / "cache" / "2",
         managed=True,
     )
-    environ = {"AISQUARE_HOME": "/h/aisq", "CLAUDE_CONFIG_DIR": "/h/claude"}
+    # Absolute already, so the window carries them as written on every OS (a "/h/…" is
+    # resolved against the drive on Windows).
+    aisq, claude = str(tmp_path / "aisq"), str(tmp_path / "claude")
+    environ = {"AISQUARE_HOME": aisq, "CLAUDE_CONFIG_DIR": claude}
 
     command, env = service.sign_in_window_command(account, environ, cwd=tmp_path)
 
@@ -122,7 +126,7 @@ def test_claude_codes_sign_in_argv_and_window_are_byte_identical_to_before(
         "run",
         "2",
     ]
-    assert env == {"AISQUARE_HOME": "/h/aisq", "CLAUDE_CONFIG_DIR": "/h/claude"}
+    assert env == {"AISQUARE_HOME": aisq, "CLAUDE_CONFIG_DIR": claude}
 
 
 def _claude_installed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -401,9 +405,12 @@ def test_a_device_code_sign_in_with_no_login_names_where_it_is_turned_on_and_bro
     assert core.managed_accounts(CODEX) == []  # both slots discarded
 
 
+@pytest.mark.usefixtures("help_console")
 def test_accounts_add_help_lists_browser_as_codexs_option() -> None:
-    """The one line ``accounts add --help`` gains, the only one a Claude Code user sees."""
-    result = CliRunner().invoke(app, ["accounts", "add", "--help"], env={"COLUMNS": "200"})
+    """The one line ``accounts add --help`` gains, the only one a Claude Code user sees. Drawn
+    with no styles (``help_console``): CI forces a terminal, whose styles split ``--browser``
+    into ``-`` and ``-browser``."""
+    result = CliRunner().invoke(app, ["accounts", "add", "--help"])
     assert result.exit_code == 0, result.output
     [line] = [each for each in result.stdout.splitlines() if "--browser" in each]
     assert "Codex: sign in with the browser (`codex login`), not a device code" in line

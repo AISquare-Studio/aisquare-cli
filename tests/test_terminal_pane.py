@@ -5705,13 +5705,23 @@ def test_the_highlight_is_visible_on_reverse_video_cells_under_a_theme_with_no_s
     assert plain_cell.reverse, "while the plain cell beside it takes the fallback's reverse video"
 
 
-def test_a_right_click_does_not_seed_the_click_chain(fake: FakeTmux, tmp_path: Path) -> None:
+def test_a_right_click_does_not_seed_the_click_chain(
+    fake: FakeTmux, tmp_path: Path, clock: Clock
+) -> None:
     """Finding 2 of the second #135 review. The pane's own click chain was counted
     before the left-button gate, for every button — so a right click (paste, or
     a context menu, on most terminals) and a left click in the same cell within
     half a second read as a double click: a word selected and the clipboard
     written by one left click. Only left clicks count, and any other button
-    breaks the run; two real left clicks are still a double click."""
+    breaks the run; two real left clicks are still a double click.
+
+    The clicks are 0.1 s apart by the test's clock (``clock``), which stamps them, and not
+    by the wall clock: on a loaded runner the loop's turns between them outran the 0.5 s
+    threshold, so the two left clicks read as two single ones (nightly 42885746792,
+    py3.13-ambient-proxy-up), and a right and a left click that far apart would pass
+    whether or not the right one seeded the chain."""
+    apart = 0.1
+    assert 2 * apart < Host.CLICK_CHAIN_TIME_THRESHOLD
 
     async def drive() -> tuple[str | None, str, int, str | None, str]:
         host = Host(fake.server(tmp_path), "%1")
@@ -5719,8 +5729,10 @@ def test_a_right_click_does_not_seed_the_click_chain(fake: FakeTmux, tmp_path: P
             pane = host.pane
             await wait_until(pilot, lambda: synced(pane))
             await click(pilot, pane, (8, 1), button=3)
+            clock.now += apart
             await click(pilot, pane, (8, 1))  # well within Textual's 0.5 s
             after = (pane.selected_text(), host.clipboard, len(host.notices))
+            clock.now += apart
             await click(pilot, pane, (8, 1))  # the second LEFT click in a row
             return *after, pane.selected_text(), host.clipboard
 

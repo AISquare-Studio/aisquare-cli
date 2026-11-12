@@ -681,13 +681,13 @@ class NewBindScreen(ModalScreen[str | None]):
     def _agent_row_shown(self) -> bool:
         """Whether the form offers the *Agent* field: with more than one agent's accounts
         listed (the accounts section's test, :meth:`AttachTargetScreen.rows`), or on a binding
-        that already runs another agent than the default. A Claude-only machine's form is
+        that already runs another agent than a new bind runs. A Claude-only machine's form is
         0.9.2's, the agent its binary's (C1's audit of #120); ``team bind --agent`` is the
         same choice by hand."""
         if len({status.account.agent for status in self._statuses}) > 1:
             return True
         bound = self._editing[1] if self._editing is not None else RoleLaunchProfile()
-        return bool(bound.agent) or self._agent_start != DEFAULT_AGENT
+        return bool(bound.agent) or self._agent_start != self._known_agent(RoleLaunchProfile())
 
     @staticmethod
     def _known_agent(bound: RoleLaunchProfile) -> str:

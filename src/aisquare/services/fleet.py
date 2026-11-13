@@ -14427,7 +14427,7 @@ def switch(
         _refuse_a_replay_spawn_refuses(project, agent, record.role)
     except FleetError as exc:
         raise FleetError(f"cannot switch {label!r}: {exc}") from exc
-    current = record.account_slot
+    current = _leaving_slot(record, session)
     notes: list[str] = []
     failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
     kind = record.agent
@@ -14683,6 +14683,23 @@ def switch(
         prompt_acked=receipt.prompt_acked,
         from_agent=kind,
         to_agent=onto,
+    )
+
+
+def _leaving_slot(record: launch_seal.LaunchRecord, session: TeamSession | None) -> int | None:
+    """The account a switch moves an agent OFF: its launch record's slot, else the slot its
+    session's config dir is (``claude_accounts.leaving_slot``, through each agent's own
+    homes: the plain claude's is slot 1, the plain codex's slot 0), else ``None``.
+
+    0.9.2 read it so (``_account_slot_of``), and so do the StopFailure hook and Remote's
+    needs scan. Read off the record's slot alone, an agent its spawn put on no account left
+    none: a switch "moved" it onto the plain slot it was on, ``--to 1`` restarted it there
+    instead of refusing, and ``from_slot`` was null (gate F2 of #113, #123). Only what it
+    leaves comes from the session: the account a replacement or a fork RUNS on is the
+    record's (:func:`_replacement_account`), never that column, which a sandbox could
+    write before its broker (review r4 of #113, finding 6)."""
+    return claude_accounts_service.leaving_slot(
+        record.account_slot, session.account if session is not None else None
     )
 
 
@@ -16426,6 +16443,14 @@ def hand_off(
     named = window_read(record.spec).account if account is None and replay else None
     # Onto another agent the source's slot is no account of it: the one asked, else its ladder.
     wanted = _account_wanted(account if named is None else named, slot if onto is None else None)
+    if onto is None and account is None and named is None and slot is None:
+        # A source whose record names no slot ran under its agent's plain home, its spawn's
+        # ladder having chosen none: the fork asks for that plain slot by name, as its
+        # restart does (:func:`_replacement_account`), and as 0.9.2's fork asked for the slot
+        # its source ran on (the plain claude's, slot 1). Asked of the ladder, a binding or a
+        # default set since put the fork on another account than its source's (#123), and a
+        # Codex fork off the thread it forks (r20 of #113).
+        wanted = _plain_slot_asked(forks, role=runs_as, project=project)
     resume: ResumeSpec | None = None
     if onto is not None:
         notes.append(_crossing_note(record.agent, onto))
@@ -16437,7 +16462,6 @@ def hand_off(
             runs_as,
             wanted,
             notes,
-            plain_home=account is None and named is None and slot is None,
         )
     own = is_git_project(project.root)
     if not own:
@@ -16530,8 +16554,6 @@ def _forkable(
     role: str,
     wanted: str | None,
     notes: list[str],
-    *,
-    plain_home: bool = False,
 ) -> tuple[ResumeSpec | None, str | None]:
     """What a hand-off's Fork resumes of the session ``record`` holds, on ``forks``, its agent
     — or ``None`` with why on ``notes``, the new agent then starting fresh from the board —
@@ -16545,10 +16567,9 @@ def _forkable(
     rollout under its ``CODEX_HOME``) forks only onto that home: asked onto another
     account's, it starts fresh with a hand-off prompt, as ``switch`` does, and the account
     resolved here is the one the spawn gets, so the two cannot differ. A source whose record
-    has no slot, forked with no account asked (``plain_home``), ran under the plain home: the
-    fork asks for the agent's plain slot by name, as its restart does
-    (:func:`_replacement_account`; r20 of #113), never the ladder, whose default would move
-    it off the thread it forks."""
+    has no slot, forked with no account asked, comes with its agent's plain slot asked by
+    name (:func:`_plain_slot_asked`; r20 of #113), never the ladder, whose default would
+    move it off the thread it forks."""
     named = forks.label if forks is not None else record.agent
     found, why = _resumable(record, forks)
     if forks is None or found is None:
@@ -16562,12 +16583,8 @@ def _forkable(
         return None, wanted
     if not forks.capabilities.resumes_across_homes and forks.accounts is not None:
         try:
-            choice = (
-                _replacement_account(None, None, role=role, project=project, whose=forks.id)
-                if plain_home
-                else claude_accounts_service.choose(
-                    wanted, role=role, project=project, agent=forks.id
-                )
+            choice = claude_accounts_service.choose(
+                wanted, role=role, project=project, agent=forks.id
             )
         except claude_accounts_service.NoSuchAccount as exc:
             raise FleetError(str(exc)) from exc
@@ -16641,6 +16658,23 @@ def _replacement_account(
     return claude_accounts_service.choose(
         _account_wanted(account, slot), role=role, project=project, agent=whose
     )
+
+
+def _plain_slot_asked(
+    adapter: AgentAdapter | None, *, role: str, project: ProjectInfo
+) -> str | None:
+    """What a fork of a source whose record names no slot asks for (:func:`hand_off`): its
+    agent's plain slot by name, as :func:`_replacement_account` asks for a restart's. ``None``,
+    so the ladder decides, for an agent with no accounts, or a plain home that is not there
+    (Codex's before its first run), which holds no thread and which the resolver refuses."""
+    if adapter is None or adapter.accounts is None:
+        return None
+    plain = str(claude_accounts_core.kind(adapter.id).plain_slot)
+    try:
+        claude_accounts_service.choose(plain, role=role, project=project, agent=adapter.id)
+    except claude_accounts_service.NoSuchAccount:
+        return None
+    return plain
 
 
 def _account_pinned(agent: FleetAgent) -> bool:

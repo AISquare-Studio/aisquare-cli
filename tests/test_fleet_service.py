@@ -18966,6 +18966,149 @@ def test_switch_refuses_without_headroom_the_same_account_or_a_dead_label(
     assert any("every account is over the 85%-used line" in note for note in receipt.notes)
 
 
+def _a_plain_agent_with_no_slot(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, slot_2_at: float
+) -> FleetAgent:
+    """Gate F2 of #113 (seq 11816, #123): an agent spawned while no account read as signed
+    in, so its row and its launch record name no slot, running on the plain claude, whose
+    session's config dir is the plain ``~/.claude``. Then the plain slot 1 (5 % used) and
+    slot 2 (``slot_2_at``) are signed in."""
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_claude_accounts import _sign_in
+    from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(accounts_core, "_home", lambda: home)
+    monkeypatch.setattr(accounts_core, "keychain_platform", lambda: False)
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert agent.account_slot is None
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and record.account_slot is None
+    plain = accounts_core.default_account()
+    _sign_in(plain, "plain@example.com", expires_in=timedelta(days=3650))
+    credentials = accounts_core.credentials_path(plain)
+    signed_in = json.loads(credentials.read_text())
+    signed_in["claudeAiOauth"]["accessToken"] = "tok-plain"
+    credentials.write_text(json.dumps(signed_in))
+    second = _slot("two@example.com", "tok-two", expires_in=timedelta(days=3650))
+    assert second.slot == 2
+    usage = _Usage({"tok-plain": _payload(5), "tok-two": _payload(slot_2_at)})
+    monkeypatch.setattr(accounts_service, "_http_get", usage)
+    # Its hook's report: the config dir it runs under, read off its transcript's path.
+    _with_transcript(agent, None)
+    assert agent.session_id is not None
+    with store_session() as store:
+        session = store.get_session(agent.session_id)
+        assert session is not None
+        store.upsert_session(session.model_copy(update={"account": str(plain.config_dir)}))
+    return agent
+
+
+def test_a_switch_leaves_the_plain_slot_an_agent_with_no_slot_runs_on(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Gate F2 of #113 (#123): the account a switch LEAVES is the row's slot, else the one
+    its session's config dir is (0.9.2's ``_account_slot_of``): slot 1 for the plain claude.
+    Read off the launch record's slot alone, it was none, so the plain slot was no account
+    to leave: ``fleet switch`` "moved" the agent onto the slot it was on, ``--to 1`` stopped
+    and restarted it there with rc 0, and ``--json`` said ``from_slot: null``."""
+    agent = _a_plain_agent_with_no_slot(project, monkeypatch, tmp_path, slot_2_at=10)
+    spawned = len(tmux.spawned)
+
+    # 3b: onto the plain slot it is on, refused, as 0.9.2 refused it, and nothing stopped.
+    refused = runner.invoke(
+        app, ["fleet", "switch", agent.label, "--project", project.id, "--to", "1"]
+    )
+    assert refused.exit_code == 1, refused.output
+    assert f"✗ '{agent.label}' already runs on plain claude (slot 1)" in refused.output
+    assert len(tmux.killed) == 0 and len(tmux.spawned) == spawned
+
+    # 3a: with no --to, the plain slot is the one it leaves: the move is to slot 2, though
+    # slot 1 has the more room (5 % against 10 %).
+    moved = runner.invoke(app, ["fleet", "switch", agent.label, "--project", project.id])
+    assert moved.exit_code == 0, moved.output
+    assert f"✓ {agent.label}: moved from plain claude (slot 1) to account 2 (slot 2) — " in (
+        moved.stdout
+    )
+    assert _flag(_command(tmux), "--account") == "2"
+
+
+def test_a_switch_of_an_agent_with_no_slot_says_from_slot_1_in_json(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Gate F2 of #113 (#123), 3c: ``--json``'s ``from_slot`` is the plain slot 1 for an
+    agent whose row names none, as 0.9.2 said, never ``null``."""
+    agent = _a_plain_agent_with_no_slot(project, monkeypatch, tmp_path, slot_2_at=10)
+
+    moved = runner.invoke(
+        app, ["--json", "fleet", "switch", agent.label, "--project", project.id, "--to", "2"]
+    )
+    assert moved.exit_code == 0, moved.output
+    payload = json.loads(moved.stdout)
+    assert (payload["from_slot"], payload["to_slot"]) == (1, 2)
+
+
+def test_a_fork_of_an_agent_with_no_slot_runs_on_the_plain_slot_it_forks_from(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#123's audit: 0.9.2's fork asked for the slot its source runs on (``_account_slot_of``:
+    the plain slot 1 for an agent with no slot on the plain claude). Read off the record's
+    slot alone, it asked the ladder, so a role binding set since put the fork on account 2,
+    while a restart of the same agent keeps the plain slot ([0.10.0]: it keeps its own home)."""
+    from aisquare.services import settings as settings_service
+
+    agent = _a_plain_agent_with_no_slot(project, monkeypatch, tmp_path, slot_2_at=10)
+    settings_service.bind_role("coder", account="2")
+
+    fork = fleet_service.hand_off(project, agent.label)
+
+    assert fork.started.agent.account_slot == 1
+    assert _flag(_command(tmux), "--account") == "1"
+    restarted = fleet_service.restart(project, agent.label)
+    assert restarted.started.account_slot == 1 and _flag(_command(tmux), "--account") == "1"
+
+
+@pytest.mark.parametrize("slot_2_at", [10, 99], ids=["slot-2-has-room", "slot-2-full"])
+def test_the_automatic_hand_over_never_hands_an_agent_with_no_slot_back_to_the_plain_slot(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    slot_2_at: float,
+) -> None:
+    """Gate F2 of #113 (#123): the automatic hand-over (``on_limit = "switch"``, the
+    default) asks the switch's own target, so a limited agent with no slot on the plain
+    claude is moved off slot 1, onto slot 2 when it has room, and otherwise stays parked:
+    never handed back to the plain slot it is leaving, though that slot reads 5 % used."""
+    agent = _a_plain_agent_with_no_slot(project, monkeypatch, tmp_path, slot_2_at=slot_2_at)
+
+    if slot_2_at < 85:
+        receipt = fleet_service.switch(project, agent.label, automatic=True, reason="session limit")
+        assert (receipt.from_slot, receipt.to_slot) == (1, 2)
+        assert _flag(_command(tmux), "--account") == "2"
+        return
+    spawned = len(tmux.spawned)
+    with pytest.raises(FleetError, match=r"no account under the line .* \(it is on slot 1\)"):
+        fleet_service.switch(project, agent.label, automatic=True, reason="session limit")
+    assert len(tmux.killed) == 0 and len(tmux.spawned) == spawned
+
+
 def test_fleet_switch_command_reports_the_move_and_its_json(
     tmux: FakeTmux,
     claude_on_path: Path,

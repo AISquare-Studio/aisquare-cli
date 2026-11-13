@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from aisquare.core import agents
 from aisquare.core import claude_accounts as core
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo, TeamSession, TeamTask
@@ -120,3 +121,55 @@ def test_a_limited_codex_agent_is_switched_fresh_onto_the_codex_slot_with_room(
     # binds at its own start hook, which takes them over then (no hook runs here).
     assert moved is not None and moved.status == "doing"
     assert "switched" in kinds and "task_released" not in kinds and "agent_exited" not in kinds
+
+
+def test_a_switch_leaves_the_plain_codex_home_a_codex_agent_with_no_slot_runs_on(
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    codex_on_path: Path,
+    project: ProjectInfo,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmp_path: Path,
+) -> None:
+    """The Codex twin of gate F2 of #113 (#123): a Codex agent its spawn put on no account
+    runs on the plain codex home, slot 0, which its session's config dir names. The switch
+    leaves that slot, as a Claude Code agent's leaves the plain claude's slot 1: ``--to 0``
+    is refused with nothing stopped, and with no ``--to`` the move is to the Codex slot,
+    though the plain home has the more room. Read off the record's slot alone, the plain
+    home was no account to leave."""
+    now = datetime.now(tz=UTC)
+    roomy = core.create_account("codex")  # an account of Codex added: its plain home counts
+    plain = core.default_account(agent="codex").config_dir
+    plain.mkdir(parents=True, exist_ok=True)
+    assert agents.install_hooks("codex", plain)  # connected, as `agents connect codex` leaves it
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
+    assert agent.agent == "codex" and agent.account_slot is None
+    for home, email in ((plain, "plain@example.com"), (roomy.config_dir, "roomy@example.com")):
+        _sign_in(home, email)
+    _rollout(plain, [_token_count(now, _window(5, 300, now + timedelta(hours=4)))], name="p")
+    _rollout(roomy.config_dir, [_token_count(now, _window(15, 300, now + timedelta(hours=4)))])
+    session_id = "codex-plain-session"
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=session_id,
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                agent="codex",
+                account=str(plain),
+            )
+        )
+        stored = store.get_fleet_agent(agent.id)
+        assert stored is not None
+        store.upsert_fleet_agent(stored.model_copy(update={"session_id": session_id}))
+    plain_slot = core.kind("codex").plain_slot
+    spawned = len(tmux.spawned)
+
+    with pytest.raises(fleet_service.FleetError, match=rf"already runs on .*\(slot {plain_slot}\)"):
+        fleet_service.switch(project, agent.label, to=str(plain_slot))
+    assert len(tmux.killed) == 0 and len(tmux.spawned) == spawned
+
+    receipt = fleet_service.switch(project, agent.label)
+
+    assert (receipt.from_slot, receipt.to_slot) == (plain_slot, roomy.slot)
+    assert _flag(_command(tmux), "--account") == str(roomy.slot)

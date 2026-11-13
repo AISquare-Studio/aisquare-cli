@@ -303,12 +303,14 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     reason tells the replacement it was moved *by its operator's `fleet switch`*, not by a
     usage limit; help texts say *the agent* or *Claude Code
     and Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose agent*,
-    where it said *general-purpose Claude*. Remote's sheets and refusals for Ctrl-C, Ctrl-D
-    and a second Esc speak of *the coding agent* and *the agent's rewind*. `persona import
-    --engine manager` names its run `<binary> (Claude Code headless, …)`, where it said
-    `<binary> -p`, and says *Claude Code gave no JSON answer*, where it said *the answer
-    was not JSON*. The sidebar's and info line's `#slot·%` is the window that limits: the
-    week's when it is fuller.
+    where it said *general-purpose Claude*. A fork from its *Hand off from* that resumes
+    the source's session adds one toast, *forked as Claude Code forks a session:
+    `--resume <transcript> --fork-session`* (Codex's names `fork <id> -C .`). Remote's
+    sheets and refusals for Ctrl-C, Ctrl-D and a second Esc speak of *the coding agent*
+    and *the agent's rewind*. `persona import --engine manager` names its run `<binary>
+    (Claude Code headless, …)`, where it said `<binary> -p`, and says *Claude Code gave no
+    JSON answer*, where it said *the answer was not JSON*. The sidebar's and info line's
+    `#slot·%` is the window that limits: the week's when it is fuller.
   - `agents list`, `scan` and `status` gain an *INTEGRATION* column: how far the agent's
     hooks are set up here. Claude Code's reads *configured* or *not configured*, or
     *unreadable* where its settings file cannot be read, with the reason on a line under

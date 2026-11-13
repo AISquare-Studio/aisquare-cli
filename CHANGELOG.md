@@ -124,7 +124,7 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     Codex's `/hooks`. Until then doctor says so, and the board sees nothing from that Codex.
   - CI tests Codex 0.164.0, 0.166.0 and 0.167.0, all pinned, 0.167.0 on macOS too, where
     the tests of Codex's sandbox and its automatic reviewer run. It also tests Codex's
-    newest release nightly: 0.167.2 was green on 2026-11-13 (run 43361751360).
+    newest release nightly: 0.168.0 was green on 2026-11-13 (run 43389041999).
     `install.sh` installs Codex's newest release, with Codex's own installer. Treat a
     release newer than the last green nightly's as untested until the nightly says
     otherwise, and tell us what breaks.
@@ -301,8 +301,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     Claude Code's folder-trust dialog says its session *has not started*, where it said
     *it is attention* (it still types nothing and files a note); a `fleet switch` without a
     reason tells the replacement it was moved *by its operator's `fleet switch`*, not by a
-    usage limit; help texts say *the agent* or *Claude Code
-    and Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose agent*,
+    usage limit; when every account of the agent's own is read over the line and no other
+    agent with accounts is installed (`[accounts] cross_agent_handover` on, the default), a
+    `fleet switch` adds the note *across agents: no other agent with accounts is
+    installed*, and the automatic hand-over's `handover_failed` board line has it as its
+    last note, after *nothing to switch to*; help texts say *the agent* or *Claude Code and
+    Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose agent*,
     where it said *general-purpose Claude*. A fork from its *Hand off from* that resumes
     the source's session adds one toast, *forked as Claude Code forks a session:
     `--resume <transcript> --fork-session`* (Codex's names `fork <id> -C .`). Remote's
@@ -387,7 +391,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     in a terminal:*, lists Codex's install commands after Claude Code's, and adds that
     with more than one installed it asks which the fleet uses; step 3, *Fleet*, waits for
     *a coding agent installed (step 2)*, where it said *Claude Code installed (step 2)*.
-    With Claude Code installed, step 2 reads as it did.
+    Until the page's first look at this machine lands, a moment after it opens, step 2 is
+    *Coding agent* with Claude Code installed too, its body *Looking for your coding
+    agent…* (it said *Looking for Claude Code…*), and step 3 waits for *a coding agent
+    installed (step 2)*; once the look lands, step 2 reads as it did.
   - On a machine with Codex accounts, the project's default agent
     (`aisquare agents use … --project`) decides only where nothing named does: a role
     bound to an account, and a launch's own `--account`, run that account's agent from any
@@ -424,9 +431,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   The line is filed as a board note after 20 s at a dialog, otherwise after up to 120 s.
   The default, `argv`, hands Claude Code the line on its command line and waits for
   nothing, as 0.9.2 did.
-- A restart keeps an agent that ran on no account on its own home, instead of moving it
-  onto a binding or default set since. After a restart or resume, such an agent's row
-  names slot 1, the plain one, where it named no account.
+- A restart or resume of an agent that ran on no account keeps it on its own home, and its
+  row then names slot 1, the plain one, even when its session never reported which config
+  dir it ran under: 0.9.2 then moved it onto a binding or default set since. With that
+  dir reported, 0.9.2 kept it there too.
 - `aisquare fleet spawn ROLE -a N` runs account N, as 0.9.2 did, and the agent's row now
   names N: 0.9.2's named the default account, which it did not run. `-e KEY=VALUE`
   (`--env`) sets that variable for the agent, as 0.9.2 did, wherever it stands among the

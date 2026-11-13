@@ -431,10 +431,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   The line is filed as a board note after 20 s at a dialog, otherwise after up to 120 s.
   The default, `argv`, hands Claude Code the line on its command line and waits for
   nothing, as 0.9.2 did.
-- A restart or resume of an agent that ran on no account keeps it on its own home, and its
-  row then names slot 1, the plain one, even when its session never reported which config
-  dir it ran under: 0.9.2 then moved it onto a binding or default set since. With that
-  dir reported, 0.9.2 kept it there too.
+- A restart, resume or fork of an agent that ran on no account runs on that agent's own
+  home, and the row (the fork's, for a fork) then names slot 1, the plain one, even when
+  the agent's session reported no config dir, or one that is no account's: 0.9.2 then put
+  it onto a binding or default set since. With the plain dir reported, 0.9.2 kept it
+  there too.
 - `aisquare fleet spawn ROLE -a N` runs account N, as 0.9.2 did, and the agent's row now
   names N: 0.9.2's named the default account, which it did not run. `-e KEY=VALUE`
   (`--env`) sets that variable for the agent, as 0.9.2 did, wherever it stands among the

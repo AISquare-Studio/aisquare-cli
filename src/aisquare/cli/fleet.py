@@ -20,7 +20,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
@@ -31,7 +31,8 @@ from rich.text import Text
 from aisquare.cli.common import USAGE_ERROR, fail, format_reset, refuse_conflicting_scope
 from aisquare.cli.native_args import NativeForwardingCommand, PassthroughCommand
 from aisquare.core import harness
-from aisquare.core.agent_adapters import agents_named
+from aisquare.core.agent_adapters import agents_named, recorded_adapter
+from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.claude_accounts import agent_label
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
@@ -136,7 +137,31 @@ def _project_json(project: ProjectInfo) -> dict[str, object]:
     }
 
 
-def _agent_line(status: FleetAgentStatus, labels: Mapping[int, str] | None = None) -> str:
+def agent_words(agents: Sequence[FleetAgentStatus]) -> dict[str, str]:
+    """Each listed agent's id → its coding agent in the words ``aisquare accounts`` names it
+    by (``Claude Code``, ``Codex (beta)``: the adapter's label and stage mark, ASCII), padded
+    to the widest, so the columns after it stay aligned. Empty while the rows are of one
+    agent's alone: a fleet of Claude Code's lists as 0.9.2's did (live mixed run, LIVE PASS
+    11884 F3: the rows said ``account 3`` and ``account 4``, and not whose)."""
+    named = {
+        status.agent.id: (
+            staged_label(adapter)
+            if (adapter := recorded_adapter(status.agent.agent)) is not None
+            else status.agent.agent or "?"
+        )
+        for status in agents
+    }
+    if len(set(named.values())) <= 1:
+        return {}
+    widest = max(len(words) for words in named.values())
+    return {agent_id: words.ljust(widest) for agent_id, words in named.items()}
+
+
+def _agent_line(
+    status: FleetAgentStatus, labels: Mapping[int, str] | None = None, words: str = ""
+) -> str:
+    """One ``fleet ls`` row; ``words`` is its agent's (:func:`agent_words`), after its role,
+    in a fleet of more than one agent's."""
     agent = status.agent
     chip = _STATE_CHIP.get(status.state, status.state)
     if status.state == "exited" and agent.exit_status is not None:
@@ -149,8 +174,10 @@ def _agent_line(status: FleetAgentStatus, labels: Mapping[int, str] | None = Non
     # 10); absent when nothing chose and the window ran on its shell's claude.
     on = f"  {slot_label(agent.account_slot, labels)}" if agent.account_slot is not None else ""
     persona = f"  · {agent.persona}" if agent.persona else ""
+    kind = f"{words} " if words else ""
     return (
-        f"  {agent.label:<24} {agent.role:<10} {chip}{where}{on}{persona}{extra}  {agent.pane_id}"
+        f"  {agent.label:<24} {agent.role:<10} {kind}{chip}{where}{on}{persona}{extra}"
+        f"  {agent.pane_id}"
     )
 
 
@@ -197,8 +224,9 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
         console.print(f"  (no agents) — start one: {spawn}", markup=False)
         return
     labels = accounts_service.slot_labels() if any(s.agent.account_slot for s in agents) else {}
+    words = agent_words(agents)
     for status in agents:
-        console.print(_agent_line(status, labels))
+        console.print(_agent_line(status, labels, words.get(status.agent.id, "")))
 
 
 @app.command(

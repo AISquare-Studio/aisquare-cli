@@ -486,6 +486,29 @@ wide as the two and the cell between them: a ``!`` whose tooltip says why and th
 PROBLEM_MARK = "!"
 """What a row with no usage to show reads across its usage cells: why is its tooltip."""
 
+NO_READING_YET = "no reading yet"
+"""What a signed-in account reads across its usage cells while its agent has recorded no
+reading on it yet (:func:`awaits_first_reading`): dim, why on hover. Not the ``!`` of a
+problem: nothing is wrong with the login, and logging in again would not bring a reading
+(the live mixed run, LIVE PASS 11884 F4)."""
+
+
+def awaits_first_reading(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
+    """Whether the row is a signed-in account whose agent has recorded no reading on it yet:
+    an agent whose readings are what its own sessions recorded (``AgentAccounts.network_usage``
+    False, Codex's), whose reader found none, and so said no reading with no cause. Every
+    other problem ``services.claude_accounts.usage_problem`` names has a cause and keeps the
+    ``!``: a login that is missing, incomplete or expired, and a reading that failed. Never
+    Claude Code's: its readings are asked of a server, and one that is not there has a
+    cause."""
+    problem = accounts_service.usage_problem(status, usage)
+    return (
+        problem is not None
+        and problem.cause is None
+        and not core.kind(status.account.agent).network_usage
+    )
+
+
 LOGIN_COLUMN = Column("login", "", 12)
 """*Log in*'s column, beside the usage (or the ``!`` that says why it is there) — or *Log in
 again*, the same flow as a secondary action on a row that reads fine
@@ -720,7 +743,9 @@ def account_cells(
     the operator named it. With no reading to show — no login, a missing, expired or
     rejected token, why the usage cannot be read (``usage_problem``) — the session cell
     is :data:`PROBLEM_MARK` and the week cell empty, never a reason or ``—``: the row shows
-    the mark across both (:data:`PROBLEM_COLUMN`), and :func:`problem_tooltip` says why.
+    the mark across both (:data:`PROBLEM_COLUMN`), and :func:`problem_tooltip` says why. A
+    signed-in account its agent has recorded no reading on yet reads :data:`NO_READING_YET`
+    there instead, dim, with the same tooltip (:func:`awaits_first_reading`).
     ``usage`` is ``None`` while a reading is owed (``…``).
 
     Another agent's row (Codex's) says how old its reading is (:func:`reading_age`): it
@@ -746,7 +771,11 @@ def account_cells(
         # No bars or resets for a login that cannot be read, whatever an older reading said.
         for key in ("session", "week", "session-resets", "week-resets"):
             cells[key] = Text()
-        cells["session"] = Text(PROBLEM_MARK, style="bold yellow")
+        cells["session"] = (
+            Text(NO_READING_YET, style="dim")
+            if awaits_first_reading(status, usage)
+            else Text(PROBLEM_MARK, style="bold yellow")
+        )
     elif not tokened and usage is not None and usage.available:
         # A reading a session recorded, as old as its last turn: said beside its bar, as a
         # kept reading's age is (the full line is the cell's tooltip).

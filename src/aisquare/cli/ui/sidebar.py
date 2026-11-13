@@ -66,8 +66,9 @@ from aisquare.cli.ui.groups import (
 )
 from aisquare.cli.ui.instances_chip import InstancesChip
 from aisquare.cli.ui.terminal import InPlaceField
+from aisquare.cli.ui.views.accounts import agent_mark
 from aisquare.core import codenames
-from aisquare.core.agent_adapters import default_binary
+from aisquare.core.agent_adapters import default_binary, recorded_adapter
 from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
@@ -391,7 +392,11 @@ def persona_badge(status: FleetAgentStatus) -> Text:
 
 
 def agent_row_text(
-    status: FleetAgentStatus, percent: float | None = None, *, width: int | None = None
+    status: FleetAgentStatus,
+    percent: float | None = None,
+    *,
+    width: int | None = None,
+    mark: Text | None = None,
 ) -> Text:
     """``🧭 manager       ⏸ #1·42% · skeptic`` — icon, label, state chip, the account's slot
     and the session use on it, exit status when exited, persona.
@@ -414,6 +419,11 @@ def agent_row_text(
     width holds the icon, two cells of label and the tail; a row narrower than that (under
     16 cells, with ``🔔 #1·100%``) is cut at its end, figure included (review of #267's
     delta, m1).
+
+    ``mark``: the agent's mark (``views.accounts.agent_mark``: ``✻`` for Claude Code, ``>_``
+    for Codex, in its colour, two cells), after the icon, in a fleet of more than one
+    agent's (:attr:`Sidebar.agents_marked`); its cells and a space come off the label's
+    room. ``None`` draws the row as before (live mixed run, LIVE PASS 11884 F3).
     """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
@@ -434,7 +444,12 @@ def agent_row_text(
             tail.append_text(used_percent_text(percent))
     badge = persona_badge(status)
     label = Text(agent.label)
-    room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
+    marked = mark.cell_len + 1 if mark is not None else 0
+    room = (
+        LABEL_WIDTH
+        if width is None
+        else max(2, width - cell_len(icon) - marked - 1 - tail.cell_len)
+    )
     if width is None:
         label.pad_right(LABEL_WIDTH - label.cell_len)
     elif label.cell_len <= room:
@@ -450,6 +465,9 @@ def agent_row_text(
         badge = Text()
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(icon)
+    if mark is not None:
+        text.append_text(mark)
+        text.append(" ")
     text.append_text(label)
     text.append(" ")
     text.append_text(tail)
@@ -1142,7 +1160,7 @@ class AgentRow(Activatable):
         super().__init__(agent_row_text(status), id=f"agent-row-{status.agent.id}")
         self.status = status
         self.selection_key = f"agent:{status.agent.id}"
-        self._painted: tuple[FleetAgentStatus, float | None, int] | None = None
+        self._painted: tuple[FleetAgentStatus, float | None, int, bool] | None = None
         self.prefill = ""
         """What the name field said when it opened: leaving it so is no change."""
         self._field: AgentLabelInput | None = None
@@ -1314,10 +1332,14 @@ class AgentRow(Activatable):
         usage = sidebar.session_usage if sidebar is not None else {}
         percent = usage.get(slot) if slot is not None else None
         width = self.content_size.width
-        wanted = (self.status, percent, width)
+        marked = sidebar is not None and sidebar.agents_marked
+        wanted = (self.status, percent, width, marked)
         if wanted != self._painted:
             self._painted = wanted
-            self.update(agent_row_text(self.status, percent, width=width or None), layout=False)
+            mark = agent_mark(agent_kind(self.status)) if marked else None
+            self.update(
+                agent_row_text(self.status, percent, width=width or None, mark=mark), layout=False
+            )
 
     def on_resize(self) -> None:
         self.paint()
@@ -1367,6 +1389,14 @@ def group_header_text(
             text.append(" · ", style="dim")
         text.append(f"🔔{bells}", style="bold red")
     return text
+
+
+def agent_kind(status: FleetAgentStatus) -> str:
+    """The coding agent a row runs, by its adapter's id: Claude Code's for a record from
+    before adapters (``recorded_adapter``), and the recorded id for one this install does
+    not know."""
+    adapter = recorded_adapter(status.agent.agent)
+    return adapter.id if adapter is not None else status.agent.agent or ""
 
 
 def has_live_agent(
@@ -2034,6 +2064,10 @@ class Sidebar(Vertical):
         self.session_usage: Mapping[int, float] = {}
         """Slot → its window that limits, percent USED, from the last headroom read: the
         ``#N·NN%`` on the agent rows (``HeadroomSummary.limit_by_slot``)."""
+        self.agents_marked = False
+        """Whether the agent rows carry their agent's mark (:func:`agent_row_text`'s ``mark``):
+        exactly while the frame's projects list agents of more than one agent
+        (:func:`agent_kind`). A fleet of Claude Code's alone is drawn as before."""
         self._prev_states: dict[str, str] = {}
         self._anchor_key: str | None = None
         """The last row highlighted: where the arrows go on from while none is. Clearing the
@@ -2144,6 +2178,9 @@ class Sidebar(Vertical):
         notices = notices or {}
         self._frame_rest = (notices, groups, live)
         self._always_show_paths = always_show_paths
+        kinds = {agent_kind(status) for statuses in agents.values() for status in statuses}
+        remark = (len(kinds) > 1) != self.agents_marked
+        self.agents_marked = len(kinds) > 1
         listed = {project.id for project in projects}
         passing = (
             {
@@ -2256,6 +2293,9 @@ class Sidebar(Vertical):
             elif slot < len(holder.children) and holder.children[slot] is not widget:
                 holder.move_child(widget, before=slot)
         self.last_frame = (projects, agents)
+        if remark:  # every row, a card's unchanged ones and the captain's too
+            for row in self.query(AgentRow):
+                row.paint()
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
 

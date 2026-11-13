@@ -371,7 +371,13 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     default. asq's *Doctor* page has a *Sign in account N* button for each added account,
     Claude Code's or Codex's, that is not signed in. It opens that account's sign-in in
     the Accounts page's pane; 0.9.2 showed the same `aisquare accounts run N` hint as text
-    only.
+    only. With Claude Code not installed, asq's *Welcome* step 2 is *Coding agent*, where
+    it was *Claude Code*: it says *No coding agent is installed. Install Claude Code or
+    Codex (beta) in a terminal:*, where it said *Claude Code is not installed. Install it
+    in a terminal:*, lists Codex's install commands after Claude Code's, and adds that
+    with more than one installed it asks which the fleet uses; step 3, *Fleet*, waits for
+    *a coding agent installed (step 2)*, where it said *Claude Code installed (step 2)*.
+    With Claude Code installed, step 2 reads as it did.
   - On a machine with Codex accounts, the project's default agent
     (`aisquare agents use … --project`) decides only where nothing named does: a role
     bound to an account, and a launch's own `--account`, run that account's agent from any

@@ -169,27 +169,38 @@ def test_the_picker_lists_codex_slots_and_reads_a_binds_codex_home(
 
 def test_the_picker_draws_each_agents_mark_in_the_marks_colour(project: ProjectInfo) -> None:
     """R16-C: where the picker lists both agents' accounts, each account row's mark is drawn in
-    its agent's colour (``AgentAdapter.mark``) and nothing else of the row is styled. A list
-    of Claude Code's accounts alone draws its rows from their text, as 0.9.2 did
-    (``tests/test_ui_personas.py``: ``1 · me@example.com · max``)."""
+    its agent's colour (``AgentAdapter.mark``) and nothing else of the row is styled. The row
+    under the highlight draws it in the bar's own colours, as the rest of the row: on the bar
+    a mark read at 1.1:1 to 2.6:1, Codex's blue one lost in textual-dark's blue bar. The row the
+    highlight leaves has its colour back. A list of Claude Code's accounts alone draws its rows
+    from their text, as 0.9.2 did (``tests/test_ui_personas.py``: ``1 · me@example.com · max``)."""
 
-    async def scenario(pilot: Pilot[None], host: Host) -> dict[str, list[tuple[str, str]]]:
-        listing = host.screen.query_one("#picker-list", OptionList)
+    def styled(listing: OptionList) -> dict[str, list[tuple[str, str]]]:
         options = [listing.get_option_at_index(i) for i in range(listing.option_count)]
-        styled: dict[str, list[tuple[str, str]]] = {}
+        drawn: dict[str, list[tuple[str, str]]] = {}
         for option in options:
             if (option.id or "").startswith("account:"):
                 prompt = option.prompt
                 assert isinstance(prompt, Text), prompt
-                styled[option.id or ""] = [
+                drawn[option.id or ""] = [
                     (prompt.plain[span.start : span.end], str(span.style)) for span in prompt.spans
                 ]
-        return styled
+        return drawn
 
-    assert drive(project, scenario) == {
-        "account:2": [("✻", "#D15C36")],
-        "account:5": [(">_", "#317BF6")],
-    }
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        listing = host.screen.query_one("#picker-list", OptionList)
+        first = listing.highlighted_option
+        seen: list[Any] = [first.id if first else None, styled(listing)]
+        listing.highlighted = listing.get_option_index("account:5")
+        await pilot.pause()
+        await settle_page(host)
+        return [*seen, styled(listing), str(listing.get_option("account:5").prompt).strip()]
+
+    first, at_rest, moved, plain = drive(project, scenario)
+    assert first == "account:2"
+    assert at_rest == {"account:2": [], "account:5": [(">_", "#317BF6")]}
+    assert moved == {"account:2": [("✻", "#D15C36")], "account:5": []}
+    assert plain == "5 · >_ Codex · slot5@example.com · plan unknown"
 
 
 def test_a_new_bind_on_a_codex_slot_carries_codex_home_and_its_agent(

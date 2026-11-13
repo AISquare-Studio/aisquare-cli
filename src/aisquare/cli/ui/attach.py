@@ -341,6 +341,11 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         self._arming: Arming[str] = Arming(self, self._armed_row)
         self._prompts: dict[str, str] = {}
         """Each row's text as :meth:`paint` drew it, to give an armed row back."""
+        self._marked: dict[str, Text] = {}
+        """Each account row :meth:`paint` drew with its agent's mark (:meth:`marked_rows`)."""
+        self._plain_row: str | None = None
+        """The marked row under the highlight, drawn in the bar's own colours
+        (:meth:`_mark_under_highlight`)."""
         self.attach_intent: Intent = intent
         self._accounts = accounts
         self.targets = Targets()
@@ -451,7 +456,8 @@ class AttachTargetScreen(ModalScreen[Target | None]):
     def paint(self) -> None:
         self._arming.disarm()  # the rows are drawn again
         query = self.query_one("#picker-filter", Input).value.strip().lower()
-        marked = self.marked_rows()
+        marked = self._marked = self.marked_rows()
+        self._plain_row = None
         options: list[Option] = []
         for section in SECTION_ORDER[self.attach_intent]:
             options.append(
@@ -480,6 +486,8 @@ class AttachTargetScreen(ModalScreen[Target | None]):
             listing.highlighted = ids.index(self._wanted)
         elif enabled:
             listing.highlighted = enabled[0]
+        if listing.highlighted is not None:
+            self._mark_under_highlight(ids[listing.highlighted])
 
     @on(Input.Changed, "#picker-filter")
     def _filtered(self) -> None:
@@ -578,6 +586,24 @@ class AttachTargetScreen(ModalScreen[Target | None]):
     def _moved(self, event: OptionList.OptionHighlighted) -> None:
         if event.option.id != self._arming.armed:
             self._arming.disarm()
+        self._mark_under_highlight(event.option.id)
+
+    def _mark_under_highlight(self, now: str | None) -> None:
+        """Draw the highlighted row's mark in the bar's own colours, as the rest of the row is,
+        and give the row the highlight left its mark's colour back. On the bar a mark in its
+        agent's colour read at 1.1:1 to 2.6:1 on every theme, and Codex's blue one vanished
+        into textual-dark's blue bar. Only rows of :meth:`marked_rows`: a list of one agent's
+        accounts draws none, and its rows stay as 0.9.2 drew them."""
+        was, self._plain_row = self._plain_row, now if now in self._marked else None
+        if was == self._plain_row:
+            return
+        listing = self.query_one("#picker-list", OptionList)
+        if was is not None:
+            with suppress(OptionDoesNotExist):  # drawn again since
+                listing.replace_option_prompt(was, Text("  ") + self._marked[was])
+        if self._plain_row is not None:
+            plain = Text("  " + self._marked[self._plain_row].plain)
+            listing.replace_option_prompt(self._plain_row, plain)
 
     def on_descendant_blur(self, event: events.DescendantBlur) -> None:
         if event.widget.id == "picker-list":

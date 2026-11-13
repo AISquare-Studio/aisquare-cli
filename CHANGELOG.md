@@ -215,7 +215,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   wins). App settings' default agent and a role's agent there are the same settings as
   `agents use` and `team bind --agent`. `AISQUARE_CODING_AGENT=<agent>` (`claude-code` or
   `codex`) does the same for the launches made from the shell it is set in, above your own
-  `agents use`. In full, the first of these names the agent:
+  `agents use`. While it is set, a role on a program no agent's name claims is refused
+  until it is bound to its agent: the refusal gives the line, `aisquare team bind <role>
+  --agent claude-code --bin claude2` for a Claude wrapper. In full, the first of these
+  names the agent:
   - a launch's `--agent`;
   - the role's binding (`team bind --agent`);
   - a program that is an agent's own (`--bin`, `AISQUARE_BIN_<ROLE>`, `AISQUARE_AGENT_BIN`
@@ -229,6 +232,14 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   - `AISQUARE_CODING_AGENT`;
   - your default (`agents use`);
   - Claude Code.
+
+  A program no agent's name claims (`--bin claude2`, `AISQUARE_BIN_<ROLE>`,
+  `AISQUARE_AGENT_BIN` or a binding's `--bin`) runs as Claude Code's wrapper, as on 0.9.2,
+  where nothing names an agent or your default is Claude Code. Such a launch is refused,
+  with that same line to paste (`--agent codex` for a Codex wrapper), in three cases:
+  - while `AISQUARE_CODING_AGENT` is set;
+  - when your default is another agent;
+  - when the project has a default agent, except for a binding's `--bin`.
 
   The captain (experimental) passes its MCP server to Claude Code inline
   (`--mcp-config '<json>'`), so `~/.aisquare/captain/mcp.json` is no longer written and
@@ -360,7 +371,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     (`aisquare agents use … --project`) decides only where nothing named does: a role
     bound to an account, and a launch's own `--account`, run that account's agent from any
     folder, and a role bound to a program no agent's name claims (`--bin claude2`) runs it
-    as the default agent's wrapper, as 0.9.2 did, from any folder.
+    as the default agent's wrapper, as 0.9.2 did, from any folder. That holds unless
+    `AISQUARE_CODING_AGENT` is set or your own default is another agent; then the role is
+    refused until it is bound to its agent (`team bind <role> --agent claude-code --bin
+    claude2`).
 <!-- R2 delta run (SMOKE14 items 2-5, 9 with the owner's sign-ins): its lines, if any. -->
 
 ### Fixed
@@ -398,7 +412,8 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   spawn's options, and a restart sets it again. `--command BIN` (`-c BIN`) runs BIN as the
   role's agent, as 0.9.2 did: a wrapper such as `claude-work` keeps the agent's session
   and its board join, so a restart resumes the conversation; `--bin BIN` still reads the
-  agent from BIN. An agent 0.9.2 spawned with `-a N` or `--command BIN` keeps them too:
+  agent from BIN. A BIN no agent's name claims runs as Claude Code's, under the wrapper
+  rule above. An agent 0.9.2 spawned with `-a N` or `--command BIN` keeps them too:
   its `fleet restart`, `fleet switch` (to the account it names) and fork run that account
   and binary, as 0.9.2's own restart did, and its row names them. 0.9.2 kept `-c BIN` as
   `BIN` alone, so such an agent restarts on the default binary with `BIN` among its

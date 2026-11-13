@@ -75,9 +75,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - **Which agent is which.** With accounts of more than one agent, as the Accounts page
   marks its rows, asq's Agent view header and Manager tab name the agent after its
   account and use (`codex-1 · 42%  codex`), and `team harness` says each role's after
-  its model (`agent=codex [role]`); *Adopt a conversation…* names each conversation's
-  agent when it lists two agents', as `fleet adopt --list` does; and asq's *New bind* form
-  has an *Agent* field, as `team bind --agent` does, also on a binding that runs Codex.
+  its model (`agent=codex [role]`); the account picker (Spawn's *Pick…*) names each
+  account's agent after its number, the agent's mark first (`5 · >_ Codex · …`);
+  *Adopt a conversation…* names each conversation's agent when it lists two agents', as
+  `fleet adopt --list` does; and asq's *New bind* form has an *Agent* field, as
+  `team bind --agent` does, also on a binding that runs Codex.
   Otherwise these read as in 0.9.2.
 - **Accounts.** `aisquare accounts add --agent codex` adds a slot and signs it in with a
   device code (`codex login --device-auth`): Codex prints a link and a one-time code, and
@@ -139,12 +141,14 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - **One priority order over every agent's accounts.** The Accounts page is one table, and
   ↑/↓ (`accounts order`, `accounts move`) rank any account above any other. With one
   agent's accounts, Claude Code's alone, there is no mark and the names keep the 12 cells
-  0.9.2's have. With both agents the name has 9 cells, not 12: each row names its agent in
-  two letters (`Cl`, `Co`), and a longer name ends in `…`, whole in its tooltip. The
-  machine default is rank 1 of the order, and `accounts default <slot>` moves an account
-  there. A default flag your registry still carries is folded into the order once, and
-  cleared. A launch nothing pins runs the agent of the first usable account with room;
-  *App settings ▸ Advanced* names the *fallback coding agent* for when none has.
+  0.9.2's have. With both agents the name has 9 cells, not 12: each row starts with its
+  agent's mark, the one that agent's own screen shows, in a colour of its own: `✻` in
+  orange for Claude Code, `>_` in blue for Codex. They differ by shape under `NO_COLOR`
+  too, and hovering a mark names its agent. A longer name ends in `…`, whole in its
+  tooltip. The machine default is rank 1 of the order, and `accounts default <slot>` moves
+  an account there. A default flag your registry still carries is folded into the order
+  once, and cleared. A launch nothing pins runs the agent of the first usable account with
+  room; *App settings ▸ Advanced* names the *fallback coding agent* for when none has.
 - **An argument holding a byte that is not UTF-8 is refused** by every command before
   anything runs (exit 2, `{"error": "usage"}` under `--json`), where it used to end in a
   traceback. What follows the `--` of `launch`, `fleet spawn`, `accounts run`, `exec` and

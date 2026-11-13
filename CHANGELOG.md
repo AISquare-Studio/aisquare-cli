@@ -334,10 +334,7 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     and *the agent's rewind*. `persona import --engine manager` names its run `<binary>
     (Claude Code headless, …)`, where it said `<binary> -p`, and says *Claude Code gave no
     JSON answer*, where it said *the answer was not JSON*. The sidebar's and info line's
-    `#slot·%` is the window that limits: the week's when it is fuller. So is the usage on
-    an account's row in the account picker (Spawn's *Pick…*): it names that window,
-    `2 · me@example.com · max · week 90%` when the week is fuller, where it always said
-    `session 12%`.
+    `#slot·%` is the window that limits: the week's when it is fuller.
   - `agents list`, `scan` and `status` gain an *INTEGRATION* column: how far the agent's
     hooks are set up here. Claude Code's reads *configured* or *not configured*, or
     *unreadable* where its settings file cannot be read, with the reason on a line under

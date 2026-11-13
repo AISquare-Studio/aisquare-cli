@@ -581,6 +581,11 @@ def usage_(
         label = Text(status.label)  # `describe` put it there, as `_emit_overview` reads it
         if status.account.disabled:
             label.append(" (disabled)", style="dim")
+        if not core.kind(status.account.agent).legacy_slots:
+            # Another agent's row than Claude Code's says whose it is (Codex's "· codex"), read
+            # or not: before its first session a Codex row, signed in as a Claude account's
+            # email, read as a third Claude account (live F2 of R16-D, seq 11884).
+            label.append(f" · {get_adapter(status.account.agent).binary}", style="dim")
         labels.append(label)
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
     _add_slot_column(table, [status.account for status in statuses])
@@ -599,16 +604,12 @@ def usage_(
         windows = _windows_cell(status.usage)
         slots = core.kind(status.account.agent)
         if status.usage and status.usage.available:
-            # A reading its sessions recorded says how old it is; another agent's row than
-            # Claude Code's says whose it is (Codex's "· codex").
+            # A reading its sessions recorded says how old it is.
             age = "" if slots.network_usage else _usage_age(status.usage)
             if windows is None:
                 week += age
             else:
                 windows += age
-            if not slots.legacy_slots:
-                binary = get_adapter(status.account.agent).binary
-                label = Text.assemble(label, (f" · {binary}", "dim"))
         row: list[Text | str] = [
             core.ref_among(status.account, [each.account for each in statuses]),
             label,

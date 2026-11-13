@@ -16934,7 +16934,9 @@ def _resume_prompt(agent: FleetAgent, reason: str | None, *, automatic: bool = T
     ``claude --resume`` opens the old conversation at an idle prompt and waits
     for input; without a line the "moved" agent never continued (review of
     #205, finding 5). One line on purpose: :func:`_type_prompt` types a
-    single-line prompt past its timeout and refuses a multi-line one.
+    single-line prompt past its timeout and refuses a multi-line one. The account is named
+    as the agent's own (``agent_noun``): ``another Claude account`` as it always read, and a
+    Codex agent moved between its accounts reads ``another Codex account`` (R16-F).
     """
     if reason == claude_accounts_core.BEFORE_LIMIT_REASON:
         why = "before its usage limit"
@@ -16942,8 +16944,9 @@ def _resume_prompt(agent: FleetAgent, reason: str | None, *, automatic: bool = T
         why = f"after {reason or 'a usage limit'}"
     else:  # a manual switch with no reason given was the operator's move, not a limit's
         why = "by its operator's `fleet switch`"
+    noun = claude_accounts_core.agent_noun(agent.agent)
     return (
-        f"You are {agent.label}, moved to another Claude account {why} and resumed "
+        f"You are {agent.label}, moved to another {noun} account {why} and resumed "
         "mid-task: re-read `aisquare board` and `git status`, then continue exactly where "
         "you left off without redoing work that is already committed."
     )

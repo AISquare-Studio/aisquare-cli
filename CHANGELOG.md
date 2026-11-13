@@ -82,7 +82,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   (`5 · >_ Codex · …`); *Adopt a conversation…* names each conversation's agent when it
   lists two agents', as `fleet adopt --list` does; and asq's *New bind* form has an
   *Agent* field, as `team bind --agent` does, also on a binding that runs Codex.
-  Otherwise these read as in 0.9.2.
+  `aisquare accounts usage` names a Codex account's agent after its name (`account 4 ·
+  codex`, `plain codex · codex`), before its first session as well as after. The Manager
+  tab tells a Codex manager to type to it "as you would to any Codex session". An agent
+  resumed after `fleet switch` or the hand-over is told it moved to "another Codex
+  account". Otherwise these read as in 0.9.2.
 - **Accounts.** `aisquare accounts add --agent codex` adds a slot and signs it in with a
   device code (`codex login --device-auth`): Codex prints a link and a one-time code, and
   you open the link on any device, phone included, and enter the code. Nothing waits for a

@@ -182,6 +182,19 @@ def agent_label(agent: str) -> str:
         return agent
 
 
+def agent_noun(agent: str | None) -> str:
+    """``Claude`` / ``Codex``: what prose calls ``agent``'s accounts and sessions, its accounts'
+    ``noun``, else the adapter's label (an agent with no account slots). A row that names no
+    agent ran the default one; an id this build does not know is named as it is."""
+    from aisquare.core.agent_adapters import default_adapter, get_adapter
+
+    try:
+        adapter = get_adapter(agent) if agent else default_adapter()
+    except ValueError:
+        return str(agent)
+    return adapter.accounts.noun if adapter.accounts is not None else adapter.label
+
+
 # --- where things are -------------------------------------------------------------
 
 

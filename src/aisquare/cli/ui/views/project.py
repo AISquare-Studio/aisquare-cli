@@ -43,6 +43,7 @@ from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, key_spellings, sho
 from aisquare.cli.ui.views.fleet_bulk import BulkAsked
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -51,9 +52,20 @@ from aisquare.services import project as project_service
 SPAWN_WORKER = "spawn-manager"
 """Name of the worker that starts the manager; how its result is told apart."""
 
-MANAGER_HINT = "type to the manager as you would to any Claude session · F12 returns to the sidebar"
-"""The dim line under the manager's info line: how to use the tab. The tmux attach command is
-not here: it is the project's, and the Settings tab shows it."""
+MANAGER_HINT = (
+    "type to the manager as you would to any {agent} session · F12 returns to the sidebar"
+)
+"""The dim line under the manager's info line: how to use the tab, ``{agent}`` the manager's own
+agent as prose calls it (:func:`manager_hint`). The tmux attach command is not here: it is the
+project's, and the Settings tab shows it."""
+
+
+def manager_hint(agent: str | None) -> str:
+    """:data:`MANAGER_HINT` for a manager running ``agent``, named as prose names it
+    (``core.claude_accounts.agent_noun``): ``Claude``, so a Claude Code manager's line reads as
+    it always did, or ``Codex`` (live F1 of R16-D, seq 11884: a Codex manager was told to type
+    "as you would to any Claude session")."""
+    return MANAGER_HINT.format(agent=accounts_core.agent_noun(agent))
 
 
 def no_manager_text(
@@ -222,7 +234,7 @@ class ManagerTab(Vertical):
         strip = TeamStrip(id="team-strip")
         strip.display = False
         yield strip
-        hint = Static(Text(MANAGER_HINT, style="dim"), id="manager-hint")
+        hint = Static(Text(manager_hint(None), style="dim"), id="manager-hint")
         hint.display = False
         yield hint
         yield Button("Start manager", id="start-manager", variant="primary")
@@ -315,7 +327,10 @@ class ManagerTab(Vertical):
         button = self.query_one("#start-manager", Button)
         pane = self.query_one("#manager-pane", TerminalPane)
         header.set_class(status is not None, "-info")
-        self.query_one("#manager-hint", Static).display = status is not None
+        hint = self.query_one("#manager-hint", Static)
+        hint.display = status is not None
+        if status is not None:
+            hint.update(Text(manager_hint(status.agent.agent), style="dim"))
         resume = self.query_one("#resume-manager", Button)
         paused = status is None and exited is not None and exited.state == "paused"
         resume.display = paused

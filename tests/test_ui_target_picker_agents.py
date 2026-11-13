@@ -262,7 +262,8 @@ def test_new_binds_extra_args_example_is_the_agents_own_model_flag(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """r20 of #113, N1's sibling: the New bind's Extra args read ``--model opus``, a Claude
-    Code model, with Codex picked. It is the bind's agent's own ``model_args``.
+    Code model, with Codex picked. Codex's is its own ``model_args``; Claude Code's is 0.9.2's
+    bare ``--model opus`` (its ``args_example``, C1 reopen, seq 11753).
 
     Both agents spell the flag ``--model``, so their examples read alike: the wait for
     Codex's held before the pick was handled, and the test ended with the form half mounted
@@ -270,7 +271,7 @@ def test_new_binds_extra_args_example_is_the_agents_own_model_flag(
     once the form has followed the pick."""
     codex = get_adapter("codex")
     monkeypatch.setattr(codex, "model_args", lambda model, effort: ["-m", model] if model else [])
-    assert args_hint("codex") != args_hint("claude-code")
+    assert args_hint("codex", bare=True) != args_hint("claude-code", bare=True)
 
     async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
         await pilot.click("#picker-new-bind")
@@ -278,13 +279,12 @@ def test_new_binds_extra_args_example_is_the_agents_own_model_flag(
         field = form.query_one("#bind-args", Input)
         seen = [str(field.placeholder)]
         form.query_one("#bind-agent", Select).value = "codex"
-        wanted = args_hint("codex")
+        wanted = args_hint("codex", bare=True)
         await until(pilot, lambda: field.placeholder == wanted, what="codex's example")
         return [*seen, str(field.placeholder)]
 
     shown = drive(project, scenario)
-    assert shown == [args_hint("claude-code"), args_hint("codex")]
-    assert all("opus" not in hint for hint in shown), shown
+    assert shown == ["--model opus", "e.g. -m MODEL"]  # 0.9.2's, then Codex's own
 
 
 class BindHost(App[None]):

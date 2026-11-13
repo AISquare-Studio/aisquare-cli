@@ -572,12 +572,20 @@ class AttachTargetScreen(ModalScreen[Target | None]):
             self.dismiss(None)
 
 
-def args_hint(agent: str) -> str:
-    """An Extra args field's example (the Spawn dialog's, the New bind's): the agent's own
-    model flag (``model_args``), so Codex is never shown Claude Code's ``--model opus``
-    (SMOKE9 N1 and r20 of #113)."""
+def args_hint(agent: str, *, bare: bool = False) -> str:
+    """An Extra args field's example (the Spawn dialog's, the New bind's), never another
+    agent's: Codex is not shown Claude Code's ``--model opus`` (SMOKE9 N1 and r20 of #113).
+
+    An agent that declares its own (``args_example``: Claude Code's ``--model opus``) is
+    shown it as 0.9.2 showed it, after ``e.g.`` in the Spawn dialog and ``bare`` in the New
+    bind form (C1 reopen, seq 11753); any other, its model flag over ``MODEL``
+    (``model_args``)."""
     try:
-        return "e.g. " + " ".join(get_adapter(agent).model_args("MODEL", None))
+        adapter = get_adapter(agent)
+        example = getattr(adapter, "args_example", None)
+        if isinstance(example, str) and example:
+            return example if bare else f"e.g. {example}"
+        return "e.g. " + " ".join(adapter.model_args("MODEL", None))
     except Exception:  # an agent this install does not know, or one that refuses the name
         return ""
 
@@ -663,7 +671,7 @@ class NewBindScreen(ModalScreen[str | None]):
                 yield Label("Extra args")
                 yield Input(
                     shlex.join(bound.args),
-                    placeholder=args_hint(self._agent_start),
+                    placeholder=args_hint(self._agent_start, bare=True),
                     id="bind-args",
                 )
             yield Static(id="bind-rule", classes="picker-note")
@@ -725,12 +733,12 @@ class NewBindScreen(ModalScreen[str | None]):
             self._binary_shown = get_adapter(picked).binary
             binary.value = self._binary_shown
         self._offer_accounts()
-        self.query_one("#bind-args", Input).placeholder = args_hint(self.bind_agent())
+        self.query_one("#bind-args", Input).placeholder = args_hint(self.bind_agent(), bare=True)
 
     @on(Input.Changed, "#bind-binary")
     def _binary_changed(self) -> None:
         self._offer_accounts()
-        self.query_one("#bind-args", Input).placeholder = args_hint(self.bind_agent())
+        self.query_one("#bind-args", Input).placeholder = args_hint(self.bind_agent(), bare=True)
 
     def _offer_accounts(self) -> None:
         select = self.query_one("#bind-account", Select)

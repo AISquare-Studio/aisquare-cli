@@ -2386,7 +2386,8 @@ def test_the_extra_args_example_is_the_picked_agents_own_model_flag(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
     """SMOKE9 N1 of #113: the example read ``e.g. --model opus``, a Claude Code model, with
-    Codex picked. It is the picked agent's own ``model_args``, naming no agent's model."""
+    Codex picked. Codex's is its own ``model_args`` over ``MODEL``; Claude Code's is 0.9.2's
+    ``e.g. --model opus`` (its ``args_example``, C1 reopen, seq 11753)."""
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
         field = dialog.query_one("#spawn-args", Input)
@@ -2396,8 +2397,8 @@ def test_the_extra_args_example_is_the_picked_agents_own_model_flag(
         return [*seen, str(field.placeholder)]
 
     shown = drive(git_project, scenario)
-    assert shown == [args_hint("claude-code"), args_hint("codex")]
-    assert all("opus" not in hint and hint.startswith("e.g. --model") for hint in shown), shown
+    assert shown == ["e.g. --model opus", args_hint("codex")]  # 0.9.2's, then Codex's own
+    assert "opus" not in shown[1] and shown[1].startswith("e.g. --model"), shown
 
 
 def test_the_roles_own_agent_is_named_and_followed_and_sent_as_none(

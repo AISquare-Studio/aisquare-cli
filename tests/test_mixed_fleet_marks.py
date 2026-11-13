@@ -148,11 +148,11 @@ def test_the_sidebar_marks_its_rows_only_while_the_fleet_mixes_agents(tmp_path: 
                 app.sidebar.show_projects([project], {project.id: frame})
                 await settle_page(app)
                 ids = {status.agent.id for status in frame}
-                await settle_until_held(
-                    app,
-                    lambda ids=ids: {row.status.agent.id for row in app.query(AgentRow)} >= ids,
-                    what="the frame's rows",
-                )
+
+                def mounted(ids: set[str] = ids) -> bool:
+                    return {row.status.agent.id for row in app.query(AgentRow)} >= ids
+
+                await settle_until_held(app, mounted, what="the frame's rows")
                 seen.append(
                     {
                         row.status.agent.label: str(row.render())

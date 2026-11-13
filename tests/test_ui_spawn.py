@@ -1526,9 +1526,18 @@ def test_a_spawn_whose_next_read_finds_the_store_unreadable_says_its_row_comes_n
         shown_before = app.content.current
         await _submit_spawn(pilot, app)
         await settle_workers(app)
-        for _ in range(3):
-            await pilot.pause()
+        # Each a fact the test waits for, bounded, as its siblings do (#75, #107): three
+        # pauses were not always enough on windows-latest for the read after the spawn
+        # (CI 43342268313, attempt 1, windows-py3.12 shard 1/10, store_error None).
+        await settle_until(app, lambda: app.store_error is not None, timeout=10)
         assert app.store_error is not None, "the premise: the read after it found no store"
+        # Then the select that waited for that read has said something of the agent: the
+        # right notice, or the "no longer listed" the bug said.
+        await settle_until(
+            app,
+            lambda: any("coder-1-2" in t or "no longer listed" in t for t, _ in app.notices),
+            timeout=10,
+        )
         return [shown_before, app.content.current, app.notices]
 
     shown_before, current, notices = drive_app(scenario)

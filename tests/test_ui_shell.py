@@ -3832,7 +3832,12 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
 def test_x_on_the_selected_agent_row_opens_the_same_stop_dialog(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The key is the SIDEBAR's: the rows are non-focusable Statics by design."""
+    """The key is the SIDEBAR's: the rows are non-focusable Statics by design.
+
+    Each step waits for its effect, as this test's siblings do since af4af582 (#75): the
+    row selected, then the dialog up. A pause after ``x`` was not always enough on
+    windows-latest, where a pushed screen's update timer can fire late: nightly 43333178602
+    (windows-py3.12, shard 4/10) read the shell's own screen, ``('PaneScreen', None)``."""
     seed(tmp_path, ("prj_a", "alpha", None))
     live = status("prj_a", "coder-auth", "coder", "working")
     script["prj_a"] = [live]
@@ -3841,11 +3846,12 @@ def test_x_on_the_selected_agent_row_opens_the_same_stop_dialog(
     async def go(pilot: Pilot[None]) -> tuple[str, str | None]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_coder-auth"))
-        await pilot.pause()
+        await settle_until(app, lambda: app.sidebar.selected_key == "agent:agt_a_coder-auth")
+        assert app.sidebar.selected_key == "agent:agt_a_coder-auth", app.sidebar.selected_key
         app.sidebar.focus()
         await pilot.pause()
         await pilot.press("x")
-        await pilot.pause()
+        await settle_until(app, lambda: isinstance(app.screen, StopAgentScreen), timeout=10)
         screen = app.screen
         label = screen.label if isinstance(screen, StopAgentScreen) else None
         return type(screen).__name__, label

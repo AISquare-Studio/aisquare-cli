@@ -178,9 +178,10 @@ class ClaudeCodeAdapter:
     id = "claude-code"
     label = "Claude Code"
     release_stage: ReleaseStage = "stable"
-    #: ✻, the glyph of its own welcome banner and spinner, in its orange: #D97757 itself reads
-    #: at 2.4:1 on textual-light, so the nearest of its hue that reads at 3:1 on every theme.
-    mark: AgentMark | None = AgentMark("✻", "#D15C36")
+    #: ✻, the glyph of its own welcome banner and spinner, in its orange (#D97757's hue): on a
+    #: dark theme lighter, on a light theme darker, the nearest of that hue that reads at 3:1
+    #: or more on every surface it is drawn on (``types.AgentMark``).
+    mark: AgentMark | None = AgentMark("✻", on_dark="#DF8B70", on_light="#AA4726")
     binary = "claude"
     home_env = "CLAUDE_CONFIG_DIR"
     home_name = ".claude"

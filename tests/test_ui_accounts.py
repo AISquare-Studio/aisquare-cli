@@ -3774,8 +3774,8 @@ def test_an_agents_mark_is_its_adapters_own_in_its_colour() -> None:
     letters (``tests/test_ui_agent_marks.py``)."""
     marks = accounts_view.agent_marks()
     assert {agent: (mark.plain, str(mark.style)) for agent, mark in marks.items()} == {
-        "claude-code": ("✻ ", "#D15C36"),
-        "codex": (">_", "#317BF6"),
+        "claude-code": ("✻ ", "#DF8B70"),  # textual-dark's, the default theme
+        "codex": (">_", "#6BA1F8"),
     }
 
 
@@ -3836,7 +3836,7 @@ def test_both_agents_marks_keep_every_name_in_one_column(
     assert names[1].x == marks[1].right + 1  # the mark, its space, the name
     # Textual paints every text at its theme's text alpha (87%), so the ink is each colour a
     # little toward the background: the one nearer to it of the two agents', and no grey.
-    colours = {"✻": Color.parse("#D15C36"), ">_": Color.parse("#317BF6")}
+    colours = {"✻": Color.parse("#DF8B70"), ">_": Color.parse("#6BA1F8")}  # textual-dark's
     for slot, glyph in ((1, "✻"), (4, ">_")):
         drawn = out["drawn"][slot]
         assert "".join(segment.text for segment in drawn).rstrip() == glyph, drawn

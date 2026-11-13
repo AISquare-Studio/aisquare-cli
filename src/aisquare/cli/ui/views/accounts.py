@@ -527,7 +527,7 @@ scrolling sideways — and the plan last; then the arranging buttons (:data:`_AC
 At 160 columns the whole line fits, the arranging buttons too (see :data:`COLUMNS`)."""
 
 
-def agent_marks() -> dict[str, Text]:
+def agent_marks(dark: bool = True) -> dict[str, Text]:
     """Each agent with account slots by its mark: the first word of the name's column, shown
     only while the table lists the accounts of more than one agent (:func:`marks_shown`).
 
@@ -538,13 +538,14 @@ def agent_marks() -> dict[str, Text]:
     at least, that no other agent's label starts with (``Fa`` for a Fake Agent), dim. Each is
     padded with spaces to the widest's cells, by Rich's ``cell_len`` (``✻`` is one, ``>_``
     two), so the names after the marks start in one column. The full label is the mark's
-    tooltip."""
+    tooltip. ``dark``: the theme's darkness, which of the mark's two colours it takes
+    (``AgentMark.colour``)."""
     labels = {agent: core.agent_label(agent) for agent in core.account_agents()}
     marks: dict[str, Text] = {}
     for agent, label in labels.items():
         own = mark_of(agent)
         if own is not None:
-            marks[agent] = Text(own.glyph, style=own.colour)
+            marks[agent] = Text(own.glyph, style=own.colour(dark))
             continue
         others = [other.lower() for each, other in labels.items() if each != agent]
         size = 2
@@ -557,10 +558,11 @@ def agent_marks() -> dict[str, Text]:
     return marks
 
 
-def agent_mark(agent: str) -> Text:
-    """``agent``'s mark as :func:`agent_marks` pads it; an agent no adapter has (an account of
-    a later release's) by the first two characters of its id, dim, padded alike."""
-    marks = agent_marks()
+def agent_mark(agent: str, dark: bool = True) -> Text:
+    """``agent``'s mark as :func:`agent_marks` pads it, in its colour for a theme of that
+    darkness; an agent no adapter has (an account of a later release's) by the first two
+    characters of its id, dim, padded alike."""
+    marks = agent_marks(dark)
     if agent in marks:
         return marks[agent]
     mark = Text(agent[:2], style="dim")
@@ -734,6 +736,7 @@ def account_cells(
     usage: ClaudeUsage | None,
     *,
     now: datetime | None = None,
+    dark: bool = True,
 ) -> dict[str, Text]:
     """One slot's cells, keyed like :data:`COLUMNS`: ``2``, ``work``, ``me@…``,
     ``▮▯▯▯▯ 12%``, ``▮▮▯▯▯ 40%``, ``in 3h 10m``, ``in 6d 12h``, ``max 5x`` (each reset's clock
@@ -757,7 +760,7 @@ def account_cells(
     tokened = core.kind(account.agent).network_usage
     cells = {column.key: Text() for column in COLUMNS}
     cells["slot"] = Text(str(account.slot), style="bold", justify="right")
-    cells["agent"] = agent_mark(account.agent)
+    cells["agent"] = agent_mark(account.agent, dark)  # the theme's darkness picks its colour
     cells["name"] = Text(status.label, style="dim cyan" if account.disabled else "cyan")
     if status.identity is not None:
         cells["email"] = Text(status.identity.email)
@@ -1231,6 +1234,9 @@ class AccountRow(Vertical, can_focus=True):
             # here, since Textual's CSS parser refuses ``line-pad: 0``.
             button.styles.line_pad = 0
         self._paint()
+        # The mark's colour is the theme's darkness's (``AgentMark.colour``): drawn again
+        # when the theme changes, as a person browses themes with the picker open.
+        self.app.theme_changed_signal.subscribe(self, lambda _theme: self._paint())
 
     def action_rename(self) -> None:
         self.post_message(self.RenameRequested(self.key))
@@ -1348,7 +1354,7 @@ class AccountRow(Vertical, can_focus=True):
 
     def _paint(self) -> None:
         account = self.status.account
-        cells = account_cells(self.status, self.usage)
+        cells = account_cells(self.status, self.usage, dark=self.app.current_theme.dark)
         self.cell("agent").display = self.marked and not self.renaming  # the field covers it
         self._repaint_when_the_wait_ends()
         for column in COLUMNS:

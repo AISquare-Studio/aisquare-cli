@@ -11,13 +11,14 @@ mark of its header, in blue. Shared code spells neither (``tests/test_no_agent_l
 
 Pinned here: the marks and their colours, that every glyph is one cell wide wherever it is
 drawn (no East-Asian-ambiguous or wide character, by Rich's ``cell_len`` too), that each
-colour reads on every Textual theme with a background of its own, the padding that keeps the
+mark's dark and light colours are one hue, the padding that keeps the
 names after the marks in one column, and the account picker's rows. The Accounts page itself,
 NO_COLOR and a Claude-only machine's unchanged screens are pinned in ``tests/test_ui_accounts.py``.
 """
 
 from __future__ import annotations
 
+import colorsys
 import unicodedata
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -26,9 +27,14 @@ from typing import Any, cast
 import pytest
 from rich.cells import cell_len
 from textual.color import Color
-from textual.theme import BUILTIN_THEMES
 
-from aisquare.cli.ui.attach import AttachTargetScreen, Targets, account_prompt, account_text
+from aisquare.cli.ui.attach import (
+    AttachTargetScreen,
+    Targets,
+    account_prompt,
+    account_text,
+    accounts_title,
+)
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import adapters, register, unregister
@@ -38,14 +44,6 @@ from tests.fake_agent import FakeAgentAdapter
 
 MARKED: tuple[AgentAdapter, ...] = tuple(adapter for adapter in adapters() if adapter.mark)
 
-#: Every built-in theme that paints a background of its own, by name: the ``ansi`` ones paint
-#: the terminal's, which no colour can be measured against.
-THEMES = {
-    name: Color.parse(background)
-    for name, theme in BUILTIN_THEMES.items()
-    if not (background := theme.to_color_system().generate()["background"]).startswith("ansi")
-}
-
 
 def _mark(adapter: AgentAdapter) -> AgentMark:
     assert adapter.mark is not None
@@ -54,8 +52,8 @@ def _mark(adapter: AgentAdapter) -> AgentMark:
 
 def test_claude_code_and_codex_carry_the_marks_their_own_tuis_show() -> None:
     assert {adapter.id: adapter.mark for adapter in adapters()} == {
-        "claude-code": AgentMark("✻", "#D15C36"),
-        "codex": AgentMark(">_", "#317BF6"),
+        "claude-code": AgentMark("✻", on_dark="#DF8B70", on_light="#AA4726"),
+        "codex": AgentMark(">_", on_dark="#6BA1F8", on_light="#0B5EE7"),
     }
 
 
@@ -77,35 +75,27 @@ def test_every_character_of_a_mark_is_one_cell_wherever_it_is_drawn(adapter: Age
 
 def test_the_marks_differ_by_shape_and_by_colour() -> None:
     """By shape, so they read apart with no colour (NO_COLOR, a mono theme); by colour, so
-    they read apart at a glance."""
+    they read apart at a glance, on a dark theme and on a light one."""
     assert len(MARKED) == len(adapters()) == 2
     assert len({_mark(adapter).glyph for adapter in MARKED}) == len(MARKED)
-    assert len({_mark(adapter).colour.lower() for adapter in MARKED}) == len(MARKED)
+    for dark in (True, False):
+        assert len({_mark(adapter).colour(dark).lower() for adapter in MARKED}) == len(MARKED)
 
 
-def _luminance(colour: Color) -> float:
-    def channel(value: int) -> float:
-        share = value / 255
-        return share / 12.92 if share <= 0.03928 else ((share + 0.055) / 1.055) ** 2.4
-
-    return 0.2126 * channel(colour.r) + 0.7152 * channel(colour.g) + 0.0722 * channel(colour.b)
-
-
-def contrast(one: Color, other: Color) -> float:
-    """WCAG's contrast ratio of two colours, 1 to 21."""
-    light, dark = sorted((_luminance(one), _luminance(other)), reverse=True)
-    return (light + 0.05) / (dark + 0.05)
+def _hue(colour: str) -> float:
+    parsed = Color.parse(colour)
+    return colorsys.rgb_to_hls(parsed.r / 255, parsed.g / 255, parsed.b / 255)[0] * 360
 
 
 @pytest.mark.parametrize("adapter", MARKED, ids=lambda adapter: adapter.id)
-def test_a_marks_colour_reads_at_three_to_one_on_every_theme(adapter: AgentAdapter) -> None:
-    """WCAG's 3:1 for a graphical object, on each theme's own background, light ones
-    included: Claude's own orange, #D97757, reads at 2.4:1 on textual-light, so Claude Code's
-    is the nearest colour of its hue that reads at 3:1 everywhere."""
-    colour = Color.parse(_mark(adapter).colour)
-    assert len(THEMES) >= 19 and "textual-light" in THEMES and "textual-dark" in THEMES
-    worst = min(THEMES, key=lambda name: contrast(colour, THEMES[name]))
-    assert contrast(colour, THEMES[worst]) >= 3.0, (worst, contrast(colour, THEMES[worst]))
+def test_a_marks_two_colours_are_one_hue_lighter_on_a_dark_theme(adapter: AgentAdapter) -> None:
+    """Orange stays orange and blue stays blue: the pair differs in lightness alone, the
+    lighter one for a dark theme. That each reads at 3:1 on the surfaces it is drawn on is
+    measured on screen, theme by theme (``tests/test_ui_agent_mark_contrast.py``)."""
+    mark = _mark(adapter)
+    assert abs(_hue(mark.on_dark) - _hue(mark.on_light)) < 3, (mark.on_dark, mark.on_light)
+    assert Color.parse(mark.on_dark).brightness > Color.parse(mark.on_light).brightness
+    assert (mark.colour(True), mark.colour(False)) == (mark.on_dark, mark.on_light)
 
 
 @pytest.fixture
@@ -131,8 +121,8 @@ def lettered() -> Iterator[None]:
 def test_an_agent_with_no_mark_keeps_its_letters_and_every_mark_pads_to_the_widest() -> None:
     marks = accounts_view.agent_marks()
     assert {agent: (mark.plain, str(mark.style)) for agent, mark in marks.items()} == {
-        "claude-code": ("✻     ", "#D15C36"),
-        "codex": (">_    ", "#317BF6"),
+        "claude-code": ("✻     ", "#DF8B70"),
+        "codex": (">_    ", "#6BA1F8"),
         "fake-agent": ("Fa    ", "dim"),
         "codexy-agent": ("Codexy", "dim"),
     }
@@ -174,8 +164,8 @@ def test_the_picker_draws_each_agents_mark_in_its_colour_before_its_name() -> No
     """The account picker's rows where it lists both agents' accounts: the mark before the
     agent's name, in the mark's colour; nothing else of the row styled."""
     for status, glyph, colour, named in (
-        (_status(2, "claude-code"), "✻", "#D15C36", "✻ Claude Code"),
-        (_status(5, "codex"), ">_", "#317BF6", ">_ Codex"),
+        (_status(2, "claude-code"), "✻", "#DF8B70", "✻ Claude Code"),
+        (_status(5, "codex"), ">_", "#6BA1F8", ">_ Codex"),
     ):
         slot = status.account.slot
         prompt = account_prompt(status, agent=True)
@@ -198,7 +188,8 @@ def test_the_picker_marks_its_rows_only_where_it_lists_more_than_one_agents_acco
     drawn with its agent's mark."""
 
     def marked(*statuses: ClaudeAccountStatus) -> dict[str, str]:
-        picker = cast(Any, SimpleNamespace(targets=Targets(accounts=list(statuses))))
+        app = SimpleNamespace(current_theme=SimpleNamespace(dark=True))
+        picker = cast(Any, SimpleNamespace(targets=Targets(accounts=list(statuses)), app=app))
         return {key: text.plain for key, text in AttachTargetScreen.marked_rows(picker).items()}
 
     claude = (_status(1, "claude-code"), _status(2, "claude-code"))
@@ -208,3 +199,19 @@ def test_the_picker_marks_its_rows_only_where_it_lists_more_than_one_agents_acco
         "account:2": "2 · ✻ Claude Code · slot2@example.com · max",
         "account:5": "5 · >_ Codex · slot5@example.com · max",
     }
+
+
+ACCOUNTS_TITLE_092 = "Accounts — spawn on a Claude account"
+"""The picker's accounts section title in 0.9.2 (6a77e650, ``cli/ui/attach.py:84``)."""
+
+
+def test_the_pickers_accounts_title_is_0_9_2s_while_it_lists_one_agents_accounts() -> None:
+    """The R16-C verify (seq 11914): "Accounts — spawn on an account" had reached Claude-only
+    machines, unnamed. One agent's accounts, or none read, name that agent's account, by its
+    noun (``AgentAccounts.noun``): 0.9.2's title, byte for byte, for Claude Code's. A list of
+    more than one agent's says "an account"."""
+    claude = [_status(1, "claude-code"), _status(2, "claude-code")]
+    assert accounts_title(claude) == ACCOUNTS_TITLE_092
+    assert accounts_title(None) == accounts_title([]) == ACCOUNTS_TITLE_092
+    assert accounts_title([_status(5, "codex")]) == "Accounts — spawn on a Codex account"
+    assert accounts_title([*claude, _status(5, "codex")]) == "Accounts — spawn on an account"

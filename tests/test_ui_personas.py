@@ -1380,6 +1380,8 @@ def test_the_filter_narrows_every_section_and_agent_rows_carry_the_persona(
     assert prompts["bind:coder2"] == "coder2 · claude2 · .claude2"
     assert prompts["bind:tester1"] == "tester1 · claude · this shell's account"
     assert prompts["account:1"] == "1 · me@example.com · max"
+    # 0.9.2's title on a machine with Claude Code's accounts alone (R16-C verify, seq 11914).
+    assert prompts["section:accounts"] == "Accounts — spawn on a Claude account"
     assert filtered == [
         "section:agents",
         "empty:agents",

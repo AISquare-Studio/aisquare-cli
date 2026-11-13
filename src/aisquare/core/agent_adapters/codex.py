@@ -704,8 +704,9 @@ class CodexAdapter:
     #: complaint (the owner, 2026-11-05). The one line that takes the marks away.
     release_stage: ReleaseStage = "beta"
     #: >_, the mark of its own header, in a blue that reads apart from Claude Code's orange
-    #: (the pair colour-blind eyes tell apart), at 3:1 on every theme.
-    mark: AgentMark | None = AgentMark(">_", "#317BF6")
+    #: (the pair colour-blind eyes tell apart), lighter on a dark theme and darker on a light
+    #: one, at 3:1 or more on every surface it is drawn on (``types.AgentMark``).
+    mark: AgentMark | None = AgentMark(">_", on_dark="#6BA1F8", on_light="#0B5EE7")
     binary = "codex"
     home_env = "CODEX_HOME"
     home_name = ".codex"

@@ -175,12 +175,21 @@ class AgentMark:
 
     ``glyph``: one to three characters, each one cell wide and none East-Asian-ambiguous
     (a terminal's font or locale must not widen it), and printable ASCII or a symbol a
-    terminal font has. ``colour``: a Rich colour, ``#rrggbb``, that reads at 3:1 or more on
-    the background of every Textual theme that has one of its own (the ``ansi`` themes are
-    the terminal's)."""
+    terminal font has. ``on_dark`` and ``on_light``: Rich colours, ``#rrggbb``, of one hue,
+    for a dark theme and a light one (:meth:`colour`). Each reads at 3:1 or more on the
+    surfaces asq draws a mark on, as drawn (the Accounts page, the account picker's list,
+    the sidebar), on every built-in Textual theme of its darkness but the two ``ansi`` ones,
+    which paint the terminal's own background (``tests/test_ui_agent_mark_contrast.py``).
+    One colour cannot: on catppuccin-frappe's picker 3:1 needs a lighter ink than
+    textual-light's page allows (the R16-C verify, seq 11914)."""
 
     glyph: str
-    colour: str
+    on_dark: str
+    on_light: str
+
+    def colour(self, dark: bool) -> str:
+        """The mark's colour on a theme of that darkness (``Theme.dark``)."""
+        return self.on_dark if dark else self.on_light
 
 
 LastingKind = Literal["mcp", "plugin"]

@@ -194,13 +194,19 @@ def test_the_picker_draws_each_agents_mark_in_the_marks_colour(project: ProjectI
         listing.highlighted = listing.get_option_index("account:5")
         await pilot.pause()
         await settle_page(host)
-        return [*seen, styled(listing), str(listing.get_option("account:5").prompt).strip()]
+        drawn = {oid: str(listing.get_option(oid).prompt) for oid in ("account:2", "account:5")}
+        return [*seen, styled(listing), drawn]
 
-    first, at_rest, moved, plain = drive(project, scenario)
+    first, at_rest, moved, drawn = drive(project, scenario)
     assert first == "account:2"
-    assert at_rest == {"account:2": [], "account:5": [(">_", "#317BF6")]}
-    assert moved == {"account:2": [("✻", "#D15C36")], "account:5": []}
-    assert plain == "5 · >_ Codex · slot5@example.com · plan unknown"
+    assert at_rest == {"account:2": [], "account:5": [(">_", "#6BA1F8")]}  # textual-dark's
+    assert moved == {"account:2": [("✻", "#DF8B70")], "account:5": []}
+    # Unstripped: the row under the bar and the row it left keep the list's two-cell indent,
+    # so neither moves sideways (the R16-C verify's mutant M4, seq 11914).
+    assert drawn == {
+        "account:2": "  2 · ✻ Claude Code · slot2@example.com · plan unknown",
+        "account:5": "  5 · >_ Codex · slot5@example.com · plan unknown",
+    }
 
 
 def test_a_new_bind_on_a_codex_slot_carries_codex_home_and_its_agent(

@@ -140,9 +140,14 @@ DIRS = re.compile(
 FLAGS = frozenset(flag for adapter in AGENTS for flag in adapter.capabilities.vocabulary.flags)
 #: Flags read in the ``--flag=value`` shape too: the long ones (``-r=…`` is no flag of theirs).
 LONG_FLAGS = frozenset(flag for flag in FLAGS if flag.startswith("--"))
-#: Each agent's mark (``AgentAdapter.mark``): its glyph and its colour, lower-cased.
+#: Each agent's mark (``AgentAdapter.mark``): its glyph and its two colours, lower-cased.
 GLYPHS = frozenset(adapter.mark.glyph for adapter in AGENTS if adapter.mark is not None)
-COLOURS = frozenset(adapter.mark.colour.lower() for adapter in AGENTS if adapter.mark is not None)
+COLOURS = frozenset(
+    colour.lower()
+    for adapter in AGENTS
+    if adapter.mark is not None
+    for colour in (adapter.mark.on_dark, adapter.mark.on_light)
+)
 #: Calls whose string arguments declare aisquare's own options (``typer.Option("--name")``).
 OPTION_CALLS = frozenset({"Option", "Argument"})
 
@@ -420,7 +425,8 @@ def _shapes_of(source: str, named: frozenset[str] = NAMED) -> set[Shape]:
         ('Text("✻", style="dim")', "mark"),
         ('f"{slot} · ✻ {name}"', "mark"),
         ('marks = {"x": ">_"}', "mark"),
-        ('Text(glyph, style="#d15c36")', "mark"),
+        ('Text(glyph, style="#df8b70")', "mark"),
+        ('Text(glyph, style="#0B5EE7")', "mark"),
     ],
 )
 def test_the_check_sees_every_shape_of_the_branch(source: str, shape: Shape) -> None:

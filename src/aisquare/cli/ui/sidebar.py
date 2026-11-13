@@ -1160,7 +1160,7 @@ class AgentRow(Activatable):
         super().__init__(agent_row_text(status), id=f"agent-row-{status.agent.id}")
         self.status = status
         self.selection_key = f"agent:{status.agent.id}"
-        self._painted: tuple[FleetAgentStatus, float | None, int, bool] | None = None
+        self._painted: tuple[FleetAgentStatus, float | None, int, bool, bool] | None = None
         self.prefill = ""
         """What the name field said when it opened: leaving it so is no change."""
         self._field: AgentLabelInput | None = None
@@ -1333,10 +1333,13 @@ class AgentRow(Activatable):
         percent = usage.get(slot) if slot is not None else None
         width = self.content_size.width
         marked = sidebar is not None and sidebar.agents_marked
-        wanted = (self.status, percent, width, marked)
+        # The mark takes the theme's darkness's colour (``AgentMark.colour``). A theme change
+        # renders every widget again, and :meth:`render` paints: the darkness is in the key.
+        dark = self.app.current_theme.dark
+        wanted = (self.status, percent, width, marked, dark)
         if wanted != self._painted:
             self._painted = wanted
-            mark = agent_mark(agent_kind(self.status)) if marked else None
+            mark = agent_mark(agent_kind(self.status), dark) if marked else None
             self.update(
                 agent_row_text(self.status, percent, width=width or None, mark=mark), layout=False
             )
@@ -2115,6 +2118,10 @@ class Sidebar(Vertical):
             yield Static(Text(NO_PROJECTS, style="dim"), id="projects-empty")
         yield OthersSection(id="others")
 
+    def _repaint_rows(self) -> None:
+        for row in self.query(AgentRow):
+            row.paint()
+
     # --- data in -----------------------------------------------------------------
 
     def show_captain(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
@@ -2294,8 +2301,7 @@ class Sidebar(Vertical):
                 holder.move_child(widget, before=slot)
         self.last_frame = (projects, agents)
         if remark:  # every row, a card's unchanged ones and the captain's too
-            for row in self.query(AgentRow):
-                row.paint()
+            self._repaint_rows()
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
 

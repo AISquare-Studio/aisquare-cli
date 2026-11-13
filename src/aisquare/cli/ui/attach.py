@@ -97,6 +97,21 @@ SECTION_TITLES: dict[Section, str] = {
     "accounts": "Accounts — spawn on an account",
 }
 
+
+def accounts_title(statuses: Iterable[ClaudeAccountStatus] | None) -> str:
+    """The accounts section's title: ``Accounts — spawn on a Claude account`` while the list
+    holds one agent's accounts, by that agent's noun (``AgentAccounts.noun``; the default
+    agent's while none is read), as 0.9.2 said it on every machine;
+    :data:`SECTION_TITLES`' ``Accounts — spawn on an account`` where it holds more than one
+    agent's (the R16-C verify, seq 11914: the plain title had reached Claude-only machines)."""
+    agents = {status.account.agent for status in statuses or ()}
+    if len(agents) > 1:
+        return SECTION_TITLES["accounts"]
+    noun = accounts_core.kind(next(iter(agents), DEFAULT_AGENT)).noun
+    article = "an" if noun[:1].lower() in "aeiou" else "a"
+    return f"Accounts — spawn on {article} {noun} account"
+
+
 TARGETS_WORKER = "attach-targets"
 
 SEAT_RULE = (
@@ -214,19 +229,20 @@ def account_text(status: ClaudeAccountStatus, *, agent: bool = False) -> str:
     return account_prompt(status, agent=agent).plain
 
 
-def account_prompt(status: ClaudeAccountStatus, *, agent: bool = False) -> Text:
+def account_prompt(status: ClaudeAccountStatus, *, agent: bool = False, dark: bool = True) -> Text:
     """:func:`account_text` as the picker draws it: with ``agent``, the agent's mark
     (``AgentAdapter.mark``, the one its own TUI shows) before its name, in the mark's colour,
     ``2 · ✻ Claude Code · …`` and ``5 · >_ Codex · …``, so the two agents' rows read apart by
-    shape and by colour; an agent that declares no mark by its name alone. Every part is
-    appended as data: an email is the user's."""
+    shape and by colour; an agent that declares no mark by its name alone. ``dark``: the
+    theme's darkness, which of the mark's two colours it takes (``AgentMark.colour``). Every
+    part is appended as data: an email is the user's."""
     who = status.identity.email if status.identity is not None else "not signed in"
     parts = [Text(str(status.account.slot)), Text(who), Text(status.subscription or "plan unknown")]
     if agent:
         named = Text(accounts_core.agent_label(status.account.agent))
         mark = mark_of(status.account.agent)
         if mark is not None:
-            named = Text.assemble((mark.glyph, mark.colour), " ", named)
+            named = Text.assemble((mark.glyph, mark.colour(dark)), " ", named)
         parts.insert(1, named)
     usage = status.usage
     limiting = usage.limiting if usage is not None else None
@@ -389,6 +405,19 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         self._say("reading agents, binds and accounts …", "dim")
         self.read(select=self._wanted)
         self.query_one("#picker-list", OptionList).focus()
+        self.app.theme_changed_signal.subscribe(self, lambda _theme: self._recolour())
+
+    def _recolour(self) -> None:
+        """The marked rows in the new theme's colours (``AgentMark.colour``), each in place:
+        the highlight, the filter and the row under the bar, drawn in its colours, stay."""
+        if not self._marked:
+            return
+        self._marked = self.marked_rows()
+        listing = self.query_one("#picker-list", OptionList)
+        for oid, prompt in self._marked.items():
+            with suppress(OptionDoesNotExist):  # filtered out
+                drawn = Text("  " + prompt.plain) if oid == self._plain_row else Text("  ") + prompt
+                listing.replace_option_prompt(oid, drawn)
 
     def read(self, *, select: str | None = None) -> None:
         """Read every section again in a worker; ``select`` is an option id to land on."""
@@ -448,8 +477,11 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         if len({s.account.agent for s in statuses}) <= 1:
             return {}
         listed = [s.account for s in statuses]
+        dark = self.app.current_theme.dark
         return {
-            f"account:{accounts_core.ref_among(s.account, listed)}": account_prompt(s, agent=True)
+            f"account:{accounts_core.ref_among(s.account, listed)}": account_prompt(
+                s, agent=True, dark=dark
+            )
             for s in statuses
         }
 
@@ -462,7 +494,12 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         for section in SECTION_ORDER[self.attach_intent]:
             options.append(
                 Option(
-                    Text(SECTION_TITLES[section], style="bold"),
+                    Text(
+                        accounts_title(self.targets.accounts)
+                        if section == "accounts"
+                        else SECTION_TITLES[section],
+                        style="bold",
+                    ),
                     id=f"section:{section}",
                     disabled=True,
                 )

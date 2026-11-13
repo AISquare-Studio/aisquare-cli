@@ -151,7 +151,7 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - **One priority order over every agent's accounts.** The Accounts page is one table, and
   ↑/↓ (`accounts order`, `accounts move`) rank any account above any other. With one
   agent's accounts, Claude Code's alone, there is no mark and the names keep the 12 cells
-  0.9.2's have. With both agents the name has 9 cells, not 12: each row starts with its
+  0.9.2's have. With both agents the name has 9 cells, not 12: each name starts with its
   agent's mark, the one that agent's own screen shows, in a colour of its own: `✻` in
   orange for Claude Code, `>_` in blue for Codex. They differ by shape under `NO_COLOR`
   too, and hovering a mark names its agent. A longer name ends in `…`, whole in its

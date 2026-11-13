@@ -193,10 +193,15 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   (in `--json`, a check named `coding-agent` with status `warn`; the exit code is
   unchanged). It says *Selected agent executable 'claude' is not on PATH*, with that agent's
   install link, when something chose the agent the `coder` role launches in this folder and
-  that agent's executable is not on PATH. That something is the role's binding (any
-  `team bind coder` option, `--account` and `--env` included), `aisquare agents use` (yours
-  or the project's), or `AISQUARE_BIN_CODER` or `AISQUARE_AGENT_BIN`. When that launch
-  cannot be resolved at all, it gives the reason and the fix instead.
+  that agent's executable is not on PATH. That something is any of these:
+  - the role's binding: any `team bind coder` option, `--account`, `--env`, `--env-file`
+    and `--arg` included, or App settings' agent for the role;
+  - the project's default agent or yours (`aisquare agents use`, or App settings);
+  - `AISQUARE_CODING_AGENT`;
+  - a shell inside a session aisquare launched (whose agent it names);
+  - `AISQUARE_BIN_CODER` or `AISQUARE_AGENT_BIN`.
+
+  When that launch cannot be resolved at all, it gives the reason and the fix instead.
 - **Placement goes by the launch record:** `fleet attach`, `fleet tell` and a rename go by
   the tmux session's id; a session you made by hand under the project's codename is no
   longer renamed or shut down; `project fresh` stops only what the records name, and where
@@ -206,9 +211,28 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   spawn, and `fleet attach` refuses an ended 0.9.2 manager whose window lingers, naming
   how to attach by hand.
 - **New and changed commands:** `aisquare agents use <agent> [--project]` chooses the
-  coding agent future launches run (a role's binding still wins). The captain
-  (experimental) passes its MCP server to Claude Code inline (`--mcp-config '<json>'`), so
-  `~/.aisquare/captain/mcp.json` is no longer written and 0.9.2's copy is left where it is.
+  coding agent future launches run where nothing else names one (a role's binding still
+  wins). App settings' default agent and a role's agent there are the same settings as
+  `agents use` and `team bind --agent`. `AISQUARE_CODING_AGENT=<agent>` (`claude-code` or
+  `codex`) does the same for the launches made from the shell it is set in, above your own
+  `agents use`. In full, the first of these names the agent:
+  - a launch's `--agent`;
+  - the role's binding (`team bind --agent`);
+  - a program that is an agent's own (`--bin`, `AISQUARE_BIN_<ROLE>`, `AISQUARE_AGENT_BIN`
+    or the binding's `--bin`);
+  - an account the launch or the binding names;
+  - the project's default (`agents use --project`);
+  - a model the launch names;
+  - the agent of the account the one order would pick (signed in, its agent installed,
+    not at a limit);
+  - in a shell inside a session aisquare launched, that session's agent;
+  - `AISQUARE_CODING_AGENT`;
+  - your default (`agents use`);
+  - Claude Code.
+
+  The captain (experimental) passes its MCP server to Claude Code inline
+  (`--mcp-config '<json>'`), so `~/.aisquare/captain/mcp.json` is no longer written and
+  0.9.2's copy is left where it is.
   `persona import --engine manager` gives Claude Code the strict form of its answer's
   schema (every field required, no other).
 - **`fleet spawn --worktree` runs the repository's hooks**, as 0.9.2 did, where no Codex

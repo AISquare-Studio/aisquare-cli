@@ -209,6 +209,37 @@ def test_the_picker_draws_each_agents_mark_in_the_marks_colour(project: ProjectI
     }
 
 
+def test_a_theme_switch_with_the_picker_open_recolours_its_rows_in_place(
+    project: ProjectInfo,
+) -> None:
+    """A theme of the other darkness, chosen with the picker open (``_recolour``): the coloured
+    row takes the light theme's colour, the row under the bar stays in the bar's colours, and
+    both keep the list's two-cell indent, compared unstripped (the R16-C round 2 verify's
+    mutants M4c and M4d, seq 11944: either row drawn two cells to the left)."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        listing = host.screen.query_one("#picker-list", OptionList)
+        first = listing.highlighted_option
+        host.theme = "textual-light"
+        await settle_page(host)
+        prompts = {oid: listing.get_option(oid).prompt for oid in ("account:2", "account:5")}
+        spans = {
+            oid: [(p.plain[s.start : s.end], str(s.style)) for s in p.spans]
+            for oid, p in prompts.items()
+            if isinstance(p, Text)
+        }
+        return [first.id if first else None, spans, {oid: str(p) for oid, p in prompts.items()}]
+
+    first, spans, drawn = drive(project, scenario)
+    assert first == "account:2"  # under the bar: drawn in its colours, no span of its own
+    # The recolour ran: the Codex row's mark is in the light theme's blue now.
+    assert spans == {"account:2": [], "account:5": [(">_", "#0B5EE7")]}
+    assert drawn == {
+        "account:2": "  2 · ✻ Claude Code · slot2@example.com · plan unknown",
+        "account:5": "  5 · >_ Codex · slot5@example.com · plan unknown",
+    }
+
+
 def test_a_new_bind_on_a_codex_slot_carries_codex_home_and_its_agent(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -368,7 +368,10 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     *Export* dialog offers each agent's personal and project skill folders (*Claude Code
     personal skills*, *Codex (beta) personal skills*, …), where it offered *Claude
     personal skills* and *Project skills*; Claude Code's personal skills are still the
-    default.
+    default. asq's *Doctor* page has a *Sign in account N* button for each added account,
+    Claude Code's or Codex's, that is not signed in. It opens that account's sign-in in
+    the Accounts page's pane; 0.9.2 showed the same `aisquare accounts run N` hint as text
+    only.
   - On a machine with Codex accounts, the project's default agent
     (`aisquare agents use … --project`) decides only where nothing named does: a role
     bound to an account, and a launch's own `--account`, run that account's agent from any

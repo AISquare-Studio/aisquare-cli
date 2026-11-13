@@ -166,6 +166,23 @@ def staged_label(adapter: AgentAdapter) -> str:
     return adapter.label + stage_mark(adapter)
 
 
+@dataclass(frozen=True)
+class AgentMark:
+    """What tells an agent's rows apart where a table or list holds more than one agent's
+    accounts (:attr:`AgentAdapter.mark`): the Accounts page's name column, the account
+    picker's rows. The mark the agent's own TUI shows, in a colour of its own, so the rows
+    read apart by shape with no colour (``NO_COLOR``) and by colour at a glance.
+
+    ``glyph``: one to three characters, each one cell wide and none East-Asian-ambiguous
+    (a terminal's font or locale must not widen it), and printable ASCII or a symbol a
+    terminal font has. ``colour``: a Rich colour, ``#rrggbb``, that reads at 3:1 or more on
+    the background of every Textual theme that has one of its own (the ``ansi`` themes are
+    the terminal's)."""
+
+    glyph: str
+    colour: str
+
+
 LastingKind = Literal["mcp", "plugin"]
 
 
@@ -1565,6 +1582,11 @@ class AgentAdapter(Protocol):
     release_stage: ReleaseStage
     """``stable``, or ``beta`` (:data:`ReleaseStage`): a beta agent's name carries
     :func:`stage_mark` wherever a person chooses or sees it, a stable one's nothing."""
+    mark: AgentMark | None
+    """Its rows' mark where one table or list holds more than one agent's accounts
+    (:class:`AgentMark`: Claude Code's ``✻``, Codex's ``>_``); ``None`` for an agent with
+    none, whose rows the Accounts page marks with the shortest start of its label no
+    other agent's shares, as it marked every agent's before (``Fa`` for a Fake Agent)."""
     binary: str
     home_env: str
     home_name: str

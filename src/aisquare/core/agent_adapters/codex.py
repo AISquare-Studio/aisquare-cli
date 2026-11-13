@@ -21,6 +21,7 @@ from aisquare.core.agent_adapters.mcp_servers import DEVTOOLS_NAME, DEVTOOLS_PAC
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
+    AgentMark,
     AgentScreen,
     AgentTranscript,
     BadEffortError,
@@ -702,6 +703,9 @@ class CodexAdapter:
     #: Beta in 0.10.0, its first release: "stable" once a release has passed with no
     #: complaint (the owner, 2026-11-05). The one line that takes the marks away.
     release_stage: ReleaseStage = "beta"
+    #: >_, the mark of its own header, in a blue that reads apart from Claude Code's orange
+    #: (the pair colour-blind eyes tell apart), at 3:1 on every theme.
+    mark: AgentMark | None = AgentMark(">_", "#317BF6")
     binary = "codex"
     home_env = "CODEX_HOME"
     home_name = ".codex"

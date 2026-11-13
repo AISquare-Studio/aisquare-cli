@@ -88,7 +88,7 @@ from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
-from aisquare.core.agent_adapters import get_adapter, stage_mark_of
+from aisquare.core.agent_adapters import get_adapter, mark_of, stage_mark_of
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
@@ -445,11 +445,12 @@ COLUMNS: tuple[Column, ...] = (
 """The table's data columns, left to right; the header and every row are cut from them.
 
 The ``agent`` cell is not a column of its own: it is the first word of the name's column
-(:func:`agent_marks`, two letters), whose 12 cells it shares with the name, and only when the
-table lists the accounts of more than one agent (:func:`marks_shown`). So a table of one
-agent's accounts, a Claude-only machine's, has no mark and names of 12 cells, as 0.9.2's
-has; with both agents' the name has 9 (the mark takes two and a space), and one longer ends
-in ``…`` with the whole in its tooltip, which the CHANGELOG says. As a column of its own it
+(:func:`agent_marks`: ``✻`` and ``>_``, two cells each once padded), whose 12 cells it shares
+with the name, and only when the table lists the accounts of more than one agent
+(:func:`marks_shown`). So a table of one agent's accounts, a Claude-only machine's, has no
+mark and names of 12 cells, as 0.9.2's has; with both agents' the name has 9 (the mark
+takes two and a space), and one longer ends in ``…`` with the whole in its tooltip, which
+the CHANGELOG says. As a column of its own it
 took the table past the 163 cells a 200-column screen shows (the ui-tester at 200x50, r23 of
 #113); inside the name's, the line keeps the 123 cells below whatever agents it lists.
 
@@ -503,20 +504,45 @@ scrolling sideways — and the plan last; then the arranging buttons (:data:`_AC
 At 160 columns the whole line fits, the arranging buttons too (see :data:`COLUMNS`)."""
 
 
-def agent_marks() -> dict[str, str]:
-    """Each agent with account slots by the shortest start of its label, two characters at
-    least, that no other agent's label starts with (``Cl`` for Claude Code, ``Co`` for Codex):
-    the first word of the name's column, shown only while the table lists the accounts of
-    more than one agent (:func:`marks_shown`). The full label is the mark's tooltip."""
+def agent_marks() -> dict[str, Text]:
+    """Each agent with account slots by its mark: the first word of the name's column, shown
+    only while the table lists the accounts of more than one agent (:func:`marks_shown`).
+
+    The adapter's own (``AgentAdapter.mark``), the mark its TUI shows in a colour of its own:
+    ``✻`` for Claude Code, ``>_`` for Codex, which read apart by shape with no colour too
+    (the owner, 2026-11-13: ``Cl`` and ``Co`` were hard to tell apart). An agent that declares
+    none keeps what every agent's rows had: the shortest start of its label, two characters
+    at least, that no other agent's label starts with (``Fa`` for a Fake Agent), dim. Each is
+    padded with spaces to the widest's cells, by Rich's ``cell_len`` (``✻`` is one, ``>_``
+    two), so the names after the marks start in one column. The full label is the mark's
+    tooltip."""
     labels = {agent: core.agent_label(agent) for agent in core.account_agents()}
-    marks: dict[str, str] = {}
+    marks: dict[str, Text] = {}
     for agent, label in labels.items():
+        own = mark_of(agent)
+        if own is not None:
+            marks[agent] = Text(own.glyph, style=own.colour)
+            continue
         others = [other.lower() for each, other in labels.items() if each != agent]
         size = 2
         while size < len(label) and any(other.startswith(label[:size].lower()) for other in others):
             size += 1
-        marks[agent] = label[:size]
+        marks[agent] = Text(label[:size], style="dim")
+    widest = max((mark.cell_len for mark in marks.values()), default=0)
+    for mark in marks.values():
+        mark.pad_right(widest - mark.cell_len)
     return marks
+
+
+def agent_mark(agent: str) -> Text:
+    """``agent``'s mark as :func:`agent_marks` pads it; an agent no adapter has (an account of
+    a later release's) by the first two characters of its id, dim, padded alike."""
+    marks = agent_marks()
+    if agent in marks:
+        return marks[agent]
+    mark = Text(agent[:2], style="dim")
+    mark.pad_right(max((each.cell_len for each in marks.values()), default=0) - mark.cell_len)
+    return mark
 
 
 MARKED_NAME_TITLE = "agent name"
@@ -706,7 +732,7 @@ def account_cells(
     tokened = core.kind(account.agent).network_usage
     cells = {column.key: Text() for column in COLUMNS}
     cells["slot"] = Text(str(account.slot), style="bold", justify="right")
-    cells["agent"] = Text(agent_marks().get(account.agent, account.agent[:2]), style="dim")
+    cells["agent"] = agent_mark(account.agent)
     cells["name"] = Text(status.label, style="dim cyan" if account.disabled else "cyan")
     if status.identity is not None:
         cells["email"] = Text(status.identity.email)

@@ -17,6 +17,8 @@ into shapes (:data:`SHAPES`):
 - ``binary``, ``env``, ``dir``, ``flag``: a string constant that is an agent's binary
   (``claude``), a variable of its own (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME=…``), a file or
   folder of its own (``.claude``, ``hooks.json``) or one of its flags (``--fork-session``).
+- ``mark``: a string constant that is an agent's mark (``AgentAdapter.mark``): its glyph
+  (``✻``, ``>_``; one with a character past ASCII anywhere in the string) or its colour.
 
 What an agent's words are is read off its adapter (:data:`AGENTS`: every registered one and
 the synthetic ones the suites register), never listed here: its ``id``, its ``binary`` and
@@ -27,7 +29,7 @@ rest it declares in ``capabilities.vocabulary`` (its model provider's variables,
 credential files, its flags). So a new agent's words in a shared module fail with their file
 and line, and this guard is not edited for it (review r18 of #113, finding 6).
 
-The last six are a ratchet: :data:`BASELINE` holds, per file and shape, how many lines carry
+The last seven are a ratchet: :data:`BASELINE` holds, per file and shape, how many lines carry
 it today, and the count may only go down. A new one fails with its file and line; one taken
 out (made a capability or an adapter method) lowers the baseline, which a later lane then
 never raises. Out of the rules, as words and not branches (SCOPE #113 0.8.2, part B):
@@ -91,7 +93,9 @@ def _files(adapter: AgentAdapter) -> set[str]:
 
 LITERALS = frozenset(adapter.id for adapter in AGENTS)
 
-Shape = Literal["decide_literal", "decide_named", "decide_binary", "binary", "env", "dir", "flag"]
+Shape = Literal[
+    "decide_literal", "decide_named", "decide_binary", "binary", "env", "dir", "flag", "mark"
+]
 SHAPES: tuple[Shape, ...] = (
     "decide_literal",
     "decide_named",
@@ -100,6 +104,7 @@ SHAPES: tuple[Shape, ...] = (
     "env",
     "dir",
     "flag",
+    "mark",
 )
 
 #: Constants that name an agent wherever they are defined; every module constant assigned an
@@ -135,6 +140,9 @@ DIRS = re.compile(
 FLAGS = frozenset(flag for adapter in AGENTS for flag in adapter.capabilities.vocabulary.flags)
 #: Flags read in the ``--flag=value`` shape too: the long ones (``-r=…`` is no flag of theirs).
 LONG_FLAGS = frozenset(flag for flag in FLAGS if flag.startswith("--"))
+#: Each agent's mark (``AgentAdapter.mark``): its glyph and its colour, lower-cased.
+GLYPHS = frozenset(adapter.mark.glyph for adapter in AGENTS if adapter.mark is not None)
+COLOURS = frozenset(adapter.mark.colour.lower() for adapter in AGENTS if adapter.mark is not None)
 #: Calls whose string arguments declare aisquare's own options (``typer.Option("--name")``).
 OPTION_CALLS = frozenset({"Option", "Argument"})
 
@@ -258,6 +266,16 @@ def _env(value: str) -> bool:
     return own and bool(assigns or name == value) and name not in PROVIDER_KEYS
 
 
+def _mark(value: str) -> bool:
+    """An agent's mark: its glyph whole, or inside the string where the glyph is past ASCII
+    (``✻ Claude Code``; ``>_`` is ASCII, and only itself), or its colour."""
+    return (
+        value in GLYPHS
+        or any(glyph in value for glyph in GLYPHS if not glyph.isascii())
+        or value.lower() in COLOURS
+    )
+
+
 def shapes(tree: ast.AST, named: frozenset[str], *, harness: bool = False) -> dict[Shape, set[int]]:
     """The lines of ``tree`` that carry each shape (:data:`SHAPES`). ``harness``: the module
     is ``core/harness.py``, whose own ``is_default_agent`` calls are its definition's."""
@@ -294,6 +312,8 @@ def shapes(tree: ast.AST, named: frozenset[str], *, harness: bool = False) -> di
                 found["dir"].add(line)
             if value in FLAGS or value.split("=", 1)[0] in LONG_FLAGS:
                 found["flag"].add(line)
+            if _mark(value):
+                found["mark"].add(line)
     return found
 
 
@@ -397,6 +417,10 @@ def _shapes_of(source: str, named: frozenset[str] = NAMED) -> set[Shape]:
         ('path.name == "hooks.json"', "dir"),
         ('args.append("--fork-session")', "flag"),
         ('["--resume=" + path]', "flag"),
+        ('Text("✻", style="dim")', "mark"),
+        ('f"{slot} · ✻ {name}"', "mark"),
+        ('marks = {"x": ">_"}', "mark"),
+        ('Text(glyph, style="#d15c36")', "mark"),
     ],
 )
 def test_the_check_sees_every_shape_of_the_branch(source: str, shape: Shape) -> None:

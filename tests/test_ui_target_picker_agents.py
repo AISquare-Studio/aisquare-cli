@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from rich.text import Text
 from textual.app import App
 from textual.pilot import Pilot
 from textual.screen import Screen
@@ -157,12 +158,38 @@ def test_the_picker_lists_codex_slots_and_reads_a_binds_codex_home(
 
     shown, account, bind = drive(project, scenario)
     assert shown["section:accounts"] == "Accounts — spawn on an account"
-    assert shown["account:2"] == "2 · Claude Code · slot2@example.com · plan unknown"
-    assert shown["account:5"] == "5 · Codex · slot5@example.com · plan unknown"
+    # Each agent's row by its mark and its name (``AgentAdapter.mark``), the mark in its colour.
+    assert shown["account:2"] == "2 · ✻ Claude Code · slot2@example.com · plan unknown"
+    assert shown["account:5"] == "5 · >_ Codex · slot5@example.com · plan unknown"
     # The bind's account is read from its agent's home variable, not CLAUDE_CONFIG_DIR.
     assert shown["bind:codex2"] == "codex2 · codex · account 5 · slot5@example.com"
     assert account == Target("account", "5", agent="codex", account="5")
     assert bind == Target("bind", "codex2", role="codex2", agent="codex", binary="codex")
+
+
+def test_the_picker_draws_each_agents_mark_in_the_marks_colour(project: ProjectInfo) -> None:
+    """R16-C: where the picker lists both agents' accounts, each account row's mark is drawn in
+    its agent's colour (``AgentAdapter.mark``) and nothing else of the row is styled. A list
+    of Claude Code's accounts alone draws its rows from their text, as 0.9.2 did
+    (``tests/test_ui_personas.py``: ``1 · me@example.com · max``)."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> dict[str, list[tuple[str, str]]]:
+        listing = host.screen.query_one("#picker-list", OptionList)
+        options = [listing.get_option_at_index(i) for i in range(listing.option_count)]
+        styled: dict[str, list[tuple[str, str]]] = {}
+        for option in options:
+            if (option.id or "").startswith("account:"):
+                prompt = option.prompt
+                assert isinstance(prompt, Text), prompt
+                styled[option.id or ""] = [
+                    (prompt.plain[span.start : span.end], str(span.style)) for span in prompt.spans
+                ]
+        return styled
+
+    assert drive(project, scenario) == {
+        "account:2": [("✻", "#D15C36")],
+        "account:5": [(">_", "#317BF6")],
+    }
 
 
 def test_a_new_bind_on_a_codex_slot_carries_codex_home_and_its_agent(

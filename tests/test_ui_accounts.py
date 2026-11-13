@@ -30,7 +30,10 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from rich.cells import cell_len
+from rich.segment import Segment
 from textual import events
+from textual.color import Color
 from textual.containers import Vertical
 from textual.geometry import Region
 from textual.pilot import Pilot
@@ -59,6 +62,7 @@ from aisquare.cli.ui.views.accounts import (
 from aisquare.core import browser, credentials, paths
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.config import FleetSettings
 from aisquare.core.state_file import update_state
 from aisquare.core.store import store_session
@@ -3646,7 +3650,7 @@ def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
     assert out["right"] <= out["screen"]
     table_width, shown_width = out["width"]
     assert out["scrolls"] == 0 and table_width <= shown_width and out["whole"]
-    assert out["marks"] == {1: "Cl", 4: "Co"} and out["tip"] == "Codex (beta)"
+    assert out["marks"] == {1: "✻ ", 4: ">_"} and out["tip"] == "Codex (beta)"
     assert out["marked"] == [True] * 4  # rows mounted into a table of both agents carry the mark
 
 
@@ -3727,8 +3731,8 @@ def test_a_machines_names_keep_their_cells_until_a_second_agent_marks_the_rows(
     assert alone["drawn"] == aliases
     # Both: the mark, its space and 9 cells of name; the longer ones cut, the tooltip whole.
     assert marked["header"] == "agent name"
-    assert marked["marks"] == {1: (True, "Cl"), 2: (True, "Cl"), 3: (True, "Co")}
-    assert marked["cells"] == 9 == name_column.width - len("Cl") - 1
+    assert marked["marks"] == {1: (True, "✻ "), 2: (True, "✻ "), 3: (True, ">_")}
+    assert marked["cells"] == 9 == name_column.width - cell_len(">_") - 1
     assert marked["drawn"] == {1: twelve[:8] + "…", 2: ten[:8] + "…", 3: nine}
     changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
     flat = " ".join(changelog.split("\n## [0.9.0]", 1)[0].replace("**", "").split())
@@ -3763,10 +3767,16 @@ def test_a_frame_while_a_name_is_renamed_leaves_the_mark_under_the_open_field(
     assert asyncio.run(run()) == [False, False, True, True]
 
 
-def test_an_agents_mark_is_the_shortest_start_of_its_label_no_other_agent_shares() -> None:
-    """The first word of the name's column: two letters, more only for agents that share
-    them, and never a name taken from the agent's id."""
-    assert accounts_view.agent_marks() == {"claude-code": "Cl", "codex": "Co"}
+def test_an_agents_mark_is_its_adapters_own_in_its_colour() -> None:
+    """The first word of the name's column: the mark the agent's own TUI shows
+    (``AgentAdapter.mark``), in its colour, each padded to the widest's two cells (the owner,
+    2026-11-13: ``Cl`` and ``Co`` were hard to tell apart). An agent with none keeps the
+    letters (``tests/test_ui_agent_marks.py``)."""
+    marks = accounts_view.agent_marks()
+    assert {agent: (mark.plain, str(mark.style)) for agent, mark in marks.items()} == {
+        "claude-code": ("✻ ", "#D15C36"),
+        "codex": (">_", "#317BF6"),
+    }
 
 
 def _painted(app: FleetApp) -> list[str]:
@@ -3774,6 +3784,126 @@ def _painted(app: FleetApp) -> list[str]:
     widgets' geometry (``tests/test_ui_remote.py``'s ``painted``)."""
     strips = app.screen._compositor.render_full_update(simplify=True).strips
     return ["".join(segment.text for segment in strip) for (strip,) in strips]
+
+
+def _cells_painted(app: FleetApp, region: Region) -> list[Segment]:
+    """The segments the terminal shows in ``region``'s first line, cut by CELLS (``Strip.crop``):
+    a line's string index is no cell once a wide character is left of it."""
+    strips = app.screen._compositor.render_full_update(simplify=True).strips
+    (strip,) = strips[region.y]
+    return [segment for segment in strip.crop(region.x, region.right) if segment.text]
+
+
+def _distance(one: Color, other: Color) -> float:
+    return float(sum((a - b) ** 2 for a, b in zip(one.rgb, other.rgb, strict=True)))
+
+
+async def _mixed_page(app: FleetApp, pilot: Pilot[None]) -> AccountsView:
+    """The Accounts page over :func:`_mixed_frame`, painted, scrolled to its first column."""
+    await settle(app)
+    view = await open_accounts(pilot)
+    await settle_until(app, lambda: painted(view, 1, 2, 4))
+    view.query_one("#accounts-table").scroll_to(x=0, animate=False, immediate=True)
+    await settle(app)
+    return view
+
+
+@pytest.mark.parametrize("width", [60, 90, 200])
+def test_both_agents_marks_keep_every_name_in_one_column(
+    no_network: dict[str, Any], width: int
+) -> None:
+    """R16-C: ``✻`` is one cell and ``>_`` two, so each is padded to two by Rich's
+    ``cell_len``: every row's name starts at the same x, Claude Code's rows and Codex's alike,
+    and keeps 9 cells. What the terminal shows there is the mark, in its agent's colour."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_mixed_frame)
+        async with app.run_test(size=(width, 40)) as pilot:
+            view = await _mixed_page(app, pilot)
+            marks = {slot: row(view, slot).cell("agent").region for slot in (1, 2, 3, 4)}
+            return {
+                "names": {slot: row(view, slot).cell("name").region for slot in (1, 2, 3, 4)},
+                "marks": marks,
+                "drawn": {slot: _cells_painted(app, marks[slot]) for slot in (1, 4)},
+            }
+
+    out = asyncio.run(run())
+    names, marks = out["names"], out["marks"]
+    assert len({region.x for region in names.values()}) == 1, names
+    assert {region.width for region in names.values()} == {9}, names
+    assert {(region.x, region.width) for region in marks.values()} == {(marks[1].x, 2)}, marks
+    assert names[1].x == marks[1].right + 1  # the mark, its space, the name
+    # Textual paints every text at its theme's text alpha (87%), so the ink is each colour a
+    # little toward the background: the one nearer to it of the two agents', and no grey.
+    colours = {"✻": Color.parse("#D15C36"), ">_": Color.parse("#317BF6")}
+    for slot, glyph in ((1, "✻"), (4, ">_")):
+        drawn = out["drawn"][slot]
+        assert "".join(segment.text for segment in drawn).rstrip() == glyph, drawn
+        (ink,) = {
+            segment.style.color for segment in drawn if segment.text.strip() and segment.style
+        }
+        assert ink is not None and ink.triplet is not None, drawn
+        painted_ink = Color(*ink.triplet)
+        nearest = min(colours, key=lambda each: _distance(colours[each], painted_ink))
+        assert nearest == glyph and len(set(ink.triplet)) > 1, (glyph, ink)
+
+
+@pytest.mark.parametrize("width", [38, 45, 60, 90, 200])
+def test_a_claude_only_machine_shows_no_agent_mark_at_any_width(
+    no_network: dict[str, Any], width: int
+) -> None:
+    """R16-C's bar: with Claude Code's accounts alone the page is 0.9.2's. No row carries a
+    mark, the name column says ``name`` and keeps its 12 cells, and no agent's mark is
+    anywhere on the screen."""
+    no_network["usage"] = _table_usage
+    glyphs = {adapter.mark.glyph for adapter in adapters() if adapter.mark is not None}
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=(width, 40)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            header = view.query_one("#accounts-header").query_one(".col-name", Static)
+            return {
+                "screen": "\n".join(_painted(app)),
+                "header": shown(header),
+                "marked": [row(view, slot).cell("agent").display for slot in (1, 2, 3, 4)],
+                "names": {row(view, slot).cell("name").region.width for slot in (1, 2, 3, 4)},
+            }
+
+    out = asyncio.run(run())
+    assert out["header"] == "name" and out["marked"] == [False] * 4
+    assert out["names"] == {12}
+    assert not [glyph for glyph in glyphs if glyph in out["screen"]], out["screen"]
+
+
+def test_with_no_colour_the_two_agents_marks_still_differ_by_shape(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NO_COLOR (Textual's Monochrome filter): every mark is grey, and the rows still read
+    apart, ``✻`` from ``>_``, never two letters that start alike."""
+    no_network["usage"] = _table_usage
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    async def run() -> dict[int, list[Segment]]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_mixed_frame)
+        assert app.no_color
+        async with app.run_test(size=(200, 40)) as pilot:
+            view = await _mixed_page(app, pilot)
+            return {
+                slot: _cells_painted(app, row(view, slot).cell("agent").region) for slot in (1, 4)
+            }
+
+    drawn = asyncio.run(run())
+    shapes = {slot: "".join(segment.text for segment in drawn[slot]).rstrip() for slot in drawn}
+    assert shapes == {1: "✻", 4: ">_"}
+    for segments in drawn.values():
+        for segment in segments:
+            ink = segment.style.color if segment.style else None
+            triplet = ink.get_truecolor() if ink is not None else None
+            assert triplet is None or triplet.red == triplet.green == triplet.blue, segment
 
 
 def _unreadable_frame() -> AccountsOverview:
@@ -3994,7 +4124,8 @@ def test_the_whole_table_fits_160_by_48_with_no_sideways_scroll(
     assert marked is codex, out["header"]
     if codex:
         marks = accounts_view.agent_marks()
-        assert f"{marks['codex']} " in lines[3] and f"{marks['claude-code']} " in lines[1]
+        assert f"{marks['codex'].plain} " in lines[3], lines[3]
+        assert f"{marks['claude-code'].plain} " in lines[1], lines[1]
 
 
 @pytest.mark.parametrize("size", [(160, 50), (100, 40)], ids=["160x50", "100x40"])

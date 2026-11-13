@@ -68,7 +68,13 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.confirm_button import Arming
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core.agent_adapters import DEFAULT_AGENT, adapter_for_binary, adapters, get_adapter
+from aisquare.core.agent_adapters import (
+    DEFAULT_AGENT,
+    adapter_for_binary,
+    adapters,
+    get_adapter,
+    mark_of,
+)
 from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.config import RoleLaunchProfile, load_config
 from aisquare.core.names import name_key
@@ -203,17 +209,30 @@ def account_text(status: ClaudeAccountStatus, *, agent: bool = False) -> str:
     """``2 · me@example.com · max · session 12%`` — slot, who, plan, usage when read: its
     window that limits, by name (``week 90%``, ``gemini-2.5-pro daily 70%``), the figure the
     sidebar shows beside its agents (``ClaudeUsage.ranked_percent``); with ``agent``, the
-    slot's agent after its number (``5 · Codex · …``), for a list that holds more than one
-    agent's slots."""
+    slot's agent after its number, its mark first (``5 · >_ Codex · …``,
+    :func:`account_prompt`), for a list that holds more than one agent's slots."""
+    return account_prompt(status, agent=agent).plain
+
+
+def account_prompt(status: ClaudeAccountStatus, *, agent: bool = False) -> Text:
+    """:func:`account_text` as the picker draws it: with ``agent``, the agent's mark
+    (``AgentAdapter.mark``, the one its own TUI shows) before its name, in the mark's colour,
+    ``2 · ✻ Claude Code · …`` and ``5 · >_ Codex · …``, so the two agents' rows read apart by
+    shape and by colour; an agent that declares no mark by its name alone. Every part is
+    appended as data: an email is the user's."""
     who = status.identity.email if status.identity is not None else "not signed in"
-    parts = [str(status.account.slot), who, status.subscription or "plan unknown"]
+    parts = [Text(str(status.account.slot)), Text(who), Text(status.subscription or "plan unknown")]
     if agent:
-        parts.insert(1, accounts_core.agent_label(status.account.agent))
+        named = Text(accounts_core.agent_label(status.account.agent))
+        mark = mark_of(status.account.agent)
+        if mark is not None:
+            named = Text.assemble((mark.glyph, mark.colour), " ", named)
+        parts.insert(1, named)
     usage = status.usage
     limiting = usage.limiting if usage is not None else None
     if usage is not None and limiting is not None and usage.ranked_percent is not None:
-        parts.append(f"{limiting.name} {usage.ranked_percent:.0f}%")
-    return " · ".join(parts)
+        parts.append(Text(f"{limiting.name} {usage.ranked_percent:.0f}%"))
+    return Text(" · ").join(parts)
 
 
 def bind_account(profile: RoleLaunchProfile, statuses: Iterable[ClaudeAccountStatus] | None) -> str:
@@ -415,9 +434,24 @@ class AttachTargetScreen(ModalScreen[Target | None]):
             for s in statuses
         ]
 
+    def marked_rows(self) -> dict[str, Text]:
+        """Each account row as :meth:`paint` draws it, by option id, where the list holds more
+        than one agent's accounts: its agent's mark in the mark's colour
+        (:func:`account_prompt`). None where it holds one agent's, whose rows are drawn from
+        their text as 0.9.2 drew them."""
+        statuses = self.targets.accounts or []
+        if len({s.account.agent for s in statuses}) <= 1:
+            return {}
+        listed = [s.account for s in statuses]
+        return {
+            f"account:{accounts_core.ref_among(s.account, listed)}": account_prompt(s, agent=True)
+            for s in statuses
+        }
+
     def paint(self) -> None:
         self._arming.disarm()  # the rows are drawn again
         query = self.query_one("#picker-filter", Input).value.strip().lower()
+        marked = self.marked_rows()
         options: list[Option] = []
         for section in SECTION_ORDER[self.attach_intent]:
             options.append(
@@ -432,7 +466,10 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                 options.append(
                     Option(Text("  (none)", style="dim"), id=f"empty:{section}", disabled=True)
                 )
-            options.extend(Option(f"  {text}", id=oid) for oid, text in rows)
+            options.extend(
+                Option(Text("  ") + marked[oid] if oid in marked else f"  {text}", id=oid)
+                for oid, text in rows
+            )
             self._prompts.update((oid, text) for oid, text in rows)
         listing = self.query_one("#picker-list", OptionList)
         listing.clear_options()

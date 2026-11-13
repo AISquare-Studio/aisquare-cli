@@ -42,6 +42,7 @@ from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
     AgentHookTrust,
+    AgentMark,
     AgentScreen,
     AgentTranscript,
     AnswerKey,
@@ -631,6 +632,8 @@ class FakeAgentAdapter:
     label = "Fake Agent"
     #: Stable: a third agent that leaves beta reads as Claude Code does, with no mark.
     release_stage: ReleaseStage = "stable"
+    #: None: its accounts' rows keep the letters every agent's had (``Fa``).
+    mark: AgentMark | None = None
     binary = "fakeagent"
     home_env = "FAKE_AGENT_HOME"
     home_name = ".fakeagent"

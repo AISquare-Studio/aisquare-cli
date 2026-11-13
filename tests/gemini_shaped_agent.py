@@ -55,6 +55,7 @@ from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
     AgentHookTrust,
+    AgentMark,
     AgentScreen,
     AgentTranscript,
     AnswerKey,
@@ -768,6 +769,7 @@ class GeminiShapedAdapter:
     label = "Gemini-shaped"
     #: Beta, as a new agent ships: its name carries the mark wherever one is chosen or seen.
     release_stage: ReleaseStage = "beta"
+    mark: AgentMark | None = None
     binary = "gemini"
     home_env = HOME_ENV
     home_name = CONFIG

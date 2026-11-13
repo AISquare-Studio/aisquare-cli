@@ -1962,7 +1962,10 @@ def endpoint_usage(
     (``seven_day_opus``, ``seven_day_sonnet``: :attr:`ClaudeUsage.family_week_percent`),
     the ``limits[]`` entries, folded into the window of their kind as the fuller figure,
     and a ``locked_reason``, which reads that window 100 % used. Keys it does not know
-    are ignored.
+    are ignored. A plan with one of the two windows has that one alone
+    (:func:`session_and_week`): a ``five_hour`` that is null, left out or says
+    nothing is a plan with a weekly limit alone, read by its week. An answer with neither
+    window is no reading.
     """
     login = stored_login(account, fresh=fresh)
     creds = login.credentials
@@ -2020,13 +2023,13 @@ def endpoint_usage(
     family_percent, family_resets = _family_weeks(payload)
     return ClaudeUsage(
         available=True,
-        # Both windows, each read or not: one the endpoint answered without went unread.
+        # The windows the plan HAS: a Max plan with a weekly limit alone answers with no
+        # five-hour window (2026-11-13), and is ranked, counted and shown by its week.
         windows=session_and_week(
             _fuller(session_percent, _limit_of(payload, _SESSION_KINDS)),
             session_resets,
             _fuller(week_percent, _limit_of(payload, _WEEK_KINDS)),
             week_resets,
-            every=True,
         ),
         family_week_percent=family_percent,
         family_week_resets_at=family_resets,

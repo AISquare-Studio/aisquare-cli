@@ -413,6 +413,18 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 
 ### Fixed
 
+- Claude Max plans that now have only a weekly limit are used and shown again. Their usage
+  has no five-hour window, and aisquare read that as a failed reading. So such an account
+  was left out of the automatic pick (a spawn, `fleet switch` with no `--to`, the hand-over
+  at a limit), out of `accounts usage`'s `N usable` and its fleet line, out of the sidebar's
+  `#slot·%`, the agent info line and `doctor --live`, even when it had the most room left.
+  It now counts by its week. Against an account with a five-hour window it is weighed by
+  what is left of the window that limits each one. Its session cell in `accounts usage`,
+  `accounts list --usage` and the Accounts page reads `no 5h limit`, and the pick's notes
+  and `doctor --live` say `account 4 week 2% used (98% left)`. In `--json` its `windows`
+  list its week alone and `limiting` is the week; no key is added. A read that failed is
+  still left out, and plans with a five-hour window read as before. A Codex plan with a
+  week alone shows `no 5h limit` too. 0.9.2 had this too.
 - A fleet Claude Code agent's permission prompt is read again on Claude Code 2.1.318, which
   leaves a named rule under the dialog, so the captain's press answers it.
 - `fleet tell` never types into a dialog a waiting Claude Code agent shows (`/resume`,

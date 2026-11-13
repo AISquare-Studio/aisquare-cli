@@ -12,8 +12,9 @@ docs/plans/claude-accounts.md. Two halves, one page:
   one priority order a launch that names no agent picks its agent from (owner, PR #113):
   one aligned row per slot that ``services.claude_accounts`` knows, in priority order:
   *↑*/*↓*, the slot, its name behind its agent's two-letter mark, who is signed in, the
-  five-hour and seven-day windows (a bar and the percent USED, or one ``!`` across the two
-  when there is no reading, whose tooltip says why and what to do) with *Log in* beside
+  five-hour and seven-day windows (a bar and the percent USED, ``no 5h limit`` for a plan
+  with a week alone, or one ``!`` across the two when there is no reading, whose tooltip
+  says why and what to do) with *Log in* beside
   them, when each window resets (the distance; the clock time on hover), then the plan.
   *Add* makes a fresh slot and opens Claude Code's own login in a tmux window
   rendered right here (a ``TerminalPane``); the view polls the slot's
@@ -594,7 +595,9 @@ def _window_cells(
     """One window's two cells (``session`` or ``week``): its bar and percent USED, and its reset.
 
     ``…`` while a reading is owed, ``—`` when there is none to show. ``clock=False`` is the
-    reset's distance alone, ``in 6d 12h``, what the row's resets cell has room for.
+    reset's distance alone, ``in 6d 12h``, what the row's resets cell has room for. The
+    session of a plan with a week alone (``ClaudeUsage.weekly_only``) reads ``no 5h limit``
+    (``NO_SESSION_LIMIT``) with no reset, the marks of a kept or borrowed reading after it.
     """
     if usage is None:
         return Text("…", style="dim"), Text()
@@ -607,13 +610,19 @@ def _window_cells(
         age = accounts_service.describe_age(resets_at, now=moment)
         # The row's cell has room for "reset"; its age is the tooltip (reset_tooltip).
         return Text("reset", style="dim"), Text(f"reset {age}" if clock else "reset", style="dim")
-    if not usage.available or percent is None:
+    unlimited = window == "session" and usage.weekly_only
+    if unlimited:
+        bar = Text(accounts_service.NO_SESSION_LIMIT, style="dim")
+    elif not usage.available or percent is None:
         return Text("—", style="dim"), Text()
-    bar = usage_bar(percent)
+    else:
+        bar = usage_bar(percent)
     if window == "session" and (kept := kept_age(usage, now=moment)) is not None:
         bar.append(f" · {kept}", style="yellow")
     elif window == "session" and usage.recorded_elsewhere:
         bar.append(f" · {VIA_MARK}", style="dim")  # not read here: the tooltip says whose
+    if unlimited:
+        return bar, Text()
     return bar, Text(format_reset(resets_at, now=moment, clock=clock), style="dim")
 
 

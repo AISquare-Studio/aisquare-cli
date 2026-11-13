@@ -338,13 +338,14 @@ def session_and_week(
     session_resets_at: datetime | None,
     week_percent: float | None,
     week_resets_at: datetime | None,
-    *,
-    every: bool = False,
 ) -> tuple[UsageWindow, ...]:
     """The :data:`SESSION_WINDOW` and :data:`WEEK_WINDOW` of a reading in those four fields,
-    each only where it says something (a percent, or a reset), or both with ``every``: a
-    reading that asks for both (Claude Code's endpoint) and got neither of one has that one
-    unread."""
+    each only where it says something (a percent, or a reset): the windows the plan HAS. A
+    Claude Max plan with a weekly limit alone answers with no five-hour window (2026-11-13),
+    as a Codex business plan records its week alone, so its reading is the week, which the
+    pick ranks it by; it was kept as an unread five-hour window, and a reading whose shortest
+    window went unread ranks nowhere (:attr:`ClaudeUsage.ranked_percent`), so the account
+    with the most room was left out of every pick and count."""
     windows = (
         UsageWindow(
             name=SESSION_WINDOW,
@@ -362,7 +363,7 @@ def session_and_week(
     return tuple(
         window
         for window in windows
-        if every or window.used_percent is not None or window.resets_at is not None
+        if window.used_percent is not None or window.resets_at is not None
     )
 
 
@@ -523,10 +524,25 @@ class ClaudeUsage(BaseModel):
         return self.windows if any(w.name not in named for w in self.windows) else ()
 
     @property
+    def weekly_only(self) -> bool:
+        """A reading of a plan with a :data:`WEEK_WINDOW` and no :data:`SESSION_WINDOW` (a
+        Claude Max plan with a weekly limit alone, a Codex business plan): ranked, counted
+        and shown by its week, its session cell saying it has no five-hour limit, never
+        ``—``, a problem or 0 %. ``False`` for a reading that failed or was never made,
+        which has no windows, and for one whose windows go by their own names."""
+        return (
+            self.available
+            and self.window(SESSION_WINDOW) is None
+            and self.window(WEEK_WINDOW) is not None
+            and not self.own_windows
+        )
+
+    @property
     def ranked_percent(self) -> float | None:
         """How full the account reads for a pick: :attr:`limiting`'s percent USED, or
-        ``None`` while its shortest window went unread (a reading Claude Code's endpoint
-        answered without its five-hour window, which the pick skips as it always has)."""
+        ``None`` while its shortest window went unread: a reading that failed has none, and
+        a window a kept reading has seen reset reads no figure. A plan without a five-hour
+        window (:attr:`weekly_only`) has its week first, and is ranked by it."""
         if not self.available or not self.windows or self.windows[0].used_percent is None:
             return None
         limiting = self.limiting

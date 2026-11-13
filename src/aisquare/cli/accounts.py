@@ -196,6 +196,8 @@ def _percent(value: float | None) -> str:
 def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> tuple[str, str]:
     """``(session used, week used)`` as the table shows them; the reason when there is nothing,
     with what to do about it (``explain_usage``: the fix the Accounts page shows on hover).
+    A plan with a week alone (``ClaudeUsage.weekly_only``) reads ``no 5h limit`` in its
+    session cell (``NO_SESSION_LIMIT``).
 
     The columns say USED in their headers: a bare ``40%`` read as the room left
     to an agent on a fresh install, which then rationed a nearly empty account.
@@ -208,7 +210,11 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
         return _DASH, _DASH
     if not usage.available:
         return accounts_service.explain_usage(usage), ""
-    session = _window_cell(usage.session_percent, usage.session_resets_at, now=now)
+    session = (
+        accounts_service.NO_SESSION_LIMIT
+        if usage.weekly_only
+        else _window_cell(usage.session_percent, usage.session_resets_at, now=now)
+    )
     week = _window_cell(usage.week_percent, usage.week_resets_at, now=now)
     # The per-family weeks (#277), each with its own reset: they bind that family alone.
     # One whose reset has passed says so, as a reset session or week does: its figure is

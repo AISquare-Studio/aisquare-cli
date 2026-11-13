@@ -2334,6 +2334,12 @@ def is_signed_in(account: ClaudeAccount) -> bool:
 VIA_THE_MAC = "via the Mac's asq"
 """What a reading this process did not take says beside its age (:func:`describe_via`)."""
 
+NO_SESSION_LIMIT = "no 5h limit"
+"""The session cell of a plan with no five-hour window (``ClaudeUsage.weekly_only``: a Claude
+Max plan with a weekly limit alone, a Codex business plan), in ``accounts usage``, ``accounts
+list --usage`` and the Accounts page: a plan without the limit, never one unread (``—``),
+a problem (``!``) or 0 %. Eleven cells, inside the page's sixteen."""
+
 
 def describe_via(reading: ClaudeUsage, *, now: datetime | None = None) -> str | None:
     """``via the Mac's asq · 2m ago``: a reading another process recorded, served here because
@@ -3201,8 +3207,8 @@ def _recorded_usage(
                 if not taken:
                     continue
                 newest = taken[-1]
-                # Every window it read (v48); a row from before, the endpoint's two, each
-                # read or not.
+                # Every window it read (v48); a row from before, those of the endpoint's two
+                # it holds: 0.9.2's row of a Max plan with a weekly limit alone has its week.
                 windows = (
                     newest.windows
                     if newest.windows is not None
@@ -3211,7 +3217,6 @@ def _recorded_usage(
                         newest.session_resets_at,
                         newest.week_percent,
                         newest.week_resets_at,
-                        every=True,
                     )
                 )
                 if current and any(w.resets_at is not None and w.resets_at <= now for w in windows):
@@ -3626,10 +3631,12 @@ def headroom_percent(reading: ClaudeUsage, family: str | None = None) -> float |
     account that had hit its own, the first request was refused, and the hand-over
     cooldown then kept the agent parked until a reset days away (final review of #203,
     accounts F1). The windows are the ones its plan HAS: a Codex plan can have a weekly
-    window and no five-hour one (measured on a business plan), an agent of daily
-    per-model quotas a window per model. ``None`` while its shortest window went unread
-    (Claude Code's endpoint answering without the five-hour one), which the pick skips as
-    it always has.
+    window and no five-hour one (measured on a business plan), and so can a Claude Max
+    plan (2026-11-13: the account with the most room was skipped as unread); an agent of
+    daily per-model quotas a window per model. Each is ranked by what is LEFT of the
+    window that limits it, a plan with a week alone by its week. ``None`` while its
+    shortest window went unread, or when nothing could be read, which the pick skips as it
+    always has.
     """
     used = reading.ranked_percent
     own = reading.family_week_percent.get(family) if family is not None else None
@@ -3709,8 +3716,8 @@ def fleet_headroom(
     The formula, as the help screen quotes it:
 
     - an account is **usable** when it is enabled and has a readable reading
-      (signed in, token accepted, its shortest window read: Claude Code's five hours, the
-      week of a Codex plan with no five-hour window);
+      (signed in, token accepted, its shortest window read: the five hours, or the week
+      of a plan with no five-hour window, a Claude Max plan's or a Codex business plan's);
     - its share **left** is ``100 - max(session % used, week % used)``, over every window
       it has — the window that limits it decides, as it does for a pick
       (:func:`headroom_percent`);

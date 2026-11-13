@@ -1342,8 +1342,9 @@ def _lane_rule(role: str, sid: str, *, merge_said: bool, fleet: FleetCommand) ->
 
     Three lines, because this block is always-injected context and lands last
     in it (the first thing truncated on a busy board). ``merge_said`` skips the
-    "Never merge" the role's own cycle already states, so no role reads the
-    same prohibition twice. A role with no entry gets no paragraph — never a
+    "Never merge" where the role's own cycle already states its merge rule (the
+    reviewer's "never merge", the manager's "Merge a PR only when …"), so no role
+    reads two merge rules. A role with no entry gets no paragraph — never a
     ``KeyError``, which the session-start hook would swallow together with the
     whole team block.
     """
@@ -1672,15 +1673,20 @@ def _role_cycle_core(
             *_state_rule(state_file),
             "Never watch panes, CI or pull requests with Monitor or sleep loops: `aisquare",
             "watch --detach` runs one watcher for the fleet, and its `watch:` lines wake you.",
+            # The owner's ruling of 2026-11-11 (PR #499, redone here): the manager may merge,
+            # on a person's GitHub approval and a green head, and still never pushes. Said once,
+            # before both escalations; the lane rule then adds no "Never merge" after it.
+            "Never write code. Merge a PR only when a person approved it on GitHub and every CI",
+            "check on its head is green. Never push.",
             *(
                 [
-                    "Never write code. Never merge. Blocked twice on one task? Ask your parent",
-                    f'manager: `aisquare note "…" --kind question --to parent --as {sid}`. Labels',
-                    "are unique, descriptive and at most 24 characters",
+                    "Blocked twice on one task? Ask your parent manager:",
+                    f'`aisquare note "…" --kind question --to parent --as {sid}`. Labels are',
+                    "unique, descriptive and at most 24 characters",
                 ]
                 if escalate_to_parent
                 else [
-                    "Never write code. Never merge. Blocked twice on one task? Ask the human:",
+                    "Blocked twice on one task? Ask the human:",
                     f'`aisquare note "…" --kind question --as {sid}`. Labels are unique, '
                     "descriptive and at most 24 characters",
                 ]

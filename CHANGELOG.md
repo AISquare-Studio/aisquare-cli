@@ -183,6 +183,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     `grep -n`, `git blame`, `journalctl` or Claude Code's Read tool print its lines, or
     with its lines joined by `&#10;` or HTML tags) is removed with its body, while the
     text after it, and a header with no key after it, are kept.
+- **A fleet's manager may merge a pull request**, but only one a person approved on GitHub
+  with every CI check on its head green. Its instructions said *Never merge* in 0.9.2; they
+  now say *Merge a PR only when a person approved it on GitHub and every CI check on its
+  head is green*, with a Claude Code or a Codex manager alike. It still never writes code,
+  and its instructions now also say never to push. Every other role is still told never to
+  merge.
 - `aisquare accounts add --help` lists one new option, `--browser`, which applies to Codex
   accounts only: with Claude Code it is refused, and Claude Code's sign-in is unchanged.
   `aisquare accounts run --help` names Codex's sign-in as `run <n> login --device-auth`.

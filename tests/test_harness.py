@@ -15,7 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.core import harness
-from tests.cycles import unscoped
+from tests.cycles import MANAGER_MERGE_RULE, unscoped
 from tests.projects import add_project
 
 # --- profiles & resolution ------------------------------------------------------
@@ -324,13 +324,44 @@ def test_the_manager_cycle_names_the_label_limit() -> None:
     ) in manager
 
 
-def test_no_role_reads_never_merge_twice() -> None:
-    """The manager's and reviewer's cycles already forbid merging; the lane rule
-    adds the prohibition only where the core does not say it, so no briefing
-    repeats the same rule two paragraphs apart."""
-    for role in harness.ROLE_PROFILES:
-        text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped)).lower()
-        assert text.count("never merge") == 1, (role, text.count("never merge"))
+@pytest.mark.parametrize(
+    ("escalate", "asks"),
+    [
+        (False, "Blocked twice on one task? Ask the human:"),
+        (True, "Blocked twice on one task? Ask your parent manager:"),
+    ],
+    ids=["asks-the-human", "asks-its-parent"],
+)
+def test_the_manager_merges_only_an_approved_pr_with_every_check_green(
+    escalate: bool, asks: str
+) -> None:
+    """The owner's ruling of 2026-11-11 (PR #499, redone in #113): the manager may merge a PR
+    a person approved on GitHub with every CI check on its head green, and never pushes. Its
+    cycle says so once, in both variants, before whom it asks when blocked, and reads no
+    "Never merge": the lane rule sees the manager's own merge rule and adds none after it."""
+    text = " ".join(
+        harness.role_cycle("manager", "abcd1234", fleet=unscoped, escalate_to_parent=escalate)
+    )
+    assert text.count(MANAGER_MERGE_RULE) == 1, text
+    assert "never merge" not in text.lower()
+    assert f"{MANAGER_MERGE_RULE} {asks}" in text, "the variant's escalation still follows it"
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        *(role for role in harness.ROLE_PROFILES if role != "manager"),
+        pytest.param("captain", marks=pytest.mark.needs_captain),
+    ],
+)
+def test_every_role_but_the_manager_reads_never_merge_once(role: str) -> None:
+    """Every other role is told "Never merge" exactly once: by its own cycle (the reviewer's)
+    or by the lane rule's closing, which adds it only where the cycle does not say it. None
+    reads the manager's merge rule."""
+    text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
+    assert text, role
+    assert text.lower().count("never merge") == 1, (role, text.lower().count("never merge"))
+    assert "Merge a PR only when" not in text, role
 
 
 def test_the_planner_lane_routes_a_fix_to_tasks_and_names_the_hand_off() -> None:

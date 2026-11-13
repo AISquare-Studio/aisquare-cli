@@ -20,13 +20,15 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
 from textual.color import Color
 from textual.theme import BUILTIN_THEMES
 
-from aisquare.cli.ui.attach import account_prompt, account_text
+from aisquare.cli.ui.attach import AttachTargetScreen, Targets, account_prompt, account_text
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import adapters, register, unregister
@@ -188,3 +190,21 @@ def test_a_list_of_one_agents_accounts_draws_its_rows_as_0_9_2_did() -> None:
     status = _status(2, "claude-code")
     assert account_text(status) == "2 · slot2@example.com · max"
     assert account_prompt(status).spans == []
+
+
+def test_the_picker_marks_its_rows_only_where_it_lists_more_than_one_agents_accounts() -> None:
+    """A Claude-only machine's picker draws no row of its own (``marked_rows`` is empty), so
+    every row is its text as 0.9.2 drew it; with a Codex account too, every account row is
+    drawn with its agent's mark."""
+
+    def marked(*statuses: ClaudeAccountStatus) -> dict[str, str]:
+        picker = cast(Any, SimpleNamespace(targets=Targets(accounts=list(statuses))))
+        return {key: text.plain for key, text in AttachTargetScreen.marked_rows(picker).items()}
+
+    claude = (_status(1, "claude-code"), _status(2, "claude-code"))
+    assert marked(*claude) == {}
+    assert marked(*claude, _status(5, "codex")) == {
+        "account:1": "1 · ✻ Claude Code · slot1@example.com · max",
+        "account:2": "2 · ✻ Claude Code · slot2@example.com · max",
+        "account:5": "5 · >_ Codex · slot5@example.com · max",
+    }

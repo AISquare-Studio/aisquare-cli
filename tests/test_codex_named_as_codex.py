@@ -224,3 +224,75 @@ def test_a_resumed_agent_is_told_its_own_agents_account() -> None:
     codex = fleet_service._resume_prompt(row("codex"), "session limit")
     assert codex == claude.replace("another Claude account", "another Codex account")
     assert core.agent_noun("codex") == "Codex" and core.agent_noun(None) == "Claude"
+
+
+# --------------------------------------------------------------------------- the manager's
+# cycle and the home's warning (the manager's rulings on seq 11900, Q1 and Q3)
+
+
+def test_the_manager_cycle_names_its_own_agents_usage_limit() -> None:
+    """Q1: a manager's whole cycle, rendered for each agent. A Claude Code manager's is the
+    default's, the one every caller rendered before (``An agent that hits its Claude usage
+    limit``, 0.9.2's words); a Codex manager's differs from it in that one word and nothing
+    else. The adopt line about the user's Claude sessions stays for both."""
+    from aisquare.core import harness
+    from tests.cycles import unscoped
+
+    def cycle(agent: str | None) -> str:
+        return "\n".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped, agent=agent))
+
+    claude = cycle("claude-code")
+    assert claude == cycle(None), "a Claude Code manager's cycle is the default's"
+    assert "An agent that hits its Claude usage" in claude
+    codex = cycle("codex")
+    assert codex != claude
+    assert codex == claude.replace("hits its Claude usage", "hits its Codex usage")
+    assert "in Claude outside the CLI" in codex  # the adopt line, as ruled
+
+
+def test_a_codex_managers_injected_cycle_says_codex(fake_home: Path) -> None:
+    """The cycle the board injects is rendered for the session's own agent
+    (``TeamSession.agent``), not the default's. (With no project, the lines above the cycle
+    differ by agent already: a sandboxed agent is told no command lists the projects.)"""
+    from datetime import UTC, datetime
+
+    from aisquare.models import TeamSession
+    from aisquare.services import team as team_service
+
+    def session(agent: str | None) -> TeamSession:
+        moment = datetime(2026, 11, 13, tzinfo=UTC)
+        return TeamSession(
+            id="abcd1234-5678",
+            project_id="prj_1",
+            role="manager",
+            started_at=moment,
+            last_seen_at=moment,
+            agent=agent,
+        )
+
+    codex = "\n".join(team_service._role_cycle(session("codex"), None))
+    claude = "\n".join(team_service._role_cycle(session("claude-code"), None))
+    assert "hits its Codex usage" in codex and "hits its Claude usage" not in codex
+    assert "hits its Claude usage" in claude
+    # The usual path: the session's fleet project known, the cycle's commands naming it.
+    [project] = seed(fake_home.parent, ("prj_1", "repo", "amber-otter"))
+    in_codex = "\n".join(team_service._role_cycle(session("codex"), project))
+    in_claude = "\n".join(team_service._role_cycle(session("claude-code"), project))
+    assert in_codex == in_claude.replace("hits its Claude usage", "hits its Codex usage")
+    assert in_codex != in_claude
+
+
+def test_the_home_warning_names_each_agent_with_accounts_here(fake_home: Path) -> None:
+    """Q3: a machine of Claude Code's accounts alone reads 0.9.2's warning byte for byte; with
+    a Codex account too, it names both agents' accounts, built from the agents."""
+    from aisquare.services import project as project_service
+
+    assert project_service.home_warning() == (
+        "this folder is aisquare's own home: it holds aisquare's settings, the fleet database "
+        "and every Claude account's login data, so agents working here can read and change them"
+    )
+    _codex_slot("me@example.com")
+    assert "and every Claude and Codex account's login data, so agents" in (
+        project_service.home_warning()
+    )
+    assert "{accounts}" in project_service.HOME_WARNING  # no agent named in the template

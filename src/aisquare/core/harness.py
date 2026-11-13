@@ -1414,6 +1414,7 @@ def role_cycle(
     task: str | None = None,
     state_file: str | None = None,
     escalate_to_parent: bool = False,
+    agent: str | None = None,
 ) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
@@ -1422,6 +1423,8 @@ def role_cycle(
     tester or ui-tester then verifies that one task and stops after its verdict (#129 a).
     ``state_file`` is where a manager keeps its state (P1 WS-4, #281). ``escalate_to_parent``:
     the project's group has a parent manager, whom a manager asks before the human (P2-W6).
+    ``agent`` is the session's own agent, whose usage limit a manager's cycle names
+    (``claude_accounts.agent_noun``: ``Claude``, as it always read, or ``Codex``; R16-F).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
@@ -1439,6 +1442,7 @@ def role_cycle(
         task=task,
         state_file=state_file,
         escalate_to_parent=escalate_to_parent,
+        agent=agent,
     )
     if not core:
         return []
@@ -1548,6 +1552,14 @@ def _verify_end(task: str | None) -> str:
     return "After that one verdict, tell the user and stop: take no other task."
 
 
+def _noun(agent: str | None) -> str:
+    """What prose calls ``agent``'s accounts and sessions (``claude_accounts.agent_noun``),
+    imported here: that module imports this one."""
+    from aisquare.core.claude_accounts import agent_noun
+
+    return agent_noun(agent)
+
+
 def _role_cycle_core(
     role: str,
     session_short_id: str,
@@ -1557,6 +1569,7 @@ def _role_cycle_core(
     task: str | None = None,
     state_file: str | None = None,
     escalate_to_parent: bool = False,
+    agent: str | None = None,
 ) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
@@ -1633,6 +1646,7 @@ def _role_cycle_core(
         ]
     if role == "manager":
         spawn = fleet("spawn")
+        noun = _noun(agent)  # the manager's own agent's, as its accounts are called
         # docs/plans/fleet-tui.md §7.1 — the planner's contract cycle plus the fleet
         # verbs and the loop protocol. Sub-agents are reached ONLY through the board
         # and `fleet spawn|tell` (§3.3, §7.6): native agent teams are off in fleet
@@ -1654,7 +1668,7 @@ def _role_cycle_core(
             f"`{spawn} validator` once every task is done.",
             "Board updates reach you every turn: reopen with reasons,",
             f'`{fleet("tell")} <label> "…"` to steer, re-spec or split what bounces. Spawn',
-            f"nothing while the `{paused}` signal is set. An agent that hits its Claude usage",
+            f"nothing while the `{paused}` signal is set. An agent that hits its {noun} usage",
             'limit shows `limited` on the board. With `on_limit = "switch"` (the default) the',
             "fleet moves a limited agent itself; act on `handover_failed`, not on `limited`:",
             f"`{fleet('switch')} <label> --as {sid}` moves it to the account with the most",

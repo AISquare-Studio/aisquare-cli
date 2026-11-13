@@ -1812,7 +1812,7 @@ class OnboardReport(BaseModel):
     """``True`` when this run added a forgotten project again: the facts forget kept,
     hidden, are back. Such a run reads the markers, as a first one does."""
     warning: str | None = None
-    """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
+    """``project_service.home_warning()`` when this onboarding made the aisquare home a
     project (D5), said once; else ``None``."""
     code_index: str | None = None
     """The symbol index's line (#285): what this onboard (or ``init``) started, or why

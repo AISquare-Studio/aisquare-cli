@@ -84,9 +84,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   *Agent* field, as `team bind --agent` does, also on a binding that runs Codex.
   `aisquare accounts usage` names a Codex account's agent after its name (`account 4 ·
   codex`, `plain codex · codex`), before its first session as well as after. The Manager
-  tab tells a Codex manager to type to it "as you would to any Codex session". An agent
-  resumed after `fleet switch` or the hand-over is told it moved to "another Codex
-  account". Otherwise these read as in 0.9.2.
+  tab tells a Codex manager to type to it "as you would to any Codex session", and a Codex
+  manager's cycle says "an agent that hits its Codex usage limit". An agent resumed after
+  `fleet switch` or the hand-over is told it moved to "another Codex account". Adding
+  aisquare's own home as a project warns that it holds "every Claude and Codex account's
+  login data" once Codex has accounts here. Otherwise these read as in 0.9.2.
 - **Accounts.** `aisquare accounts add --agent codex` adds a slot and signs it in with a
   device code (`codex login --device-auth`): Codex prints a link and a one-time code, and
   you open the link on any device, phone included, and enter the code. Nothing waits for a

@@ -5367,6 +5367,7 @@ def _role_cycle(
             task=spawned_for,
             state_file=state_file,
             escalate_to_parent=escalate,
+            agent=me.agent,
         )
     cycle = harness.role_cycle(
         base_role(me.role),
@@ -5374,6 +5375,7 @@ def _role_cycle(
         task=spawned_for,
         state_file=state_file,
         escalate_to_parent=escalate,
+        agent=me.agent,
         fleet=lambda verb: (
             install_route.command_line(["aisquare", "fleet", verb, "--project"])
             + f" {_NO_CYCLE_PROJECT}"

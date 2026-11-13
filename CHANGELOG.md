@@ -72,14 +72,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   and resume, `fleet top`, `fleet adopt`), Welcome, doctor, Usage & stats, personas and
   Remote, each through Codex's own hooks, flags and screens. Teams can mix agents, and a
   restart resumes the agent's Codex thread.
-- **Which agent is which.** With accounts of more than one agent, as the Accounts page
-  marks its rows, asq's Agent view header and Manager tab name the agent after its
-  account and use (`codex-1 · 42%  codex`), and `team harness` says each role's after
-  its model (`agent=codex [role]`); the account picker (Spawn's *Pick…*) names each
-  account's agent after its number, the agent's mark first (`5 · >_ Codex · …`);
-  *Adopt a conversation…* names each conversation's agent when it lists two agents', as
-  `fleet adopt --list` does; and asq's *New bind* form has an *Agent* field, as
-  `team bind --agent` does, also on a binding that runs Codex.
+- **Which agent is which.** In a fleet of more than one agent's, `fleet ls` names each
+  row's agent after its role (`Claude Code`, `Codex (beta)`), and asq's sidebar rows carry
+  the agent's mark after the role icon (`✻`, `>_`). With accounts of more than one agent,
+  as the Accounts page marks its rows, asq's Agent view header and Manager tab name the
+  agent after its account and use (`codex-1 · 42%  codex`), and `team harness` says each
+  role's after its model (`agent=codex [role]`); the account picker (Spawn's *Pick…*)
+  names each account's agent after its number, the agent's mark first
+  (`5 · >_ Codex · …`); *Adopt a conversation…* names each conversation's agent when it
+  lists two agents', as `fleet adopt --list` does; and asq's *New bind* form has an
+  *Agent* field, as `team bind --agent` does, also on a binding that runs Codex.
   Otherwise these read as in 0.9.2.
 - **Accounts.** `aisquare accounts add --agent codex` adds a slot and signs it in with a
   device code (`codex login --device-auth`): Codex prints a link and a one-time code, and
@@ -90,7 +92,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   its admin in the workspace permissions. Where it is off, `aisquare accounts add --agent
   codex --browser` signs in with the browser as before (`codex login`); a sign-in that
   ends with no login says both. Usage is read off each account's own sessions, and an
-  agent at its limit can move to the Codex account with the most room.
+  agent at its limit can move to the Codex account with the most room. Until a Codex
+  session has recorded a reading on an account, asq's Accounts page reads *no reading yet*
+  there, dim, with the reason on hover, not the `!` of a broken login.
 - **Your own Codex home** (`~/.codex`, or `$CODEX_HOME`) is one of your accounts only once
   aisquare has taken it on: connected (`agents connect codex`, `install.sh --agent codex`),
   an account of Codex added (`accounts add --agent codex`), signed in from Welcome, or

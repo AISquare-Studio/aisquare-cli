@@ -190,8 +190,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   *Effort* follow it. *Settings* shows each role's agent, account, permission and flags.
 - `--as` takes a fleet label. A manager's `state.md` is read only as a regular file of at
   most 64 KiB. Over SSH, a launch takes the Mac's last usage readings as floors. Doctor
-  has *fleet server env* and *accounts sharing* rows, and `aisquare upgrade` says *hooks
-  already current* for a hooks file it left alone. Doctor also has a *coding-agent* warning
+  has an *accounts sharing* row, and its *fleet server env* row also warns when the
+  fleet's tmux server pins an agent's process identity (Claude Code's `CLAUDE_PID` or
+  `CLAUDECODE`, Codex's `CODEX_THREAD_ID`, …), with the `set-environment -gu` that clears
+  it, as it does for a team variable; its ok text says the server *pins no team variable
+  and no agent's process identity*. `aisquare upgrade` says *hooks already current* for a
+  hooks file it left alone. Doctor also has a *coding-agent* warning
   (in `--json`, a check named `coding-agent` with status `warn`; the exit code is
   unchanged). It says *Selected agent executable 'claude' is not on PATH*, with that agent's
   install link, when something chose the agent the `coder` role launches in this folder and
@@ -351,9 +355,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     `trust_left` in `agents disconnect`; `agent` and `agent_source` in `team spawn` and in
     each role of `team harness`, which also gains `notes` and `fleet` (and `error`,
     `detail` and `fix` for a role whose agent cannot be resolved); each profile's `agent`
-    in `team bind` and `team bindings`; and in `config list`, `agents.default` and each
-    role's `approval_policy`, `approve_for_me`, `permission` and `sandbox` (unset unless
-    you set them).
+    in `team bind`, bare (every binding) or for one role; and in `config list`,
+    `agents.default` and each role's `approval_policy`, `approve_for_me`, `permission` and
+    `sandbox` (unset unless you set them).
   - Files: `launch-seals/` is new; `agents.json` gains `hook_files_made`; a saved
     `config.toml` gains an empty `[fleet.roles.<role>.agent_args]` table per role. 0.9.2
     reads both. `config list` shows new defaults: `[agents] mcp` (off; on, each launch is
@@ -364,7 +368,11 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     *Permission* field, one value each agent maps to its own flags (*role default* leaves
     the agent's own fields below it in charge). *App settings* gains *captain's agent*
     under the captain's box and *hand off across agents* among the accounts' rules. The
-    Settings hub's *Usage & stats* reads *all your agents' sessions*. asq's persona
+    Settings hub's *Usage & stats* reads *all your agents' sessions*, and its *Accounts*
+    link *the AISquare sign-in and the Claude Code and Codex accounts* (it said *the
+    AISquare sign-in and the Claude Code accounts*). With no hooks to remove, `aisquare
+    uninstall`'s plan says it would *find no aisquare hooks in any Claude Code directory
+    or Codex home*, where it said *in any Claude Code directory*. asq's persona
     *Export* dialog offers each agent's personal and project skill folders (*Claude Code
     personal skills*, *Codex (beta) personal skills*, …), where it offered *Claude
     personal skills* and *Project skills*; Claude Code's personal skills are still the

@@ -15,6 +15,8 @@ three bindings :func:`_bind` makes (the live diff, R14 rig ``harness-diff.sh``).
 from __future__ import annotations
 
 import json
+import os
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -162,10 +164,26 @@ def _signed_in(account: ClaudeAccount, email: str) -> None:
     credentials.write_text(json.dumps({"claudeAiOauth": token}))
 
 
-@pytest.mark.parametrize("home", ["plain", "managed"])
+def _claude_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claude Code on PATH, as on a machine that runs it: the accounts rung reads only the
+    accounts of an agent installed here (``claude_accounts.usable_accounts``, by
+    ``shutil.which``). tests/conftest.py's stand-in ``claude`` (no_real_fleet, which also
+    fails a test that launches it) is POSIX-only, so on Windows nothing was found, no account
+    was usable, and the pick fell to "default" (CI 43338150685, windows-py3.12 shard 4/10).
+    A ``claude.cmd`` stands in there, found through PATHEXT as an installed claude.exe is."""
+    if sys.platform != "win32":
+        return
+    folder = tmp_path / "claude-bin"
+    folder.mkdir()
+    (folder / "claude.cmd").write_text("@exit /b 97\r\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
+@pytest.mark.parametrize(("home", "rung"), [("plain", "accounts"), ("managed", "account")])
 def test_a_signed_in_claude_only_machine_reads_0_9_2s_binary_and_its_source(
-    runner: CliRunner, tmp_path: Path, home: str
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: str, rung: str
 ) -> None:
+    _claude_on_path(tmp_path, monkeypatch)
     _signed_in(core.default_account(), "plain@example.invalid")
     if home == "managed":
         for n in (2, 3):
@@ -202,7 +220,9 @@ def test_a_signed_in_claude_only_machine_reads_0_9_2s_binary_and_its_source(
     )
     assert set(shown) >= SPAWN_KEYS_0_9_2, shown
     assert (shown["binary"], shown["binary_source"]) == ("claude", "default")
-    assert shown["agent_source"] in {"accounts", "account"}, "the rung stays the agent's"
+    # The agent pick's rung: the signed-in plain slot's ("accounts"), or the role's bound
+    # account's ("account"). It stays in agent_source, never the binary's source.
+    assert shown["agent_source"] == rung, shown["agent_source"]
 
 
 #: 0.9.2's note for a role bound to a wrapper binary (`--bin claude2`), as `team spawn` said it.

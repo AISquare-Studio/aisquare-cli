@@ -189,7 +189,14 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - `--as` takes a fleet label. A manager's `state.md` is read only as a regular file of at
   most 64 KiB. Over SSH, a launch takes the Mac's last usage readings as floors. Doctor
   has *fleet server env* and *accounts sharing* rows, and `aisquare upgrade` says *hooks
-  already current* for a hooks file it left alone.
+  already current* for a hooks file it left alone. Doctor also has a *coding-agent* warning
+  (in `--json`, a check named `coding-agent` with status `warn`; the exit code is
+  unchanged). It says *Selected agent executable 'claude' is not on PATH*, with that agent's
+  install link, when something chose the agent the `coder` role launches in this folder and
+  that agent's executable is not on PATH. That something is the role's binding (any
+  `team bind coder` option, `--account` and `--env` included), `aisquare agents use` (yours
+  or the project's), or `AISQUARE_BIN_CODER` or `AISQUARE_AGENT_BIN`. When that launch
+  cannot be resolved at all, it gives the reason and the fix instead.
 - **Placement goes by the launch record:** `fleet attach`, `fleet tell` and a rename go by
   the tmux session's id; a session you made by hand under the project's codename is no
   longer renamed or shut down; `project fresh` stops only what the records name, and where

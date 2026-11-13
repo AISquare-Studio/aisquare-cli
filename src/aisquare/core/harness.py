@@ -423,8 +423,13 @@ def tool_policy(
 
     runs = adapter_for_binary(binary)
     if runs is None:
+        default = get_adapter(DEFAULT_AGENT)
         return withheld_policy(
-            role, binary, fleet, why=f"is not {get_adapter(DEFAULT_AGENT).binary}"
+            role,
+            binary,
+            fleet,
+            why=f"is not {default.binary}",
+            deny_flag=getattr(default, "deny_flag", None),
         )
     return runs.tool_policy(role, binary=binary, args=args, fleet=fleet, effort=effort)
 
@@ -445,12 +450,22 @@ def denied_for(role: str, fleet: FleetSettings) -> tuple[set[str], str]:
     return denied, settings.skill_listing
 
 
-def withheld_policy(role: str, binary: str, fleet: FleetSettings, *, why: str) -> ToolPolicy:
+def withheld_policy(
+    role: str, binary: str, fleet: FleetSettings, *, why: str, deny_flag: str | None = None
+) -> ToolPolicy:
     """No deny token and no listing settings for ``binary``: a :class:`ToolPolicy` whose note
     names what was withheld (``role``'s deny set, its ``names`` listing) and why, ``why``
-    said of the binary (``'aider' is not claude``)."""
+    said of the binary (``'aider' is not claude``).
+
+    ``deny_flag`` is the flag the deny set would have gone in, for an agent that has one
+    (Claude Code's ``--disallowedTools``): the note names it as 0.9.2's did,
+    ``--disallowedTools=Edit Write withheld: 'claude2' is not claude`` (C1 reopen, seq
+    11753). Without one, ``the deny list (Edit Write)``."""
     denied, listing = denied_for(role, fleet)
-    withheld = [f"the deny list ({' '.join(sorted(denied))})"] if denied else []
+    shown = " ".join(sorted(denied))
+    withheld = (
+        [f"{deny_flag}={shown}" if deny_flag else f"the deny list ({shown})"] if denied else []
+    )
     withheld += ["skill_listing names"] if listing == "names" else []
     note = f"{', '.join(withheld)} withheld: {os.path.basename(binary)!r} {why}"
     return ToolPolicy(notes=[note] if withheld else [], skill_listing=listing)

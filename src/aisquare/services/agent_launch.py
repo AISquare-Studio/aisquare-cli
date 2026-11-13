@@ -308,7 +308,11 @@ def resolve(
     name, source = next((value, origin) for value, origin in choices if value)
     adapter = get_adapter(name)
     if chosen_binary.source == "default":
-        chosen_binary = harness.BinaryResolution(binary=adapter.binary, source=source)
+        # The selected agent's own binary, chosen by no rung of the binary's: its source stays
+        # "default", as 0.9.2 said it, and why the AGENT was chosen is `source` (agent_source).
+        # Copied here, a signed-in Claude-only user's `team harness` and `team spawn` read
+        # `bin=claude [accounts]` and binary_source "accounts" (C1 reopen, seq 11753).
+        chosen_binary = harness.BinaryResolution(binary=adapter.binary, source="default")
     elif inferred is not None and inferred.id != adapter.id:
         raise ValueError(
             f"{chosen_binary.binary!r} runs {inferred.id}, but {adapter.id} was selected"

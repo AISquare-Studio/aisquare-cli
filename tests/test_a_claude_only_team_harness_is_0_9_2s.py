@@ -14,6 +14,8 @@ three bindings :func:`_bind` makes (the live diff, R14 rig ``harness-diff.sh``).
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
+from aisquare.models import ClaudeAccount
 
 HARNESS_0_9_2 = """\
 base effort: high (default)
@@ -107,3 +110,120 @@ def test_beside_another_agents_accounts_each_role_says_its_agent_after_the_model
     assert result.stdout.endswith(
         "Resolution shown without probing; native defaults stay with the selected agent.\n"
     )
+
+
+# --- signed in: the binary's source is not the agent pick's rung (C1 reopen, seq 11753) -------
+#
+# A signed-in Claude-only user is the normal case, and the pins above ran with no login. With
+# one, `agent_launch.resolve` copied the agent selection's rung ("accounts", or "account" for
+# a role bound to one) into the default binary's source: `team harness` printed
+# `bin=claude [accounts]` on every role, `team spawn` `·  binary claude [accounts]`, and both
+# --json outputs said binary_source "accounts". 0.9.2 printed, in the same homes:
+
+BOUND_SIGNED_0_9_2 = """\
+base effort: high (default)
+planner    fable→opus→sonnet    effort=high      ( 0) → fable [optimistic]
+coder      sonnet→opus          effort=high      ( 0) → sonnet [optimistic]  env=X
+runner     sonnet→opus          effort=high      ( 0) → sonnet [optimistic]
+validator  fable→opus           effort=xhigh     (+1) → fable [optimistic]
+manager    fable→opus→sonnet    effort=high      ( 0) → fable [optimistic]
+tester     sonnet→opus          effort=high      ( 0) → sonnet [optimistic]
+reviewer   sonnet→opus          effort=high      ( 0) → sonnet [optimistic]
+ui-tester  sonnet→opus          effort=high      ( 0) → sonnet [optimistic]  bin=claude2 [config]  role_args=--chrome
+Resolution shown without probing — `aisquare team spawn <role>` verifies live.
+"""  # noqa: E501 - 0.9.2's ui-tester line, whole
+
+#: 0.9.2's `team spawn coder` ✓ line, cut at its mission, then what follows it.
+SPAWN_0_9_2 = {"plain": "", "managed": "  ·  env X [config]"}
+
+#: The keys of 0.9.2's rows (``team harness --json``'s ``roles[]``, ``team spawn --json``).
+HARNESS_ROW_KEYS_0_9_2 = {
+    "binary", "binary_source", "default_args", "effort", "effort_offset", "effort_source",
+    "env", "env_files", "extra_args", "ladder", "mission", "refusal", "resolves_to", "role",
+    "source",
+}  # fmt: skip
+SPAWN_KEYS_0_9_2 = {
+    "binary", "binary_source", "command", "denied_tools", "effort", "effort_source", "env",
+    "env_files", "env_sources", "extra_args", "model", "not_added", "notes", "role",
+    "skipped", "source",
+}  # fmt: skip
+
+
+def _signed_in(account: ClaudeAccount, email: str) -> None:
+    """What a signed-in Claude Code leaves in a config directory: its identity, and a token
+    good for hours (the suite's Keychain holds none)."""
+    path = core.claude_json_path(account)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"oauthAccount": {"emailAddress": email}}))
+    expires = int((datetime.now(UTC) + timedelta(hours=7)).timestamp() * 1000)
+    token = {"accessToken": "sk-ant-oat01-test", "expiresAt": expires, "scopes": ["user:inference"]}
+    credentials = core.credentials_path(account)
+    credentials.parent.mkdir(parents=True, exist_ok=True)
+    credentials.write_text(json.dumps({"claudeAiOauth": token}))
+
+
+@pytest.mark.parametrize("home", ["plain", "managed"])
+def test_a_signed_in_claude_only_machine_reads_0_9_2s_binary_and_its_source(
+    runner: CliRunner, tmp_path: Path, home: str
+) -> None:
+    _signed_in(core.default_account(), "plain@example.invalid")
+    if home == "managed":
+        for n in (2, 3):
+            _signed_in(core.create_account(), f"slot{n}@example.invalid")
+        for argv in (
+            ["team", "bind", "coder", "--account", "2", "--env", "X=1"],
+            ["team", "bind", "manager", "--account", "3"],
+            ["team", "bind", "ui-tester", "--bin", "claude2"],
+        ):
+            result = runner.invoke(app, argv)
+            assert result.exit_code == 0, result.output
+    listed = runner.invoke(app, ["--json", "accounts"])
+    assert any(row["signed_in"] for row in json.loads(listed.stdout)["accounts"]), listed.stdout
+
+    text = runner.invoke(app, ["team", "harness"])
+    assert text.exit_code == 0, text.output
+    assert text.stdout == (HARNESS_0_9_2 if home == "plain" else BOUND_SIGNED_0_9_2)
+    rows = json.loads(runner.invoke(app, ["--json", "team", "harness"]).stdout)["roles"]
+    for row in rows:
+        assert set(row) >= HARNESS_ROW_KEYS_0_9_2, row
+        wrapper = home == "managed" and row["role"] == "ui-tester"
+        assert (row["binary"], row["binary_source"]) == (
+            ("claude2", "config") if wrapper else ("claude", "default")
+        ), row
+
+    spawn = runner.invoke(app, ["team", "spawn", "coder", "--no-probe"])
+    assert spawn.exit_code == 0, spawn.output
+    (tick,) = [line for line in spawn.stdout.splitlines() if line.startswith("✓ coder:")]
+    assert "binary" not in tick and tick.endswith(
+        "implements them to their acceptance criteria" + SPAWN_0_9_2[home]
+    ), tick
+    shown = json.loads(
+        runner.invoke(app, ["--json", "team", "spawn", "coder", "--no-probe"]).stdout
+    )
+    assert set(shown) >= SPAWN_KEYS_0_9_2, shown
+    assert (shown["binary"], shown["binary_source"]) == ("claude", "default")
+    assert shown["agent_source"] in {"accounts", "account"}, "the rung stays the agent's"
+
+
+#: 0.9.2's note for a role bound to a wrapper binary (`--bin claude2`), as `team spawn` said it.
+WITHHELD_0_9_2 = (
+    "coder: --disallowedTools=Artifact ArtifactComments PushNotification ReportFindings "
+    "ScheduleWakeup SendFeedback ShareOnboardingGuide Workflow, skill_listing names withheld: "
+    "'claude2' is not claude"
+)
+
+
+def test_a_wrapper_bindings_withheld_deny_list_is_said_as_0_9_2_said_it(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """The note #113 reworded for every agent (``the deny list (…)``) names Claude Code's flag
+    again, as 0.9.2 did; Codex's, which has no such flag, keeps the neutral words."""
+    _bind(runner, tmp_path)
+    spawn = runner.invoke(app, ["team", "spawn", "coder", "--no-probe"])
+    assert spawn.exit_code == 0, spawn.output
+    # Said on stderr, as 0.9.2 said it, beside the line on stdout.
+    assert WITHHELD_0_9_2 in spawn.output.splitlines(), spawn.output
+    shown = json.loads(
+        runner.invoke(app, ["--json", "team", "spawn", "coder", "--no-probe"]).stdout
+    )
+    assert WITHHELD_0_9_2.removeprefix("coder: ") in shown["notes"], shown["notes"]

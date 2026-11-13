@@ -182,6 +182,13 @@ class ClaudeCodeAdapter:
     home_name = ".claude"
     settings_name = "settings.json"
     install_hint = "https://claude.ai/install.sh"
+    args_example = "--model opus"
+    """The example an *Extra args* field shows for it (``cli.ui.attach.args_hint``), as
+    0.9.2's Spawn dialog and New bind form showed it. An agent without one is shown its
+    own model flag over ``MODEL``."""
+    deny_flag = "--disallowedTools"
+    """The flag a launch's deny set goes in; a note that withholds it names it
+    (``harness.withheld_policy``), as 0.9.2's did."""
     #: The native installer first: what ``install.sh`` runs and the layout
     #: ``diagnostics.claude_code_version`` reads first; npm last, for it needs a Node.js.
     install_routes: tuple[InstallRoute, ...] = (
@@ -640,7 +647,9 @@ class ClaudeCodeAdapter:
 
         runs = adapter_for_binary(binary)
         if runs is None or runs.id != self.id:
-            return harness.withheld_policy(role, binary, fleet, why=f"is not {self.binary}")
+            return harness.withheld_policy(
+                role, binary, fleet, why=f"is not {self.binary}", deny_flag=self.deny_flag
+            )
         denied, listing = harness.denied_for(role, fleet)
         notes: list[str] = []
         efforts = (_lowered(effort), _lowered(_flag_value(args, "--effort")))

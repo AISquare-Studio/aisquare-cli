@@ -423,7 +423,10 @@ def agent_row_text(
     ``mark``: the agent's mark (``views.accounts.agent_mark``: ``✻`` for Claude Code, ``>_``
     for Codex, in its colour, two cells), after the icon, in a fleet of more than one
     agent's (:attr:`Sidebar.agents_marked`); its cells and a space come off the label's
-    room. ``None`` draws the row as before (live mixed run, LIVE PASS 11884 F3).
+    room. It gives way first: a row whose label would keep less than two cells beside it
+    (an exited row, ``💤 exited(0)``, or ``🔔 #1·100%``, in a 24-cell sidebar) is drawn with
+    none, so the chip and the figure are never cut; the rows it fits keep theirs. ``None``
+    draws the row as before (live mixed run, LIVE PASS 11884 F3).
     """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
@@ -444,6 +447,15 @@ def agent_row_text(
             tail.append_text(used_percent_text(percent))
     badge = persona_badge(status)
     label = Text(agent.label)
+    if (
+        mark is not None
+        and width is not None
+        and width - cell_len(icon) - mark.cell_len - 1 - 1 - tail.cell_len < 2
+    ):
+        # The mark gives way first: the chip and ``#N·NN%`` are never cut, and with the mark
+        # the label would have less than its two cells (a 24-cell sidebar's exited row,
+        # R16-E verify seq 11952). This row is drawn as it is with no mark.
+        mark = None
     marked = mark.cell_len + 1 if mark is not None else 0
     room = (
         LABEL_WIDTH

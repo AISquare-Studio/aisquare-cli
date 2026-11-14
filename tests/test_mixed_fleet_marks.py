@@ -231,3 +231,119 @@ def test_a_real_problem_keeps_its_mark(
     assert not accounts_view.awaits_first_reading(status, usage)
     cells = accounts_view.account_cells(status, usage, now=NOW)
     assert cells["session"].plain == accounts_view.PROBLEM_MARK
+
+
+# --- R16-E verify (seq 11952): the mark gives way; old rows; the captain's row ---------------
+
+
+def _painted(app: FleetApp, row: AgentRow) -> str:
+    """The row as the terminal shows it, from its content's first cell to the sidebar's edge."""
+    region = row.content_region
+    (strip,) = app.screen._compositor.render_full_update(simplify=True).strips[region.y]
+    return "".join(segment.text for segment in strip.crop(region.x, region.right))
+
+
+def _fleet_row(
+    label: str, agent: str | None, state: str, *, project: str, slot: int | None = None, **kw: Any
+) -> FleetAgentStatus:
+    status = _row(label, agent, slot=slot, project=project)
+    return status.model_copy(
+        update={"state": state, "agent": status.agent.model_copy(update={"role": "tester", **kw})}
+    )
+
+
+@pytest.mark.parametrize("width", [38, 45, 60])
+def test_in_a_narrow_sidebar_the_mark_gives_way_and_no_chip_is_cut(
+    tmp_path: Path, width: int
+) -> None:
+    """A 24-cell sidebar: the mark's three cells came off a label already at its two, and the
+    exited row read ``🧪 ✻  t… 💤 exited…``. The chip and ``#N·NN%`` are never cut: a row
+    with no room for its mark is drawn with none, and a row with room keeps it."""
+    project = team_project(tmp_path)
+    rows = [
+        _fleet_row("tester-1", "claude-code", "exited", project=project.id, exit_status=0),
+        _fleet_row("coder-codex", "codex", "attention", project=project.id, slot=5),
+        _fleet_row("coder-claude", "claude-code", "working", project=project.id, slot=2),
+    ]
+    tails = {"tester-1": "💤 exited(0)", "coder-codex": "🔔 #5·100%", "coder-claude": "▶ #2·64%"}
+
+    async def run() -> dict[str, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_overview)
+        async with app.run_test(size=(width, 40)):
+            await settle_page(app)
+            app.sidebar.session_usage = {5: 100.0, 2: 64.0}
+            app.sidebar.show_projects([project], {project.id: rows})
+            await settle_page(app)
+            await settle_until_held(
+                app, lambda: len(list(app.query(AgentRow))) >= len(rows), what="the rows"
+            )
+            return {
+                row.status.agent.label: _painted(app, row).rstrip() for row in app.query(AgentRow)
+            }
+
+    drawn = asyncio.run(run())
+    for label, tail in tails.items():
+        assert drawn[label].endswith(tail), (width, label, drawn[label])
+    assert any(glyph in text for text in drawn.values() for glyph in GLYPHS), drawn  # still mixed
+
+
+def test_a_claude_only_fleet_with_a_pre_adapter_row_draws_no_mark(tmp_path: Path) -> None:
+    """A row from before adapters (``agent`` NULL: the v44 backfill leaves it so for a custom
+    binary) is Claude Code's: beside a ``claude-code`` row it is one agent's fleet, and the
+    sidebar draws no mark (the R16-E verify's mutant E3, seq 11952)."""
+    project = team_project(tmp_path)
+    rows = [
+        _row("manager", None, slot=1, project=project.id),
+        _row("coder-auth", "claude-code", slot=2, project=project.id),
+    ]
+
+    async def run() -> list[str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_overview)
+        async with app.run_test(size=(120, 40)):
+            await settle_page(app)
+            app.sidebar.show_projects([project], {project.id: rows})
+            await settle_page(app)
+            await settle_until_held(
+                app, lambda: len(list(app.query(AgentRow))) >= len(rows), what="the rows"
+            )
+            return [_painted(app, row) for row in app.query(AgentRow)]
+
+    drawn = asyncio.run(run())
+    assert len(drawn) == 2 and not any(g in text for text in drawn for g in GLYPHS), drawn
+
+
+@pytest.mark.needs_captain
+def test_the_captains_row_gains_and_loses_the_mark_as_the_fleet_flips(tmp_path: Path) -> None:
+    """The captain's row is no project card's: a frame does not feed it again, so the flip
+    repaints it (``Sidebar.show_projects``' repaint; the R16-E verify's mutant E4, seq 11952)."""
+    project = team_project(tmp_path)
+    home = _row("captain", "claude-code", project="home")
+    captain = home.model_copy(
+        update={"state": "waiting", "agent": home.agent.model_copy(update={"role": "captain"})}
+    )
+    claude = _row("coder-claude", "claude-code", slot=2, project=project.id)
+    codex = _row("coder-codex", "codex", slot=5, project=project.id)
+
+    async def run() -> list[str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_overview)
+        seen: list[str] = []
+        async with app.run_test(size=(120, 40)):
+            await settle_page(app)
+            app.sidebar.show_captain(captain)
+            for frame in ([claude], [claude, codex], [claude]):
+                app.sidebar.show_projects([project], {project.id: frame})
+                await settle_page(app)
+                await settle_until_held(
+                    app,
+                    lambda: any(r.status.agent.role == "captain" for r in app.query(AgentRow)),
+                    what="the captain's row",
+                )
+                (row,) = [r for r in app.query(AgentRow) if r.status.agent.role == "captain"]
+                # What the screen shows: ``row.render()`` would paint the row as it is read.
+                seen.append(_painted(app, row))
+        return seen
+
+    alone, mixed, alone_again = asyncio.run(run())
+    assert "✻  captain" in mixed, mixed
+    assert not any(glyph in alone for glyph in GLYPHS), alone
+    assert alone_again == alone

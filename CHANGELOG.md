@@ -136,7 +136,7 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     Codex's `/hooks`. Until then doctor says so, and the board sees nothing from that Codex.
   - CI tests Codex 0.164.0, 0.166.0 and 0.167.0, all pinned, 0.167.0 on macOS too, where
     the tests of Codex's sandbox and its automatic reviewer run. It also tests Codex's
-    newest release nightly: 0.168.0 was green on 2026-11-13 (run 43389041999).
+    newest release nightly: 0.169.0 was green on 2026-11-14 (run 43538549479).
     `install.sh` installs Codex's newest release, with Codex's own installer. Treat a
     release newer than the last green nightly's as untested until the nightly says
     otherwise, and tell us what breaks.
@@ -161,8 +161,12 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   room; *App settings ▸ Advanced* names the *fallback coding agent* for when none has.
 - **An argument holding a byte that is not UTF-8 is refused** by every command before
   anything runs (exit 2, `{"error": "usage"}` under `--json`), where it used to end in a
-  traceback. What follows the `--` of `launch`, `fleet spawn`, `accounts run`, `exec` and
-  `fleet gate` still goes to the other program as given.
+  traceback. What follows the `--` of `launch`, `accounts run`, `exec` and `fleet gate`
+  still goes to the other program as given; `exec`'s report keeps such an argument with
+  the byte escaped, where 0.9.2's report failed to save (*Command report failed*). `fleet
+  spawn` runs the agent with such an argument escaped (`\udcff`), records it so, which a
+  restart runs again, and says so on its receipt. 0.9.2's spawn failed when it recorded
+  the agent (*could not record the agent … surrogates not allowed*) and killed its window.
 - **Each fleet agent has a launch record** in `~/.aisquare/launch-seals/`. Restart, switch,
   `fleet tell`, `stop`, `reap`, `shutdown` and `attach` act on the pane it names, never on
   a store row alone, and a spawn whose record cannot be written starts nothing. An agent
@@ -290,8 +294,9 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   `project fresh` and `project forget` keep it, and `aisquare uninstall --purge` clears it.
   A machine where Codex never ran records nothing, and every hook runs, as on 0.9.2.
 - **`persona import <name>`** looks where 0.9.2 looked first, in its order (Claude Code's
-  `~/.claude/skills`, then the repository's `.claude/skills`), then in the other agents'
-  skill folders; `persona import --list` lists them in that order.
+  `~/.claude/skills`, then the repository's `.claude/skills`), then in each of your Claude
+  Code accounts' own `skills` folder, then in the other agents' skill folders; `persona
+  import --list` lists them in that order.
 - **Every `aisquare launch`** (by hand, `team spawn`, a fleet window) gives the agent
   `AISQUARE_LAUNCH_ID`, `AISQUARE_LAUNCH_AGENT` and `AISQUARE_LAUNCH_PID`; `accounts run`
   does not. The line `team spawn` prints is `<python> -P -m aisquare launch <role> --agent
@@ -310,6 +315,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - **Model availability is cached per account:** after a Claude Code update, a model that
   was available stays cached for its 24 h, and only one that was refused is probed again.
   The first `team spawn` after upgrading from 0.9.2 probes once per account.
+- **An account whose usage cannot be read counts as full when its last reading was over
+  the line.** When an account's usage cannot be read (the endpoint asks to wait, or a read
+  failed while Claude Code can still refresh the login) and its last reading was over
+  `switch_at` in a window that has not reset since, the automatic pick (a spawn, `fleet
+  switch` with no `--to`, the hand-over) counts it as full, however old that reading is,
+  and the pick's note says so with the reading's age. When every account is over the line
+  and none has a live reading, a spawn or a `fleet switch` takes the least full by those
+  readings (the automatic hand-over still takes none). 0.9.2 skipped such an account as
+  *too old to pick by*, and with nothing readable it left the choice to the account ladder
+  (a binding, then the project's and the machine's default).
 - **What else you may notice:**
   - Words: Codex is marked `(beta)` where agents are listed or chosen (`agents list`, the
     `--agent` helps, `aisquare accounts`' last line, `[--agent codex (beta)]`). Doctor's
@@ -319,22 +334,31 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     `metrics stats` and *Usage & stats* says *no agent was used in it*, where it said
     *Claude Code was not used in it*; with the board on, a `fleet tell` to an agent at
     Claude Code's folder-trust dialog says its session *has not started*, where it said
-    *it is attention* (it still types nothing and files a note); a `fleet switch` without a
-    reason tells the replacement it was moved *by its operator's `fleet switch`*, not by a
-    usage limit; when every account of the agent's own is read over the line and no other
-    agent with accounts is installed (`[accounts] cross_agent_handover` on, the default), a
-    `fleet switch` adds the note *across agents: no other agent with accounts is
-    installed*, and the automatic hand-over's `handover_failed` board line has it as its
-    last note, after *nothing to switch to*; help texts say *the agent* or *Claude Code and
-    Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose agent*,
-    where it said *general-purpose Claude*. A fork from its *Hand off from* that resumes
-    the source's session adds one toast, *forked as Claude Code forks a session:
-    `--resume <transcript> --fork-session`* (Codex's names `fork <id> -C .`). Remote's
-    sheets and refusals for Ctrl-C, Ctrl-D and a second Esc speak of *the coding agent*
-    and *the agent's rewind*. `persona import --engine manager` names its run `<binary>
-    (Claude Code headless, …)`, where it said `<binary> -p`, and says *Claude Code gave no
-    JSON answer*, where it said *the answer was not JSON*. The sidebar's and info line's
-    `#slot·%` is the window that limits: the week's when it is fuller.
+    *it is attention* (it still types nothing and files a note); a `fleet switch` without
+    a reason tells the replacement it was moved *by its operator's `fleet switch`*, not by
+    a usage limit; when every account of the agent's own is read over the line and no
+    other agent with accounts is installed (`[accounts] cross_agent_handover` on, the
+    default), a `fleet switch` adds the note *across agents: no other agent with accounts
+    is installed*, and the automatic hand-over's `handover_failed` board line has it as
+    its last note, after *nothing to switch to*; help texts say *the agent* or *Claude
+    Code and Codex*. The Spawn dialog's no-role choice is *(none) — general-purpose
+    agent*, where it said *general-purpose Claude*, and its note reads *a plain session of
+    its agent on the board*, where it said *a plain Claude Code session on the board*. A
+    fork from its *Hand off from* that resumes the source's session adds one toast,
+    *forked as Claude Code forks a session: `--resume <transcript> --fork-session`*
+    (Codex's names `fork <id> -C .`). Remote's sheets and refusals for Ctrl-C, Ctrl-D and
+    a second Esc speak of *the coding agent* and *the agent's rewind*. `persona import
+    --engine manager` names its run `<binary> (Claude Code headless, …)`, where it said
+    `<binary> -p`, and says *Claude Code gave no JSON answer*, where it said *the answer
+    was not JSON*. The sidebar's and info line's `#slot·%` is the window that limits: the
+    week's when it is fuller. asq's *Stop* and *Pause* dialogs for every agent say each
+    one *is sent its own exit command* until they have read the fleet, a moment after they
+    open (and if that read fails); then they say */exit*, as 0.9.2's always did. `metrics
+    tokens` names whose prices it used, *Claude Code prices as of …*, where it said
+    *prices as of …*. `python -m aisquare` names itself `aisquare` in its usage and help
+    lines, where it said `python -m aisquare`. `aisquare launch --persona` with your own
+    `--append-system-prompt` says in one dim line that the persona is briefed by the
+    session-start hook alone; 0.9.2 said nothing.
   - `agents list`, `scan` and `status` gain an *INTEGRATION* column: how far the agent's
     hooks are set up here. Claude Code's reads *configured* or *not configured*, or
     *unreadable* where its settings file cannot be read, with the reason on a line under
@@ -362,7 +386,16 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
   - `team harness` adds a line under a role that a `fleet spawn` would launch on another
     model, effort or arguments than `team spawn` (`fleet: …`; an `AISQUARE_MODEL_<ROLE>`
     pin reaches `team spawn` alone), and one saying how the agent reads an effort set by
-    the role's own arguments.
+    the role's own arguments. A role whose binding passes its own `--model` shows that
+    model, marked `native`, where 0.9.2 showed the ladder's model, which the launch did
+    not run.
+  - With tracing set up, `aisquare explainability doctor` has an *explainability-spool*
+    row beside the redaction row: while insights ship, whether their spool can be written,
+    and the receiver's last failure as a warning; otherwise it says shipping is disabled.
+  - A task a parent manager adds on a member's board (`task add --project <member>`)
+    records the parent board, and the `--origin` task when one is named, in its event's
+    `meta`: `team show <seq>` prints a `meta:` line and `board --json` carries it. 0.9.2's
+    had none.
   - `--json` gains keys and loses none: `agent`, `detail` and `installs` in `accounts`;
     `readiness`, `detail` and `route` in `agents list`, `scan` and `status`, and
     `readiness` and `detail` in `agents connect`;
@@ -398,23 +431,26 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
     link *the AISquare sign-in and the Claude Code and Codex accounts* (it said *the
     AISquare sign-in and the Claude Code accounts*). With no hooks to remove, `aisquare
     uninstall`'s plan says it would *find no aisquare hooks in any Claude Code directory
-    or Codex home*, where it said *in any Claude Code directory*. asq's persona
-    *Export* dialog offers each agent's personal and project skill folders (*Claude Code
-    personal skills*, *Codex (beta) personal skills*, …), where it offered *Claude
-    personal skills* and *Project skills*; Claude Code's personal skills are still the
-    default. asq's *Doctor* page has a *Sign in account N* button for each added account,
-    Claude Code's or Codex's, that is not signed in. It opens that account's sign-in in
-    the Accounts page's pane; 0.9.2 showed the same `aisquare accounts run N` hint as text
-    only. With Claude Code not installed, asq's *Welcome* step 2 is *Coding agent*, where
-    it was *Claude Code*: it says *No coding agent is installed. Install Claude Code or
-    Codex (beta) in a terminal:*, where it said *Claude Code is not installed. Install it
-    in a terminal:*, lists Codex's install commands after Claude Code's, and adds that
-    with more than one installed it asks which the fleet uses; step 3, *Fleet*, waits for
-    *a coding agent installed (step 2)*, where it said *Claude Code installed (step 2)*.
+    or Codex home*, where it said *in any Claude Code directory*. asq's persona *Export*
+    dialog offers each agent's personal and project skill folders (*Claude Code personal
+    skills*, *Codex (beta) personal skills*, …), where it offered *Claude personal skills*
+    and *Project skills*; Claude Code's personal skills are still the default. asq's
+    *Doctor* page has a *Sign in account N* button for each added account, Claude Code's
+    or Codex's, that is not signed in. It opens that account's sign-in in the Accounts
+    page's pane; 0.9.2 showed the same `aisquare accounts run N` hint as text only. With
+    Claude Code not installed, asq's *Welcome* step 2 is *Coding agent*, where it was
+    *Claude Code*: it says *No coding agent is installed. Install Claude Code or Codex
+    (beta) in a terminal:*, where it said *Claude Code is not installed. Install it in a
+    terminal:*, lists Codex's install commands after Claude Code's, and adds that with
+    more than one installed it asks which the fleet uses; step 3, *Fleet*, waits for *a
+    coding agent installed (step 2)*, where it said *Claude Code installed (step 2)*.
     Until the page's first look at this machine lands, a moment after it opens, step 2 is
     *Coding agent* with Claude Code installed too, its body *Looking for your coding
     agent…* (it said *Looking for Claude Code…*), and step 3 waits for *a coding agent
-    installed (step 2)*; once the look lands, step 2 reads as it did.
+    installed (step 2)*; once the look lands, step 2 reads as it did. *App settings*' *on
+    a usage limit* choice reads *wait for the reset, on the same account*, where it said
+    *wait for the reset (Claude Code continues by itself)*. Remote's key pad has a *⇧⏎*
+    key under *More*: a new line in the agent's prompt, not sent.
   - On a machine with Codex accounts, the project's default agent
     (`aisquare agents use … --project`) decides only where nothing named does: a role
     bound to an account, and a launch's own `--account`, run that account's agent from any
@@ -429,16 +465,18 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 
 - Claude Max plans that now have only a weekly limit are used and shown again. Their usage
   has no five-hour window, and aisquare read that as a failed reading. So such an account
-  was left out of the automatic pick (a spawn, `fleet switch` with no `--to`, the hand-over
-  at a limit), out of `accounts usage`'s `N usable` and its fleet line, out of the sidebar's
-  `#slot·%`, the agent info line and `doctor --live`, even when it had the most room left.
-  It now counts by its week. Against an account with a five-hour window it is weighed by
-  what is left of the window that limits each one. Its session cell in `accounts usage`,
-  `accounts list --usage` and the Accounts page reads `no 5h limit`, and the pick's notes
-  and `doctor --live` say `account 4 week 2% used (98% left)`. In `--json` its `windows`
-  list its week alone and `limiting` is the week; no key is added. A read that failed is
-  still left out, and plans with a five-hour window read as before. A Codex plan with a
-  week alone shows `no 5h limit` too. 0.9.2 had this too.
+  was left out of the automatic pick (a spawn, `fleet switch` with no `--to`, the
+  hand-over at a limit), out of `accounts usage`'s `N usable` and its fleet line, the
+  sidebar's `● N× claude` line, the Accounts page's fleet line and the status line's
+  `fleet NN% left (N×)`, out of the sidebar's `#slot·%`, the agent info line and `doctor
+  --live`, even when it had the most room left. It now counts by its week. Against an
+  account with a five-hour window it is weighed by what is left of the window that limits
+  each one. Its session cell in `accounts usage`, `accounts list --usage` and the Accounts
+  page reads `no 5h limit`, and the pick's notes and `doctor --live` say `account 4 week
+  2% used (98% left)`. In `--json` its `windows` list its week alone and `limiting` is the
+  week; no key is added. A read that failed is still left out, and plans with a five-hour
+  window read as before. A Codex plan with a week alone shows `no 5h limit` too. 0.9.2 had
+  this too.
 - A fleet Claude Code agent's permission prompt is read again on Claude Code 2.1.318, which
   leaves a named rule under the dialog, so the captain's press answers it.
 - `fleet tell` never types into a dialog a waiting Claude Code agent shows (`/resume`,
@@ -489,6 +527,38 @@ complaints. Claude Code now runs through the same adapter as Codex and does what
 - A switch or restart's hand-off prompt quotes the newest five board entries meant for the
   agent, not 🔔 lines meant for you. The Spawn dialog names the account the spawn will run
   on.
+- The account picker (Spawn's *Pick…*) names the account a binding made with `team bind
+  --account` launches on. 0.9.2 read only the binding's environment and said *this
+  shell's account*.
+- What the fleet types into an agent (`fleet tell`, a first message, a nudge, a hand-off
+  prompt that quotes the board) no longer carries control characters, line breaks and tabs
+  aside. On a tmux older than 3.7, a board entry holding an escape sequence could end the
+  paste early, and the rest arrived as keys. 0.9.2 had this too.
+- asq's dialogs that restart, stop, pause or resume every agent work from the keyboard:
+  Tab goes from *Managers only* to the dialog's own button (*Restart*, *Stop*, *Pause* or
+  *Resume*) to *Cancel*, the focused button shows a band, and ↑ ↓, PgUp, PgDn, Home and
+  End scroll the list of agents from any of them. The list was a Tab stop that showed
+  nothing, and a focused button did not look focused.
+- Remote's card for a Claude Code agent's second permission prompt (or MCP server form) in
+  one turn names that prompt even when both came in the same tick of the clock, as on
+  Windows, whose clock ticks every 15 ms. It named the first call's prompt. 0.9.2 had this
+  too.
+- A board command whose `--as` names no session says *no session matches '<ref>'* (with
+  *has no session yet* for a fleet agent whose first hook has not run), and `--json`'s
+  `ref` is that ref. It said *nothing matches '<task id>'*, naming the task beside it,
+  which was there.
+- A note left for a fleet agent before its session started (a `fleet tell` while Claude
+  Code sat at its folder-trust dialog, a first line filed as a note) reaches the agent
+  with its first prompt. It reached it only while it was among the board's last few events
+  at the start.
+- A tmux server the fleet starts from inside a Claude Code session (a `fleet spawn` an
+  agent runs, asq started from Claude Code's shell) no longer keeps that session's
+  `CLAUDECODE` and `CLAUDE_PID` for every window it opens. Claude Code started in such a
+  window took itself for one started from inside another Claude Code session.
+- `fleet restart` and `fleet switch` of an agent on an account where Claude Code runs no
+  aisquare hooks (disconnected there, or switched off), whose session had ended, no longer
+  list that session on the board as a live teammate. 0.9.2 listed it from then on, with
+  nothing to end it.
 - Turning Remote on again just as the last one stops is no longer refused with *another
   Remote is on for this ~/.aisquare*.
 - On Windows, `aisquare outcomes` reads who started a turn (you or an agent) from that

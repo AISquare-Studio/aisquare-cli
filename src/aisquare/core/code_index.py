@@ -54,6 +54,7 @@ from typing import Any
 from aisquare.core import ignore as ignore_core
 from aisquare.core import locking, paths
 from aisquare.core.spawn import git_env
+from aisquare.core.workspace import git_argv
 
 SCHEMA_VERSION = 1
 """The database's own layout. A file built by another layout is deleted and rebuilt: it is a
@@ -326,7 +327,7 @@ def _git_files(root: Path) -> list[str] | None:
     """Tracked and untracked-but-not-ignored files under ``root``, or ``None`` outside git."""
     try:
         completed = subprocess.run(
-            ["git", "ls-files", "-co", "--exclude-standard", "-z"],
+            git_argv("ls-files", "-co", "--exclude-standard", "-z"),
             cwd=root,
             stdin=subprocess.DEVNULL,  # not the MCP protocol pipe a server's tool may run under
             capture_output=True,

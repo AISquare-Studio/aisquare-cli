@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import transcripts
+from aisquare.core.agent_adapters import claude_ledger
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import TeamSession
@@ -297,9 +298,9 @@ def test_a_delta_block_is_counted_whatever_its_opening_tag_names(opening: str) -
         attachment = {"type": "hook_success", "hookEvent": "UserPromptSubmit", "content": content}
         return {"type": "attachment", "attachment": attachment}
 
-    assert token_ledger._deltas(hook(block)) == [block]
-    assert token_ledger._deltas(hook(f"{block}\n{block}")) == [block, block]
-    assert token_ledger._deltas(hook("<aisquare-team-deltaX>")) == []
+    assert claude_ledger.delta_blocks(hook(block)) == [block]
+    assert claude_ledger.delta_blocks(hook(f"{block}\n{block}")) == [block, block]
+    assert claude_ledger.delta_blocks(hook("<aisquare-team-deltaX>")) == []
 
 
 def test_latest_context_reads_the_last_request_from_the_tail(tmp_path: Path) -> None:

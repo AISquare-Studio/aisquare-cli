@@ -148,6 +148,64 @@ def test_a_press_queued_before_the_paint_is_ignored_and_takes_no_focus() -> None
     assert told == []
 
 
+def test_the_guard_comes_down_with_the_apps_queue_not_after_the_screens_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard comes down from the back of the app's queue, once the app has judged every
+    press it had queued by the paint, and not a frame later. A callback after the screen's
+    refresh (``call_after_refresh``) waits behind every other one the screen has queued
+    there; on the Settings hub that was the restyle of the focus moving, and the guard stayed
+    up to a second after the view was drawn (UI tester on #8, PR #478 at 41569b99). Here such
+    a callback is queued with the frame that shows the button and runs until the test lets it
+    go, so a guard that waited for the screen's callbacks is still up. Nothing here waits on
+    a pause, a click or a clock (R9l2: the last click of the test above caught that only by
+    chance, 0 of 3 alone).
+
+    A canary goes down that late path right after the look, and must still be waiting at the
+    read and have run after the release. Without it, a hold that never engaged (a Textual 8
+    that paints after the layout signal, or runs those callbacks apart) passed the guard of
+    the late path 7 of 10 (tester-r9f, seq 11512)."""
+
+    async def go(pilot: Pilot[None], host: Host) -> dict[str, bool]:
+        button = await _shown(pilot, host)
+        shown_at = button.region
+        host.query_one(ContentSwitcher).current = "one"
+        await settle_page(host)
+        restyled = guard_paint.slow_after_refresh(monkeypatch, lambda: button.region == shown_at)
+        host.query_one(ContentSwitcher).current = "two"
+        app_free = guard_paint.busy(host)
+        # The app is held, so the guard cannot come down from its queue before the look; the
+        # screen lays out and paints apart, and queues the slow callback with that frame.
+        await watch_until(lambda: button.region == shown_at)
+        seen: dict[str, bool] = {"up at the paint": button.guarding}
+        canary = asyncio.Event()
+        button.call_after_refresh(canary.set)  # the late path, behind the slow callback
+        app_free.set()
+        judged = asyncio.Event()
+        host.call_later(judged.set)  # behind everything the app had queued by the paint
+        await watch_until(judged.is_set)
+        seen["down once judged"] = judged.is_set() and not button.guarding
+        seen["late path held"] = not canary.is_set()
+        restyled.set()
+        await settle_page(host)
+        await watch_until(canary.is_set)
+        seen["late path ran after"] = canary.is_set()
+        seen["shown"] = button.region == shown_at
+        seen["up after"] = button.guarding
+        return seen
+
+    seen = drive(go)
+    assert seen["shown"], "the button must come up where it was"
+    assert seen["up at the paint"], "the guard must be up while the app has not judged its queue"
+    assert seen["late path held"], (
+        "the slow callback did not hold the screen's callbacks after its refresh: "
+        "this test can no longer tell the app's queue from that late path"
+    )
+    assert seen["down once judged"], "the guard waited for the screen's callbacks after its refresh"
+    assert seen["late path ran after"], "the screen's callbacks did not run once let go"
+    assert not seen["up after"]
+
+
 async def _shown_again(pilot: Pilot[None], host: Host) -> tuple[GuardedButton, Offset]:
     """The button shown once, then the view before it back, with the keyboard on
     ``#typing``: the next switch puts the button under a pointer resting at the place
@@ -605,6 +663,13 @@ def test_a_double_or_triple_click_on_what_opens_a_dialog_presses_nothing_in_it()
                 if not isinstance(app.screen, Over):
                     return False
                 confirm = app.screen.query_one("#confirm", GuardedButton)
+                # Over is current from its push, and laid out a turn of the loop or more later.
+                # Until then its map is empty: Confirm has no region, nothing is at ``where``,
+                # and the guard, which goes up at Confirm's first layout, is not up yet. A look
+                # in that gap read the guard as down and raised NoWidget at (2, 1) (windows CI,
+                # runs 41741181600 and 41748932341). Confirm laid out over ``where`` first.
+                if not confirm.region.contains_point(where):
+                    return False
                 return not confirm.guarding and app.get_widget_at(*where)[0] is confirm
 
             def seen() -> list[object]:

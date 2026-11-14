@@ -1,50 +1,69 @@
-"""``fleet adopt``: a Claude Code conversation started by hand, brought under the fleet (#290).
+"""``fleet adopt``: a conversation started by hand, brought under the fleet (#290).
 
 Owner scope, 2026-10-23: phase B of the P3 handoff's W5 and a picker, nothing more. The
-transcript is looked for under the CLI's KNOWN account config dirs only (its slots; slot 1
-is the plain claude's), and the account it resumes on is the dir it lives in, so a resume
-never crosses accounts. It is refused while a live ``claude`` still holds the session (two
+transcript is looked for under the CLI's KNOWN account config dirs only (each agent's slots and
+its plain home), and the account it resumes on is the dir it lives in, so a resume never
+crosses accounts. It is refused while a live process still holds the conversation (two
 processes would write one conversation), when a fleet row already owns it, and when the
 directory it ran in is no onboarded project (onboarding stays intentional). Otherwise it is
-spawned with ``ResumeSpec(id, path)``: ``claude --resume <path>`` keeps the session id, so
-the board row is the conversation's own and no second session row appears.
+spawned on its own agent with ``ResumeSpec``: the agent's own resume (``AgentAdapter.
+resume_args``: ``claude --resume <path>``, ``codex resume <id>``) keeps the session, so the
+board row is the conversation's own and no second session row appears.
 
-The transcript's format is internal to Claude Code; this reads only what it must and fails
-open: the ``cwd`` an entry records, and the first thing the user typed, for the picker.
-Never more of the conversation, and none of it is stored.
+Every agent's transcript is its adapter's to read (``AgentTranscript``): which conversations a
+config dir keeps (``conversations``), and of one only what this must: the folder it ran in and
+the first thing the user typed, for the picker (``opening``). Never more of the conversation,
+and none of it is stored. A transcript that cannot be read fails open.
 
-A session is HELD when Claude Code's own registry says so (``<config dir>/sessions/<pid>
-.json`` names its ``sessionId``, and that pid is alive) or a process's arguments name it
-(``--resume`` / ``--session-id``, the fleet's own launches and older builds). A stale entry
-whose pid was reused can only make it refuse, which is the safe way to be wrong.
+A conversation is HELD when Claude Code's own registry says so (``<config dir>/sessions/<pid>
+.json`` names its ``sessionId``, and that pid is alive), when a process's arguments name it
+(``AgentAdapter.adoptable``: a ``claude --resume``/``--session-id``, the fleet's own launches
+and older builds, or a ``codex resume <id>``), or, for an agent whose writer holds its
+transcript open (``AgentTranscript.held_open``, Codex's), when a process of that agent's holds
+it open (``core.process_table``): a ``codex`` started fresh names no thread. Codex's managed
+app-server daemon, which runs a ``codex`` started with no arguments and keeps its rollout open
+for minutes after it quit, holds it too (Codex resumes no thread it has open): a client of
+Codex's that runs is named before it, told by what it runs and never by a word in its
+arguments, and the refusal of the daemon itself says how it lets go
+(``AgentTranscript.server_note``). Its process that holds nothing is never named, nor as its
+client a Codex that runs embedded or a fleet agent, which is none. This command's own
+process and those above it hold nothing, short of that daemon, which runs the commands of
+every TUI attached to it (adopt run from such a shell sees it and its other clients). A
+stale entry whose pid was reused can only make it refuse, which is the safe way to be wrong;
+a process table that cannot be read says nothing, as a registry that cannot be read does.
 """
 
 from __future__ import annotations
 
 import contextlib
-import glob
-import itertools
 import json
 import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import procs
+from aisquare.core import process_table, procs
+from aisquare.core.agent_adapters import adapters, default_adapter, recorded_adapter
+from aisquare.core.agent_adapters.types import (
+    AgentAdapter,
+    AgentTranscript,
+    HoldsOpen,
+    process_executable,
+)
 from aisquare.core.store import store_session
+from aisquare.core.tmux import TmuxError
 from aisquare.models import AdoptableConversation, ClaudeAccount, ProjectInfo
+from aisquare.services import agent_events
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 
 LIST_LIMIT = 10
 """How many conversations ``fleet adopt --list`` shows unless told."""
-SCAN_LINES = 400
-"""How far into a transcript its ``cwd`` and first prompt are looked for."""
 PROMPT_CHARS = 80
 """How much of the first prompt the picker shows."""
 PS_TIMEOUT = 5.0
@@ -60,57 +79,35 @@ class AdoptRefused(fleet_service.FleetError):
         self.code = code
 
 
-def _transcripts(account: ClaudeAccount) -> Iterator[Path]:
-    """The account's conversation transcripts: ``projects/<slug>/<id>.jsonl`` (a subagent's,
-    one level further down, is no conversation of its own)."""
-    with contextlib.suppress(OSError):
-        yield from (account.config_dir / "projects").glob("*/*.jsonl")
+@dataclass(frozen=True)
+class _Found:
+    """One conversation on disk: its agent's own id for it, its transcript, the account whose
+    home holds it and that account's agent."""
+
+    native: str
+    path: Path
+    account: ClaudeAccount
+    adapter: AgentAdapter
+    reader: AgentTranscript
+
+    @property
+    def board_id(self) -> str:
+        """The board's id for it (``agent_events.session_key``): the native id where the agent
+        names its sessions at launch (Claude Code's), else one of its home and that id."""
+        home = accounts_core.agent_config_dir(self.account)
+        return agent_events.session_key(self.adapter, home, self.native)
 
 
-def _entries(path: Path) -> Iterator[dict[str, Any]]:
-    """The transcript's first :data:`SCAN_LINES` entries that read as JSON objects."""
-    with contextlib.suppress(OSError), path.open(encoding="utf-8", errors="replace") as file:
-        for number, line in enumerate(file):
-            if number >= SCAN_LINES:
-                return
-            with contextlib.suppress(ValueError):
-                entry = json.loads(line)
-                if isinstance(entry, dict):
-                    yield entry
-
-
-def _typed(entry: dict[str, Any]) -> str | None:
-    """What the user typed in a ``user`` entry: text, never a tool result, a command's
-    wrapper (``<command-name>…``) or a meta line."""
-    if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isSidechain"):
-        return None
-    message = entry.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, list):
-        texts = [
-            part.get("text")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
-        content = next((text for text in texts if isinstance(text, str)), None)
-    if not isinstance(content, str) or not content.strip() or content.lstrip().startswith("<"):
-        return None
-    return content
-
-
-def _read_head(path: Path) -> tuple[str | None, str | None]:
-    """``(cwd, first prompt)`` from the head of a transcript; ``None`` for what it lacks."""
-    cwd: str | None = None
-    first: str | None = None
-    for entry in _entries(path):
-        if cwd is None and isinstance(entry.get("cwd"), str):
-            cwd = entry["cwd"]
-        if first is None and (typed := _typed(entry)) is not None:
-            line = " ".join(typed.split())
-            first = line if len(line) <= PROMPT_CHARS else line[: PROMPT_CHARS - 1] + "…"
-        if cwd is not None and first is not None:
-            break
-    return cwd, first
+def _found_in(account: ClaudeAccount) -> Iterator[_Found]:
+    """The conversations the account's home keeps, as its agent's transcript reader lists
+    them; none for an agent without one."""
+    adapter = recorded_adapter(account.agent)
+    reader = adapter.transcript_reader if adapter is not None else None
+    if adapter is None or reader is None:
+        return
+    home = accounts_core.agent_config_dir(account)
+    for native, path in reader.conversations(home):
+        yield _Found(native, path, account, adapter, reader)
 
 
 def _registry_holders(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
@@ -129,9 +126,6 @@ def _registry_holders(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
 
 Process = tuple[int, int, str]
 """``(pid, parent pid, arguments)`` of one process, as ``ps`` lists it."""
-
-_SESSION_FLAGS = frozenset({"--resume", "-r", "--session-id"})
-"""The ``claude`` flags that name the session a process runs."""
 
 
 def _process_args() -> list[Process]:
@@ -156,28 +150,177 @@ def _process_args() -> list[Process]:
     return listed
 
 
-def _ancestors(processes: Sequence[Process], pid: int) -> set[int]:
-    """``pid`` and every process above it: the shell and the ``claude`` that run this
-    command are no holder of the session it adopts (review of #370)."""
-    parents = {child: parent for child, parent, _args in processes}
+def _ancestors(
+    processes: Sequence[Process], pid: int, *, until: Callable[[str], bool] | None = None
+) -> set[int]:
+    """``pid`` and every process above it, up to and never including one whose arguments
+    ``until`` stops at: the shell that runs this command, and a program above it that no
+    agent's ``held_open`` recognises (a ``claude --resume <id>``), are no holder of the
+    session it adopts (review of #370); an agent's process that holds what it writes open
+    is (:func:`_holds_open`)."""
+    parents = {child: (parent, args) for child, parent, args in processes}
     seen: set[int] = set()
     while pid and pid not in seen:
+        parent, args = parents.get(pid, (0, ""))
+        if until is not None and until(args):
+            break
         seen.add(pid)
-        pid = parents.get(pid, 0)
+        pid = parent
     return seen
 
 
-def _names_session(args: str, session_id: str, transcript: Path) -> bool:
-    """Whether ``args`` is a ``claude`` program given this session by a session flag: a
-    word naming ``claude`` and ``--resume``/``-r``/``--session-id`` followed by the id or
-    the transcript. A shell whose command line merely mentions the id is no holder."""
+def _holds_open(args: str) -> bool:
+    """Whether the process run with ``args`` is one an agent's ``AgentTranscript.held_open``
+    recognises, whatever it answers: one of an agent whose writer holds what it writes open
+    (any Codex: a TUI, an ``exec``, one run embedded, its managed daemon). Such a process and
+    those above it are never this command's own (:func:`_ancestors`), as Claude Code's
+    registry refuses a live session that is (the MANAGER DECISION, r33): what it holds open
+    is a fact, not a word, and dropping it lets adopt start a second writer on a transcript
+    it still writes. Measured on 0.164.0, a Codex runs its tool shells as its own children
+    when embedded (``codex -c model=…``, no daemon: adopt run from one took the thread that
+    Codex held, the adopted ``codex resume`` beside it) and as the daemon's on its daemon,
+    whose parent is the TUI that had started it (r32's question: from such a shell, the
+    daemon's hold and its other clients were dropped)."""
     words = args.split()
-    if not any(Path(word).name in {"claude", "claude.exe"} for word in words):
-        return False
-    named = {session_id, str(transcript)}
-    given = list(itertools.pairwise(words))
-    given += [(flag, value) for flag, _, value in (w.partition("=") for w in words if "=" in w)]
-    return any(flag in _SESSION_FLAGS and value in named for flag, value in given)
+    return any(
+        reader is not None and reader.held_open(words) is not None
+        for reader in (each.transcript_reader for each in adapters())
+    )
+
+
+def _serves(reader: AgentTranscript, words: Sequence[str]) -> bool:
+    """Whether the process run with ``words`` holds what it has open for the clients it
+    serves by what it runs, whatever its arguments say: its executable alone
+    (``types.process_executable``) reads so (``AgentTranscript.held_open``'s ``clients``:
+    Codex's managed daemon, run from its own dir). One that reads so by its words only may
+    be a TUI whose prompt they are (``codex 'app-server daemon pid-update-loop'``, r34)."""
+    image = process_executable(words)
+    return image is not None and reader.held_open(words[: words.index(image) + 1]) == "clients"
+
+
+def _fleet_panes() -> set[int]:
+    """The pid tmux started in each live fleet row's pane, where its launch record places it
+    (``fleet.resolve_place``, never the row's own columns): none of a row it cannot place,
+    nor of a server that will not say."""
+    with store_session() as store:
+        rows = store.live_fleet_agents()
+    config = fleet_service.settings()
+    pids: set[int] = set()
+    for row in rows:
+        place = fleet_service.resolve_place(row, config=config)
+        if isinstance(place, fleet_service.Placed):
+            with contextlib.suppress(TmuxError):
+                if (pid := place.pane.pid()) is not None:
+                    pids.add(pid)
+    return pids
+
+
+class _Holders:
+    """Who holds a conversation, read once for a listing: the registries, the processes this
+    command does not run under (an agent's it runs under, and those above it, still counting:
+    :func:`_holds_open`), and, for an agent whose writer holds its transcript open, what that
+    agent's processes hold (one read of the process table, asked of the first such
+    conversation only)."""
+
+    def __init__(
+        self, accounts: Sequence[ClaudeAccount], processes: Sequence[Process] | None
+    ) -> None:
+        self._registry = _registry_holders(accounts)
+        listed = _process_args() if processes is None else processes
+        mine = _ancestors(listed, os.getpid(), until=_holds_open)
+        self._listed = listed
+        self._others = [(pid, args.split()) for pid, _parent, args in listed if pid not in mine]
+        self._open: dict[str, tuple[list[tuple[int, HoldsOpen]], frozenset[str] | None]] = {}
+        self._fleet: set[int] | None = None
+        self._serving: set[int] = set()
+
+    def of(self, native: str, transcript: Path, adapter: AgentAdapter) -> int | None:
+        if (pid := self._registry.get(native)) is not None:
+            return pid
+        named = {native, str(transcript)}
+        for pid, words in self._others:
+            if any(each.adoptable(words) in named for each in adapters()):
+                return pid
+        return self._holding_open(transcript, adapter)
+
+    def _holding_open(self, transcript: Path, adapter: AgentAdapter) -> int | None:
+        """A process of ``adapter``'s that holds ``transcript`` open, as the agent's writer
+        holds one (``AgentTranscript.held_open``, which says which processes are the agent's
+        by what they run, never by a word in their arguments: a shell or a tmux server that
+        mentions the agent is none): one that holds it for its own session (a TUI, an
+        ``exec``), named; or one that holds it for the clients it serves (Codex's managed
+        app-server daemon), a hold too: Codex resumes no thread its daemon has open (the
+        adopted ``codex resume`` sat on "This conversation is open in another app", measured
+        on 0.164.0, #47). A client of the agent's that runs is named before the daemon, the
+        process the human knows to quit; with none, the daemon is (:meth:`serving`). A client
+        is a process of the agent's connected to the daemon's socket
+        (``process_table.connected_to``, measured on macOS: r31), whatever its arguments
+        say, the daemon's own words too (r34, live: a TUI ``codex 'app-server daemon stop'``,
+        connected, was never asked, and the daemon was named under it with its stop), all
+        but the daemon's own processes, which serve by what they run (:func:`_serves`); where
+        the socket cannot say (``/proc``, no ``lsof``), one that runs a form that can be one
+        (``held_open``'s ``session``). A process of the daemon's that holds nothing
+        (its ``pid-update-loop``) is never named, nor as its client one that is none: one
+        that runs embedded or runs no thread of the daemon's (``held_open``'s ``alone``: an
+        ``exec``, an ``app-server`` of its own, an ``exec-server``, a ``login``), named only
+        when it holds the conversation itself, and a fleet agent's (:meth:`_fleets`), which
+        shows its own (#50: a Codex fleet agent was named for a thread the daemon held, a
+        human told to quit it). ``None`` when none holds it or the process table cannot say.
+
+        A process table names no thread a client shows: with the daemon holding the rollout,
+        any client of that daemon's is named, one showing another thread among them, and
+        where the socket cannot say, one attached to another home's daemon too. Either way it
+        refuses, and quitting it leaves the daemon named next: it never names a process that
+        is not the agent's."""
+        reader = adapter.transcript_reader
+        if reader is None:
+            return None
+        if adapter.id not in self._open:
+            runs = [
+                (pid, kind)
+                for pid, words in self._others
+                if (kind := reader.held_open(words)) is not None
+            ]
+            self._open[adapter.id] = (runs, process_table.open_files([pid for pid, _ in runs]))
+        runs, held = self._open[adapter.id]
+        real = os.path.realpath(transcript)
+        if not held or real not in held:
+            return None
+        # Which of them: asked one by one, now that one of them is known to hold it.
+        holders = [
+            (pid, kind) for pid, kind in runs if real in (process_table.open_files([pid]) or ())
+        ]
+        own = next((pid for pid, kind in holders if kind != "clients"), None)
+        server = next((pid for pid, kind in holders if kind == "clients"), None)
+        if own is not None or server is None:
+            return own
+        words_of = dict(self._others)
+        agents = [pid for pid, _kind in runs if not _serves(reader, words_of[pid])]
+        connected = process_table.connected_to(server, agents)
+        if connected is None:  # the socket cannot say: the forms that can be its client
+            clients = [pid for pid, kind in runs if kind == "session"]
+        else:
+            clients = [pid for pid in agents if pid in connected]
+        named = next((pid for pid in clients if not self._fleets(pid)), server)
+        if named == server:
+            self._serving.add(server)
+        return named
+
+    def _fleets(self, pid: int) -> bool:
+        """Whether ``pid`` is a live fleet row's agent: the process tmux started in its pane
+        or one below it, the pane where its launch record places it (``fleet.resolve_place``),
+        asked of tmux once a listing and only when a client would be named."""
+        if self._fleet is None:
+            self._fleet = _fleet_panes()
+        return not self._fleet.isdisjoint(_ancestors(self._listed, pid))
+
+    def serving(self, pid: int) -> bool:
+        """Whether ``pid``, as :meth:`of` named it, holds the conversation for the clients it
+        serves (``AgentTranscript.held_open``'s ``clients``: Codex's managed app-server
+        daemon), none of them running: its refusal says how it lets go
+        (``AgentTranscript.server_note``), not "quit it". Never a client named before it,
+        whose words read so too (r34: ``codex 'app-server --managed-daemon'``, connected)."""
+        return pid in self._serving
 
 
 def holder(
@@ -185,19 +328,16 @@ def holder(
     transcript: Path,
     accounts: Sequence[ClaudeAccount],
     *,
+    agent: str | None = None,
     processes: list[Process] | None = None,
 ) -> int | None:
-    """The pid of a live process holding the conversation, or ``None``: the registry first,
-    then a ``claude`` given this session by a session flag, never this command's own
-    process or one above it."""
-    if (pid := _registry_holders(accounts).get(session_id)) is not None:
-        return pid
-    listed = _process_args() if processes is None else processes
-    mine = _ancestors(listed, os.getpid())
-    for pid, _parent, args in listed:
-        if pid not in mine and _names_session(args, session_id, transcript):
-            return pid
-    return None
+    """The pid of a live process holding the conversation ``session_id`` (``agent``'s own
+    id for it), or ``None``: the registry first, then a process of any agent's whose
+    arguments name it (``AgentAdapter.adoptable``), then one of ``agent``'s that holds its
+    transcript open where its writer does; never this command's own process or one above it,
+    short of an agent's process that holds what it writes open (:func:`_holds_open`)."""
+    adapter = recorded_adapter(agent) or default_adapter()
+    return _Holders(accounts, processes).of(session_id, transcript, adapter)
 
 
 def _project_for(cwd: str | None, projects: Sequence[ProjectInfo]) -> ProjectInfo | None:
@@ -214,22 +354,24 @@ def _project_for(cwd: str | None, projects: Sequence[ProjectInfo]) -> ProjectInf
 
 
 def _conversation(
-    path: Path,
-    account: ClaudeAccount,
-    projects: Sequence[ProjectInfo],
-    held: int | None,
+    found: _Found, projects: Sequence[ProjectInfo], held: int | None
 ) -> AdoptableConversation:
-    cwd, first = _read_head(path)
+    cwd, typed = found.reader.opening(found.path)
+    first: str | None = None
+    if typed is not None:
+        line = " ".join(typed.split())
+        first = line if len(line) <= PROMPT_CHARS else line[: PROMPT_CHARS - 1] + "…"
     project = _project_for(cwd, projects)
     return AdoptableConversation(
-        session_id=path.stem,
-        transcript_path=str(path),
-        slot=account.slot,
-        account=accounts_core.label(account),
+        session_id=found.native,
+        agent=found.adapter.id,
+        transcript_path=str(found.path),
+        slot=found.account.slot,
+        account=accounts_core.label(found.account),
         cwd=cwd,
         project_id=project.id if project is not None else None,
-        last_activity=datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
-        first_prompt=first,
+        last_activity=datetime.fromtimestamp(found.path.stat().st_mtime, tz=UTC),
+        first_prompt=first or None,
         held_by=held,
     )
 
@@ -238,123 +380,138 @@ def _known() -> list[ClaudeAccount]:
     return accounts_service.list_accounts()
 
 
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def recent(limit: int = LIST_LIMIT) -> list[AdoptableConversation]:
     """The newest conversations across the known accounts that no fleet row owns, newest
     first, at most ``limit``: the picker the manager shows when the user asks what they
-    were working on in Claude outside the CLI. On request only, never on its own."""
+    were working on outside the CLI. On request only, never on its own."""
     accounts = _known()
-    found: list[tuple[float, Path, ClaudeAccount]] = []
+    found: list[tuple[float, _Found]] = []
     seen: set[str] = set()
     for account in accounts:
-        for path in _transcripts(account):
-            key = os.path.realpath(path)  # a `projects/` shared through a link is one file
+        for each in _found_in(account):
+            key = os.path.realpath(each.path)  # a `projects/` shared through a link is one file
             if key in seen:
                 continue
             seen.add(key)
             with contextlib.suppress(OSError):
-                found.append((path.stat().st_mtime, path, account))
+                found.append((each.path.stat().st_mtime, each))
     with store_session() as store:
         owned = store.fleet_session_ids()
         projects = store.list_projects()
     found.sort(key=lambda item: item[0], reverse=True)
-    held = _registry_holders(accounts)
-    processes = _process_args()
+    holders = _Holders(accounts, None)
     listed: list[AdoptableConversation] = []
-    for _mtime, path, account in found:
+    for _mtime_at, each in found:
         if len(listed) >= max(limit, 1):
             break
-        if path.stem in owned or path.stem in {c.session_id for c in listed}:
+        if each.board_id in owned or each.native in {c.session_id for c in listed}:
             continue
-        pid = held.get(path.stem) or holder(path.stem, path, [], processes=processes)
+        pid = holders.of(each.native, each.path, each.adapter)
         with contextlib.suppress(OSError):
-            listed.append(_conversation(path, account, projects, pid))
+            listed.append(_conversation(each, projects, pid))
     return listed
 
 
-def find(ref: str) -> tuple[AdoptableConversation, Path]:
-    """The conversation ``ref`` names, a session id or a ``.jsonl`` path, under a known
-    account's ``projects/``; :class:`AdoptRefused` when it is not there."""
-    accounts = _known()
-    with store_session() as store:
-        projects = store.list_projects()
-    as_path = Path(ref).expanduser()
+def _find(ref: str, accounts: Sequence[ClaudeAccount]) -> _Found:
+    """The conversation ``ref`` names, its agent's id for it (or the start of one) or its
+    transcript's path, among the known accounts' (:class:`AdoptRefused` when it is none)."""
     if ref.endswith(".jsonl"):
-        candidates = [as_path] if as_path.is_file() else []
+        given = Path(ref).expanduser()
+        real = os.path.realpath(given) if given.is_file() else None
         homes = [
-            account
+            each
             for account in accounts
-            for path in candidates
-            if (account.config_dir / "projects").resolve() in path.resolve().parents
+            for each in _found_in(account)
+            if real is not None and os.path.realpath(each.path) == real
         ]
         if not homes:
             raise AdoptRefused(
                 "not_on_a_known_account",
-                f"{ref} is no transcript under an account the CLI knows (its slots, and the "
-                "plain claude's ~/.claude): `aisquare accounts list` shows them",
+                f"{ref} is no conversation under an account the CLI knows (its slots, and each "
+                "agent's plain home): `aisquare accounts list` shows them",
             )
-        path, account = candidates[0], homes[0]
-    else:
-        # An id or the start of one (the list shows eight characters): only the characters
-        # a session id has, escaped all the same, and a prefix must name ONE conversation
-        # (review of #370: `*` matched every transcript).
-        if not ref or not _SESSION_CHARS.fullmatch(ref):
-            raise AdoptRefused(
-                "no_such_conversation",
-                f"{ref!r} is no session id (or the start of one) — "
-                "`aisquare fleet adopt --list` shows the recent ones",
-            )
-        matches = [
-            (path, account)
-            for account in accounts
-            for path in (account.config_dir / "projects").glob(f"*/{glob.escape(ref)}*.jsonl")
-        ]
-        if not matches:
-            raise AdoptRefused(
-                "no_such_conversation",
-                f"no conversation {ref!r} under the accounts the CLI knows — "
-                "`aisquare fleet adopt --list` shows the recent ones",
-            )
-        sessions = sorted({path.stem for path, _account in matches})
-        if len(sessions) > 1:
-            raise AdoptRefused(
-                "ambiguous",
-                f"{ref!r} starts {len(sessions)} conversations ({', '.join(sessions[:4])}"
-                f"{', …' if len(sessions) > 4 else ''}): give more of the id",
-            )
-        # The newest copy: a resume on another account goes on writing the original.
-        path, account = max(matches, key=lambda m: m[0].stat().st_mtime)
-    return _conversation(path, account, projects, None), path
+        return homes[0]
+    # An id or the start of one (the list shows eight characters): only the characters a
+    # session id has, and a prefix must name ONE conversation (review of #370: `*` matched
+    # every transcript).
+    if not ref or not _SESSION_CHARS.fullmatch(ref):
+        raise AdoptRefused(
+            "no_such_conversation",
+            f"{ref!r} is no session id (or the start of one) — "
+            "`aisquare fleet adopt --list` shows the recent ones",
+        )
+    matches = [
+        each for account in accounts for each in _found_in(account) if each.native.startswith(ref)
+    ]
+    if not matches:
+        raise AdoptRefused(
+            "no_such_conversation",
+            f"no conversation {ref!r} under the accounts the CLI knows — "
+            "`aisquare fleet adopt --list` shows the recent ones",
+        )
+    sessions = sorted({each.native for each in matches})
+    if len(sessions) > 1:
+        raise AdoptRefused(
+            "ambiguous",
+            f"{ref!r} starts {len(sessions)} conversations ({', '.join(sessions[:4])}"
+            f"{', …' if len(sessions) > 4 else ''}): give more of the id",
+        )
+    # The newest copy: a resume on another account goes on writing the original.
+    return max(matches, key=lambda each: _mtime(each.path))
+
+
+def find(ref: str) -> tuple[AdoptableConversation, Path]:
+    """The conversation ``ref`` names, a session id (its agent's own) or a transcript's path,
+    under a known account's home; :class:`AdoptRefused` when it is not there."""
+    found = _find(ref, _known())
+    with store_session() as store:
+        projects = store.list_projects()
+    return _conversation(found, projects, None), found.path
 
 
 def adopt(ref: str, *, role: str = "coder", label: str | None = None) -> fleet_service.SpawnReceipt:
     """Bring the conversation ``ref`` names under the fleet: a row on its project, resumed
-    on its own account in its own directory, keeping its session id."""
-    conversation, path = find(ref)
+    by its own agent on its own account in its own directory, keeping its session."""
+    accounts = _known()
+    found = _find(ref, accounts)
+    board_id = found.board_id
     with store_session() as store:
-        owner = store.fleet_agent_for_session(conversation.session_id)
-        if owner is None and conversation.session_id in store.fleet_session_ids():
+        owner = store.fleet_agent_for_session(board_id)
+        if owner is None and board_id in store.fleet_session_ids():
             raise AdoptRefused(
                 "owned_by_the_fleet",
-                f"{conversation.session_id} was a fleet agent's: restart that agent (its "
-                "sidebar row's Restart) rather than adopt it",
+                f"{found.native} was a fleet agent's: restart that agent (its sidebar row's "
+                "Restart) rather than adopt it",
             )
         projects = store.list_projects()
     if owner is not None:
         raise AdoptRefused(
-            "owned_by_the_fleet", f"{conversation.session_id} is already {owner.label} in the fleet"
+            "owned_by_the_fleet", f"{found.native} is already {owner.label} in the fleet"
         )
-    if (pid := holder(conversation.session_id, path, _known())) is not None:
+    holders = _Holders(accounts, None)
+    if (pid := holders.of(found.native, found.path, found.adapter)) is not None:
+        why = (
+            found.reader.server_note(["aisquare", "accounts", "run", str(found.account.slot)])
+            if holders.serving(pid)
+            else "quit it first, then adopt — two processes would write one conversation"
+        )
         raise AdoptRefused(
-            "held",
-            f"a live claude (pid {pid}) still holds {conversation.session_id}: quit it first, "
-            "then adopt — two processes would write one conversation",
+            "held", f"a live {found.adapter.label} (pid {pid}) still holds {found.native}: {why}"
         )
+    conversation = _conversation(found, projects, None)
     project = _project_for(conversation.cwd, projects)
     if project is None:
         where = conversation.cwd or "a directory its transcript does not record"
         raise AdoptRefused(
             "not_onboarded",
-            f"{conversation.session_id} ran in {where}, which no onboarded project holds: "
+            f"{found.native} ran in {where}, which no onboarded project holds: "
             f"`aisquare project onboard {conversation.cwd or '<dir>'}` first",
         )
     return fleet_service.spawn(
@@ -363,6 +520,9 @@ def adopt(ref: str, *, role: str = "coder", label: str | None = None) -> fleet_s
         label=label,
         worktree=False,
         cwd=Path(conversation.cwd) if conversation.cwd else None,
-        account=str(conversation.slot),
-        resume=fleet_service.ResumeSpec(conversation.session_id, path),
+        agent=found.adapter.id,
+        account=str(found.account.slot),
+        resume=fleet_service.ResumeSpec(
+            board_id, found.path, found.native if found.native != board_id else None
+        ),
     )

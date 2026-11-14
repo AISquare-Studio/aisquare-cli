@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -62,7 +63,7 @@ from aisquare.models import (
     TeamTask,
     WorkBrief,
 )
-from aisquare.services import command_reports, install_route, team
+from aisquare.services import command_reports, install_route, store_broker, team
 
 #: Distinct failures by one task against one revision of a requirement that block
 #: the task, so the manager re-plans instead of the task looping through review.
@@ -173,16 +174,41 @@ class _Artifact:
 def _read_artifact(path: Path) -> _Artifact:
     """The artifact named on the command line. A regular file, and at most
     :data:`MAX_ARTIFACT_BYTES`: a FIFO or a device would block or never end the read."""
+    named = path.expanduser()
+    absolute = named if named.is_absolute() else Path.cwd() / named
+    # A command an agent's broker runs reads as the user, outside the sandbox, and keeps a
+    # copy in the store: only a file of the launch's own tree, resolved there with nothing
+    # outside it looked at, so a refusal says the same whatever lies outside (review r38 of
+    # #113, finding 1), and read from the descriptor opened below the tree with no link
+    # followed: a name checked and then opened again was swapped for a link in between
+    # (`store_broker.open_in_tree`).
     try:
-        resolved = path.expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"artifact {path} cannot be read ({exc})") from None
-    if not resolved.is_file():
-        raise ValueError(f"artifact {path} is not a regular file")
+        descriptor = store_broker.open_in_tree(absolute)
+    except store_broker.OutOfScope:
+        raise
+    except OSError as exc:  # a name of the tree that is not there
+        raise ValueError(f"artifact {path} cannot be read ({exc.strerror})") from None
+    if descriptor is None:
+        try:
+            resolved = named.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"artifact {path} cannot be read ({exc})") from None
+        if not resolved.is_file():
+            raise ValueError(f"artifact {path} is not a regular file")
+        handle = resolved.open("rb")
+    else:
+        resolved = store_broker.resolved_in_tree(absolute) or absolute
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):  # a directory, a FIFO swapped in
+            os.close(descriptor)
+            raise ValueError(f"artifact {path} is not a regular file")
+        handle = os.fdopen(descriptor, "rb")
     limit = MAX_ARTIFACT_BYTES // (1024 * 1024)
-    if resolved.stat().st_size > MAX_ARTIFACT_BYTES:
-        raise ValueError(f"artifact {path} is over the {limit} MiB limit; record a smaller one")
-    with resolved.open("rb") as handle:
+    with handle:
+        status = os.fstat(handle.fileno())
+        if not stat.S_ISREG(status.st_mode):
+            raise ValueError(f"artifact {path} is not a regular file")
+        if status.st_size > MAX_ARTIFACT_BYTES:
+            raise ValueError(f"artifact {path} is over the {limit} MiB limit; record a smaller one")
         body = handle.read(MAX_ARTIFACT_BYTES + 1)
     if len(body) > MAX_ARTIFACT_BYTES:  # it grew between the stat and the read
         raise ValueError(f"artifact {path} is over the {limit} MiB limit; record a smaller one")
@@ -254,7 +280,8 @@ class _Sources:
         cached = self._files.get(root)
         if cached is None:
             try:
-                cached = source_file_hashes(Path(root))
+                with store_broker.sandbox_mount_targets(Path(root)):
+                    cached = source_file_hashes(Path(root))
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 cached = f"the source in {root} cannot be read ({exc})"
             self._files[root] = cached
@@ -371,7 +398,10 @@ def _pass_refusals(
         return why
     root = report.source_root
     try:
-        current = source_file_hashes(Path(root))
+        # A brokered call runs while the sandboxed command that asked does, and bwrap's
+        # mount targets are in the checkout until it ends.
+        with store_broker.sandbox_mount_targets(Path(root)):
+            current = source_file_hashes(Path(root))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         why.append(f"the source in {root} cannot be read now ({exc})")
         return why
@@ -674,9 +704,45 @@ def _checkout_of(path: Path, brief: WorkBrief, project_root: Path | None) -> Pat
     hub's board, so an unrelated repository passed, and every pass read "stale"
     against it (review of #341, finding 4).
     """
+    if store_broker.brokered_call():
+        # Run by a sandboxed agent's broker, as the user: whatever is not a checkout is told
+        # alike, by the path as given (resolved, it showed where a link outside the tree
+        # leads; "not a directory" told what lies there: review r38 of #113, finding 1).
+        not_ours = SourceRootError(
+            f"--source-root {path} is not a checkout of this brief's project"
+            + (f" ({project_root})" if project_root else "")
+            + ": name the project's directory or one of its worktrees"
+        )
+        named = path.expanduser()
+        # resolved in the launch's tree alone, nothing outside it looked at: a link out of the
+        # tree and a `..` back in said whether what the link names is there (round 2)
+        resolved = store_broker.resolved_in_tree(
+            named if named.is_absolute() else Path.cwd() / named
+        )
+        if resolved is None:
+            raise not_ours
+        try:
+            if resolved.is_dir() and _is_checkout(resolved, brief, project_root):
+                return resolved
+        except Exception:  # anything the user's read of an odd place raises
+            raise not_ours from None
+        raise not_ours
     resolved = path.expanduser().resolve()
     if not resolved.is_dir():
         raise SourceRootError(f"--source-root {path} is not a directory")
+    if not _is_checkout(resolved, brief, project_root):
+        raise SourceRootError(
+            f"--source-root {resolved} is not a checkout of this brief's project"
+            + (f" ({project_root})" if project_root else "")
+            + ": name the project's directory or one of its worktrees"
+        )
+    return resolved
+
+
+def _is_checkout(resolved: Path, brief: WorkBrief, project_root: Path | None) -> bool:
+    """Whether the directory ``resolved`` is the project's, or the top of a worktree of the
+    same repository (the same git common directory) or of one a check of ``brief`` was
+    recorded in."""
     root = project_root.resolve() if project_root is not None else None
     ours = resolved == root
     if not ours and orchestrator.team_project(resolved).id == brief.project_id:
@@ -689,13 +755,7 @@ def _checkout_of(path: Path, brief: WorkBrief, project_root: Path | None) -> Pat
                 if Path(recorded).is_dir()
             }
             ours = common in known
-    if not ours:
-        raise SourceRootError(
-            f"--source-root {resolved} is not a checkout of this brief's project"
-            + (f" ({project_root})" if project_root else "")
-            + ": name the project's directory or one of its worktrees"
-        )
-    return resolved
+    return ours
 
 
 # --- the gate ----------------------------------------------------------------------
@@ -1314,6 +1374,9 @@ def _record(
     report_sha256: str | None = None
     if report_id is not None:
         try:
+            # A report an agent's sandbox saved is copied into the home first, when its broker
+            # sealed it and it is unchanged: evidence cites the copy, which nothing there writes.
+            command_reports.adopt_sandboxed(report_id.strip())
             report = command_reports.load_report(report_id.strip())
             saved = command_reports.load_source_files(report.id)
             report_sha256 = _report_digest(report.id)

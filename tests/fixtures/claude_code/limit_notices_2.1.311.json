@@ -1,0 +1,66 @@
+{
+  "version": "2.1.311",
+  "how": "claude 2.1.311 -p 'LIMITME <claim>' against a loopback Messages stub that answers 429 with anthropic-ratelimit-unified-status: rejected and representative-claim: <claim>, TZ=America/Toronto; each payload is what its StopFailure hook was handed (the paths made /repo); recorded_at is the transcript's API-error record",
+  "notices": {
+    "five_hour": {
+      "recorded_at": "2026-10-28T07:08:46.082Z",
+      "payload": {
+        "session_id": "d9ce180e-ee53-4033-8d53-e05d1f3948a8",
+        "transcript_path": "/home/dev/.claude/projects/-repo/d9ce180e-ee53-4033-8d53-e05d1f3948a8.jsonl",
+        "cwd": "/repo",
+        "prompt_id": "64f49f87-160a-4e04-92a3-571623f4cc22",
+        "effort": {
+          "level": "medium"
+        },
+        "hook_event_name": "StopFailure",
+        "error": "rate_limit",
+        "last_assistant_message": "You've hit your session limit · resets 6:08am (America/Toronto)"
+      }
+    },
+    "seven_day": {
+      "recorded_at": "2026-10-28T07:08:49.284Z",
+      "payload": {
+        "session_id": "71afead8-751a-47ed-8bd6-f809f8ea08a3",
+        "transcript_path": "/home/dev/.claude/projects/-repo/71afead8-751a-47ed-8bd6-f809f8ea08a3.jsonl",
+        "cwd": "/repo",
+        "prompt_id": "1e774549-58b2-43d4-9583-52e025f97f61",
+        "effort": {
+          "level": "medium"
+        },
+        "hook_event_name": "StopFailure",
+        "error": "rate_limit",
+        "last_assistant_message": "You've hit your weekly limit · resets Nov 1 at 2:08am (America/Toronto)"
+      }
+    },
+    "seven_day_opus": {
+      "recorded_at": "2026-10-28T07:08:52.494Z",
+      "payload": {
+        "session_id": "1b67a63a-80de-4477-85eb-067e8bfa4775",
+        "transcript_path": "/home/dev/.claude/projects/-repo/1b67a63a-80de-4477-85eb-067e8bfa4775.jsonl",
+        "cwd": "/repo",
+        "prompt_id": "4b42ca54-c223-4e7e-a47d-5e9c48831a96",
+        "effort": {
+          "level": "medium"
+        },
+        "hook_event_name": "StopFailure",
+        "error": "rate_limit",
+        "last_assistant_message": "You've hit your Opus limit · resets Nov 1 at 2:08am (America/Toronto)"
+      }
+    },
+    "seven_day_sonnet": {
+      "recorded_at": "2026-10-28T07:08:55.697Z",
+      "payload": {
+        "session_id": "c969da60-3ebc-4199-b64f-55f00db9318a",
+        "transcript_path": "/home/dev/.claude/projects/-repo/c969da60-3ebc-4199-b64f-55f00db9318a.jsonl",
+        "cwd": "/repo",
+        "prompt_id": "3363fd69-341b-46ab-90e6-71e2914c1f01",
+        "effort": {
+          "level": "medium"
+        },
+        "hook_event_name": "StopFailure",
+        "error": "rate_limit",
+        "last_assistant_message": "You've hit your Sonnet limit · resets Nov 1 at 2:08am (America/Toronto)"
+      }
+    }
+  }
+}

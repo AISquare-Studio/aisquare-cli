@@ -220,7 +220,7 @@ def test_the_status_lines_headroom_over_ssh_is_the_macs(asqs: TwoAsqs) -> None:
     summary = service.read_fleet_headroom([two, three], now=NOW, fetch=NoFetch())
 
     assert summary.level != "empty" and summary.usable == 2
-    assert summary.session_by_slot == {2: 40.0, 3: 70.0}
+    assert summary.limit_by_slot == {2: 40.0, 3: 70.0}
 
 
 def test_accounts_usage_over_ssh_prints_the_macs_figures_with_their_age(
@@ -322,8 +322,10 @@ def test_a_launch_over_ssh_never_picks_by_a_reading_older_than_the_picks_minute(
     asqs: TwoAsqs,
 ) -> None:
     """The kept rule of today (review of #408, MAJ-1): a launch picks only by a reading
-    inside its own minute, PICK_MAX_AGE_SECONDS. Over SSH nothing can fetch a newer one,
-    so an older reading of the Mac's is skipped with its age, and the default decides."""
+    inside its own minute, PICK_MAX_AGE_SECONDS. Over SSH nothing can fetch a newer one, so
+    an older reading of the Mac's under the line is skipped with its age. One over the line
+    is a floor (#113: the manager's rule of 2026-10-26, usage only rises within a window),
+    and with no live figure the least-full floor is the answer, saying how old it is."""
     two, three = _slots(asqs)
     _mac_reads(asqs, [two, three], NOW - timedelta(minutes=2), s2=90.0, s3=10.0)
 
@@ -336,11 +338,14 @@ def test_a_launch_over_ssh_never_picks_by_a_reading_older_than_the_picks_minute(
         fetch=NoFetch(),
     )
 
-    assert picked is None, notes
+    assert picked is not None and picked.slot == two.slot, notes
     assert f"headroom: account 3 skipped — {LOCKED_SSH}; its last reading is from 2m ago, " in (
         "\n".join(notes)
     )
-    assert notes[-1] == "headroom: no account's usage could be read — the default decides"
+    assert notes[-1].endswith(
+        "every account is over the 80%-used line; "
+        "account 2 has the most room by its reading from 2m ago (10% left at most)"
+    ), notes
 
 
 # --- 3. a locked process writes nothing another process is served ------------------------
@@ -531,7 +536,7 @@ def test_a_logout_the_mac_saw_is_a_logout_over_ssh_for_the_page_line_and_pick(
     assert problem is not None and problem.cause is UsageCause.token_missing
     # The status line's headroom.
     summary = service.read_fleet_headroom(fetch=NoFetch())
-    assert set(summary.session_by_slot) == {two.slot}
+    assert set(summary.limit_by_slot) == {two.slot}
     # The launch pick, and the default rung under it.
     picked, notes = service.headroom_choice(
         accounts, switch_at=85, max_age=service.PICK_MAX_AGE_SECONDS, fetch=NoFetch()
@@ -580,6 +585,7 @@ def test_a_login_remembered_from_before_is_not_written_over_a_newer_one(
     [two] = _slots(asqs, 1)
     _mac_reads(asqs, [two], NOW - timedelta(minutes=2), s2=40.0)  # A remembers tok-2
     key = service._seen_key(two)
+    assert key is not None, "a Claude Code slot's login is in the item it names"
     asqs.login(two, "tok-2-new")
     newer = service.SeenLogin(
         token=service._login_digest(_creds("tok-2-new")), expires_at=NOW + timedelta(hours=7)
@@ -760,7 +766,7 @@ def test_a_login_whose_write_lost_the_race_is_not_taken_as_said(asqs: TwoAsqs) -
             self.rows[key] = service.SeenLogin(token="someone else's").dump()
             return False
 
-    seen = service._seen_in(core.stored_login(two))
+    seen = service._seen_in(core.item_login(two))
     assert seen is not None and seen.token is not None
     service._note_login(Raced(), two, seen)  # type: ignore[arg-type]
 

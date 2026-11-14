@@ -264,6 +264,19 @@ async def wait_until(
     raise AssertionError(f"condition not met within {timeout:.1f}s")
 
 
+async def _mirrored(pilot: Pilot[None], host: Any, copy: str) -> None:
+    """Wait, at most 5 s, for the paste-buffer mirror to have put ``copy`` on the clipboard.
+
+    The mirror reads on a timer (``BUFFER_MIRROR_DELAY``, ``BUFFER_MIRROR_RETRY``), and a
+    fixed pause a little longer than that was read before it on a loaded runner: ``'' ==
+    "the drag's copy"`` (#107, CI 42293248624, ubuntu captain-off shard 2/4). The copy is not
+    lost there, only late: it is the clipboard's once the timer has fired. A test that asserts
+    NO copy keeps its fixed pause, which a slow runner can only make pass."""
+    deadline = time.monotonic() + 5.0
+    while host.clipboard != copy and time.monotonic() < deadline:
+        await pilot.pause(0.02)
+
+
 def scroll_event(pane: TerminalPane, *, up: bool) -> events.MouseScrollUp | events.MouseScrollDown:
     cls = events.MouseScrollUp if up else events.MouseScrollDown
     return cls(pane, 1, 1, 0, -1 if up else 1, 0, False, False, False)
@@ -305,7 +318,15 @@ def fake() -> FakeTmux:
 # --- rendering ----------------------------------------------------------------------------
 
 
-def test_renders_text_and_sgr_colour(fake: FakeTmux, tmp_path: Path) -> None:
+def test_renders_text_and_sgr_colour(
+    fake: FakeTmux,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This test asserts colour; an automation shell's NO_COLOR would deliberately
+    # make Textual map the same ANSI cells to greyscale.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
     async def drive() -> tuple[list[str], Style, Style, Style]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
@@ -4716,7 +4737,7 @@ def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboar
             await pilot.mouse_down(widget, offset=(0, 0))
             fake.buffer = "what Claude selected"  # the program's release handler ran
             await pilot.mouse_up(widget, offset=(9, 0))
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            await _mirrored(pilot, host, "what Claude selected")
             copied, toasts = host.clipboard, list(host.notices)
             await pilot.mouse_down(widget, offset=(0, 1))  # a click: the buffer stands
             await pilot.mouse_up(widget, offset=(0, 1))
@@ -4860,7 +4881,7 @@ def test_the_same_words_copied_again_are_mirrored_again(fake: FakeTmux, tmp_path
             await press(pilot, widget, (0, 0))
             fake.buffer = "the same words"  # the program's release handler copies them again
             await release(pilot, widget, (9, 0))
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            await _mirrored(pilot, host, "the same words")
             return host.clipboard, list(host.notices)
 
     clipboard, toasts = run(drive())
@@ -4889,7 +4910,7 @@ def test_a_copy_that_lands_after_the_first_read_is_mirrored_by_the_second(
             # The press's read, then the first after the release: nothing new yet.
             await wait_until(pilot, lambda: _buffer_reads(fake) == 2)
             fake.buffer = "a late copy"
-            await pilot.pause(widget.BUFFER_MIRROR_RETRY + 0.1)
+            await _mirrored(pilot, host, "a late copy")
             return host.clipboard, list(host.notices)
 
     clipboard, toasts = run(drive())
@@ -4957,7 +4978,7 @@ def test_a_press_inside_the_first_delay_leaves_the_copy_to_its_read(
             await press(pilot, header, (1, 0))
             fake.buffer = "the drag's copy"  # written after the header's press
             await release(pilot, header, (1, 0))
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            await _mirrored(pilot, host, "the drag's copy")
             return host.clipboard, list(host.notices)
 
     clipboard, toasts = run(drive())
@@ -5576,16 +5597,17 @@ def test_agent_view_stop_says_a_release_the_store_refused(
 
     async def drive() -> list[tuple[str, str]]:
         host = ViewHost()
-        # Recorded at the call: the dialog notifies and then dismisses, and its callback
-        # runs ahead of the queued toast, so the screen's toasts can still be [] (seq 381).
-        told = toast_log.record_severity(host)
         async with host.run_test(size=(80, 12)) as pilot:
+            # What the dialog said, as it said it: it notifies, then dismisses, but the toast
+            # is a message on the app's queue and the dismiss a callback the app runs before
+            # its next one, so on windows-latest the dismiss was seen with no toast yet.
+            said = toast_log.record_severities(host)
             await pilot.pause()
             host.push_screen(StopAgentScreen(project, working), callback=closed.append)
             await pilot.pause()
             await pilot.click("#stop-confirm")
             await wait_until(pilot, lambda: len(closed) == 1)
-            return told
+            return said
 
     said = run(drive())
     assert closed == [working.agent]  # dismissed with the receipt's row, as a clean stop is
@@ -5683,13 +5705,23 @@ def test_the_highlight_is_visible_on_reverse_video_cells_under_a_theme_with_no_s
     assert plain_cell.reverse, "while the plain cell beside it takes the fallback's reverse video"
 
 
-def test_a_right_click_does_not_seed_the_click_chain(fake: FakeTmux, tmp_path: Path) -> None:
+def test_a_right_click_does_not_seed_the_click_chain(
+    fake: FakeTmux, tmp_path: Path, clock: Clock
+) -> None:
     """Finding 2 of the second #135 review. The pane's own click chain was counted
     before the left-button gate, for every button — so a right click (paste, or
     a context menu, on most terminals) and a left click in the same cell within
     half a second read as a double click: a word selected and the clipboard
     written by one left click. Only left clicks count, and any other button
-    breaks the run; two real left clicks are still a double click."""
+    breaks the run; two real left clicks are still a double click.
+
+    The clicks are 0.1 s apart by the test's clock (``clock``), which stamps them, and not
+    by the wall clock: on a loaded runner the loop's turns between them outran the 0.5 s
+    threshold, so the two left clicks read as two single ones (nightly 42885746792,
+    py3.13-ambient-proxy-up), and a right and a left click that far apart would pass
+    whether or not the right one seeded the chain."""
+    apart = 0.1
+    assert 2 * apart < Host.CLICK_CHAIN_TIME_THRESHOLD
 
     async def drive() -> tuple[str | None, str, int, str | None, str]:
         host = Host(fake.server(tmp_path), "%1")
@@ -5697,8 +5729,10 @@ def test_a_right_click_does_not_seed_the_click_chain(fake: FakeTmux, tmp_path: P
             pane = host.pane
             await wait_until(pilot, lambda: synced(pane))
             await click(pilot, pane, (8, 1), button=3)
+            clock.now += apart
             await click(pilot, pane, (8, 1))  # well within Textual's 0.5 s
             after = (pane.selected_text(), host.clipboard, len(host.notices))
+            clock.now += apart
             await click(pilot, pane, (8, 1))  # the second LEFT click in a row
             return *after, pane.selected_text(), host.clipboard
 

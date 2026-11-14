@@ -6,8 +6,9 @@ import contextlib
 import json
 import shutil
 import sqlite3
+import tomllib
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import paths, personas
+from aisquare.core.agent_adapters import claude_code, codex_config, register, unregister
 from aisquare.core.config import (
     FLEET_DENY_TOOLS,
     REVIEWER_ARGS,
@@ -31,6 +33,7 @@ from aisquare.models import FleetAgent, LaunchSpec
 from aisquare.services import settings as settings_service
 from aisquare.services.explainability import join_records
 from tests import bundled_personas
+from tests.fake_agent import FakeAgentAdapter
 from tests.role_policy import policy_args
 
 
@@ -329,7 +332,8 @@ def test_launch_captain_outside_the_fleet_is_refused(
 
 
 _CAPTAINS_LAUNCH = LaunchSpec(binary="claude", extra_args=["--strict-mcp-config", "--tools", ""])
-"""The captain's start launches it so (``brain.launch_args``): what ``is_the_captains_row`` asks."""
+"""The captain's start launches it so (``brain.launch_args``). ``is_the_captains_row`` asks its
+folder (the brain's), as the captain's tools are never recorded (#113)."""
 
 
 def _seat(
@@ -411,6 +415,7 @@ def test_launch_captain_in_the_captains_own_window_starts_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from aisquare.core.workspace import project_id_for
+    from aisquare.services.captain import brain
 
     home = project_id_for(paths.aisquare_home().resolve())
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_the_captain")
@@ -418,7 +423,7 @@ def test_launch_captain_in_the_captains_own_window_starts_it(
         "agt_the_captain",
         role="captain",
         project_id=home,
-        cwd=work_dir,
+        cwd=brain.brain_dir(),
         launch_spec=_CAPTAINS_LAUNCH,
     )
 
@@ -442,7 +447,9 @@ def test_launch_reports_a_missing_agent_binary(
 def test_launch_honours_a_custom_agent_command(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
-    result = runner.invoke(app, ["launch", "coder", "--command", "claude-next"])
+    result = runner.invoke(
+        app, ["launch", "coder", "--agent", "claude-code", "--command", "claude-next"]
+    )
 
     assert result.exit_code == 0, result.output
     assert spy["argv"] == ["claude-next"]
@@ -631,7 +638,7 @@ def test_spawn_exec_survives_a_base_url_the_agent_could_not_parse(
     _tracing_on("$http://127.0.0.1:9190")
     seen: dict[str, Any] = {}
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr(
         "aisquare.cli.team.os.execvpe",
         lambda file, argv, env: seen.update(argv=argv, env=env),
@@ -777,7 +784,9 @@ def test_a_role_bound_to_a_wrapper_traces_and_still_joins(
         save_config(
             AppConfig(
                 explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url),
-                team=TeamSettings(profiles={"coder": RoleLaunchProfile(bin="my-wrapper")}),
+                team=TeamSettings(
+                    profiles={"coder": RoleLaunchProfile(agent="claude-code", bin="my-wrapper")}
+                ),
             )
         )
         result = runner.invoke(app, ["launch", "coder"])
@@ -872,7 +881,9 @@ def test_launch_does_not_pin_an_id_it_cannot_own(
         (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], "the-resumed-session")
         assert record["pipeline_id"] == spy["env"]["AISQUARE_PIPELINE_ID"]
 
-        result = runner.invoke(app, ["launch", "coder", "--command", "aider"])
+        result = runner.invoke(
+            app, ["launch", "coder", "--agent", "claude-code", "--command", "aider"]
+        )
         assert result.exit_code == 0, result.output
         assert spy["argv"] == ["aider"], "no flag reaches a binary we did not resolve"
         assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
@@ -1013,10 +1024,103 @@ def test_a_role_bound_to_a_session_id_is_not_given_a_second_one(
     assert spy["argv"].count("--session-id") == 1, (
         f"two --session-id flags reached the agent: {spy['argv']}"
     )
+    # The binding's, then the role's own flags (its tool policy): main 0.9.2's order,
+    # kept for Claude Code (`binding_args_first`, R1 F3).
     assert spy["argv"] == ["claude", "--session-id", "bound-id-1234", *policy_args("coder")], spy[
         "argv"
     ]
     assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
+
+
+def test_on_windows_launch_waits_for_its_agent_and_ends_with_its_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R8 of #113's release: on windows-latest a pasted `team spawn` line (which runs `aisquare
+    launch`) gave its shell back at once, with status 2816: Windows has no exec, so
+    `os.execve` started the agent and ended the launcher. There the agent runs as a child,
+    a `.cmd` shim included, and the launcher ends with the agent's status. It ignores Ctrl-C
+    while it waits: as KeyboardInterrupt, `subprocess.call` would kill the agent (seq 11176)."""
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    ran: list[tuple[list[str], dict[str, str]]] = []
+    handlers: list[tuple[int, object]] = []
+
+    def call(args: list[str], env: dict[str, str]) -> int:
+        assert handlers == [(signal.SIGINT, signal.SIG_IGN)], "Ctrl-C ignored before the wait"
+        ran.append((args, env))
+        return 7
+
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.append((sig, handler)))
+    monkeypatch.setattr(subprocess, "call", call)
+    monkeypatch.setattr(os, "execve", lambda *args: pytest.fail("no exec on Windows"))
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(SystemExit) as ended:
+        launch_cli._exec(r"C:\npm\claude.cmd", ["claude", "--verbose"], {"PATH": "C:\\npm"})
+    assert ended.value.code == 7
+    assert ran == [([r"C:\npm\claude.cmd", "--verbose"], {"PATH": "C:\\npm"})]
+
+
+#: The variadic flags Claude Code 2.1.318 declares (`claude --help`): each takes every
+#: word after it that is not an option.
+VARIADIC = [["--add-dir", "/opt/b"], ["--allowedTools", "Bash"], ["--mcp-config", "/opt/m.json"]]
+
+
+@pytest.mark.parametrize("bound", VARIADIC)
+def test_a_bound_variadic_flag_never_takes_the_lines_prompt(
+    bound: list[str], runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """R1 of #113's release, F3: with the role's flags in front of the binding's, a role bound
+    to a variadic flag ran into the line's prompt (`claude <policy> --add-dir /opt/b hello`),
+    which Claude Code read as one more directory, and the session started with no prompt.
+    Main 0.9.2 ran `claude --add-dir /opt/b <policy> hello`, its order kept for Claude Code."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings, save_config
+
+    save_config(AppConfig(team=TeamSettings(profiles={"coder": RoleLaunchProfile(args=bound)})))
+    result = runner.invoke(app, ["launch", "coder", "--", "hello"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", *bound, *policy_args("coder"), "hello"], spy["argv"]
+
+
+def test_a_literal_separator_in_a_binding_never_makes_the_roles_flags_prompt_text(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """The head's reason for leading with the role's flags, kept by another means: a binding
+    that ends Claude Code's options (`--`) is followed by prompt text, so the role's flags go
+    in front of its `--`, and the line's own arguments after it, as given."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings, save_config
+
+    bound = ["--verbose", "--", "bound text"]
+    save_config(AppConfig(team=TeamSettings(profiles={"coder": RoleLaunchProfile(args=bound)})))
+    result = runner.invoke(app, ["launch", "coder", "--", "more"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", "--verbose", *policy_args("coder"), "--", "bound text", "more"]
+
+
+def test_a_traced_launchs_session_id_stays_in_front_of_the_lines_separator(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pinned `--session-id` goes last, as on main 0.9.2, but never after a `--` the line
+    carries: there Claude Code would read it as its prompt."""
+    from aisquare.core.config import AppConfig, ExplainabilitySettings, save_config
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    with healthy_proxy() as proxy_url:
+        save_config(
+            AppConfig(explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url))
+        )
+        result = runner.invoke(app, ["launch", "coder", "--", "--verbose", "--", "a prompt"])
+
+    assert result.exit_code == 0, result.output
+    argv = spy["argv"]
+    assert "--session-id" in argv, "traced"
+    assert argv.index("--session-id") < argv.index("--") and argv[-2:] == ["--", "a prompt"], argv
 
 
 @pytest.mark.parametrize("bound", [["--continue"], ["--resume"]])
@@ -1120,7 +1224,9 @@ def test_launch_persona_exports_the_name_for_the_session_start_hook(
     # file, never as an argument (`ps` shows argv) — the same block the session-start
     # hook briefs, so the two channels cannot disagree (owner decision, gh #210).
     policy = policy_args("coder")
-    assert spy["argv"][: 2 + len(policy)] == ["claude", *policy, launch_cli.SYSTEM_PROMPT_FLAG]
+    # Main 0.9.2's order, kept for Claude Code (`binding_args_first`, R1 F3): the role's
+    # flags, then the persona's.
+    assert spy["argv"][: 2 + len(policy)] == ["claude", *policy, claude_code.SYSTEM_PROMPT_FLAG]
     assert len(spy["argv"]) == 3 + len(policy)
     prompt = Path(spy["argv"][-1])
     briefed = "\n".join(personas.briefing(personas.resolve("skeptic"))) + "\n"
@@ -1143,11 +1249,162 @@ def test_launch_persona_system_prompt_is_a_switch_the_hook_channel_ignores(
     assert spy["argv"] == ["claude", *policy_args("coder")]
 
 
+class _NoSeam(FakeAgentAdapter):
+    """The fake agent, with no system-prompt seam: its ``system_prompt_args`` answers None."""
+
+    def system_prompt_args(
+        self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path
+    ) -> list[str] | None:
+        return None
+
+
+@pytest.fixture
+def fake_agent() -> Iterator[FakeAgentAdapter]:
+    """The fake agent registered for one test, unregistered after it."""
+    fake = FakeAgentAdapter()
+    register(fake)
+    try:
+        yield fake
+    finally:
+        unregister(fake.id)
+
+
+def _briefed(name: str) -> str:
+    return "\n".join(personas.briefing(personas.resolve(name))) + "\n"
+
+
+def test_a_hand_launched_claude_codes_board_is_each_calls_own_directorys(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1 of #113's release, F2: `aisquare launch` handed every agent AISQUARE_TEAM_HUB, the
+    launch's project root, so `aisquare task add` that a hand-launched Claude Code session ran
+    in another repository landed on the launch's board. 0.9.2 resolved each call by its own
+    directory, as again: refused in a repository that is no project of the user's, on that
+    project's own board in one that is."""
+    import subprocess
+
+    from aisquare.core.orchestrator import team_project
+    from aisquare.services import team as team_service
+
+    subprocess.run(["git", "init", "-q", str(work_dir)], check=True)
+    team_service.activate(work_dir)
+    result = runner.invoke(app, ["launch", "coder"])
+    assert result.exit_code == 0, result.output
+    assert "AISQUARE_TEAM_HUB" not in spy["env"], "Claude Code is given no hub"
+    agents_env = {key: value for key, value in spy["env"].items() if key.startswith("AISQUARE_")}
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    monkeypatch.chdir(other)
+
+    refused = runner.invoke(app, ["--json", "task", "add", "made in other"], env=agents_env)
+    assert refused.exit_code != 0 and "not one of your projects" in refused.output, refused.output
+    team_service.activate(other)
+    added = runner.invoke(app, ["--json", "task", "add", "made in other"], env=agents_env)
+    assert added.exit_code == 0, added.output
+    assert (
+        json.loads(added.stdout)["project_id"]
+        == team_project(other).id
+        != team_project(work_dir).id
+    )
+
+
+def test_a_sandboxed_agents_launch_still_carries_the_hub(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hub stays where the agent's sandbox needs it (`capabilities.sandboxes_tools`,
+    Codex's): its board calls go through the launch's broker, on the launch's board."""
+    import subprocess
+
+    from aisquare.services import team as team_service
+
+    subprocess.run(["git", "init", "-q", str(work_dir)], check=True)
+    team_service.activate(work_dir)
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "no-system.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "no-managed.toml")
+
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+
+    assert result.exit_code == 0, result.output
+    assert Path(spy["env"]["AISQUARE_TEAM_HUB"]).resolve() == work_dir.resolve()
+
+
+def test_launch_persona_on_codex_adds_it_to_the_operators_developer_instructions(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SCOPE #113 0.8.2 A3: Codex's seam is ``-c developer_instructions=…`` (measured on
+    0.162.1: it lands in the request's developer message). The ``-c`` replaces the
+    config's own value, so the operator's is kept ahead of the persona's block, and the
+    body travels as text: no file is written for it."""
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text('developer_instructions = "Answer in French."\n')
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "no-system.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "no-managed.toml")
+
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--persona", "skeptic"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    argv = spy["argv"]
+    seams = [arg for arg in argv if arg.startswith("developer_instructions=")]
+    assert len(seams) == 1, argv
+    assert argv[argv.index(seams[0]) - 1] == "-c"
+    value = tomllib.loads(seams[0])["developer_instructions"]
+    assert value == "Answer in French.\n\n" + _briefed("skeptic")
+    assert not (paths.aisquare_home() / "cache" / "persona-prompts").exists()
+
+
+def test_launch_persona_on_codex_leaves_the_operators_own_developer_instructions_alone(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """A ``-c developer_instructions=`` on the launch's own line is the operator's and wins;
+    the hook briefs the persona, and one line says the seam was not used."""
+    mine = ["-c", 'developer_instructions="mine"']
+    result = runner.invoke(
+        app, ["launch", "coder", "--agent", "codex", "--persona", "skeptic", "--", *mine]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    assert [arg for arg in spy["argv"] if "developer_instructions" in arg] == [mine[1]]
+    assert "no system-prompt seam for Codex" in result.output
+
+
+def test_launch_persona_on_an_agent_whose_adapter_takes_the_text_puts_it_in_argv(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], fake_agent: FakeAgentAdapter
+) -> None:
+    """No agent named here: the adapter's own answer is the seam (the fake's preamble)."""
+    result = runner.invoke(
+        app, ["launch", "coder", "--agent", fake_agent.id, "--persona", "skeptic"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][-2:] == ["--preamble", _briefed("skeptic")]
+
+
 def test_launch_persona_on_a_binary_without_a_seam_keeps_the_hook_alone_and_says_so(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
-    """codex, aider, a wrapper not named claude: no system-prompt flag this launcher
-    knows, so the briefing is the channel, and one line says so."""
+    """Main 0.9.2's test, which #113 deleted, restored (R1 of #113's release, F5): aider, a
+    wrapper not named claude: no system-prompt flag this launcher knows, so the briefing is
+    the channel, and one line says so. The head gave aider `--append-system-prompt-file`,
+    which it rejects, and the launch did not start."""
     result = runner.invoke(app, ["launch", "coder", "--persona", "skeptic", "--command", "aider"])
 
     assert result.exit_code == 0, result.output
@@ -1155,6 +1412,25 @@ def test_launch_persona_on_a_binary_without_a_seam_keeps_the_hook_alone_and_says
     assert spy["argv"] == ["aider"]
     said = result.output + (result.stderr if hasattr(result, "stderr") else "")
     assert "takes no system-prompt flag" in said
+
+
+def test_launch_persona_on_an_agent_without_a_seam_keeps_the_hook_alone_and_says_so(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """An adapter that answers None: the briefing is the channel, and one dim line says so."""
+    fake = _NoSeam()
+    register(fake)
+    try:
+        result = runner.invoke(app, ["launch", "coder", "--agent", fake.id, "--persona", "skeptic"])
+    finally:
+        unregister(fake.id)
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    assert not any(_briefed("skeptic") in arg for arg in spy["argv"])
+    assert "--preamble" not in spy["argv"]
+    assert "no system-prompt seam for Fake Agent" in result.output
+    assert "session-start hook alone" in result.output
 
 
 def test_launch_persona_with_a_cache_it_cannot_write_launches_on_the_hook_alone(
@@ -1351,7 +1627,8 @@ def test_a_reviewer_from_team_spawn_is_denied_the_tools_that_edit(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: dict[str, Any] = {}
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    # The binary resolved as every launch resolves it (`agent_launch.resolve`, #113).
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: f"/usr/bin/{name}")
     monkeypatch.setattr(
         "aisquare.cli.team.os.execvpe", lambda _file, argv, env: seen.update(argv=argv)
     )

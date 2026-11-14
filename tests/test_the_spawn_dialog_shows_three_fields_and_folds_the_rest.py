@@ -5,8 +5,8 @@ claude), handoff, account". The dialog showed a dozen rows at once, and *Pick…
 opened the target picker, which picks an account too, beside the Account select. Now Role,
 *Hand off from* and Account are on show; everything else is in one *Advanced* section,
 folded until it is opened, or until it holds the reason *Spawn* is disabled. Role's first
-option is *(none) — general-purpose Claude*: ``fleet.PLAIN_ROLE``, a plain Claude Code
-session on the board with no standing cycle and no mission.
+option is *(none) — general-purpose agent*: ``fleet.PLAIN_ROLE``, a plain session of its
+agent on the board with no standing cycle and no mission.
 
 What these assert is what the owner meets: what ``Tab`` reaches, what a click on the title
 or ``Enter`` does, how tall the box is, and the keywords the spawn received.
@@ -209,18 +209,26 @@ def test_extra_args_that_break_quoting_open_advanced_and_a_basic_refusal_does_no
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The control is a refusal in the basic tier — a second manager — whose reason is
-    under Role: *Advanced* has nothing to show for it and stays folded."""
+    under Role: *Advanced* has nothing to show for it and stays folded.
+
+    Each change is read once the dialog has handled it (``settle``: no message queued or in
+    hand on any node, no worker running, nothing left to lay out), never after one pause. A
+    value set on an Input reaches the dialog as an ``Input.Changed`` that bubbles from the
+    Input's queue to the dialog's, and on windows-latest one pause returned before the
+    dialog had validated the args: Spawn read enabled (CI run 43513953786, attempt 1, job
+    132191187338). The settle waits for quiet, not for the answer, so a dialog that stops
+    refusing them still fails here at once."""
     monkeypatch.setattr(fleet_service, "manager_of", lambda project: object())
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         select(dialog, "role").value = "manager"
-        await pilot.pause()
+        await settle(pilot)
         seen: list[Any] = [submit(dialog).disabled, advanced(dialog).collapsed]
         select(dialog, "role").value = "coder"
-        await pilot.pause()
+        await settle(pilot)
         seen.append(submit(dialog).disabled)
         dialog.query_one("#spawn-args", Input).value = '--append "unclosed'
-        await pilot.pause()
+        await settle(pilot)
         seen += [submit(dialog).disabled, advanced(dialog).collapsed]
         return seen
 
@@ -242,7 +250,8 @@ def test_no_role_is_the_first_option_and_spawns_a_plain_claude_with_nothing_else
             note(dialog, "#spawn-role-note"),
             advanced(dialog).collapsed,
         ]
-        await pilot.click("#spawn-submit")
+        # The role's note moved *Spawn* a row: the click aims once that is laid out (#107).
+        assert await pilot.click("#spawn-submit"), "the click landed beside Spawn"
         await settle(pilot)
         return seen
 

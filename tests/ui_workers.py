@@ -17,6 +17,10 @@ assert holds.
 clock: no settle comes before it, because on Windows a settle can outlast the fact.
 
 ``released`` waits out a Button's press effect before the next click on it.
+
+``laid_out`` is whether the screen has laid out every change asked of it. ``settle_page`` waits
+for it too, and ``aiming_at_what_is_laid_out`` makes every ``Pilot`` mouse event wait for it
+before it aims (the suite's ``conftest`` installs it for the session).
 """
 
 from __future__ import annotations
@@ -24,12 +28,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from textual.app import App
 from textual.css.query import NoMatches
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import Button
 from textual.worker import Worker, WorkerError
 
@@ -80,7 +85,8 @@ async def settle_page(app: App[Any], *, group: str | None = None) -> None:
 
     So it goes round: pause, then wait for what is running, until a pause ends
     with no message queued on the app or its screen, none still in hand there,
-    and no worker of ours unfinished. The rounds are bounded, so a page that
+    no worker of ours unfinished, and nothing left to lay out (:func:`laid_out`): a size,
+    a region or a scroll read after it is the one on screen. The rounds are bounded, so a page that
     never goes quiet fails at its test's assertion, not here. The screen is the
     CURRENT one, as in Textual's own wait: a screen under a modal is not counted
     while the modal is up, and each round reads the current screen again, so the
@@ -101,7 +107,7 @@ async def settle_page(app: App[Any], *, group: str | None = None) -> None:
         await pilot.pause()
         if not _busy(app, group):
             await _handled(app)
-            if not _busy(app, group):
+            if not _busy(app, group) and laid_out(app):
                 return
         await settle_workers(app, group=group)
 
@@ -170,6 +176,59 @@ async def watch_until(done: Callable[[], object], *, timeout: float = 10.0) -> N
 _SETTLE_ROUNDS = 20
 _HANDLED_S = 5.0
 _UNTIL_POLL_S = 0.02
+_AIM_S = 5.0
+"""Seconds a mouse event waits at most for the screen to be laid out (:func:`aim`)."""
+
+
+def laid_out(app: App[Any]) -> bool:
+    """Whether the current screen has laid out every change asked of it, so a widget is where
+    its region says and where the screen shows it.
+
+    Not a settle. A change that moves a widget (a note shown, a row added, a dialog pushed)
+    reaches the screen in three steps: the widget marks itself, its next idle posts a
+    ``Layout`` to the screen, and the screen lays out from its update timer, once it is idle.
+    ``Pilot.pause`` runs that timer's work at its end, but only for a request already at the
+    screen, and on windows-latest the timer and the idles behind it come late. So a size read
+    after a settle was the one before (a list of thirty, 1 row high and not scrollable: CI run
+    42256676993, shard 9), and ``Pilot.click``, which aims at a widget's region when it is
+    called and fires after its own pauses, pressed beside *Spawn*, or on a GuardedButton whose
+    guard the move then put up (CI run 42251112675, shard 3): no press, and no spawn. Each
+    step is looked at: the flags of the screen and of every widget on it, and the messages
+    queued on them.
+    """
+    screen = app.screen
+    nodes: list[Any] = [screen, *screen.walk_children(Widget)]
+    return not any(
+        node._layout_required or node._scroll_required or node.message_queue_size for node in nodes
+    )
+
+
+async def aim(pilot: Pilot[Any]) -> None:
+    """Wait, at most :data:`_AIM_S` seconds, until the screen is laid out (:func:`laid_out`):
+    what the owner waits for before a click, the screen drawn where they aim. Pauses only: no
+    worker is waited for, since a test may hold one while it clicks. When the time is up the
+    event goes as it would have, and the test's assertion says what it missed."""
+    deadline = time.monotonic() + _AIM_S
+    while not laid_out(pilot.app) and time.monotonic() < deadline:
+        await pilot.pause()
+
+
+@contextlib.contextmanager
+def aiming_at_what_is_laid_out() -> Iterator[None]:
+    """Every ``Pilot`` mouse event (a click, a hover, a press) aims once the screen is laid
+    out (:func:`aim`), wherever the test called it from: a change made just before it is on
+    screen first, as it is before the owner's click."""
+    post = Pilot._post_mouse_events
+
+    async def aimed(self: Pilot[Any], *args: Any, **kwargs: Any) -> bool:
+        await aim(self)
+        return await post(self, *args, **kwargs)
+
+    Pilot._post_mouse_events = aimed  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        Pilot._post_mouse_events = post  # type: ignore[method-assign]
 
 
 async def settle_until_held(

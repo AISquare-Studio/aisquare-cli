@@ -21,11 +21,14 @@ import os
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from aisquare.core.paths import aisquare_home
 from aisquare.core.spawn import git_env
+from aisquare.core.workspace import git_argv
 
 #: Build output, whether or not a project remembered to gitignore it: a first ``pytest``
 #: run must not change the identity by writing ``__pycache__``. Applied to UNTRACKED files
@@ -61,7 +64,7 @@ def _git(root: Path, *args: str, timeout: float = 30) -> subprocess.CompletedPro
     answer; "could not list" is a failure)."""
     try:
         return subprocess.run(
-            ["git", "-C", str(root), *args],
+            git_argv("-C", str(root), *args),
             stdin=subprocess.DEVNULL,  # a tool's git must not hold an MCP server's protocol pipe
             capture_output=True,
             timeout=timeout,
@@ -148,6 +151,21 @@ def source_root_for(project_root: Path, cwd: Path | None = None) -> Path:
     return start
 
 
+def checkout_of(start: Path) -> Path:
+    """The checkout ``start`` is in, asked of the files alone: git's top for it, else the
+    nearest directory with a marker (``.git``, ``.hg``, ``.aisquare``), else ``start``. For a
+    process that cannot ask the board which project a directory is in (an agent's sandbox,
+    where the store is read-only): the source it fingerprints is the tree it runs in."""
+    start = start.resolve()
+    top = _toplevel(start)
+    if top is not None:
+        return top
+    for directory in (start, *start.parents):
+        if any((directory / marker).exists() for marker in (".git", ".hg", ".aisquare")):
+            return directory
+    return start
+
+
 def _refuse_home(root: Path) -> None:
     """A root that is, or holds, AI Square's home or the user's home is not a checkout.
 
@@ -181,7 +199,8 @@ def _names(root: Path) -> list[str]:
     ignore, and every ``.gitignore`` git reads, ignored or not: an untracked
     ``tests/.gitignore`` that ignores itself and a ``conftest.py`` must not hide both
     (tester's X2 on #14). A ``.gitignore`` inside an ignored directory is never read by
-    git, and is not listed."""
+    git, and is not listed. An untracked :func:`placeholder`, or a file :func:`mount_targets`
+    names, is not a file of the checkout, and is not listed either."""
     probe = _git(root, "rev-parse", "--show-toplevel", timeout=10)
     if probe.returncode == 0:
         tracked = _git_ls(root, "--cached")
@@ -191,7 +210,11 @@ def _names(root: Path) -> list[str]:
             for name in _git_ls(root, "--others", "--ignored", "--exclude-standard", "--directory")
             if Path(name).name == ".gitignore" and not name.endswith("/")
         ]
-        kept = {name for name in [*untracked, *rules] if not _generated(name)}
+        kept = {
+            name
+            for name in [*untracked, *rules]
+            if not _generated(name) and not _absent(root / name)
+        }
         return sorted(set(tracked) | kept)
     return sorted(str(path.relative_to(root)) for path in _walk(root))
 
@@ -200,7 +223,8 @@ def _walk(top: Path) -> Iterator[Path]:
     """Every file and link under ``top``, sorted: the one walk of a directory, used for a
     checkout without git and for a directory a symlink points at, so the two cannot
     disagree about what counts (manager's ruling on the tester's Y3-Y6, #14). It never
-    descends into ``.git``, the :data:`GENERATED_DIRECTORIES` or through a link."""
+    descends into ``.git``, the :data:`GENERATED_DIRECTORIES` or through a link, and skips
+    a :func:`placeholder` and a file :func:`mount_targets` names."""
 
     def unreadable(error: OSError) -> None:
         raise ValueError(f"cannot list source directory: {error}") from None
@@ -212,7 +236,76 @@ def _walk(top: Path) -> Iterator[Path]:
             if link.is_symlink():
                 yield link
         for filename in sorted(files):
-            yield Path(directory) / filename
+            if not _absent(Path(directory) / filename):
+                yield Path(directory) / filename
+
+
+def placeholder(path: Path) -> bool:
+    """Whether ``path`` is a placeholder an OS sandbox mounted where the checkout has no
+    file: a regular file that no directory holds (no link to it, ``st_nlink`` 0), empty, and
+    on another filesystem than the directory it is listed in.
+
+    Codex's Linux sandbox (bwrap) keeps every read-only path its profile names, even one
+    that does not exist, so that its commands cannot create it: aisquare's launch inputs at
+    the top of a tree (``.claude``, ``.mcp.json``, ``.aisquare``, ...; review r10 of #113,
+    finding 1). bwrap 0.11.1 (ubuntu-26.04) does that by binding a deleted file from a tmpfs
+    over each missing file path. Inside the sandbox git then lists one untracked file per
+    path, and nothing of them is on the disk the host reads: a report ``asq exec`` saved
+    in the sandbox named four files the broker, outside it, could not find, so ``brief
+    evidence --report`` refused it as changed since it ran (CI 42842656612 and probe
+    42849938305, #114). A file the checkout holds always has a link on its own filesystem,
+    so this is never one, and a placeholder reads as no file at all, as the host reads it."""
+    if sys.platform == "win32":
+        return False
+    try:
+        status = os.lstat(path)
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 0 or status.st_size != 0:
+            return False
+        return status.st_dev != os.stat(path.parent).st_dev
+    except OSError:
+        return False
+
+
+#: The paths :func:`mount_targets` names, as ``os.fspath`` of each.
+_MOUNT_TARGETS: ContextVar[frozenset[str]] = ContextVar("source_mount_targets", default=frozenset())
+
+
+@contextmanager
+def mount_targets(paths: Iterable[Path]) -> Iterator[None]:
+    """Read each of ``paths`` that holds an empty file no one may write as no file, inside.
+
+    bwrap makes the mount target of each missing read-only path on the disk it binds, the
+    checkout's, while a sandboxed command runs: an empty file no one may write (0444 under
+    the umask), which Codex removes when the command ends. A board call the agent's
+    sandbox makes runs, through its broker, while that command runs, so the broker's
+    command reads the checkout with those files in it: ``.aisquare``,
+    ``.aisquare-worktrees``, ``.claude`` and ``.mcp.json`` at the top of the tree,
+    measured on bwrap 0.11.1 (ubuntu-26.04, probe 42866990895 on #114), and ``brief
+    evidence --report`` refused a report its sandbox saved as changed since it ran. The
+    sandbox's own view of those paths is a :func:`placeholder`. Only the paths a launch's
+    sandbox holds read-only are named (``services.store_broker.sandbox_mount_targets``),
+    and only an empty file no one may write there is read as none."""
+    token = _MOUNT_TARGETS.set(frozenset(os.fspath(path) for path in paths))
+    try:
+        yield
+    finally:
+        _MOUNT_TARGETS.reset(token)
+
+
+def _mount_target(path: Path) -> bool:
+    targets = _MOUNT_TARGETS.get()
+    if not targets or os.fspath(path) not in targets:
+        return False
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(status.st_mode) and status.st_size == 0 and not status.st_mode & 0o222
+
+
+def _absent(path: Path) -> bool:
+    """Whether a listed ``path`` is a sandbox's, not the checkout's: read as no file."""
+    return placeholder(path) or _mount_target(path)
 
 
 def _rule_files(root: Path) -> list[tuple[str, Path]]:
@@ -271,7 +364,7 @@ def _hash_entry(root: Path, path: Path, entry: hashlib._Hash, seen: set[Path]) -
     or fail every report (tester's Y6 on #14)."""
     if path.is_symlink():
         return _hash_link(root, path, entry, seen)
-    if not path.exists():
+    if not path.exists() or _absent(path):
         entry.update(b"deleted\0")
         return []
     if not stat.S_ISREG(path.stat().st_mode):

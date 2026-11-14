@@ -9,6 +9,7 @@ held to a private socket. Each claim reads what a widget shows or what the dialo
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,7 @@ from tests.test_ui_shell import (
     shown,
     status,
 )
+from tests.ui_workers import settle_until_held
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -376,6 +378,27 @@ def dialog_project(app: FleetApp) -> tuple[str, str, list[str]]:
     return dialog.project.id, str(field.value), offered
 
 
+def project_field_set(app: FleetApp) -> Callable[[], bool]:
+    """The Spawn dialog up, and its Project field holding a value: what ``dialog_project`` reads.
+
+    The field is a ``Select`` given its project at construction, and it sets its value from
+    that in its OWN mount handler, a turn of the loop or more after the dialog is current.
+    Until then it reads ``Select.NULL``. *Spawn agent*'s message reaches the app after the
+    click's own pause, so one pause after the click could look at the screen before the dialog
+    was there and end before the field's mount: the Project field read ``Select.NULL`` on
+    windows-latest (CI 41785849184, attempt 1, shard 10, at b3b9d5db). Its value, not which one,
+    is the fact waited for: the test asserts which.
+    """
+
+    def done() -> bool:
+        dialog = app.screen
+        return isinstance(dialog, SpawnDialog) and not (
+            dialog.query_one("#spawn-project", Select).is_blank()
+        )
+
+    return done
+
+
 def test_spawn_agent_opens_on_the_selected_card_the_selected_agents_project_else_the_first(
     tmp_path: Path, script: Script
 ) -> None:
@@ -385,7 +408,9 @@ def test_spawn_agent_opens_on_the_selected_card_the_selected_agents_project_else
     async def open_spawn(pilot: Pilot[None]) -> tuple[str, str, list[str]]:
         app = fleet_app(pilot)
         await pilot.click(app.query_one(SpawnButton))
-        await pilot.pause()
+        await settle_until_held(
+            app, project_field_set(app), what="the Spawn dialog's Project field set", timeout=10
+        )
         seen = dialog_project(app)
         await pilot.press("escape")
         await settle(app)
@@ -428,7 +453,9 @@ def test_with_the_captain_selected_spawn_agent_opens_on_the_first_project(
         row_for(app, captain.agent.id).activate()
         await until(pilot, agent_opened(pilot, captain.agent.id), what="the captain selected")
         await pilot.click(app.query_one(SpawnButton))
-        await pilot.pause()
+        await settle_until_held(
+            app, project_field_set(app), what="the Spawn dialog's Project field set", timeout=10
+        )
         seen = dialog_project(app)
         await pilot.press("escape")
         await quiet(pilot)

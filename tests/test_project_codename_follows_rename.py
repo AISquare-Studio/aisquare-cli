@@ -374,7 +374,8 @@ def test_the_old_codename_still_finds_the_project_and_the_board_is_told_once(
     ]
     # Every hint printed from now on names the new codename.
     assert project_service.fleet_command("ls", renamed).endswith("--project aisquare-cli")
-    assert fleet_service.attach_argv(project)[-1] == "=asq-aisquare-cli"
+    # By tmux's id for the session its launch records name (#113, review r7), named so now.
+    assert fleet_service.attach_argv(project)[-1] == tmux.session_ids["asq-aisquare-cli"]
     # A second rename keeps both earlier names, and tells the board once more.
     fleet_service.rename_project(project, "Billing")
     assert {project_service.resolve(ref).id for ref in (old, "aisquare-cli", "billing")} == {
@@ -573,7 +574,7 @@ def test_the_session_is_renamed_on_every_server_the_rows_recorded(
 
     assert tmux.renamed == [(f"asq-{old}", "asq-moved")], "on the server the row recorded"
     assert moved.renamed == [], "today's socket holds no such session: asked, not renamed"
-    assert fleet_service.attach_argv(project)[-1] == "=asq-moved"
+    assert fleet_service.attach_argv(project)[-1] == tmux.session_ids["asq-moved"]
 
 
 # --- 5. the card says the codename where its name does not --------------------------------
@@ -645,7 +646,7 @@ def test_two_renames_at_once_leave_the_session_on_the_stored_codename_in_either_
     fleet_service._codename_changed(w2, old_w2, [])  # W2's tmux half lands first
     fleet_service._codename_changed(w1, old_w1, [])  # W1's lands last, with its stale view
     assert set(tmux.sessions) == {"asq-baz"}
-    assert fleet_service.attach_argv(project)[-1] == "=asq-baz"
+    assert fleet_service.attach_argv(project)[-1] == tmux.session_ids["asq-baz"]
 
 
 def test_a_session_another_project_holds_now_is_never_taken_by_a_rename(
@@ -663,9 +664,11 @@ def test_a_session_another_project_holds_now_is_never_taken_by_a_rename(
     with store_session() as store:
         store.onboard_project(project)  # added again: its old codenames come back with it
     tmux.sessions["asq-shared-name"] = []  # the other project's agents
-    tmux.sessions["asq-mine-now"] = []
+    tmux.sessions["asq-mine-now"] = []  # made by hand: no launch record names it
     fleet_service.rename(project, "mine-later")
-    assert set(tmux.sessions) == {"asq-shared-name", "asq-mine-later"}
+    # #113 renames the sessions the project's launch records name, by tmux's id, never one
+    # found by a name built from a codename (review r7, finding 2): neither is touched.
+    assert set(tmux.sessions) == {"asq-shared-name", "asq-mine-now"}
 
 
 def test_a_spawn_a_rename_lands_during_opens_its_window_in_the_renamed_session(
@@ -698,12 +701,13 @@ def test_a_scoped_shutdown_and_fresh_look_in_a_session_left_under_an_old_codenam
     fleet_service.spawn(project, "manager")
     old = _codename(project)
     fleet_service.rename_project(project, "Renamed")
-    tmux.sessions[f"asq-{old}"] = []
+    # The session left under the old name: its launch record names it by tmux's id (#113),
+    # so it is found whatever it is called now.
+    tmux.rename_session("asq-renamed", f"asq-{old}")
     found = fleet_service.project_sessions(_stored(project))
-    assert found is not None and {name.split(":")[-1] for name in found} == {
-        "asq-renamed",
-        f"asq-{old}",
-    }
+    # Found by its id, under the name its record keeps for it.
+    assert found is not None and [name.split(":")[-1] for name in found] == ["asq-renamed"]
+    assert f"asq-{old}" in tmux.sessions and "asq-renamed" not in tmux.sessions
 
 
 def test_fresh_takes_a_branch_left_under_a_codename_the_project_gave_up(

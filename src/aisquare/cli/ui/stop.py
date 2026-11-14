@@ -80,7 +80,7 @@ StopAgentScreen #stop-dont-ask:focus { text-style: bold reverse; }
 
 
 def grace_seconds() -> float:
-    """How long ``stop`` waits after ``/exit`` — asked of the service, never copied.
+    """How long ``stop`` waits after the exit command — asked of the service, never copied.
 
     The dialog promises the user a number of seconds. Typing that number here
     would make the sentence true only until someone changed the service's
@@ -150,7 +150,11 @@ def stop_answer(worker: Worker[Any], state: WorkerState) -> fleet_service.StopRe
 
 def warn_release_failed(app: App[Any], receipt: fleet_service.StopReceipt) -> None:
     """``fleet stop`` prints this and exits 1: a claim left with the ended session is not a
-    clean stop, and the screen must not read as one."""
+    clean stop, and the screen must not read as one. A stop that typed no exit command (a
+    window no launch record places, killed at once) says why first (the receipt's
+    ``killed``, #113)."""
+    if receipt.killed:
+        app.notify(receipt.killed, severity="warning", timeout=8, markup=False)
     if receipt.release_failed:
         app.notify(f"claims: {receipt.release_failed}", severity="warning", timeout=8, markup=False)
 
@@ -182,14 +186,24 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         return self.label == fleet_service.MANAGER_LABEL
 
     def has_process(self) -> bool:
-        """Whether there is a process to ``/exit`` — ``ALIVE_STATES``, the button's own rule.
+        """Whether there is a process to type the exit command into — ``ALIVE_STATES``, the
+        button's own rule.
 
         On a 💤 exited row the window is dead and kept only for its last screen
         (`remain-on-exit`, #138): the stop removes it and the row leaves the
-        listing, with no ``/exit`` and no grace, so the question says that and
-        *Force* — which only skips the ``/exit`` — has nothing to offer.
+        listing, with no exit command and no grace, so the question says that and
+        *Force* — which only skips the exit command — has nothing to offer.
         """
         return self.status.state in ALIVE_STATES
+
+    def exit_command(self) -> str:
+        """What the stop types to end this row's session — asked of the service, never
+        copied (``fleet_service.exit_command_for``, the very call ``fleet stop`` types): its
+        agent's own ``AgentAdapter.exit_command``, and for an agent this install does not
+        know the default agent's, which is what ``fleet stop`` types into it. The dialog
+        guessed nothing for that agent and said "Its exit command" while the stop typed the
+        default's (tester of #58, seq 10298)."""
+        return fleet_service.exit_command_for(self.status.agent)
 
     def question(self) -> Text:
         """The whole question as data — the label is the user's, brackets and all."""
@@ -217,8 +231,11 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         text.append("Stop ")
         text.append(self.label, style="bold")
         text.append("?\n")
-        text.append(f"/exit, then the window is killed after {grace_seconds():g} s. ", style="dim")
-        text.append("Force skips the /exit.", style="dim")
+        command = self.exit_command()
+        text.append(
+            f"{command}, then the window is killed after {grace_seconds():g} s. ", style="dim"
+        )
+        text.append(f"Force skips the {command}.", style="dim")
         if self.is_manager():
             text.append(
                 "\nThis is the project's manager; the agents it started keep running.",
@@ -284,7 +301,7 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
     @on(Button.Pressed, "#stop-cancel")
     def action_cancel(self) -> None:
         if self._stopping:
-            # The /exit is already typed and the kill is on its way: closing now
+            # The exit command is already typed and the kill is on its way: closing now
             # would leave the service's answer — including a refusal — nowhere to
             # land. The Spawn dialog waits out its own spawn for the same reason.
             return

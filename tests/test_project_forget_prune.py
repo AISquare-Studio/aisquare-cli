@@ -114,7 +114,13 @@ def _record_turn(trace_id: str, project_id: str) -> None:
     )
 
 
+_BUILT = itertools.count(1)
+
+
 def _agent(project_id: str, label: str = "coder1") -> FleetAgent:
+    # Each row a microsecond after the one before: the store lists rows by ``created_at, id``,
+    # and two built together read the same clock on windows-latest (15 ms), so the order the
+    # refusals name them in was the random ids' (run 40450023264: "coder1, manager").
     return FleetAgent(
         id=new_agent_id(),
         project_id=project_id,
@@ -122,7 +128,7 @@ def _agent(project_id: str, label: str = "coder1") -> FleetAgent:
         role="coder",
         pane_id="%1",
         cwd=Path("/tmp"),
-        created_at=datetime.now(tz=UTC),
+        created_at=datetime.now(tz=UTC) + timedelta(microseconds=next(_BUILT)),
     )
 
 

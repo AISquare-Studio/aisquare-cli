@@ -1,10 +1,10 @@
 """*Adopt a conversation…*: ``fleet adopt --list`` as a picker, on the Accounts page (#290).
 
-The conversations no fleet agent owns, newest first, as ``services.adopt.recent`` reads them
-(off the UI thread, before this opens). One a live ``claude`` still holds, or whose directory
-is no onboarded project, is listed with why and cannot be picked: adopting it would only be
-refused. Enter on one answers its session id, which the page adopts in a worker; Esc answers
-``None``.
+The conversations no fleet agent owns, every agent's, newest first, as ``services.adopt.recent``
+reads them (off the UI thread, before this opens). One a live process still holds, or whose
+directory is no onboarded project, is listed with why and cannot be picked: adopting it would
+only be refused. Enter on one answers its session id, which the page adopts in a worker; Esc
+answers ``None``.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.models import AdoptableConversation
 
 
@@ -33,16 +34,39 @@ def _ago(now: datetime, then: datetime) -> str:
     return f"{seconds // 86400}d ago"
 
 
-def conversation_text(conversation: AdoptableConversation, now: datetime) -> Text:
-    """One row: short id, account, directory, age; the first prompt under it; why it cannot
-    be adopted, when it cannot. A Text, never markup: every field is the user's."""
+def _agent_label(conversation: AdoptableConversation) -> str:
+    adapter = recorded_adapter(conversation.agent)
+    return adapter.label if adapter is not None else conversation.agent
+
+
+def _program(conversation: AdoptableConversation) -> str:
+    """The program a holder of ``conversation`` runs: ``claude``, as 0.9.2 said it."""
+    adapter = recorded_adapter(conversation.agent)
+    return adapter.binary if adapter is not None else conversation.agent
+
+
+def agents_named(conversations: Sequence[AdoptableConversation]) -> bool:
+    """Whether the rows name their agent: only where it tells them apart, with more than one
+    agent's conversations listed, as ``fleet adopt --list`` does (review r28 of #113, n5).
+    One agent's read as 0.9.2's did (C1 of #120)."""
+    return len({conversation.agent for conversation in conversations}) > 1
+
+
+def conversation_text(
+    conversation: AdoptableConversation, now: datetime, *, named: bool = False
+) -> Text:
+    """One row: short id, the agent when ``named`` (:func:`agents_named`), account,
+    directory, age; the first prompt under it; why it cannot be adopted, when it cannot. A
+    Text, never markup: every field is the user's."""
+    agent = _agent_label(conversation) if named else _program(conversation)
     text = Text(conversation.session_id[:8], style="bold")
-    text.append(f"  {conversation.account}  {conversation.cwd or '—'}  ")
+    shown = f"  {agent}" if named else ""
+    text.append(f"{shown}  {conversation.account}  {conversation.cwd or '—'}  ")
     text.append(_ago(now, conversation.last_activity), style="dim")
     if conversation.first_prompt:
         text.append(f"\n  {conversation.first_prompt}", style="dim")
     if conversation.held_by is not None:
-        text.append(f"\n  a claude still runs it (pid {conversation.held_by})", style="yellow")
+        text.append(f"\n  a {agent} still runs it (pid {conversation.held_by})", style="yellow")
     elif conversation.project_id is None:
         text.append("\n  its directory is no onboarded project", style="yellow")
     return text
@@ -82,10 +106,11 @@ class AdoptPicker(ModalScreen[str | None]):
 
     def on_mount(self) -> None:
         picker = self.query_one("#adoptlist", OptionList)
+        named = agents_named(self._conversations)
         for conversation in self._conversations:
             picker.add_option(
                 Option(
-                    conversation_text(conversation, self._now),
+                    conversation_text(conversation, self._now, named=named),
                     id=conversation.session_id,
                     disabled=not adoptable(conversation),
                 )

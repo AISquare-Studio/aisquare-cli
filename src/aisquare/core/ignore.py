@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from aisquare.core.spawn import git_env
+from aisquare.core.workspace import git_argv
 
 #: What no index should read whatever the repo's ``.gitignore`` says: dependency
 #: trees, build output, caches, and this tool's own worktree directories. Globs in
@@ -40,7 +41,7 @@ def head_sha(root: Path) -> str | None:
     """Best-effort current commit of ``root``."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            git_argv("rev-parse", "HEAD"),
             cwd=root,
             stdin=subprocess.DEVNULL,  # not the MCP protocol pipe a server's tool may run under
             capture_output=True,

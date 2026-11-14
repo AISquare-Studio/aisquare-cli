@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import usage as usage_core
+from aisquare.core.agent_adapters import claude_usage
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, PanePids, TmuxServer
 from aisquare.models import FleetAgent, ProjectInfo, SessionUsage, TeamSession
@@ -435,7 +436,7 @@ def test_spend_starts_from_the_recorded_row_and_adds_only_what_the_transcript_ga
     written since, and never reads the recorded bytes again (the recorded figure is not what
     those bytes hold: re-read, the total would be wrong)."""
     path = _transcript(tmp_path, "ses-a", request(NOW, "msg_1", cwd=project.root))
-    _, state = usage_core.scan(path)
+    _, state = claude_usage.scan(path)
     recorded = usage_core.Usage(
         models={"claude-opus-5-5": usage_core.ModelUsage(requests=1, input=1_000_000, cost_usd=5)}
     )
@@ -483,7 +484,8 @@ def test_a_session_no_hook_recorded_is_read_from_its_first_line_then_only_its_ne
     assert first["coder-1"].tokens == 1130 + 1610
     assert second["coder-1"].tokens == 1130 + 1610 + 1130
     assert first["fresh"].tokens is None and first["fresh"].cost_usd is None
-    _, _, state = spend._seen["ses-b"]
+    _, _, kept, _agent_id = spend._seen["ses-b"]
+    state = claude_usage.ScanState.parse(kept)
     assert state.offsets[str(path)] == path.stat().st_size, "the reader kept its place"
 
 
@@ -626,6 +628,56 @@ def test_fleet_top_json_is_one_object_with_every_agent_and_the_totals(
     }
     assert first["uptime_seconds"] == 3723 and first["tokens"] is None
     assert payload["totals"]["agents"] == 2 and payload["totals"]["processes"] == 5
+
+
+def test_a_lone_plain_home_codex_agent_is_named_plain_codex_wherever_fleet_top_shows_it(
+    project: ProjectInfo, faked: ListedPanes
+) -> None:
+    """Tester on #55 (seq 10278): a Codex agent on its plain home records slot 0 (as a hand-off's
+    does, ``tests/test_a_hand_off_of_a_codex_row_forks_its_thread.py``). Read as falsy, a lone
+    one read no labels and fell back to Claude Code's names, ``account 0``; beside a Claude
+    Code row it read ``plain codex``. Its name is the slot's alias, else the slot's own
+    (``slot_name``, as ``fleet ls`` says it), in the sample, ``fleet top``, ``--json`` and the
+    Agent resources page. Three looks, each failing on one half: no home on disk (no label
+    lists it: the built-in name), the home aliased (the labels are read for slot 0 too), the
+    home plain."""
+    from textual.widgets import Static
+
+    from aisquare.cli.ui.views.resources import ResourcesView
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_ui_resources import _drive_page, _text
+
+    plain = accounts_core.kind("codex").plain_slot
+    row = _agent(project, "cx", "%1", slot=plain)
+    with store_session() as store:
+        store.upsert_fleet_agent(row.model_copy(update={"agent": "codex"}))
+
+    def account() -> str | None:
+        return _by_label(fleet_top.sample(None))["cx"].account
+
+    no_home = account()  # Codex not run yet here: no label lists its plain home
+    Path(accounts_core.default_account(agent="codex").config_dir).mkdir(parents=True)
+    accounts_service.set_alias(str(plain), "codex-home")
+    aliased = account()
+    accounts_service.set_alias(str(plain), None)
+    sampled = account()
+    shown = runner.invoke(app, ["fleet", "top"])
+    payload = json.loads(runner.invoke(app, ["--json", "fleet", "top"]).output)
+
+    async def page(pilot: Any, view: ResourcesView) -> str:
+        return _text(view.query_one("#resources-table", Static))
+
+    table = _drive_page(lambda: fleet_top.sample(None), page)
+
+    assert plain == 0
+    assert no_home == "plain codex", "the slot's own name, never Claude Code's 'account 0'"
+    assert aliased == "codex-home", "slot 0's label is read: 0 is an account"
+    assert sampled == "plain codex"
+    assert shown.exit_code == 0 and "plain codex" in shown.output, shown.output
+    [agent] = payload["agents"]
+    assert agent["account"] == "plain codex", agent
+    assert "plain codex" in table and "account 0" not in table, table
 
 
 def test_fleet_top_project_narrows_to_one_fleet_and_an_unknown_one_fails(

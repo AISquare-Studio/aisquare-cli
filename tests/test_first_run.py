@@ -24,12 +24,20 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import config as config_core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import claude_code
 from aisquare.core.config import FleetSettings
 from aisquare.core.orchestrator import team_project
 from aisquare.core.selfcli import CliResult
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer
-from aisquare.models import FleetAgent, FleetAgentState, FleetAgentStatus, ProjectInfo
+from aisquare.models import (
+    CheckStatus,
+    DoctorCheck,
+    FleetAgent,
+    FleetAgentState,
+    FleetAgentStatus,
+    ProjectInfo,
+)
 from aisquare.services import agents as agents_service
 from aisquare.services import first_run, onboarding
 from aisquare.services import fleet as fleet_service
@@ -160,7 +168,7 @@ def test_each_platform_gets_its_own_routes() -> None:
     mac = [route.command for route in first_run.install_routes("darwin")]
     linux = [route.command for route in first_run.install_routes("linux")]
     windows = first_run.install_routes("win32")
-    assert first_run.BREW_COMMAND in mac and first_run.BREW_COMMAND not in linux
+    assert claude_code.BREW_COMMAND in mac and claude_code.BREW_COMMAND not in linux
     assert accounts_core.INSTALL_ALTERNATIVE in linux  # npm stays, last
     assert [route.how for route in windows] == ["inside WSL2"]
 
@@ -180,7 +188,7 @@ def test_claude_missing_is_not_found_and_reads_no_login() -> None:
 
     state = first_run.probe_claude(which=nowhere, connected=lambda: False, signed_in=login)
     assert (state.found, state.ready, state.signed_in) == (False, False, None)
-    assert asked == ["claude"] and state.is_claude
+    assert asked == ["claude"] and state.native
 
 
 def test_claude_found_connected_and_signed_in_is_ready(tmp_path: Path) -> None:
@@ -209,7 +217,7 @@ def test_the_agent_override_is_what_the_probe_looks_for(
 
     state = first_run.probe_claude(which=which, connected=lambda: True, signed_in=lambda: True)
     assert asked == [stand_in] and state.found
-    assert (state.wanted, state.source, state.is_claude) == (stand_in, "env:global", False)
+    assert (state.wanted, state.source, state.native) == (stand_in, "env:global", False)
 
 
 def test_connected_is_the_shared_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -408,8 +416,14 @@ def test_connect_is_the_doctors_own_fix() -> None:
 
     result = first_run.connect(run=run)
     assert result.ok and ran == [(["--json", "agents", "connect", "claude-code"], None)]
-    known = [fix.argv for fix in onboarding.KNOWN_FIXES]
-    assert first_run.connect_fix().argv in known
+    assert admitted(first_run.connect_fix())
+
+
+def admitted(fix: onboarding.FixCommand) -> bool:
+    """Whether the doctor's own table (``onboarding.KNOWN_FIXES``) makes ``fix`` a button: a
+    check whose hint names it reads back as exactly its argv."""
+    check = DoctorCheck(name=fix.check, status=CheckStatus.warn, detail="", fix=f"run {fix.label}")
+    return [found.argv for found in onboarding.fix_commands([check])] == [fix.argv]
 
 
 # --------------------------------------------------------------------------- tmux and gh

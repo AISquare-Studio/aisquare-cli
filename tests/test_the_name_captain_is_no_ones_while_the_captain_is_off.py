@@ -266,12 +266,16 @@ def test_off_a_session_started_as_a_declared_captain_gets_the_ordinary_briefing(
 
     assert "aisquare task claim" in text, "the board's task protocol, as for any role"
     assert "attention()" not in text, "not the captain's cycle"
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("plain-coder-1", project.root, "startup")
     with store_session() as store:
         session = store.get_session("declared-captain-1")
-    # Since #123 (and #32, L1) every role's start reads `waiting` until its first prompt, so
-    # the state no longer tells the captain's path from the ordinary one; the briefing
-    # asserts above do.
-    assert session is not None and session.state == "waiting"
+        plain = store.get_session("plain-coder-1")
+    # Not forced to anything: the state any role's start gives (#113: a Claude Code start
+    # sits at its prompt, `waiting`, for every role alike; #32, L1). What tells them apart
+    # is the briefing above.
+    assert session is not None and plain is not None
+    assert session.state == plain.state == "waiting", "not the captain's own state"
 
 
 @pytest.mark.needs_captain

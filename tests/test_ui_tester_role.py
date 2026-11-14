@@ -36,6 +36,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.sidebar import ROLE_ICON
 from aisquare.core import agents as agent_core
 from aisquare.core import harness
+from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -195,8 +196,14 @@ def test_the_other_roles_know_the_ui_tester_exists() -> None:
 # ── --chrome is the role's, applied exactly once, opt-out wins ───────────────
 
 
+def _defaults(binary: str, args: list[str], role: str = ROLE) -> harness.RoleDefaults:
+    """What ``launch``, ``team spawn`` and a fleet window ask: the selected agent's
+    ``role_defaults`` for the binary the role resolved to (Claude Code's, the default)."""
+    return get_adapter("claude-code").role_defaults(role, binary=binary, args=args)
+
+
 def _args(binary: str, args: list[str], role: str = ROLE) -> list[str]:
-    return harness.role_defaults(role, binary=binary, args=args).args
+    return _defaults(binary, args, role).args
 
 
 def test_default_args_apply_to_the_default_binary_only() -> None:
@@ -223,8 +230,8 @@ def test_default_args_accept_a_wrapper_named_claude() -> None:
     operators use to add an account or a flag to Claude Code, and from here it
     is indistinguishable from the real thing."""
     assert _args("/opt/wrap/claude", []) == ["--chrome"]
-    assert harness.is_default_agent("~/bin/claude") is True
-    assert harness.is_default_agent("claude2") is False
+    assert adapter_for_binary("~/bin/claude") is get_adapter("claude-code")
+    assert adapter_for_binary("claude2") is None
 
 
 def test_default_args_never_duplicate_and_never_override_an_opt_out() -> None:
@@ -253,23 +260,26 @@ def test_a_withheld_flag_is_never_silent() -> None:
     """The sibling gate (`explainability.accepts_session_id`) returns a note that
     `launch` prints; this one printed nothing, so the operator saw a clean launch
     and a ui-tester that reopened every UI task as not browser-verified."""
-    withheld = harness.role_defaults(ROLE, binary="claude-next", args=[])
+    withheld = _defaults("claude-next", [])
     assert withheld.args == []
     assert withheld.notes and "--chrome withheld" in withheld.notes[0]
     assert "'claude-next' is not claude" in withheld.notes[0]
-    quiet = harness.role_defaults(ROLE, binary="claude", args=["--no-chrome"])
+    quiet = _defaults("claude", ["--no-chrome"])
     assert quiet.notes == [], "the operator's own opt-out is already on their screen"
 
 
 def test_one_predicate_answers_the_binary_question_for_both_gates() -> None:
     """`role_defaults` and `--session-id` pinning ran 55 lines apart in the same
-    launch, each with its own `"claude"` literal and each missing the shims."""
+    launch, each with its own `"claude"` literal and each missing the shims. Both ask
+    the adapter the binary's name runs (`adapter_for_binary`), never the name."""
+    claude = get_adapter("claude-code")
     for binary in ("claude", "/usr/local/bin/claude", "claude.cmd", "/opt/wrap/claude"):
         assert explainability_service.accepts_session_id(binary) is True, binary
-        assert harness.is_default_agent(binary) is True, binary
+        assert adapter_for_binary(binary) is claude, binary
     for binary in ("claude2", "claude-next", "aider"):
         assert explainability_service.accepts_session_id(binary) is False, binary
-        assert harness.is_default_agent(binary) is False, binary
+        assert adapter_for_binary(binary) is None, binary
+    assert explainability_service.accepts_session_id("codex") is False, "it names its own"
 
 
 def test_roles_without_defaults_get_nothing() -> None:
@@ -316,10 +326,12 @@ def test_launch_keeps_the_operators_word_on_chrome(
     assert spy["argv"] == ["claude", *policy_args(ROLE), "--chrome", "--resume"], "never twice"
 
 
-def test_launch_adds_nothing_to_another_agent_binary_and_says_so(
+def test_launch_withholds_browser_flags_from_a_declared_wrapper_and_says_so(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
-    result = runner.invoke(app, ["launch", ROLE, "--command", "claude-next"])
+    result = runner.invoke(
+        app, ["launch", ROLE, "--agent", "claude-code", "--command", "claude-next"]
+    )
     assert result.exit_code == 0, result.output
     assert spy["argv"] == ["claude-next"], "Claude Code's flag is not another agent's"
     assert "--chrome withheld" in result.output, (
@@ -339,9 +351,11 @@ def test_spawn_prints_the_role_flag_in_the_pasteable_command(
     assert "--chrome" in result.output
     assert "--model sonnet" in result.output
 
-    bound = runner.invoke(app, ["team", "spawn", ROLE, "--bin", "claude-next"])
+    bound = runner.invoke(
+        app, ["--json", "team", "spawn", ROLE, "--agent", "claude-code", "--bin", "claude-next"]
+    )
     assert bound.exit_code == 0, bound.output
-    pasted = next(line for line in bound.output.splitlines() if "AISQUARE_ROLE" in line)
+    pasted = json.loads(bound.stdout)["command"]
     assert "--chrome" not in pasted, "Claude Code's flag is not another agent's"
     assert "--chrome withheld" in bound.output, "and the paste says what it is missing"
 
@@ -780,7 +794,7 @@ def test_doctor_honours_a_declined_project_server(
     )
 
 
-def test_doctor_scans_the_hook_sites_exactly_once(
+def test_doctor_scans_the_hook_sites_once_per_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`hook_sites` GRADES every site — `classify_hook_binary` runs a real
@@ -798,7 +812,8 @@ def test_doctor_scans_the_hook_sites_exactly_once(
 
     monkeypatch.setattr(agent_core, "hook_sites", counting)
     diagnostics.doctor(cwd=tmp_path, live=False)
-    assert calls == ["claude-code"], f"{len(calls)} hook_sites scans in one doctor run"
+    assert calls.count("claude-code") == 1
+    assert len(calls) == len(set(calls)), f"duplicate hook_sites scans in one doctor run: {calls}"
 
 
 def test_doctor_asks_only_about_this_homes_directories(

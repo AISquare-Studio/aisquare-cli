@@ -39,10 +39,11 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.sidebar import CUSTOM_ROLE_ICON, ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
-from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, shown_pane
+from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, key_spellings, shown_pane
 from aisquare.cli.ui.views.fleet_bulk import BulkAsked
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -51,9 +52,20 @@ from aisquare.services import project as project_service
 SPAWN_WORKER = "spawn-manager"
 """Name of the worker that starts the manager; how its result is told apart."""
 
-MANAGER_HINT = "type to the manager as you would to any Claude session · F12 returns to the sidebar"
-"""The dim line under the manager's info line: how to use the tab. The tmux attach command is
-not here: it is the project's, and the Settings tab shows it."""
+MANAGER_HINT = (
+    "type to the manager as you would to any {agent} session · F12 returns to the sidebar"
+)
+"""The dim line under the manager's info line: how to use the tab, ``{agent}`` the manager's own
+agent as prose calls it (:func:`manager_hint`). The tmux attach command is not here: it is the
+project's, and the Settings tab shows it."""
+
+
+def manager_hint(agent: str | None) -> str:
+    """:data:`MANAGER_HINT` for a manager running ``agent``, named as prose names it
+    (``core.claude_accounts.agent_noun``): ``Claude``, so a Claude Code manager's line reads as
+    it always did, or ``Codex`` (live F1 of R16-D, seq 11884: a Codex manager was told to type
+    "as you would to any Claude session")."""
+    return MANAGER_HINT.format(agent=accounts_core.agent_noun(agent))
 
 
 def no_manager_text(
@@ -202,6 +214,7 @@ class ManagerTab(Vertical):
         *,
         escape_key: str,
         usage: Mapping[int, float] | None = None,
+        named: bool = False,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
@@ -212,13 +225,16 @@ class ManagerTab(Vertical):
         """The manager's account named as the Agent view names it, read off the UI thread."""
         self.usage: Mapping[int, float] = usage or {}
         """Slot → session percent USED, as the shell's slow headroom read last handed it."""
+        self.named = named
+        """Whether the header names the agent (``views.agent.info_line``'s ``named``), as the
+        shell's accounts read last handed it."""
 
     def compose(self) -> ComposeResult:
         yield InfoLine(id="manager-header")
         strip = TeamStrip(id="team-strip")
         strip.display = False
         yield strip
-        hint = Static(Text(MANAGER_HINT, style="dim"), id="manager-hint")
+        hint = Static(Text(manager_hint(None), style="dim"), id="manager-hint")
         hint.display = False
         yield hint
         yield Button("Start manager", id="start-manager", variant="primary")
@@ -238,6 +254,12 @@ class ManagerTab(Vertical):
             self.usage = usage
             self._paint_manager()
 
+    def show_named(self, named: bool) -> None:
+        """Whether the header names the agent, from the shell's accounts read."""
+        if named != self.named:
+            self.named = named
+            self._paint_manager()
+
     @on(Worker.StateChanged)
     def _labels_answered(self, event: Worker.StateChanged) -> None:
         if self.labels.answered(event):
@@ -247,7 +269,7 @@ class ManagerTab(Vertical):
         """Repaint the header for the manager on show — the no-manager text is left as it is."""
         if self.status is not None and self.is_mounted:
             header = self.query_one("#manager-header", InfoLine)
-            header.show_line(self.status, self.labels.labels, self.usage)
+            header.show_line(self.status, self.labels.labels, self.usage, named=self.named)
 
     def show_team(self, agents: Sequence[FleetAgentStatus]) -> None:
         """The team strip for the shell's frame: hidden while nobody but the manager runs."""
@@ -275,8 +297,11 @@ class ManagerTab(Vertical):
             return
         try:
             status = fleet_service.status_of(manager)
-        except fleet_service.FleetError:
-            status = FleetAgentStatus(agent=manager, socket_at=fleet_service.socket_at(manager))
+        except fleet_service.FleetError as exc:
+            # No pane from the row itself: the store's word for where it is, which a
+            # sandboxed agent writes (`fleet.resolve_place`), is never shown or typed into.
+            self.show(None, unavailable=str(exc))
+            return
         self.show(status)
 
     def show(
@@ -302,7 +327,10 @@ class ManagerTab(Vertical):
         button = self.query_one("#start-manager", Button)
         pane = self.query_one("#manager-pane", TerminalPane)
         header.set_class(status is not None, "-info")
-        self.query_one("#manager-hint", Static).display = status is not None
+        hint = self.query_one("#manager-hint", Static)
+        hint.display = status is not None
+        if status is not None:
+            hint.update(Text(manager_hint(status.agent.agent), style="dim"))
         resume = self.query_one("#resume-manager", Button)
         paused = status is None and exited is not None and exited.state == "paused"
         resume.display = paused
@@ -313,10 +341,11 @@ class ManagerTab(Vertical):
             if pane.pane_id is not None:
                 pane.attach(None)
             return
-        header.show_line(status, self.labels.labels, self.usage)
+        header.show_line(status, self.labels.labels, self.usage, named=self.named)
         self.labels.ask(self)
         button.display = False
         pane.display = True
+        pane.key_spellings = key_spellings(status)
         pane.label = status.agent.label
         if (wanted := shown_pane(status)) != pane.pane_id:
             if wanted is not None:
@@ -401,8 +430,9 @@ class ManagerTab(Vertical):
 class ProjectView(TabbedContent):
     """One project: its manager's pane first, then the board, settings and personas.
 
-    ``usage`` is the shell's last per-slot session use (``HeadroomSummary.session_by_slot``),
-    so a view opened between two headroom reads shows the figure at once.
+    ``usage`` is the shell's last per-slot session use (``HeadroomSummary.limit_by_slot``),
+    so a view opened between two headroom reads shows the figure at once; ``named`` is the
+    shell's :attr:`FleetApp.agents_named`, handed on the same way.
     """
 
     TAB_IDS: ClassVar[tuple[str, ...]] = (
@@ -419,6 +449,7 @@ class ProjectView(TabbedContent):
         id: str | None = None,
         refresh_seconds: float = 2.0,
         usage: Mapping[int, float] | None = None,
+        named: bool = False,
     ) -> None:
         super().__init__(id=id)
         self.project = project
@@ -430,7 +461,9 @@ class ProjectView(TabbedContent):
         panes = (
             TabPane(
                 "Manager",
-                ManagerTab(project, escape_key=escape_key, usage=usage, id="manager-tab"),
+                ManagerTab(
+                    project, escape_key=escape_key, usage=usage, named=named, id="manager-tab"
+                ),
                 id="tab-manager",
             ),
             TabPane(
@@ -485,6 +518,11 @@ class ProjectView(TabbedContent):
         """The accounts' session use from the shell's slow headroom read, for the Manager tab."""
         for tab in self.query(ManagerTab):
             tab.show_usage(usage)
+
+    def show_named(self, named: bool) -> None:
+        """Whether the Manager tab's header names the agent, from the shell's accounts read."""
+        for tab in self.query(ManagerTab):
+            tab.show_named(named)
 
     def on_mount(self) -> None:
         if self._pending is not None:

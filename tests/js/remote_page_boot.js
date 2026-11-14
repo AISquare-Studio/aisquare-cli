@@ -469,7 +469,7 @@ function textsOf(nodes) {
 const FLEET = {
   project: { id: PROJECT, root: "/tmp/x" },
   name: "x",
-  agents: [{ agent: { id: "agt_1", label: "coder-1", role: "coder" }, state: "waiting", detail: null }],
+  agents: [{ agent: { id: "agt_1", label: "coder-1", role: "coder" }, state: "waiting", detail: null, exit_command: "/exit" }],
 };
 const ITEM = {
   id: NEEDS_ID,
@@ -1094,6 +1094,50 @@ async function stopAtAPrompt() {
   return { said, lead, dismissed: page.sent("api/agent/stop").map((body) => body.dismiss_dialog === true), toast: page.toast() };
 }
 
+/* #60: what Stop says it types is the machine's word for the agent (`exit_command` on its
+ * fleet row or its card), never the page's: an agent whose command is its own, with Force
+ * ticked too; a row that carries none, the neutral line; and a lost card of a project whose
+ * fleet the page has not read. */
+async function stopSaysTheMachinesExit() {
+  const sheetOf = async (page, open) => {
+    open();
+    await settle();
+    const sheet = page.run("UI.sheet");
+    const lead = () => find(sheet, (node) => node.className === "lead").textContent;
+    const box = find(sheet, (node) => node.tagName === "INPUT" && node.type === "checkbox");
+    const said = { lead: lead(), force: box.parentNode.textContent };
+    box.checked = true;
+    box.dispatch("change");
+    said.forced = lead();
+    return said;
+  };
+  const fleetWith = (row) => Object.assign({}, FLEET, { agents: [Object.assign({}, FLEET.agents[0], row)] });
+  const viewWith = async (row) => {
+    const page = await agentView({});
+    page.live().frame("fleet", fleetWith(row));
+    await settle();
+    return sheetOf(page, () => {
+      click(buttonNamed(page.main(), "Actions…"));
+      click(buttonNamed(page.run("UI.sheet"), "Stop…"));
+    });
+  };
+  const lost = Object.assign({}, ITEM, {
+    id: "ny_0123456789abcd99", kind: "lost", project: { id: "prj_elsewhere", name: "elsewhere" },
+    agent: "coder-9", agent_id: "agt_9", reason: "coder-9's window is gone", detail: {},
+    answers: [], actions: ["restart", "stop", "dismiss"], exit_command: "/quit",
+  });
+  const feed = bootPage("#/", signedIn({ "GET api/needs": () => ({ status: 200, json: { items: [lost] } }) }));
+  await settle();
+  feed.acceptSockets();
+  feed.live().frame("remote", { allow_write: true, auto_off_at: null, version: "test" });
+  await settle();
+  return {
+    own: await viewWith({ exit_command: "/quit" }),
+    none: await viewWith({ exit_command: undefined }),
+    card: await sheetOf(feed, () => click(buttonNamed(feed.main(), "Stop…"))),
+  };
+}
+
 /* A pad key refused read_only: writes went off on the machine, and no remote frame has
  * said so yet. */
 async function refusedReadOnly() {
@@ -1554,7 +1598,7 @@ async function lateAnswers() {
   paneCame(page, "coder-2");
   await settle();
   click(buttonNamed(page.main(), "^C"));
-  keys[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
+  keys[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits the coding agent — send confirm_exit: true" } });
   await settle();
   const doublePress = {
     sheet: sheetTitle(page), toast: page.toast(), exits: page.sent("api/send-keys").filter((body) => body.confirm_exit).length,
@@ -1721,7 +1765,7 @@ async function lateAnswers() {
       await settle();
     }
     await moveOn(one);
-    sent[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code — send confirm_exit: true" } });
+    sent[1].settle({ status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits the coding agent — send confirm_exit: true" } });
     await settle();
     return { sheet: sheetTitle(one), toast: one.toast() };
   };
@@ -2011,7 +2055,7 @@ async function keysInOrder() {
 }
 
 /* The pad's guards, which only the page keeps: ^C and ^D each ask first; a second Esc within
- * 1.5 s asks first (two open Claude Code's Rewind), at once or 1.4 s after the last, again
+ * 1.5 s asks first (two open the agent's rewind), at once or 1.4 s after the last, again
  * once its sheet was closed, and one 2 s (or 1.6 s) after the last does not; a second ^C the
  * machine refuses double_press goes again, with confirm_exit, only once the human says so.
  * After each step: the sheet on screen and how many keys were sent. */
@@ -2019,7 +2063,7 @@ async function padConfirms() {
   let ctrlC = 0;
   const page = await agentView({
     "POST api/send-keys": (body) => (body.keys[0] === "C-c" && body.confirm_exit !== true && ++ctrlC > 1
-      ? { status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits Claude Code" } }
+      ? { status: 409, json: { error: "double_press", message: "a second Ctrl-C within 3 s exits the coding agent" } }
       : { status: 200, json: { sent: true } }),
   });
   const steps = [];
@@ -2049,6 +2093,34 @@ async function padConfirms() {
   await act("sheet", "Close");
   page.run("Date.now = ((then) => () => then + 200)(Date.now());");
   await act("pad", "Esc");
+  return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
+}
+
+/* One ^D to an agent the machine reads at its empty prompt, where its coding agent exits on
+ * one (Codex): refused one_press_exit, naming the agent, it goes again with confirm_exit
+ * once the human says so on a sheet in those words. Each step: the sheet's title and
+ * sentence, and how many keys were sent. */
+async function padOnePressExit() {
+  const reason = "coder-1 is at Codex's empty prompt, where one Ctrl-D can exit it";
+  const refused = { error: "one_press_exit", message: reason + " — send confirm_exit: true to mean it", reason };
+  const page = await agentView({
+    "POST api/send-keys": (body) => (body.confirm_exit === true ? { status: 200, json: { sent: true } } : { status: 409, json: refused }),
+  });
+  const steps = [];
+  const sent = () => page.sent("api/send-keys");
+  const lead = () => {
+    if (!page.run("UI.sheet.classList.contains('open')")) return null;
+    const p = find(page.run("UI.sheet"), (node) => node.tagName === "P" && node.className === "lead");
+    return p ? p.textContent : null;
+  };
+  const act = async (where, name) => {
+    click(buttonNamed(where === "sheet" ? page.run("UI.sheet") : page.main(), name));
+    await settle();
+    steps.push([name, sheetTitle(page), lead(), sent().length]);
+  };
+  await act("pad", "^D");
+  await act("sheet", "Send Ctrl-D");
+  await act("sheet", "Send and exit");
   return { steps, keys: sent().map((body) => (body.confirm_exit === true ? body.keys.concat("confirm_exit") : body.keys)) };
 }
 
@@ -3871,6 +3943,7 @@ async function main() {
     tellNotSent: await tellNotSent(),
     paneCursor: await paneCursor(),
     stopAtAPrompt: await stopAtAPrompt(),
+    stopSaysTheMachinesExit: await stopSaysTheMachinesExit(),
     notTyped: await notTyped(),
     ledgerUndone: await ledgerUndone(),
     refusedReadOnly: await refusedReadOnly(),
@@ -3893,6 +3966,7 @@ async function main() {
     sheetOnFleetUnread: await sheetOnFleetUnread(),
     keysInOrder: await keysInOrder(),
     padConfirms: await padConfirms(),
+    padOnePressExit: await padOnePressExit(),
     staleAcrossAWake: await staleAcrossAWake(),
     heldBetweenSockets: await heldBetweenSockets(),
     silentSocket: await silentSocket(),

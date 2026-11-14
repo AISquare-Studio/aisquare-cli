@@ -679,6 +679,27 @@ def test_a_reading_without_its_week_never_shadows_the_endpoints_spent_week(
     assert service.ingest_statusline([account], now=NOW) == 0
 
 
+def test_a_reading_without_its_five_hours_never_reads_as_a_plan_without_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The twin of the week's, since a plan can have a week alone (R16-A): a 5x slot's record
+    with no five_hour, ingested, would be a sample of its week alone, which the cache serves
+    as a plan with no five-hour limit ("no 5h limit"), its five hours never read. Both
+    windows, or the endpoint is asked, and the slot reads its five hours (#125 reopen, MF)."""
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    account = _slot("a@example.com", "tok-a")
+    _record("s-a", config_dir=str(account.config_dir), five_hour=None)
+    fetch = _Usage({"tok-a": _payload(90.0, week=20.0)})
+
+    readings = service.cached_usage([account], now=NOW, fetch=fetch)
+
+    assert fetch.calls == ["tok-a"], "the endpoint was asked"
+    reading = readings[account.slot]
+    assert reading.session_percent == 90.0 and reading.limiting is not None
+    assert not reading.weekly_only and reading.limiting.name == "session"
+    assert service.ingest_statusline([account], now=NOW) == 0
+
+
 def test_an_old_or_already_recorded_reading_is_not_ingested_twice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

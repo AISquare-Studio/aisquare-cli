@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from aisquare.core import usage
+from aisquare.core.agent_adapters import claude_usage as usage
 from tests.budgets import budget
 
 MODEL = "claude-sonnet-5-5"
@@ -387,7 +387,9 @@ def test_scanning_a_five_megabyte_transcript_fits_the_stop_hooks_budget(tmp_path
 
     Each figure is the best of three runs: a box loaded by a parallel gate slowed one cold
     scan past the bound once (final delta review, n8), while a real slowdown slows all
-    three, so the bound keeps its teeth."""
+    three, so the bound keeps its teeth. By the WALL clock: the bound is the Stop hook's
+    budget, which a user waits through, and a sleep, a lock or a child process in the scan
+    costs no CPU time here (R9i reopen 1)."""
     transcript = tmp_path / "big.jsonl"
     filler = "x" * 4_000
     with transcript.open("w", encoding="utf-8") as handle:

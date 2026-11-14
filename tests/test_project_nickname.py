@@ -112,13 +112,16 @@ def test_bytes_the_terminal_could_not_decode_are_refused_in_words(
 ) -> None:
     """Python hands undecodable argv bytes over as lone surrogates, and the store's UTF-8
     encode raised ``'utf-8' codec can't encode character '\\udce9'``, which ``rename``
-    printed as its reason."""
+    printed as its reason. The CLI now refuses such an argument for every command before it
+    runs (``cli.global_flags``, r39 reopen of #113): a usage error, in words; the service
+    refuses it too, for its other callers."""
     project = _added(work_dir)
     with pytest.raises(ValueError, match="could not decode"):
         project_service.set_nickname(project, "caf\udce9")
     result = runner.invoke(app, ["project", "rename", "caf\udce9"])
-    assert result.exit_code == 1
-    assert "could not decode" in result.output and "codec" not in result.output
+    assert result.exit_code == 2
+    said = " ".join(result.output.replace("│", " ").split())  # the error box, unwrapped
+    assert "holds a byte that is not UTF-8" in said and "codec" not in said, said
     assert _stored(project).nickname is None
 
 

@@ -11,6 +11,7 @@ test: :func:`install` points ``procs.inspect`` and ``mcp_host.parent_pid`` at it
 from __future__ import annotations
 
 import contextlib
+import os
 from collections.abc import Iterator
 
 import pytest
@@ -27,9 +28,13 @@ class Tree:
         self._next = 4000
 
     def spawn(self, image: str, parent: int = 1, *, started: str | None = None) -> int:
-        """A new process running ``image`` under ``parent``; its pid."""
+        """A new process running ``image`` under ``parent``; its pid. Never the test's own pid:
+        a test adds that one itself, and asserts it is not looked up, and a Windows runner's own
+        pid was 4000, the first fake one (#107, CI 42272784634)."""
         pid = self._next
-        self._next += 1
+        if pid == os.getpid():
+            pid += 1
+        self._next = pid + 1
         self.table[pid] = procs.ProcInfo(parent, started or f"t{pid}", image)
         return pid
 

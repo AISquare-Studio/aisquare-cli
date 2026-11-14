@@ -605,3 +605,45 @@ def test_the_help_says_whether_x_asks_first() -> None:
 
     assert x_line(True).endswith("(asks first)")
     assert "at once" in x_line(False) and "asks first" not in x_line(False)
+
+
+# --- the line says the exit command the stop types (SCOPE #113 092, row 2) -----------------
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "codex", "an-agent-this-install-does-not-know"])
+def test_the_question_names_the_exit_command_of_the_rows_own_agent(agent: str) -> None:
+    """``fleet stop`` types the row's ``fleet_service.exit_command_for``: its agent's
+    ``AgentAdapter.exit_command`` (a synthetic agent's own: ``tests/
+    test_third_agent_seams.py``), and the default agent's for one this install does not know
+    — and the question says that command, Force skipping it. The unknown one was "Its exit
+    command" while the stop typed the default's (#60, tester of #58)."""
+    row = status("prj_a", "coder-auth", "coder", "waiting")
+    row = row.model_copy(update={"agent": row.agent.model_copy(update={"agent": agent})})
+    typed = fleet_service.exit_command_for(row.agent)
+
+    question = StopAgentScreen(ProjectInfo(id="prj_a", root=Path("/w")), row).question().plain
+
+    assert f"{typed}, then the window is killed after" in question, question
+    assert f"Force skips the {typed}." in question, question
+    assert "Its exit command" not in question and "the exit command." not in question, question
+
+
+def test_the_question_asks_the_service_what_the_stop_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the dialog says the stop types is asked of the service, never copied: the very
+    resolver ``fleet stop`` types (``exit_command_for``), so the two cannot drift (#60)."""
+    asked: list[str] = []
+
+    def told(agent: FleetAgent) -> str:
+        asked.append(agent.id)
+        return "/leave-now"
+
+    monkeypatch.setattr(fleet_service, "exit_command_for", told)
+    row = status("prj_a", "coder-auth", "coder", "waiting")
+
+    question = StopAgentScreen(ProjectInfo(id="prj_a", root=Path("/w")), row).question().plain
+
+    assert "/leave-now, then the window is killed after" in question, question
+    assert "Force skips the /leave-now." in question, question
+    assert asked and set(asked) == {row.agent.id}, "asked of THIS row"

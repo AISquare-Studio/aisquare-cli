@@ -862,15 +862,21 @@ def test_a_held_lock_is_a_refusal_the_owner_can_retry_and_a_write_failure_is_an_
 
 
 def test_the_whole_refresh_over_the_fixture_runs_under_a_second(fx: Fixture) -> None:
+    """The refresh's own work under a second of this process's CPU time: the wall clock
+    also measured the runner's load (2.75 s on a loaded py3.12 shard, CI 41888119902
+    attempt 1; main's test). And under five seconds of the wall clock, so a refresh that
+    blocks on something, which a user waits through and no CPU time shows (a sleep, a
+    child, its lock poll), still fails it (R7's verify, F2)."""
     _seed_three_projects(fx)
     for project in (fx.alpha, fx.beta, fx.gamma):
         for seq in range(100, 160):
             fx.ask(project, f"question number {seq % 7} about the fold", seq=seq)
     queue = fx.queue()
-    started = time.perf_counter()
+    started, began = time.process_time(), time.perf_counter()
     queue.refresh()
-    elapsed = time.perf_counter() - started
-    assert elapsed < 1.0, f"refresh took {elapsed:.2f}s"
+    elapsed, waited = time.process_time() - started, time.perf_counter() - began
+    assert elapsed < 1.0, f"refresh took {elapsed:.2f}s of CPU"
+    assert waited < 5.0, f"refresh took {waited:.2f}s"
     assert len(queue.items()) < 60  # the 180 repeats folded into a few rows
 
 
@@ -1123,11 +1129,12 @@ def test_an_older_observation_folded_later_does_not_undo_a_newer_fold(fx: Fixtur
 
 
 def test_normalise_is_bounded_on_untrusted_text() -> None:
-    """Should-fix 8a: no quadratic pattern under the lock."""
+    """Should-fix 8a: no quadratic pattern under the lock. This thread's CPU time: the wall
+    clock also counts pytest's other workers on a shared runner."""
     hostile = "seq" + " " * 200_000 + "1 " + "x" * 200_000
-    started = time.perf_counter()
+    started = time.thread_time()
     out = normalise(hostile)
-    assert time.perf_counter() - started < 0.5
+    assert time.thread_time() - started < 0.5
     assert len(out) <= 2000
 
 

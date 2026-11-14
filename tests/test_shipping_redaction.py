@@ -22,7 +22,13 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import insights, outbox
 from aisquare.core.config import AppConfig, save_config
-from aisquare.core.redaction import _CREDENTIAL_RULES, _IDENTITY_RULES, redact
+from aisquare.core.redaction import (
+    _CREDENTIAL_RULES,
+    _IDENTITY_RULES,
+    MARKER,
+    PEM_BLOCK,
+    redact,
+)
 from aisquare.models import RedactionLevel
 from aisquare.services import hooks as hooks_service
 
@@ -52,7 +58,11 @@ SECRETS = {
     "anthropic/openai key": _shaped("sk-", "ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII"),
     "github pat": _shaped("ghp", "_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
     "gitlab pat": _shaped("glpat", "-AbCdEfGhIjKlMnOpQrSt"),
+    "github fine-grained pat": _shaped(
+        "github", "_pat_11ABCDEFG0AbCdEfGhIjKl_mNoPqRsTuVwXyZ0123456789"
+    ),
     "slack bot token": _shaped("xox", "b-1234567890-ABCDEFGHIJKLMNOP"),
+    "slack app token": _shaped("xapp", "-1-A0123456789-1234567890-abcdef0123456789"),
     "aws access key id": _shaped("AKIA", "IOSFODNN7EXAMPLE"),
     "aisquare session token": _shaped("aisq_", "3kF9xQ2mVb8ZrT1cLw6nYp4sHd0eJu7gAi5oKf9qRc2"),
     "google api key": _shaped("AIza", "SyA1234567890abcdefghijklmnopqrstuvw"),
@@ -64,6 +74,7 @@ SECRETS = {
     ),
     "bearer header": _shaped("Authorization: Bearer ", "abcdef1234567890abcdef1234567890"),
     "assigned secret": _shaped('EXPLAINABILITY_API_KEY="wk_', 'live_9f8e7d6c5b4a3210"'),
+    "json quoted secret": _shaped('{"password": "', 'hunter2hunter2hunter2"}'),
     "url with credentials": _shaped("https://deploy:", "hunter2@internal.example.com/repo.git"),
     "pem private key": _shaped(
         "-----BEGIN RSA PRIVATE KEY",
@@ -85,7 +96,9 @@ IDENTITIES = {
 #: Every rule collection in ``redaction`` and the samples that must exercise it.
 #: A third collection is registered here once and inherits both ratchets below.
 _COVERED = {
-    "credential": (_CREDENTIAL_RULES, SECRETS),
+    # The private-key block is not a ``sub`` rule (it is a linear pass), but its shape is a
+    # rule all the same: a sample must match it, and it must have one.
+    "credential": ((*_CREDENTIAL_RULES, (PEM_BLOCK, MARKER)), SECRETS),
     "identity": (_IDENTITY_RULES, IDENTITIES),
 }
 
@@ -305,15 +318,19 @@ def test_redaction_cannot_blow_up_on_the_primary_path() -> None:
     """A canary for catastrophic backtracking, not a benchmark.
 
     The bound is deliberately loose — it fails on a pathological regex, not on a
-    slow machine. Anything that trips this would have been a hang on a hook.
+    slow machine. Anything that trips this would have been a hang on a hook. This thread's
+    CPU time, the least of three runs: pytest's other workers stall a run on a shared runner
+    by the wall clock, and a stall lands on one run where a backtracking rule is in all three.
     """
     payload = ("sk-" + "a" * 40 + " normal words here " + "x" * 200 + "\n") * 40
 
-    started = time.perf_counter()
-    redact(payload[:8000], RedactionLevel.strict)
-    elapsed = time.perf_counter() - started
+    elapsed = float("inf")
+    for _ in range(3):
+        started = time.thread_time()
+        redact(payload[:8000], RedactionLevel.strict)
+        elapsed = min(elapsed, time.thread_time() - started)
 
-    assert elapsed < 0.1, f"redaction took {elapsed:.3f}s on 8k of text"
+    assert elapsed < 0.1, f"redaction took {elapsed:.3f}s of CPU on 8k of text"
 
 
 def test_consent_line_states_that_shipping_is_scrubbed() -> None:

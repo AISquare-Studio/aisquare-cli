@@ -37,7 +37,7 @@ from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.spawn import IDENTITY_ENV_VARS
 from aisquare.core.tmux import Completed, TmuxServer
-from aisquare.models import ClaudeAccount
+from aisquare.models import ClaudeAccount, ClaudeUsage
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import team as team_service
@@ -541,10 +541,19 @@ def test_usage_parses_the_live_payload_and_sends_the_token_only_to_the_usage_end
     assert usage.week_resets_at == datetime(2026, 9, 9, 21, 59, 59, 618443, tzinfo=UTC)
     assert usage.fetched_at == NOW
     [(url, headers, timeout)] = fetch.calls
-    assert url == service.USAGE_URL and url.startswith("https://api.anthropic.com/")
+    assert url == core.USAGE_URL and url.startswith("https://api.anthropic.com/")
     assert headers["Authorization"] == "Bearer sk-ant-oat01-secret"
-    assert headers["anthropic-beta"] == service.OAUTH_BETA
-    assert timeout == service.USAGE_TIMEOUT_SECONDS
+    assert headers["anthropic-beta"] == core.OAUTH_BETA
+    assert timeout == core.USAGE_TIMEOUT_SECONDS
+
+
+def test_the_usage_endpoint_constants_have_one_home() -> None:
+    """``USAGE_URL``, ``OAUTH_BETA`` and ``USAGE_TIMEOUT_SECONDS`` were copied into the service
+    when the usage code moved to ``core``, where nothing read the copies: a test that patched
+    only the service's would have reached the real endpoint (review r23 of #113, nit)."""
+    for name in ("USAGE_URL", "OAUTH_BETA", "USAGE_TIMEOUT_SECONDS"):
+        assert hasattr(core, name)
+        assert not hasattr(service, name), f"service.{name} is a second copy of core.{name}"
 
 
 def test_usage_reads_the_two_windows_out_of_the_w0_shape_and_ignores_the_rest(
@@ -1018,6 +1027,67 @@ def test_accounts_usage_renders_the_windows_and_the_reasons(
     missing = runner.invoke(app, ["--json", "accounts", "usage", "9"])
     assert missing.exit_code == 1
     assert json.loads(missing.stdout)["error"] == "unknown_account"
+
+
+#: ``accounts usage --summary --json``'s ``summary`` keys: 0.9.2's (6a77e650's HeadroomSummary)
+#: and 0.10.0's ``limit_by_slot``. 0.10.0 had renamed ``session_by_slot`` to it, and a script
+#: reading 0.9.2's key broke (the --json audit of C1, seq 11721; restored per seq 11722).
+SUMMARY_KEYS = [
+    "fetched_at",
+    "left_by_slot",
+    "level",
+    "limit_by_slot",
+    "needs_login",
+    "percent_left",
+    "session_by_slot",
+    "usable",
+    "week_left_by_slot",
+    "week_percent_left",
+    "week_resets_soonest",
+    "weeks_left",
+]
+
+
+def test_the_usage_summary_keeps_0_9_2s_keys_and_their_meaning(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``session_by_slot`` is each account's five-hour window used, as 0.9.2 filled it, and
+    ``limit_by_slot`` the window that limits: here the week's 7 % over the five hours' 3 %."""
+    second = core.create_account()
+    _sign_in(second, "two@example.com")
+    monkeypatch.setattr(service, "_http_get", _Fetch())
+    result = runner.invoke(app, ["--json", "accounts", "usage", "--summary"])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.stdout)["summary"]
+    assert sorted(summary) == SUMMARY_KEYS
+    assert summary["session_by_slot"] == {"2": 3.0}
+    assert summary["limit_by_slot"] == {"2": 7.0}
+    assert summary["left_by_slot"] == {"2": 93.0}  # 0.9.2's: 100 - max(five hours, week)
+
+
+def test_session_by_slot_is_0_9_2s_five_hour_window_and_nothing_else() -> None:
+    """On the same readings as 0.9.2 read them: a slot whose reading has no five-hour window
+    has no entry (0.9.2 left it out), whatever another window says, and a disabled slot, an
+    unread one and a kept reading past its age have none either."""
+    now = datetime(2026, 11, 12, 12, 0, tzinfo=UTC)
+    accounts = [
+        ClaudeAccount(slot=slot, config_dir=Path(f"/accounts/{slot}"), disabled=slot == 5)
+        for slot in (2, 3, 4, 5, 6)
+    ]
+    readings = {
+        2: ClaudeUsage(available=True, session_percent=12.0, week_percent=95.0, fetched_at=now),
+        3: ClaudeUsage(available=True, week_percent=40.0, fetched_at=now),  # no five hours
+        5: ClaudeUsage(available=True, session_percent=50.0, fetched_at=now),  # disabled
+        6: ClaudeUsage(
+            available=True,
+            session_percent=60.0,
+            fetched_at=now - timedelta(days=2),
+            last_failed_reason="could not reach the usage endpoint",
+        ),  # kept, and too old to count
+    }
+    summary = service.fleet_headroom(accounts, readings, now=now)
+    assert summary.session_by_slot == {2: 12.0}
+    assert summary.limit_by_slot[2] == 95.0  # the window that limits, apart from it
 
 
 def test_accounts_usage_says_why_a_signed_out_slot_reads_nothing_and_the_fix(

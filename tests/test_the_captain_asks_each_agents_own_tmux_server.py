@@ -25,12 +25,10 @@ import pytest
 
 pytest.importorskip("mcp", reason="the [serve] extra is not installed")
 
-from aisquare.core.ids import new_agent_id
-from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
 from aisquare.services.captain import actions
 from tests import test_fleet_service as fleet_suite
-from tests.test_fleet_service import FakeTmux, _coder
+from tests.test_fleet_service import FakeTmux, _coder, _spawned_on
 
 # The fleet suite's fixtures, bound here so pytest finds them for this module's tests.
 tmux = fleet_suite.tmux
@@ -54,14 +52,9 @@ def test_the_captain_reads_a_pane_on_the_server_its_row_recorded(
     elsewhere.set_command(window.pane_id, "claude")
     elsewhere.screens[window.pane_id] = ["the row's own agent, on its own server"]
     tmux.screens[here.pane_id] = ["another agent's screen, under the same pane id"]
-    moved = {
-        "id": new_agent_id(),
-        "socket_path": APART,
-        "pane_id": window.pane_id,
-        "label": "coder-9",
-    }
-    with store_session() as store:
-        store.upsert_fleet_agent(_coder(project).model_copy(update=moved))
+    # Spawned there: its row and its launch record's place both say so, as a spawn writes
+    # them (`_spawned_on`), for the fleet places a row by its record alone.
+    _spawned_on(_coder(project, label="coder-9"), socket_path=APART, pane_id=window.pane_id)
 
     said = json.loads(
         actions.read_pane(project.root.name, "coder-9", utterance="what is coder-9 doing")

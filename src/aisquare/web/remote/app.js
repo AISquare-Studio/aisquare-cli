@@ -2102,9 +2102,20 @@ const AGENT_ACTIONS = {
   switch: { title: "Switch account", busy: "Switching", done: "Switched" },
 };
 
+/* What a stop types into ctx's agent, as the machine says it (`exit_command` on the card or
+ * on the agent's fleet row: what `fleet stop` types, each agent's own), never spelled here
+ * (#60). Where the page has neither (a card of no agent, the fleet not read yet), "its exit
+ * command". */
+function exitCommandOf(ctx) {
+  const said = (one) => (one && isText(one.exit_command) ? plainText(one.exit_command) : "");
+  const fleet = S.fleet && projectIdOf(S.fleet) === ctx.pid ? S.fleet.read || S.fleet : null;
+  const row = fleet ? findAgent(fleet, ctx.label) : null;
+  return said(ctx.item) || said(row) || "its exit command";
+}
+
 function effectSentence(kind, label, o) {
   let text;
-  if (kind === "stop") text = o.force ? "Stop " + label + " now: its window is killed without /exit." : "Stop " + label + ": Esc if it is busy, then /exit; its window is killed 5 s later.";
+  if (kind === "stop") text = o.force ? "Stop " + label + " now: its window is killed without " + o.exit + "." : "Stop " + label + ": Esc if it is busy, then " + o.exit + "; its window is killed 5 s later.";
   else if (kind === "restart") text = "Restart " + label + ": it stops, then starts again on " + (o.fresh ? "a fresh conversation." : "its own conversation.") + " This can take 40 s.";
   else text = "Switch " + label + (o.to ? " to " + o.to : " to the account with the most headroom") + ": it hands over and carries on there. This can take 40 s.";
   return o.dismiss ? text + " Its prompt is dismissed (No) first." : text;
@@ -2133,7 +2144,8 @@ function actionSheet(kind, ctx) {
   openSheet(meta.title + " " + label, (sheet) => {
     const lead = el("p", "lead");
     sheet.body.appendChild(lead);
-    const force = kind === "stop" ? checkbox("Force: kill the window now, without /exit", false) : null;
+    const exit = exitCommandOf(ctx);
+    const force = kind === "stop" ? checkbox("Force: kill the window now, without " + exit, false) : null;
     const fresh = kind === "restart" ? checkbox("Fresh: start a new conversation", false) : null;
     let to = null;
     if (kind === "switch") {
@@ -2151,7 +2163,7 @@ function actionSheet(kind, ctx) {
     const say = () => {
       lead.textContent = effectSentence(kind, label, {
         force: force && force.box.checked, fresh: fresh && fresh.box.checked,
-        to: to && to.value.trim() ? plainText(to.value.trim()) : "", dismiss,
+        to: to && to.value.trim() ? plainText(to.value.trim()) : "", dismiss, exit,
       });
     };
     for (const option of [force, fresh]) if (option) option.box.addEventListener("change", say);
@@ -2353,7 +2365,7 @@ VIEWS.project = (route, main) => {
         const by = p.session_id ? authors.get(p.session_id) || "an agent" : "you";
         const to = isText(p.to_role) ? " → " + plainText(p.to_role) : "";
         card.appendChild(el("p", "muted", plainText(kind) + " · " + by + to + " · " + ago(event.ts, now)));
-        card.appendChild(el("p", "text", (kind === "limited" || kind === "limited_handing_over") && typeof p.text === "string" ? p.text.replace(RESET_SAID, "") : p.text));
+        card.appendChild(el("p", "text", /^limited/.test(kind) && typeof p.text === "string" ? p.text.replace(RESET_SAID, "") : p.text));
         list.appendChild(card);
       }
       return undefined;
@@ -2505,8 +2517,9 @@ function measureColumns(box) {
 
 /* Enter is ⏎, as on the input bar: "Enter" overflows its key on a 390 px phone. */
 const PAD_ROW = [["Esc", "Escape"], ["1", "1"], ["2", "2"], ["3", "3"], ["⏎", "Enter"], ["↑", "Up"], ["↓", "Down"]];
+/* ⇧⏎ is a newline in the prompt, sent as the agent reads one (Codex's C-j). */
 const PAD_MORE = [
-  ["Tab", "Tab"], ["⇧Tab", "BTab"], ["⌫", "BSpace"], ["Space", "Space"], ["←", "Left"], ["→", "Right"],
+  ["⇧⏎", "S-Enter"], ["Tab", "Tab"], ["⇧Tab", "BTab"], ["⌫", "BSpace"], ["Space", "Space"], ["←", "Left"], ["→", "Right"],
   ["PgUp", "PageUp"], ["PgDn", "PageDown"], ["Home", "Home"], ["End", "End"], ["y", "y"], ["n", "n"],
   ["4", "4"], ["5", "5"], ["6", "6"], ["7", "7"], ["8", "8"], ["9", "9"], ["0", "0"],
   ["F1", "F1"], ["F2", "F2"], ["F3", "F3"], ["F4", "F4"], ["F5", "F5"], ["F6", "F6"], ["F7", "F7"],
@@ -2515,7 +2528,7 @@ const PAD_MORE = [
 ];
 /* What a screen reader says for a key whose label is a glyph or a short form ("⏎" is Enter). */
 const KEY_SPOKEN = Object.freeze({
-  Escape: "Escape", Enter: "Enter", Up: "Up arrow", Down: "Down arrow", Left: "Left arrow", Right: "Right arrow",
+  Escape: "Escape", Enter: "Enter", "S-Enter": "New line", Up: "Up arrow", Down: "Down arrow", Left: "Left arrow", Right: "Right arrow",
   BTab: "Shift Tab", BSpace: "Backspace", PageUp: "Page up", PageDown: "Page down",
   "C-l": "Control L", "C-r": "Control R", "C-u": "Control U", "C-o": "Control O", "C-c": "Control C", "C-d": "Control D",
 });
@@ -2703,12 +2716,13 @@ function inputBar(pid, label, cleanups, blind, pin) {
     const res = await keysInTurn(pid, label, (at) => apiWrite(writePath("send-keys"), Object.assign({ agent: label, project: pid }, body), what, null, at));
     sending(tapped, -1);
     if (res.ok) return true;
-    if (res.status === 409 && res.error === "double_press") {
+    if (res.status === 409 && /^(double|one)_press/.test(res.error)) {
+      const why = plainText(res.data.reason);
       // Asked on this agent's screen over no sheet: a late answer would sit on another's.
       if (onAgent({ pid, label }) && !sheetOpen()) {
-        confirmSheet("Send " + what + " to " + label + " again?", "A second " + what + " within 3 s exits Claude Code, and " + label + " with it.",
+        confirmSheet("Send " + what + " to " + label + " again?", (why || "A second " + what + " within 3 s exits the coding agent") + ", and " + label + " with it.",
           "Send and exit", () => post(Object.assign({}, body, { confirm_exit: true }), what, tapped));
-      } else toast(label + ": the second " + what + " was not sent — it would exit Claude Code.");
+      } else toast(label + ": the " + (why ? "" : "second ") + what + " was not sent — it would exit the coding agent.");
       return false;
     }
     if (res.status === 409 && res.error === "dialog_open") {
@@ -2725,15 +2739,15 @@ function inputBar(pid, label, cleanups, blind, pin) {
     if (key === "Escape") {
       const now = Date.now();
       if (now - lastEsc < ESC_REPEAT_MS) {
-        if (!blind) return confirmSheet("Press Esc again?", "Two Esc in a row open Claude Code's Rewind selector.", "Send Esc", () => { lastEsc = 0; post(body, "Esc", tapped); });
+        if (!blind) return confirmSheet("Press Esc again?", "Two Esc in a row open the agent's rewind, where Enter goes back to an earlier message.", "Send Esc", () => { lastEsc = 0; post(body, "Esc", tapped); });
         lastEsc = now; // not sent, so the window runs on
-        return toast("Not sent — two Esc open the Rewind selector. Send it from Live.");
+        return toast("Not sent — two Esc open the agent's rewind. Send it from Live.");
       }
       lastEsc = now;
     }
     if (key === "C-c" || key === "C-d") {
       const which = key === "C-c" ? "Ctrl-C" : "Ctrl-D";
-      confirmSheet("Send " + which + "?", which + " interrupts " + label + "; a second one within 3 s exits Claude Code.", "Send " + which,
+      confirmSheet("Send " + which + "?", which + " can interrupt or exit " + label + ".", "Send " + which,
         () => post(body, which, tapped));
       return;
     }

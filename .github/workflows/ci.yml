@@ -765,7 +765,7 @@ jobs:
       # As publish.yml builds them (#137): rlx into dist/rlx/, and the same build as
       # aisquare-cli into dist/aisquare-cli/, checked to be one package under two names.
       # Built and checked here; nothing is uploaded anywhere.
-      - name: Build sdist and wheel, as rlx and as aisquare-cli
+      - name: Build sdist and wheel
         run: |
           python -m pip install --upgrade pip build
           python scripts/build_dists.py --out dist

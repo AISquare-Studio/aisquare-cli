@@ -69,7 +69,11 @@ CONFIGURE = "Configure an aisquare home, the way a developer's machine is"
 #: The ``package`` step that runs on one leg only, and the gate that says which.
 TWINE = "Check the dists' PyPI metadata (twine)"
 TWINE_GATE = "matrix.os == 'ubuntu-latest'"
-TWINE_RUN = ["python -m pip install twine", "python -m twine check --strict dist/*"]
+#: Both names' dists, as scripts/build_dists.py lays them out (#137).
+TWINE_RUN = [
+    "python -m pip install twine",
+    "python -m twine check --strict dist/rlx/* dist/aisquare-cli/*",
+]
 
 
 # ---- the steps, as the YAML has them

@@ -189,6 +189,12 @@ fi
 
 command -v aisquare >/dev/null 2>&1 || fail "aisquare is not on PATH after run 1"
 command -v asq >/dev/null 2>&1 || fail "asq is not on PATH after run 1"
+# rlx and relax (#133): this tree's wheel has them; a release before them, which a cell
+# run by hand with no wheel installs from PyPI, does not.
+if [ -n "${AISQUARE_INSTALL_PACKAGE:-}" ]; then
+    command -v rlx >/dev/null 2>&1 || fail "rlx is not on PATH after run 1"
+    command -v relax >/dev/null 2>&1 || fail "relax is not on PATH after run 1"
+fi
 head1 "installed: $(aisquare --version)"
 
 # The four things the installer promised, checked one at a time so a failure
@@ -476,6 +482,11 @@ else
     # does not keep the staging's `--with`.
     typer_cap=${TMPDIR:-/tmp}/typer-cap.txt
     printf '%s\n' 'typer<0.29' >"$typer_cap"
+    # A machine that has the pinned release has it as aisquare-cli, the name every
+    # release before rlx was published under, and nothing else (#137). Runs 1 to 3
+    # left the rlx tool this tree's wheel made: beside it, the staging would be two
+    # names side by side, which the installer refuses. So that tool goes first.
+    uv tool uninstall rlx >/dev/null 2>&1 || true
     # An EXACT PIN, deliberately — that is the shape `uv tool upgrade` refuses
     # to move, and installing without the pin would test nothing.
     uv tool install --force --python 3.13 --with tiktoken --with 'typer<0.29' \

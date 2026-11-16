@@ -41,7 +41,7 @@ from aisquare.core.config import REVIEWER_ARGS, RoleLaunchProfile, load_config, 
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
-from aisquare.core.version import DISTRIBUTION
+from aisquare.core.version import DISTRIBUTION, PLUGIN_DISTRIBUTION
 from aisquare.models import FleetAgent
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route, lifecycle
@@ -264,22 +264,22 @@ def test_the_same_url_without_editable_is_a_local_source(tmp_path: Path) -> None
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "main"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git@main",
+            f"{DISTRIBUTION} @ git+https://github.com/AISquare-Studio/rlx.git@main",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd"},
             "cli",
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git#subdirectory=cli",
+            f"{DISTRIBUTION} @ git+https://github.com/AISquare-Studio/rlx.git#subdirectory=cli",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "v0.8.0"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git",
+            f"{DISTRIBUTION} @ git+https://github.com/AISquare-Studio/rlx.git",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "0123abcd"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git",
+            f"{DISTRIBUTION} @ git+https://github.com/AISquare-Studio/rlx.git",
         ),
     ],
     ids=["branch", "subdirectory", "release-tag", "commit"],
@@ -313,7 +313,7 @@ def test_a_venv_with_no_source_record_is_the_venv_route(tmp_path: Path) -> None:
         "pip",
         "install",
         "--upgrade",
-        "aisquare-cli",
+        DISTRIBUTION,  # the distribution installed there, its own name (#137)
     ]
 
 
@@ -442,7 +442,9 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
     assert "CPython" in upgrades and "Astral" in upgrades and forced in upgrades, upgrades
     assert "exported" in upgrades, "and that a setting the user exported is kept"
     assert '--from "$_from" aisquare hook' in launcher, "the launcher still runs uvx --from"
-    assert f"uvx --from {DISTRIBUTION}==" in plugin
+    # The plugin keeps its own pin, aisquare-cli, whatever this install is (#137).
+    assert f"uvx --from {PLUGIN_DISTRIBUTION}==" in plugin
+    assert f"_from=${{AISQUARE_PLUGIN_FROM:-{PLUGIN_DISTRIBUTION}==" in launcher
     assert "_tested='>=3.11,<3.14'" in launcher and '--python "$_tested"' in launcher, (
         "the launcher still asks uv for a Python"
     )
@@ -1047,7 +1049,7 @@ def test_the_lookup_reads_info_version(monkeypatch: pytest.MonkeyPatch) -> None:
     latest = _REAL_FETCH_LATEST()
 
     assert latest == LatestRelease("0.9.1")
-    assert asked == [("https://pypi.org/pypi/aisquare-cli/json", 5.0)]
+    assert asked == [(f"https://pypi.org/pypi/{DISTRIBUTION}/json", 5.0)]
 
 
 def test_an_unreachable_pypi_is_an_answer_not_an_exception(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1315,6 +1317,7 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
         uploaded_before: Any = None,
         python: str | None = None,
         pin: str | None = None,
+        name: str | None = None,
     ) -> LatestRelease:
         # Each keyword changes what the REAL lookup reads; its tests drive it through open_url.
         world.lookups += 1
@@ -1876,9 +1879,9 @@ def test_a_uvx_run_is_told_nothing_is_installed(
 
     assert route.kind == install_route.UVX, route
     assert venv.kind == install_route.VENV, "control: a venv elsewhere is still a venv"
-    assert check["route"] == "uvx" and check["command"] == "uv tool install aisquare-cli", check
+    assert check["route"] == "uvx" and check["command"] == f"uv tool install {DISTRIBUTION}", check
     assert "nothing is installed to upgrade" in check["reason"], check
-    assert package["command"] == "uv cache clean aisquare-cli" and not package["runs"], package
+    assert package["command"] == f"uv cache clean {DISTRIBUTION}" and not package["runs"], package
     assert "nothing is installed to remove" in package["reason"], package
 
 
@@ -2223,6 +2226,106 @@ def test_another_asq_on_this_home_refuses_the_upgrade_and_is_named(
     assert reopened[0] == ["ui"], "asq's Update comes back"
     agreed = runner.invoke(app, ["upgrade", "--yes"])
     assert agreed.exit_code == 0 and len(machine.installs) == 1, "control: alone, it upgrades"
+
+
+def _commands_installed(tool: Tool, bin_dir: Path, *, exe: str = "") -> None:
+    """``tool``'s receipt and ``bin_dir`` as uv 0.11.6 leaves an install of this release
+    (measured): links to the tool's own scripts, the five recorded by path (#133)."""
+    names = ("aisquare", "asq", "asq-statusline", "rlx", "relax")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    rows = ",\n".join(
+        f"    {{ name = {_toml(name)}, install-path = {_toml(str(bin_dir / f'{name}{exe}'))}, "
+        'from = "aisquare-cli" }'
+        for name in names
+    )
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, _TIKTOKEN, tail=f"entrypoints = [\n{rows},\n]\n"),
+        encoding="utf-8",
+    )
+    if not exe:
+        for name in names:
+            (bin_dir / name).symlink_to(tool.prefix / "bin" / name)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uv links the scripts on POSIX only")
+def test_another_programs_relax_refuses_the_upgrade_before_uv_runs_and_is_named(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#133: `uv tool install --force` replaced another program's `relax` without a word
+    (measured, uv 0.11.6). Refused as another asq is, in one line naming it and what to do:
+    in the plan, under --yes, --json and --one-click; nothing is installed and that `relax`
+    is left as it was."""
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    reopened: list[list[str]] = []
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: reopened.append(list(args)))
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    _commands_installed(tool, bin_dir)
+    (bin_dir / "relax").unlink()
+    (bin_dir / "relax").write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+
+    plan = _one_object(runner.invoke(app, ["--json", "upgrade", "--dry-run"]).stdout)
+    shown = runner.invoke(app, ["upgrade", "--dry-run"])
+    refused = runner.invoke(app, ["upgrade", "--yes"])
+    as_json = runner.invoke(app, ["--json", "upgrade", "--yes"])
+    one_click = runner.invoke(app, ["upgrade", "--one-click"])
+
+    line = (
+        f"{bin_dir / 'relax'} is another program, which the reinstall would replace without a "
+        "word: rename or move it first, then run `aisquare upgrade` again."
+    )
+    assert plan["commands_taken"] == [str(bin_dir / "relax")], plan
+    assert f"✗ it will not run: {line}" in " ".join(shown.stdout.split()), shown.stdout
+    assert refused.exit_code == 1 and line in " ".join(refused.stderr.split()), refused.output
+    assert as_json.exit_code == 1 and _one_object(as_json.stdout)["error"] == "command_taken"
+    assert one_click.exit_code == 1 and line in " ".join(one_click.stderr.split())
+    assert reopened and reopened[0][:1] == ["ui"], "asq's Update comes back"
+    assert machine.installs == [], "nothing installed"
+    assert (bin_dir / "relax").read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
+    (bin_dir / "relax").unlink()
+    (bin_dir / "relax").symlink_to(tool.prefix / "bin" / "relax")
+    agreed = runner.invoke(app, ["upgrade", "--yes"])
+    assert agreed.exit_code == 0 and len(machine.installs) == 1, "control: ours, it upgrades"
+
+
+def test_the_command_a_person_runs_on_windows_says_another_programs_rlx_first(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """On Windows the reinstall is run by hand, and that command too would replace another
+    program's ``rlx.exe``: the line says so, beside the command. uv copies the scripts there,
+    so a copy the receipt records is ours (``relax.exe``) and one it does not is not."""
+    windows = replace(tool.facts, platform="win32")
+    monkeypatch.setattr(install_route, "facts", lambda: windows)
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    _commands_installed(tool, bin_dir, exe=".exe")
+    receipt = (tool.prefix / install_route.RECEIPT_NAME).read_text(encoding="utf-8")
+    rlx = _toml(str(bin_dir / "rlx.exe"))
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        "\n".join(line for line in receipt.splitlines() if rlx not in line) + "\n",
+        encoding="utf-8",
+    )
+    for name in ("rlx", "relax"):
+        (bin_dir / f"{name}.exe").write_text("MZ", encoding="utf-8")
+
+    run = runner.invoke(app, ["upgrade", "--yes"])
+
+    said = " ".join(run.stderr.split())
+    assert run.exit_code == 1, run.output
+    assert "Upgrade it with: uv tool install --force" in said, said
+    assert (
+        f"{bin_dir / 'rlx.exe'} is another program, which the reinstall would replace "
+        "without a word: rename or move it first, then run it."
+    ) in said, said
+    assert "relax.exe" not in said, "the copy the receipt records is ours"
+    assert machine.installs == []
 
 
 def test_yes_runs_the_restated_command_checks_the_version_and_refreshes_the_hooks(
@@ -3783,7 +3886,7 @@ def test_a_pin_pypi_does_not_list_keeps_the_command_of_a_route_with_an_index_of_
     check = runner.invoke(app, ["upgrade", "--check", "--version", "0.8.1+corp"])
     command = install_route.command_line(install_route.upgrade_argv(route, "0.8.1+corp"))
 
-    why = "PyPI lists no aisquare-cli 0.8.1+corp"
+    why = f"PyPI lists no {route.distribution} 0.8.1+corp"
     assert f"upgrade with: {command}" in check.stdout, check.stdout
     assert f"({why}: the command finds it only on an index set up for it)" in check.stdout
     assert "cannot install it" not in check.stdout, check.stdout

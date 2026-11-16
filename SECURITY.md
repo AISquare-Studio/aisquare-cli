@@ -2,9 +2,10 @@
 
 ## Supported versions
 
-rlx is pre-1.0 and releases often. Only the latest release of its package,
-`aisquare-cli`, on [PyPI](https://pypi.org/project/aisquare-cli/) gets security
-fixes, so please check `rlx --version` against it before you report.
+rlx is pre-1.0 and releases often. Only the latest release gets security fixes,
+so please check `rlx --version` against it before you report. Each release is
+on PyPI as `rlx` and, the same package, as
+[`aisquare-cli`](https://pypi.org/project/aisquare-cli/).
 
 ## Reporting a vulnerability
 
@@ -96,7 +97,8 @@ that mode, Claude Code's classifier, not you, approves each tool call.
 
 - **Upgrades.** `rlx upgrade --check`, and `rlx upgrade` without
   `--version` on an install it runs, ask PyPI for the latest release
-  (`https://pypi.org/pypi/aisquare-cli/json`), with a `User-Agent` that names
+  (`https://pypi.org/pypi/rlx/json`, or `https://pypi.org/pypi/aisquare-cli/json`
+  for an install made under that name), with a `User-Agent` that names
   the installed version. When the install's uv receipt records its own index,
   or another setting that can hold a release back (a cutoff alone is still
   compared), or cannot be read, nothing is asked and `--check` says it cannot

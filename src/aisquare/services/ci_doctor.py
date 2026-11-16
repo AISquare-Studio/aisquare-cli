@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import ci_client, ci_descriptor, ci_override
 from aisquare.services.ci_contract import DeliveryDescriptor
@@ -165,7 +166,7 @@ def _check_ci_descriptor(
         elif result.status == 404:
             fix = "Check AISQUARE_CI_RUN names a run this server has published"
         elif detail.startswith("descriptor speaks contract_version"):
-            fix = "Upgrade aisquare-cli, or ask for a run published for this contract"
+            fix = f"Upgrade {DISTRIBUTION}, or ask for a run published for this contract"
         elif detail.startswith("descriptor expired at"):
             fix = "Ask the experiment controller for a fresh run"
         else:

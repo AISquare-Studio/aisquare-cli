@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import pytest
 
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services import explainability as service
 
 
@@ -36,7 +37,7 @@ def test_a_normal_install_is_advised_to_use_the_extra() -> None:
     """The safe path stays the recommendation."""
     hint = service.install_hint(editable=False)
 
-    assert "aisquare-cli[explainability]" in hint
+    assert f"{DISTRIBUTION}[explainability]" in hint
     assert "editable" not in hint.lower()
 
 
@@ -45,7 +46,7 @@ def test_an_editable_install_is_warned_off_it() -> None:
     hint = service.install_hint(editable=True)
 
     assert "editable" in hint.lower()
-    assert 'pip install --upgrade "aisquare-cli[explainability]"' not in hint, (
+    assert f'pip install --upgrade "{DISTRIBUTION}[explainability]"' not in hint, (
         "an editable checkout must not be handed the command that shadows it"
     )
 

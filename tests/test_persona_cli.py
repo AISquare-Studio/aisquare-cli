@@ -21,6 +21,7 @@ from aisquare.core import agents as agents_core
 from aisquare.core import claude_accounts
 from aisquare.core import personas as core
 from aisquare.core.personas import PersonaError
+from aisquare.core.version import DISTRIBUTION
 from tests import bundled_personas
 
 
@@ -368,7 +369,7 @@ def test_plain_text_goes_to_the_llm_path_and_no_llm_refuses_it(
     assert (code, payload["error"]) == (1, "not_recognised")
     # conftest's no_real_llm_import: without --no-llm the engines are tried, and none can run.
     assert (engines_code, engines["error"]) == (1, "no_import_engine")
-    assert "aisquare-cli[llm]" in engines["detail"]
+    assert f"{DISTRIBUTION}[llm]" in engines["detail"]
     assert (missing_code, missing["error"]) == (1, "source_not_found")
     assert not _user_layer().exists()
 

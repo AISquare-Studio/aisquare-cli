@@ -44,7 +44,13 @@ from aisquare.core.spawn import (
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.terminal import outer_terminal
-from aisquare.core.version import DISTRIBUTION, __version__
+from aisquare.core.version import (
+    DISTRIBUTION,
+    DISTRIBUTIONS,
+    PLUGIN_DISTRIBUTION,
+    __version__,
+    installed_distributions,
+)
 from aisquare.core.workspace import active_project, git_common_root
 from aisquare.models import (
     CheckStatus,
@@ -150,6 +156,11 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
         return [
             _check_python(),
             _check_install(),
+            # Only while rlx and aisquare-cli are both installed in this environment (#137).
+            *_optional(_check_both_names()),
+            # Only while `rlx` or `relax` on PATH runs another program (#133): ok, as a
+            # program of the user's own is no fault, but said, as the command is not ours.
+            *_optional(_check_commands()),
             _check_provenance(),
             _check_home(),
             _check_home_filesystem(),
@@ -310,8 +321,8 @@ def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
             "sandbox-install",
             f"aisquare runs from {inside}, in {root.name or root}'s tree, which a sandboxed "
             f"{adapter.label} agent launched there may write: such a launch is refused",
-            "install aisquare-cli outside the project (uv tool install aisquare-cli, or "
-            f"pipx install aisquare-cli), then connect the {adapter.label} hooks again with "
+            f"install {DISTRIBUTION} outside the project (uv tool install {DISTRIBUTION}, or "
+            f"pipx install {DISTRIBUTION}), then connect the {adapter.label} hooks again with "
             "that install",
         )
     return None
@@ -491,6 +502,61 @@ def _check_install() -> DoctorCheck:
     return _ok("install", f"aisquare at {binary}")
 
 
+def _check_both_names() -> DoctorCheck | None:
+    """A warning while this environment holds BOTH ``rlx`` and ``aisquare-cli`` (#137), or
+    ``None``. They are one package under two names, so they share every file: the one
+    installed last wrote them, an upgrade of the other rewrites them, and removing either
+    deletes the files the other runs. Only a person's own second install makes it (nothing
+    this package runs installs the other name beside it)."""
+    names = installed_distributions()
+    if len(names) < 2:
+        return None
+    return _warn(
+        "package names",
+        f"{' and '.join(names)} are both installed in {sys.prefix}: one package under two "
+        "names, sharing every file, so removing either breaks the other",
+        f"Keep one: uninstall {DISTRIBUTIONS[1]}, then reinstall {DISTRIBUTIONS[0]} with "
+        "--force-reinstall, with the tool that installed them",
+    )
+
+
+def _check_commands() -> DoctorCheck | None:
+    """``rlx`` and ``relax``, the commands beside ``aisquare`` and ``asq`` since the rlx rename
+    (#133), when one a shell finds is another program: PyPI's ``relax`` is another project,
+    and one earlier on PATH than this install's own answers to the name. ``None`` while each
+    runs this install, or is not on PATH (nothing found that is not ours).
+
+    This install's own is the script of that name beside its ``aisquare``
+    (``agents.current_install``), compared by the file a link leads to, as uv's
+    ``~/.local/bin`` links are.
+    """
+    ours_dir = agent_core.current_install().parent
+    suffix = ".exe" if sys.platform == "win32" else ""
+    others: list[tuple[str, str]] = []
+    for name in install_route.NEW_COMMANDS:
+        found = shutil.which(name)
+        if found is None:
+            continue
+        try:
+            same = Path(found).resolve() == (ours_dir / f"{name}{suffix}").resolve()
+        except (OSError, RuntimeError):
+            same = False
+        if not same:
+            others.append((name, found))
+    if not others:
+        return None
+    one = len(others) == 1
+    names = " and ".join(name for name, _ in others)
+    where = ", ".join(found for _, found in others)
+    taken = {name for name, _ in others}
+    left = [name for name in ("aisquare", "asq", *install_route.NEW_COMMANDS) if name not in taken]
+    return _ok(
+        "commands",
+        f"{names} on your PATH {'runs another program' if one else 'run other programs'} "
+        f"({where}), not this aisquare: start it with {', '.join(left[:-1])} or {left[-1]}",
+    )
+
+
 def _check_provenance() -> DoctorCheck:
     """Which SOURCE the installed build came from, not just which binary runs.
 
@@ -507,7 +573,7 @@ def _check_provenance() -> DoctorCheck:
     from it, and is by definition not the tree anyone is working in.
     """
     try:
-        record = metadata.distribution("aisquare-cli").read_text("direct_url.json")
+        record = metadata.distribution(DISTRIBUTION).read_text("direct_url.json")
     except Exception:
         return _ok("provenance", "install source not recorded")
     if not record:
@@ -968,7 +1034,10 @@ def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
     program = agent_core.plugin_runner()
     if program is None:
         if agent_core.launcher_finds("uvx") is not None:
-            release = f"{DISTRIBUTION}=={pin}" if pin else f"the pinned {DISTRIBUTION}"
+            # The launcher's own pin, which stays aisquare-cli (#137), whatever this install is.
+            release = (
+                f"{PLUGIN_DISTRIBUTION}=={pin}" if pin else f"the pinned {PLUGIN_DISTRIBUTION}"
+            )
             return f"{release} through uvx", None, None
         return (
             "",

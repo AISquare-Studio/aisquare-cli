@@ -35,6 +35,7 @@ from aisquare.core.config import AppConfig, RoleLaunchProfile, save_config
 from aisquare.core.paths import aisquare_home, config_path
 from aisquare.core.personas import PersonaError
 from aisquare.core.spawn import EXCLUDED, SEAMS
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services import persona_import
 from aisquare.services import personas as service
 
@@ -355,7 +356,7 @@ def test_without_the_sdk_the_refusal_names_the_llm_extra(
         _import(str(_notes(tmp_path)))
 
     assert caught.value.code == "no_import_engine"
-    assert "aisquare-cli[llm]" in str(caught.value)
+    assert f"{DISTRIBUTION}[llm]" in str(caught.value)
     assert "manager engine:" in str(caught.value)
     assert not _user_layer().exists()
 

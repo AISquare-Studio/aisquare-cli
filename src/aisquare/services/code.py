@@ -12,11 +12,12 @@ from pathlib import Path
 from aisquare.core import code_index
 from aisquare.core import ignore as ignore_core
 from aisquare.core.config import CodeSettings, load_config
+from aisquare.core.version import DISTRIBUTION
 from aisquare.core.workspace import current_project
 from aisquare.models import ProjectInfo
 
 INDEX_COMMAND = "aisquare code index"
-EXTRA_HINT = 'pip install --upgrade "aisquare-cli[code]"'
+EXTRA_HINT = f'pip install --upgrade "{DISTRIBUTION}[code]"'
 """What adds the TypeScript and JavaScript parsers: the CLI named first, as every extra's
 hint names it (``services.explainability.INSTALL_HINT`` says why)."""
 

@@ -64,7 +64,8 @@ def _installed(
     executable: str | None = None,
 ) -> None:
     """Run as aisquare-cli installed at ``prefix`` on ``platform`` would, without the packages
-    ``missing``."""
+    ``missing``: the distribution that runs is aisquare-cli, as such an install's is (#137)."""
+    monkeypatch.setattr(remote_server, "DISTRIBUTION", "aisquare-cli")
     monkeypatch.setattr(sys, "prefix", str(prefix))
     monkeypatch.setattr(sys, "executable", executable or str(prefix / "bin" / "python"))
     monkeypatch.setattr(sys, "platform", platform)
@@ -508,3 +509,31 @@ def test_a_qr_without_segno_names_the_command_that_puts_it_back_in_the_install_t
     said = command.format(python=prefix / "bin" / "python")
     assert art.plain == f"QR unavailable: this install lacks segno — {said}"
     assert not art.style, "the notice is plain, not the QR's colours"
+
+
+@pytest.mark.parametrize("name", ["rlx", "aisquare-cli"])
+def test_each_install_is_told_its_own_name_whichever_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    """#137: the hint names the install's own name, never the other one. A pipx venv and a uv
+    tool are named for it (their directory wins over the distribution that runs), a
+    virtualenv says it by the distribution installed there."""
+    other = "aisquare-cli" if name == "rlx" else "rlx"
+    pipx = tmp_path / "pipx" / "venvs" / name
+    pipx.mkdir(parents=True)
+    (pipx / "pipx_metadata.json").write_text("{}", encoding="utf-8")
+    _installed(monkeypatch, pipx)
+    monkeypatch.setattr(remote_server, "DISTRIBUTION", other)
+    injected = remote_server.remote_install_hint()
+    tool = tmp_path / "uv" / "tools" / name
+    unreadable = _uv_tool(monkeypatch, tool, b"\xff not toml")
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    _installed(monkeypatch, venv)
+    monkeypatch.setattr(remote_server, "DISTRIBUTION", name)
+    in_venv = remote_server.remote_install_hint()
+
+    assert injected.startswith(f"pipx inject {name} "), injected
+    assert unreadable.endswith(f" --with tiktoken {name}"), unreadable
+    assert in_venv.endswith(f" -m pip install {name}"), in_venv
+    assert other not in f"{injected} {unreadable} {in_venv}".split(), "never the other name"

@@ -41,11 +41,15 @@ VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", 
 SERVED="$WORK/served"
 LATEST="$SERVED/releases/latest/download"
 PINNED="$SERVED/releases/download/v$VERSION"
-mkdir -p "$LATEST" "$PINNED" "$SERVED/pypi/aisquare-cli" "$WORK/bin" "$WORK/home" "$WORK/tmp"
+mkdir -p "$LATEST" "$PINNED" "$SERVED/pypi/rlx" "$SERVED/pypi/aisquare-cli" "$WORK/bin" "$WORK/home" "$WORK/tmp"
 
 python3 scripts/stamp_installers.py --tag "v$VERSION" --out "$LATEST" >/dev/null
 cp "$LATEST/install.sh" "$PINNED/install.sh"
-printf '{"info":{"name":"aisquare-cli","version":"%s"}}' "$VERSION" >"$SERVED/pypi/aisquare-cli/json"
+# Both of the package's names, as PyPI serves a release (#137): a fresh machine takes rlx,
+# one that has aisquare keeps aisquare-cli.
+for name in rlx aisquare-cli; do
+    printf '{"info":{"name":"%s","version":"%s"}}' "$name" "$VERSION" >"$SERVED/pypi/$name/json"
+done
 grep -q "^STAMPED_VERSION=\"$VERSION\"\$" "$LATEST/install.sh" ||
     fail "the stamper did not stamp $VERSION"
 
@@ -93,6 +97,7 @@ for arg do
         https://github.com/AISquare-Studio/rlx/releases/*)
             arg="$LOCAL/releases/\${arg#https://github.com/AISquare-Studio/rlx/releases/}"
             ;;
+        https://pypi.org/pypi/rlx/json) arg="$LOCAL/pypi/rlx/json" ;;
         https://pypi.org/pypi/aisquare-cli/json) arg="$LOCAL/pypi/aisquare-cli/json" ;;
     esac
     set -- "\$@" "\$arg"
@@ -138,7 +143,7 @@ fetched() { grep -qF -e "$1" "$WORK/fetch.log" || fail "$2"; }
 
 # PyPI is asked once a run at most: the hand-off asks, and a fallback reuses it.
 asked_pypi_once() {
-    [ "$(grep -c 'pypi.org/pypi/aisquare-cli/json' "$WORK/fetch.log")" -le 1 ] ||
+    [ "$(grep -c -E 'pypi.org/pypi/(rlx|aisquare-cli)/json' "$WORK/fetch.log")" -le 1 ] ||
         fail "PyPI was asked more than once"
 }
 
@@ -181,8 +186,8 @@ for name in $SHELLS; do
     # The install target, on uv's line: plain on a machine without aisquare,
     # `@latest` on one that has it, and never ==V or @V. A machine whose aisquare
     # is already the latest has no install line (`is current`), only the check above.
-    if ! grep -q "^==> aisquare-cli $VERSION is current\$" "$WORK/out"; then
-        grep -Eq "^ *would run: uv tool install .* aisquare-cli(@latest)?\$" "$WORK/out" ||
+    if ! grep -Eq "^==> (rlx|aisquare-cli) $VERSION is current\$" "$WORK/out"; then
+        grep -Eq "^ *would run: uv tool install .* (rlx|aisquare-cli)(@latest)?\$" "$WORK/out" ||
             fail "the release's installer did not install the latest release"
     fi
     expect "nothing above was actually run" "--dry-run was not passed through"

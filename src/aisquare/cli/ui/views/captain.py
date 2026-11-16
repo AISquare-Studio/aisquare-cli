@@ -58,6 +58,7 @@ from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.views.agent import AgentView
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import FleetAgentStatus
 
 _log = logging.getLogger(__name__)
@@ -174,7 +175,7 @@ class MicScreen(ModalScreen[None]):
                 yield Static(Text("\n".join(info.qr)), id="mic-qr")
             else:
                 yield Static(
-                    Text("(no QR: segno is not installed — pip install 'aisquare-cli[voice]')",
+                    Text(f"(no QR: segno is not installed — pip install '{DISTRIBUTION}[voice]')",
                          style="dim"),
                     id="mic-qr",
                 )  # fmt: skip

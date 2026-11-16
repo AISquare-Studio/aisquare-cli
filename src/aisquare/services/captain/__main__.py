@@ -41,8 +41,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         import mcp.server.mcpserver  # noqa: F401  (the module the server builds on)
     except ImportError as exc:
+        from aisquare.core.version import DISTRIBUTION  # here: this entry imports little
+
         print(
-            f"the MCP server cannot start: {exc} — pip install 'aisquare-cli[serve]' "
+            f"the MCP server cannot start: {exc} — pip install '{DISTRIBUTION}[serve]' "
             "(aisquare captain serve --stdio says more)",
             file=sys.stderr,
         )

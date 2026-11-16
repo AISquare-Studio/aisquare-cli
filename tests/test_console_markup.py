@@ -30,6 +30,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.console import stderr_console, stdout_console
+from aisquare.core.version import DISTRIBUTION
 
 #: A value that is ordinary in the field and destroyed by a markup parser: a
 #: path segment in brackets, an extra name, a bracketed status word.
@@ -101,7 +102,7 @@ def test_the_serve_hint_still_names_the_extra(runner: CliRunner) -> None:
         patch.setattr(serve_cli, "_find_spec", lambda name: None)
         result = runner.invoke(app, ["serve", "--stdio"])
 
-    assert "aisquare-cli[serve]" in result.output
+    assert f"{DISTRIBUTION}[serve]" in result.output
 
 
 def test_a_doctor_detail_keeps_bracketed_status_words(runner: CliRunner) -> None:

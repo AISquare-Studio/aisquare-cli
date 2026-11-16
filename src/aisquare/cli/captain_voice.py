@@ -19,8 +19,9 @@ import typer
 from aisquare.cli.common import fail
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+from aisquare.core.version import DISTRIBUTION
 
-VOICE_INSTALL = "pip install 'aisquare-cli[voice]'"
+VOICE_INSTALL = f"pip install '{DISTRIBUTION}[voice]'"
 DEFAULT_PORT = 8749
 
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services.explainability import EDITABLE_INSTALL_HINT, INSTALL_HINT
 
 _PAGE = Path(__file__).resolve().parents[1] / "CONTRIBUTING.md"
@@ -41,7 +42,7 @@ def _recovery_command() -> str:
 
 def _extra_spec() -> str:
     """The ``name[extra]`` token, taken from the hint that recommends it."""
-    start = INSTALL_HINT.find("aisquare-cli[")
+    start = INSTALL_HINT.find(f"{DISTRIBUTION}[")
     assert start != -1, f"INSTALL_HINT no longer names the extra: {INSTALL_HINT!r}"
     end = INSTALL_HINT.index("]", start) + 1
     return INSTALL_HINT[start:end]

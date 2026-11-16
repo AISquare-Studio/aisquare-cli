@@ -38,7 +38,7 @@ RECENT = 512
 #: ``aisquare repo …`` as a COMMAND: the program word at the start of the line or after a
 #: shell separator, bare or by path (``claude_usage``'s rule, for any agent's shell tool).
 _LOOKUP_COMMAND = re.compile(
-    r"(?:^|[;&|(`]|\$\()\s*(?:\w+=\S*\s+)*(?:\S*/)?(?:aisquare|asq)(?:\.exe)?\s+repo\b"
+    r"(?:^|[;&|(`]|\$\()\s*(?:\w+=\S*\s+)*(?:\S*/)?(?:aisquare|asq|rlx|relax)(?:\.exe)?\s+repo\b"
 )
 
 

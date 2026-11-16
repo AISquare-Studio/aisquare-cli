@@ -1,4 +1,5 @@
-"""Both console scripts point at the same CLI entry point."""
+"""Every console script of the CLI points at the same entry point: aisquare, asq, and since
+#133 rlx and relax."""
 
 from __future__ import annotations
 
@@ -8,12 +9,13 @@ from pathlib import Path
 import pytest
 
 import aisquare
+from aisquare.core.version import DISTRIBUTION
 
 
 def test_console_scripts_registered() -> None:
     scripts = {ep.name: ep.value for ep in entry_points(group="console_scripts")}
-    assert scripts.get("aisquare") == "aisquare.cli.app:main"
-    assert scripts.get("asq") == "aisquare.cli.app:main"
+    for name in ("aisquare", "asq", "rlx", "relax"):
+        assert scripts.get(name) == "aisquare.cli.app:main", name
 
 
 def test_the_suite_imports_this_tree_not_an_installed_copy() -> None:
@@ -156,13 +158,13 @@ def test_the_experiment_extra_is_a_real_extra_in_the_built_metadata() -> None:
 
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
-    installed = version("aisquare-cli")
+    installed = version(DISTRIBUTION)
     if installed != declared:
         pytest.skip(
-            f"the installed aisquare-cli is {installed}, this tree is {declared} — "
+            f"the installed {DISTRIBUTION} is {installed}, this tree is {declared} — "
             "its metadata is another build's; reinstall with `make install` to check it here"
         )
-    assert "experiment" in (metadata("aisquare-cli").get_all("Provides-Extra") or [])
+    assert "experiment" in (metadata(DISTRIBUTION).get_all("Provides-Extra") or [])
 
 
 def test_the_wheel_carries_the_bundled_personas(tmp_path: Path) -> None:

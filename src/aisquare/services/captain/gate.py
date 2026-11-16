@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from aisquare.core import experimental, state_file
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services.captain import speaker
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Refused
@@ -70,7 +71,7 @@ LOCKOUT_MAX = timedelta(hours=24)
 """The longest one lock lasts, however many came before it."""
 ISSUER = "aisquare captain"
 """What an authenticator app shows above the code."""
-EXTRA = "pip install 'aisquare-cli[gate]'"
+EXTRA = f"pip install '{DISTRIBUTION}[gate]'"
 """How to get pyotp, said where its absence refuses."""
 ENROLL = "aisquare captain gate enroll"
 UNLOCK = "say your authenticator's code to the captain, or run: aisquare captain gate unlock <code>"

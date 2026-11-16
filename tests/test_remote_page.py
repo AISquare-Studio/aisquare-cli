@@ -36,6 +36,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from aisquare.core.paths import remote_dist_dir
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services import remote_needs, remote_page, remote_server, transcript
 from aisquare.services.remote_server import (
     NO_PAGE_HINT,
@@ -226,7 +227,7 @@ def test_an_install_without_its_bundled_page_says_to_reinstall(
 
     assert response.status_code == 404
     assert response.json() == {"error": "no_dist", "message": NO_PAGE_HINT}
-    assert "reinstall aisquare-cli" in NO_PAGE_HINT
+    assert f"reinstall {DISTRIBUTION}" in NO_PAGE_HINT
     assert remote_server._page_missing(None) == NO_PAGE_HINT
 
 

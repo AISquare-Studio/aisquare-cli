@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import serve as serve_cli
 from aisquare.cli.app import app
+from aisquare.core.version import DISTRIBUTION
 
 
 def test_a_missing_extra_is_reported_as_the_error_contract(runner: CliRunner) -> None:
@@ -36,7 +37,7 @@ def test_a_missing_extra_is_reported_as_the_error_contract(runner: CliRunner) ->
 
     assert result.exit_code == 1
     assert "serve extra is not installed" in result.output
-    assert "aisquare-cli[serve]" in result.output
+    assert f"{DISTRIBUTION}[serve]" in result.output
     assert "Traceback" not in result.output
 
 
@@ -144,7 +145,7 @@ def test_an_error_message_is_data_not_a_rich_template(runner: CliRunner) -> None
         patch.setattr(serve_cli, "_find_spec", _absent)
         result = runner.invoke(app, ["serve", "--stdio"])
 
-    assert "aisquare-cli[serve]" in result.output, "the extra name must survive rendering"
+    assert f"{DISTRIBUTION}[serve]" in result.output, "the extra name must survive rendering"
 
 
 def test_bracketed_text_in_any_failure_survives(runner: CliRunner) -> None:

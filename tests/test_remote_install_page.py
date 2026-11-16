@@ -36,6 +36,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
 from aisquare.core.paths import remote_audit_path, remote_dist_dir, remote_state_path
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services import remote_page, remote_server
 from aisquare.services.remote_server import NO_PAGE_HINT, NoRemotePage, Runtime, build_app
 from tests.fsperms import can_deny_reads
@@ -355,7 +356,7 @@ def test_start_with_no_page_at_all_raises_the_actionable_sentence(
         remote_server.start_remote_server(port=free_port())
 
     assert str(raised.value) == NO_PAGE_HINT
-    assert "reinstall aisquare-cli" in str(raised.value)
+    assert f"reinstall {DISTRIBUTION}" in str(raised.value)
     assert remote_server.remote_server_status()["running"] is False  # nothing was left listening
 
 

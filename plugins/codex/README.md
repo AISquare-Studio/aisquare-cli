@@ -34,7 +34,7 @@ The plugin's launcher is the Claude Code plugin's, the same file in both plugins
 The hooks hand your saved context to every new session. To save something, use rlx's commands. Install it once, and the plugin runs that same install from then on:
 
 ```sh
-uv tool install aisquare-cli
+uv tool install rlx
 rlx remember --user "I prefer pytest"
 ```
 

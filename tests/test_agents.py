@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents, paths, selfcli
+from aisquare.core.version import DISTRIBUTION
 from tests.fsperms import can_deny_writes, can_symlink, unwritable
 
 
@@ -973,7 +974,7 @@ def test_this_install_is_located_once_per_process(monkeypatch: pytest.MonkeyPatc
     agents._same_install(agents.HookBinary(Path("/elsewhere/bin/aisquare")))
 
     assert agents.current_install() == first
-    assert located == ["aisquare-cli"], "located once"
+    assert located == [DISTRIBUTION], "located once"
 
 
 def test_posix_quoting_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:

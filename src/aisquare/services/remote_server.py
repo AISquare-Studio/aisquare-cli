@@ -100,7 +100,7 @@ from aisquare.core.paths import (
     remote_state_path,
     restrict_to_owner,
 )
-from aisquare.core.version import __version__
+from aisquare.core.version import DISTRIBUTION, DISTRIBUTIONS, __version__
 from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
@@ -343,7 +343,7 @@ account may change, or that is found through a directory another account may cha
 (:func:`_page_served_open_to_others`). Without the path, as :data:`NO_DIST_INDEX` is; the
 log names it, in the words :func:`_page_missing` gives the machine's own terminal."""
 
-NO_PAGE_HINT = "the bundled remote page is missing from this install — reinstall aisquare-cli"
+NO_PAGE_HINT = f"the bundled remote page is missing from this install — reinstall {DISTRIBUTION}"
 """Shown by the modal's status line, ``asq remote serve``'s exit, and the raise of
 ``start_remote_server()`` — one sentence, so a broken install never runs a server that
 quietly answers with nothing. A fresh machine never sees it: aisquare-cli carries its
@@ -6559,15 +6559,13 @@ def remote_install_hint() -> str:
     import importlib.util
     import sys
 
-    from aisquare.core.version import DISTRIBUTION
-
     prefix = Path(sys.prefix)
     if (prefix / "uv-receipt.toml").is_file():
         return _remote_uv_tool_hint(prefix / "uv-receipt.toml")
     if (prefix / "pipx_metadata.json").is_file():
         needed = (*REMOTE_EXTRA, "segno")
         missing = [name for name in needed if importlib.util.find_spec(name) is None]
-        return f"pipx inject {DISTRIBUTION} {' '.join(missing or REMOTE_EXTRA)}"
+        return f"pipx inject {_own_name(prefix)} {' '.join(missing or REMOTE_EXTRA)}"
     python = _remote_shell_word(sys.executable)
     extra = _remote_shell_word(DISTRIBUTION)
     if _remote_made_by_uv(prefix):
@@ -6575,6 +6573,13 @@ def remote_install_hint() -> str:
     if sys.platform == "win32" and python.startswith('"'):
         return f"& {python} -m pip install {extra} (in cmd.exe, without the &)"
     return f"{python} -m pip install {extra}"
+
+
+def _own_name(prefix: Path) -> str:
+    """The name the environment at ``prefix`` was installed under (#137): a uv tool's and a
+    pipx venv's directory are named for it; else this install's distribution."""
+    named = re.sub(r"[-_.]+", "-", prefix.name).lower()
+    return named if named in DISTRIBUTIONS else DISTRIBUTION
 
 
 _UV_SOURCES = ("url", "path", "directory", "editable", "git")
@@ -6611,22 +6616,21 @@ def _remote_uv_tool_hint(receipt: Path) -> str:
     import sys
     import tomllib
 
-    from aisquare.core.version import DISTRIBUTION
-
     running = f"{sys.version_info.major}.{sys.version_info.minor}"
+    own = _own_name(receipt.parent)
     try:
         tool = tomllib.loads(receipt.read_text(encoding="utf-8"))["tool"]
         requirements = tool["requirements"]
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
         tool, requirements = {}, None
     if not isinstance(requirements, list) or not requirements:
-        as_installed = ["--python", running, "--with", "tiktoken", DISTRIBUTION]
+        as_installed = ["--python", running, "--with", "tiktoken", own]
         return " ".join(
             _remote_shell_word(word) for word in ["uv", "tool", "install", *as_installed]
         )
     said = _remote_uv_tool_words(tool, requirements, running)
     if said is None:
-        return f"install {DISTRIBUTION} again with uv tool install, as {receipt} records it"
+        return f"install {own} again with uv tool install, as {receipt} records it"
     return " ".join(_remote_shell_word(word) for word in said)
 
 
@@ -6635,8 +6639,6 @@ def _remote_uv_tool_words(
 ) -> list[str] | None:
     """The words of :func:`_remote_uv_tool_hint`'s command; ``None`` when they would drop
     something the receipt records."""
-    from aisquare.core.version import DISTRIBUTION
-
     python, points = tool.get("python", running), tool.get("entrypoints", [])
     main, *others = requirements
     if (
@@ -6644,7 +6646,8 @@ def _remote_uv_tool_words(
         or not isinstance(points, list)
         or any(tool.get(key) for key in _UV_FROM_FILES)
         or not isinstance(main, dict)
-        or main.get("name") != DISTRIBUTION
+        # Either name (#137): the install's own, which its receipt holds.
+        or re.sub(r"[-_.]+", "-", str(main.get("name"))).lower() not in DISTRIBUTIONS
     ):
         return None
     froms = [point.get("from") for point in points if isinstance(point, dict)]

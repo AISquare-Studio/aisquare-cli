@@ -44,6 +44,7 @@ from pydantic import BaseModel, ValidationError
 from aisquare.core import harness
 from aisquare.core.paths import aisquare_home
 from aisquare.core.personas import BODY_SOFT_CAP, SKILL_NAME_MAX
+from aisquare.core.version import DISTRIBUTION
 
 if TYPE_CHECKING:
     from aisquare.services.agent_launch import ResolvedAgent
@@ -372,7 +373,7 @@ def draft_with_api(
         import anthropic
     except ImportError:
         raise EngineUnavailable(
-            "api engine: the anthropic SDK is not installed — pip install 'aisquare-cli[llm]'"
+            f"api engine: the anthropic SDK is not installed — pip install '{DISTRIBUTION}[llm]'"
         ) from None
     if cancel is not None and cancel.is_set():
         raise ImportCancelled("the import was cancelled before the api engine started")
@@ -496,7 +497,7 @@ def draft(
             reasons.append(str(exc))
     fixes = (
         "start or bind a manager (its agent on PATH and signed in), or install "
-        "aisquare-cli[llm] and provide Anthropic credentials"
+        f"{DISTRIBUTION}[llm] and provide Anthropic credentials"
     )
     raise ImportRefused(
         f"no import engine could run ({'; '.join(reasons)}) — {fixes}",

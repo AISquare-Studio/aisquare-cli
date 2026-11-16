@@ -2198,12 +2198,15 @@ def _remedy(inside: Path, writes: SandboxWrites) -> str:
     out; a directory given the sandbox (``--add-dir``, ``writable_roots``, a profile's
     ``write`` path), drop it or move the install; the workspace, inside the project,
     install it elsewhere, above the project (a launch from the home), launch from the
-    project (r12, findings 6 and 14). The distribution is ``aisquare-cli``."""
+    project (r12, findings 6 and 14). The distribution is this install's own name
+    (``version.DISTRIBUTION``, #137)."""
     from aisquare.core.workspace import project_tree, real_project_root
 
     real = _resolved_writes(writes)
     root = real.root_of(_resolved(inside))
-    elsewhere = "(`uv tool install aisquare-cli`, or `pipx install aisquare-cli`)"
+    from aisquare.core.version import DISTRIBUTION
+
+    elsewhere = f"(`uv tool install {DISTRIBUTION}`, or `pipx install {DISTRIBUTION}`)"
     if root is not None and root in real.temporary:
         return (
             f"install aisquare outside {root}, which every such sandbox may write "

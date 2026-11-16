@@ -12,8 +12,9 @@ import typer
 from aisquare.cli.common import fail
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+from aisquare.core.version import DISTRIBUTION
 
-_INSTALL_HINT = "pip install 'aisquare-cli[serve]' (or: pipx inject aisquare-cli mcp)"
+_INSTALL_HINT = f"pip install '{DISTRIBUTION}[serve]' (or: pipx inject {DISTRIBUTION} mcp)"
 
 #: The module ``services.mcp_server.build_server`` actually imports. Probing the
 #: DISTRIBUTION instead (``find_spec("mcp")``) is not enough: mcp 1.x ships a

@@ -53,6 +53,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.keys import Drop, Translation, translate
 from aisquare.core.store import SqliteStore, store_session
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import (
     ClaudeAccount,
     FleetAgent,
@@ -4151,7 +4152,7 @@ def test_the_fleet_refuses_a_codex_agent_whose_sandbox_may_write_its_aisquare(
     inside = project.root / ".venv" / "bin" / "python"
     monkeypatch.setattr(store_broker, "install_paths", lambda *args, **kwargs: (inside,))
 
-    with pytest.raises(fleet_service.FleetError, match="aisquare-cli"):
+    with pytest.raises(fleet_service.FleetError, match=f"uv tool install {DISTRIBUTION}"):
         fleet_service.spawn(project, "tester", agent="codex", worktree=False)
 
     assert tmux.sessions == {}
@@ -4180,7 +4181,7 @@ def test_a_replacement_its_sandbox_would_refuse_is_refused_before_the_agent_stop
     inside = codex.project.root / ".venv"
     monkeypatch.setattr(store_broker, "install_paths", lambda *args, **kwargs: (inside,))
 
-    with pytest.raises(fleet_service.FleetError, match="aisquare-cli"):
+    with pytest.raises(fleet_service.FleetError, match=f"uv tool install {DISTRIBUTION}"):
         fleet_service.restart(codex.project, codex.agent.label)
 
     assert tmux.typed == [] and tmux.killed == [], "nothing typed into or killed"

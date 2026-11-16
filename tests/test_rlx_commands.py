@@ -15,14 +15,16 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
-from aisquare.cli import app as app_module
+from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import main
 from aisquare.core import agents as agent_core
 from aisquare.core import instance_scan
+from aisquare.core.version import __version__
 from aisquare.services import diagnostics, install_route, lifecycle
 from aisquare.services.install_route import Facts, InstallRoute, UvReceipt
 
@@ -31,8 +33,11 @@ NAMES = ("aisquare", "asq", "rlx", "relax")
 
 
 def _run_main(monkeypatch: pytest.MonkeyPatch, name: str, *args: str) -> int:
-    """``main`` as the console script ``<name>`` runs it, its exit code."""
+    """``main`` as the console script ``<name>`` runs it, its exit code. Click names the
+    program after ``__main__``'s package when it has one (``python -m pytest`` here); a
+    console script's ``__main__`` has none, so its name is ``argv[0]``'s."""
     monkeypatch.setattr(sys, "argv", [f"/opt/tools/aisquare-cli/bin/{name}", *args])
+    monkeypatch.setitem(sys.modules, "__main__", types.ModuleType("__main__"))
     try:
         main()
     except SystemExit as exc:
@@ -65,7 +70,7 @@ def test_version_is_the_packages_under_every_name(
     code = _run_main(monkeypatch, name, "--version")
 
     assert code == 0
-    assert capsys.readouterr().out == f"aisquare {app_module.__version__}\n"
+    assert capsys.readouterr().out == f"aisquare {__version__}\n"
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -73,8 +78,8 @@ def test_the_bare_name_opens_what_bare_asq_opens(
     monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     opened: list[str] = []
-    monkeypatch.setattr(app_module.fleet, "interactive_terminal", lambda: True)
-    monkeypatch.setattr(app_module.fleet, "ui", lambda: opened.append(name))
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    monkeypatch.setattr(fleet_cli, "ui", lambda: opened.append(name))
 
     code = _run_main(monkeypatch, name)
 

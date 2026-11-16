@@ -3417,10 +3417,10 @@ refuse_taken_commands() {
 $_rt_taken
 EOF_TAKEN
     if [ "$_rt_count" = 1 ]; then
-        _rt_what="is another program's, and $PYPI_PACKAGE now installs a $_rt_names command there"
+        _rt_what="is another program's, and $PYPI_PACKAGE now installs its own $_rt_names command there"
         _rt_them="it"
     else
-        _rt_what="are another program's, and $PYPI_PACKAGE now installs $_rt_names commands there"
+        _rt_what="are another program's, and $PYPI_PACKAGE now installs its own $_rt_names commands there"
         _rt_them="them"
     fi
     printf '%serror%s %s\n' "$C_RED" "$C_RESET" \

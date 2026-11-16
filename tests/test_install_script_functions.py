@@ -4451,8 +4451,8 @@ def test_a_run_that_installs_the_cli_stops_on_another_programs_command_in_one_li
     assert result.returncode == 1, result.stdout + result.stderr
     assert "went-on" not in result.stdout
     assert result.stderr == (
-        "error ~/.local/bin/relax is another program's, and aisquare-cli now installs a relax "
-        "command there: rename or move it, then run this again. Nothing was changed.\n"
+        "error ~/.local/bin/relax is another program's, and aisquare-cli now installs its own "
+        "relax command there: rename or move it, then run this again. Nothing was changed.\n"
     )
 
 
@@ -4467,8 +4467,8 @@ def test_two_taken_commands_are_named_in_the_one_line(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert result.stderr == (
         "error ~/.local/bin/rlx and ~/.local/bin/relax are another program's, and aisquare-cli "
-        "now installs rlx and relax commands there: rename or move them, then run this again. "
-        "Nothing was changed.\n"
+        "now installs its own rlx and relax commands there: rename or move them, then run this "
+        "again. Nothing was changed.\n"
     )
 
 

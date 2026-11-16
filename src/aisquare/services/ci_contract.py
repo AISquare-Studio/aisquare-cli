@@ -295,9 +295,10 @@ class Briefing(BaseModel):
         elif self.status == "empty":
             if self.items:
                 raise ValueError("an empty briefing must carry no items")
-        elif self.status == "unavailable":
-            if self.items or self.rendered_context or self.token_count:
-                raise ValueError("an unavailable briefing must carry nothing")
+        elif self.status == "unavailable" and (
+            self.items or self.rendered_context or self.token_count
+        ):
+            raise ValueError("an unavailable briefing must carry nothing")
         return self
 
 

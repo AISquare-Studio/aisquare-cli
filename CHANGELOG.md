@@ -8,10 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **`rlx` and `relax` start aisquare, as `asq` and `aisquare` do.** The product's name is
-  now rlx, short for relax, and all four commands run the same thing: bare `rlx` opens the
-  fleet UI, `rlx --help` names itself, and `rlx --install-completion` sets up completion for
-  `rlx`. The one-line installer, `aisquare upgrade` and asq's *Update* put the two new
+- **`rlx` and `relax` start aisquare, as `asq` and `aisquare` do.** All four commands run
+  the same thing: bare `rlx` opens the fleet UI, `rlx --help` names itself, and
+  `rlx --install-completion` sets up completion for `rlx`. The one-line installer, `aisquare upgrade` and asq's *Update* put the two new
   commands in `~/.local/bin` beside the others. Hooks still call `aisquare`, whichever
   command connected them.
 - **Another program's `rlx` or `relax` is never replaced or deleted.** When `~/.local/bin`
@@ -28,6 +27,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The product is named rlx, short for relax.** The README is titled rlx and opens with
+  what it does for you: one place for your Claude Code and Codex agents across your
+  projects, a manager you talk to in plain words, account usage managed for you, memory
+  that carries across sessions, and a command for everything. It writes its commands as
+  `rlx …` and names only what is live. The Codex plugin's page, CONTRIBUTING, SECURITY and
+  the two pages the README links say rlx too. The package is still `aisquare-cli` on PyPI,
+  and its keywords there name rlx.
 - **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count
   beside it is as before (`rlx · 3 live`), and nothing else in the sidebar moves, at any
   width.

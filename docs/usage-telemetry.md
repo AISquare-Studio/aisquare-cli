@@ -1,6 +1,6 @@
 # Usage sharing: what is sent, what never is, and the wire contract
 
-aisquare can send AISquare **anonymous daily counts of how it is used**, so that the people who
+rlx can send AISquare **anonymous daily counts of how it is used**, so that the people who
 build it know what to improve. It is **off by default**. Nothing leaves your machine until you
 turn it on, you can see what would be sent first, and you can turn it off with one click.
 
@@ -8,8 +8,8 @@ Turn it on or off, either way:
 
 - the one-time question the UI asks after you have set up a project, or the button at the top of
   *Settings ▸ Usage & stats* (*Turn sharing on* / *Turn sharing off*, and *What's shared*);
-- `aisquare metrics share on`, `aisquare metrics share off`, `aisquare metrics share status`;
-- see the body of the next shipment: `aisquare metrics share preview`. With sharing on it is
+- `rlx metrics share on`, `rlx metrics share off`, `rlx metrics share status`;
+- see the body of the next shipment: `rlx metrics share preview`. With sharing on it is
   exactly that body (built by the same code, the transcripts read first). Otherwise (sharing off,
   forced off, or switched on by hand with `config set sharing.enabled true` before this
   installation has an id) it is captioned as what it is: a **sample** of your last 31 days with
@@ -40,23 +40,23 @@ Counts, per local calendar day, and nothing else:
   A Codex agent and the tasks it marked done are not in these counts: one marked in its shell or
   through its sandbox's broker is its own whether or not it names its session (`--as`), and one
   you mark done `--as` a Codex agent's session is that agent's too.
-- **Your installation**: aisquare's version, your operating system and its version, the CPU
-  architecture, the Python version and how aisquare was installed (`brew`, `pipx`, `uv`, `pip`,
+- **Your installation**: rlx's version, your operating system and its version, the CPU
+  architecture, the Python version and how rlx was installed (`brew`, `pipx`, `uv`, `pip`,
   `script`, `unknown`), and a **random id** made the first time you turn sharing on (a UUID that
   is not derived from you or your machine).
 
 ### Every repository you run Claude Code in
 
 Usage is counted for **every repository you run Claude Code in, including ones you have not
-added to aisquare**: the local sweep reads the transcripts of every session on the machine, and
+added to rlx**: the local sweep reads the transcripts of every session on the machine, and
 `[projects] capture` (which decides whether a hook records rows for a directory nobody added)
 does not change that. When you turn sharing on, those repositories are part of the repository
 counts that are sent, each as a salted hash with four coarse traits, like any other. This is
 said wherever sharing is switched on: in the question, in the description of the switch in
-Settings ▸ Usage & stats, and when `aisquare metrics share on` turns it on. A project you forgot
+Settings ▸ Usage & stats, and when `rlx metrics share on` turns it on. A project you forgot
 with `project forget --purge` is not counted, shown or sent again, by the sweep or by the Stop
 hook. Codex's sessions, which the sweep reads too, are counted on your machine (Usage & stats,
-`aisquare metrics stats`) and never sent: sharing covers Claude Code's alone, its tokens,
+`rlx metrics stats`) and never sent: sharing covers Claude Code's alone, its tokens,
 repositories, sessions and accounts, its agents alone in the fleet counts (agents started by
 role, tasks done) and the commands of its launches and yours alone in the feature counts. A day
 with only Codex activity sends no record.
@@ -110,14 +110,14 @@ the attempt is retried after the backoff.
 
 ## Switching it off
 
-`aisquare metrics share off` (or the button) turns it off at once, deletes what was kept about what
+`rlx metrics share off` (or the button) turns it off at once, deletes what was kept about what
 was sent, and sends **one** notice that you opted out (only if anything was ever sent). A shipment
 already under way is stopped: it looks at the switch again before every request, so at most the
 request that is already out finishes (5 seconds at most), and nothing it would have recorded is
 written after the deletion. Nothing is sent after the notice until you turn sharing on again. Saying
 *off* is also the answer to the one-time question, which is not asked afterwards. These force it off whatever the switch says, and
 suppress the question: `DO_NOT_TRACK=1`, `AISQUARE_NO_TELEMETRY=1`, and any `CI` run.
-`aisquare metrics share reset-id` gives the installation a new id and salt.
+`rlx metrics share reset-id` gives the installation a new id and salt.
 
 ## Where it lives in the code
 

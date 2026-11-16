@@ -431,8 +431,7 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
     launcher = (root / "plugins" / "claude-code" / "scripts" / "aisquare-hook").read_text("utf-8")
 
     assert (
-        "`aisquare upgrade`" in changed
-        and f"`aisquare {' '.join(lifecycle.REFRESH_HOOKS[:2])}`" in changed
+        "`rlx upgrade`" in changed and f"`rlx {' '.join(lifecycle.REFRESH_HOOKS[:2])}`" in changed
     )
     assert install_route.PYPI_JSON_URL in sent and "User-Agent" in sent
     upgrades = " ".join(sent.split("**Upgrades.**")[1].split("\n- **")[0].split())
@@ -449,7 +448,7 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
         "the launcher still asks uv for a Python"
     )
     assert "CPython" in plugin and "UV_PYTHON_DOWNLOADS" in plugin, plugin
-    assert "`aisquare uninstall`" in changed and "`--purge`" in changed, "uninstall too"
+    assert "`rlx uninstall`" in changed and "`--purge`" in changed, "uninstall too"
     assert "Keychain" in changed, "a purge leaves the macOS slots' tokens, and says so"
 
 

@@ -438,7 +438,9 @@ def test_doctor_has_no_captain_row_when_on() -> None:
 REPO = Path(__file__).resolve().parent.parent
 
 
-@pytest.mark.parametrize("page", ["CHANGELOG.md", "README.md"])
+#: The README left the list with rlx (the owner, 2026-11-16): it names only what is live, so
+#: it says nothing of the captain (tests/test_readme_presents_rlx.py holds it to that).
+@pytest.mark.parametrize("page", ["CHANGELOG.md"])
 def test_the_docs_say_it_is_experimental_and_how_to_turn_it_on(page: str) -> None:
     text = (REPO / page).read_text(encoding="utf-8")
     assert "experimental" in text

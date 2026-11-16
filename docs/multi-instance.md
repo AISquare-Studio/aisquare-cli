@@ -1,8 +1,9 @@
-# Running more than one asq on one home
+# Running more than one rlx on one home
 
-You can run asq at the Mac and, at the same time, over SSH into that same Mac. Both use the same
+You can run rlx at the Mac and, at the same time, over SSH into that same Mac. Both use the same
 home (`~/.aisquare`) and the same fleet. This page explains what the two share, what only one of
-them holds at a time, and what asq does to keep two releases from running against one home.
+them holds at a time, and what rlx does to keep two releases from running against one home.
+Below, a running rlx is called an asq, as its own messages call it.
 
 ## Seeing them
 
@@ -16,17 +17,17 @@ them holds at a time, and what asq does to keep two releases from running agains
   `Mac` (`local` on Linux) is an asq at this machine, `ssh` is one reached from another machine,
   and a host name is an asq on another machine that shares the home. Hover the chip to see each
   asq's version, host, pid, terminal and start time. With one asq open, the chip is hidden.
-- **The command.** `aisquare instances` lists the live asqs: their kind, host, pid, version, when
+- **The command.** `rlx instances` lists the live asqs: their kind, host, pid, version, when
   each started and how long ago it last checked in. `--json` gives the same list as an object,
   `{"instances": [...]}`. Each entry is the asq's record plus `heartbeat_age_s` and `this`.
 
   ```sh
-  aisquare instances
-  aisquare instances --json
+  rlx instances
+  rlx instances --json
   ```
 
-- **The doctor.** `aisquare doctor` (and asq's Doctor page) has an `asq instances` row. It is ok
-  when every live asq runs this aisquare's release and store schema, and warns when one doesn't.
+- **The doctor.** `rlx doctor` (and asq's Doctor page) has an `asq instances` row. It is ok
+  when every live asq runs this release and store schema, and warns when one doesn't.
 
 Every asq writes a small record to `~/.aisquare/instances/` when it starts, refreshes it every
 5 seconds, and removes it when it quits. A crashed asq's record is ignored at once, and deleted
@@ -58,14 +59,14 @@ Some things can only have one holder. Whichever asq takes it first keeps it unti
   as recorded elsewhere, never another login's. A sign-out or an expired login that the Mac saw
   shows the same way over SSH. To refresh the readings, open asq on the Mac, or run
   `security unlock-keychain` in the SSH session.
-- The transcript sweep for *Usage & stats*, and `aisquare watch`, each run in one process at a
+- The transcript sweep for *Usage & stats*, and `rlx watch`, each run in one process at a
   time, as before.
 
-## SSH can't start the fleet's tmux server (macOS)
+## SSH and the fleet's tmux server (macOS)
 
 On macOS a tmux server belongs to the login that started it, and so does every pane it opens.
 Agents in a server started from an SSH login can't read their Claude Code login from the Keychain.
-So asq refuses to start the fleet's tmux server from an SSH login:
+So asq refuses to start the fleet's tmux server from an SSH login for a Claude Code agent:
 
 ```text
 not started: start asq on the Mac first: agents started from an SSH login can't read the Keychain
@@ -74,6 +75,10 @@ not started: start asq on the Mac first: agents started from an SSH login can't 
 Start the first agent in asq at the Mac. After that, a fleet server is running and agents spawn
 into it from SSH as usual. Only starting the server is refused. A server that the Mac started
 stays the Mac's, whoever attaches to it later.
+
+A Codex agent keeps its login in a file in its home (`auth.json`), so it can start the server from
+SSH. asq marks a server started that way, and opens no Claude Code agent in it, from SSH or at the
+Mac: `rlx fleet shutdown --all` ends it, and the Mac starts the next one.
 
 ## One release per home: the version gate and the quit offer
 
@@ -109,6 +114,6 @@ Some refusals come without a question, because there is nothing this asq can ask
 The one case asq starts without the check is a home it can't write to. It says so once, and the
 other asqs won't see it.
 
-`aisquare upgrade` and `aisquare uninstall` refuse while another asq runs on the home (asqs of
+`rlx upgrade` and `rlx uninstall` refuse while another asq runs on the home (asqs of
 0.9.2 or later; quit a 0.9.1 asq yourself), and asq's own Update and Uninstall buttons do too.
 Quit the other asqs first.

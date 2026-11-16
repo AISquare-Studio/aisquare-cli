@@ -2270,8 +2270,8 @@ def test_aisquare_board_names_each_session_as_the_left_pane_does(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#140: the board's text names a session by its label (the manager, which has none, by
-    its role) and the owner's own note by "you", where it read ``role·<id>``; ``--json`` keeps
-    the ids, and the agent-facing text it is not."""
+    its role) and the owner's own note by "owner", where it read ``role·<id>`` and ``cli``;
+    ``--json`` keeps the ids."""
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     _start(runner, CODER, work_dir)
     monkeypatch.setenv("AISQUARE_ROLE", "manager")
@@ -2288,6 +2288,6 @@ def test_aisquare_board_names_each_session_as_the_left_pane_does(
     assert board.exit_code == 0, board.output
     assert "  - coder-auth — " in board.stdout and "  - manager — " in board.stdout
     assert "coder-auth note: PR ready" in board.stdout
-    assert "you note: ship it" in board.stdout
+    assert "owner note: ship it" in board.stdout, "agents run it too: never 'you'"
     assert "bbbb2222" not in board.stdout and "aaaa1111" not in board.stdout
     assert {s["id"] for s in shown["sessions"]} >= {CODER, PLANNER}, "--json keeps the ids"

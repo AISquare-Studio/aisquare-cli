@@ -3,9 +3,10 @@
 The owner, verbatim: "the board currently has persona.<id> sort of format which is impossible to
 understand, can that be just the name shown on left pane". On the HUMAN board — asq's board view,
 ``board -w`` and ``aisquare board``'s text — a session is its fleet row's label, as a relabel left
-it, else the label it started under, else its role (the manager has none); a line no session
-wrote is the person's, "you". Two sessions of one name are told apart only then. The agent-facing
-text (hook deltas, the start pack, the MCP board, ``team verify``) and every ``--json`` keep ids.
+it, else the label it started under, else its role (the manager has none). A line no session
+wrote is "you" in the views and "owner" in ``aisquare board``'s text, which agents run too.
+Two sessions of one name are told apart only then. The agent-facing text (hook deltas, the
+start pack, the MCP board, ``team verify``) and every ``--json`` keep ids.
 """
 
 from __future__ import annotations
@@ -224,7 +225,8 @@ def test_aisquare_board_s_text_names_sessions_claims_and_authors() -> None:
     assert "  - manager — " in text and "  - coder-auth — " in text
     assert "[doing @coder-auth] wire auth" in text
     assert "  - coder-auth note: PR ready" in text
-    assert "  - you note: ship it" in text
+    # "owner", not "you": agents run aisquare board too, and would read "you" as their own.
+    assert "  - owner note: ship it" in text and "you note" not in text
     assert "2222bbbb" not in text and "1111aaaa" not in text
 
 

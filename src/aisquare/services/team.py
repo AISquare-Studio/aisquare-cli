@@ -3767,9 +3767,13 @@ def hook_stop_failure(
 
 
 PERSON = "you"
-"""What the human board calls the owner, the author of a line no session wrote (a note
-from the CLI, asq or the phone): the word the app uses for the person (#140). Agent-facing
-lines keep ``cli``."""
+"""What a board VIEW calls the owner, the author of a line no session wrote (a note from the
+CLI, asq or the phone): the word the app uses for the person (#140). Only people read asq's
+board and ``board -w``."""
+
+OWNER = "owner"
+"""The owner, in ``aisquare board``'s text (#140): agents run that command too, and would read
+"you note: …" as their own. The agent-facing lines keep ``cli``."""
 
 
 def board_name(session: TeamSession, live: Mapping[str, str] | None = None) -> str:
@@ -5869,12 +5873,12 @@ def event_line(
     """``583dc9a8 (manager) added → coder: [#12 tsk_…] title``; ``numbers`` is the board's
     task id → number (``store.task_numbers``), so the task reads as the board shows it. With
     ``names`` (:func:`board_names`), a person's board: ``manager added → coder: …``, and
-    :data:`PERSON` for a line no session wrote (#140)."""
+    :data:`OWNER` for a line no session wrote (#140)."""
     if names is not None:
         who = (
             (names.get(event.session_id) or short_id(event.session_id))
             if event.session_id
-            else PERSON
+            else OWNER
         )
     else:
         who = (

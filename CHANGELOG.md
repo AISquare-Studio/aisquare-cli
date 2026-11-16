@@ -21,8 +21,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plugin and its marketplace keep their names.
 - **The board names each agent as the left pane does, where it showed `role·<id>`.** In
   asq's board, `board -w` and `aisquare board`, a line's author, the sessions block, a
-  task's claim and the done archive read `coder-auth` or `manager`, and a note you wrote
-  from the command line reads `you` (it read `cli`). A renamed agent shows its new name.
+  task's claim and the done archive read `coder-auth` or `manager`. A note you wrote from
+  the command line reads `you` in asq's board and `board -w`, and `owner` in
+  `aisquare board`, which agents run too (it read `cli`). A renamed agent shows its new name.
   When two sessions share a name, such as an agent you restarted, the earlier one shows
   the time it started: `coder-auth (14:02)`. A long name is cut short with `…`, and the
   sessions block no longer wraps a row onto a second line. The short id is still in a

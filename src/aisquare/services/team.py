@@ -3779,15 +3779,30 @@ def board_name(session: TeamSession, live: Mapping[str, str] | None = None) -> s
     return (live or {}).get(session.id) or session.label or session.role
 
 
+BOARD_NAME_CELLS = 24
+"""The most a board VIEW gives a name (asq's board, ``board -w``): a longer label ends in ``…``,
+so a feed line or a sessions row keeps its chip, as ``role·<id>`` (at most 17) did (#140)."""
+
+
+def _fit(name: str, cells: int | None) -> str:
+    return name if cells is None or len(name) <= cells else name[: max(cells - 1, 1)] + "…"
+
+
 def board_names(
-    sessions: Sequence[TeamSession], live: Mapping[str, str] | None = None
+    sessions: Sequence[TeamSession],
+    live: Mapping[str, str] | None = None,
+    *,
+    cells: int | None = None,
 ) -> dict[str, str]:
     """Session id → :func:`board_name`, what the HUMAN board calls each session (#140), in place
     of ``role·<id>``. Two sessions of one name (a restarted agent, an earlier round's agent of
     the same label) are told apart only then: the live one, else the newest, keeps the name,
     and each other gets the time it started, ``coder-1 (14:02)``, or its short id where that
-    time is shared too. The agent-facing lines keep ids (:func:`authors_of`)."""
+    time is shared too. ``cells`` caps each (:data:`BOARD_NAME_CELLS` for a view), the name
+    shortened and never what tells it apart. The agent-facing lines keep ids
+    (:func:`authors_of`)."""
     names = {session.id: board_name(session, live) for session in sessions}
+    told_apart: set[str] = set()
     groups: dict[str, list[TeamSession]] = {}
     for session in sessions:
         groups.setdefault(names[session.id], []).append(session)
@@ -3801,9 +3816,12 @@ def board_names(
         for session in others:
             stamp = stamps[session.id]
             shared = sum(1 for other in stamps.values() if other == stamp) > 1
-            names[session.id] = f"{name} ({short_id(session.id) if shared else stamp})"
+            suffix = f" ({short_id(session.id) if shared else stamp})"
+            room = None if cells is None else cells - len(suffix)
+            names[session.id] = _fit(name, room) + suffix
+            told_apart.add(session.id)
         names[kept.id] = name
-    return names
+    return {sid: name if sid in told_apart else _fit(name, cells) for sid, name in names.items()}
 
 
 def live_labels(store: ContextStore, sessions: Sequence[TeamSession]) -> dict[str, str]:

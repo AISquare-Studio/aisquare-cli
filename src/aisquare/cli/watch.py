@@ -500,7 +500,7 @@ def board_frame(height: int, width: int, project: ProjectInfo | None = None) -> 
         events=200, project=project, exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
     )
     project, sessions, tasks, events, switches = read[:5]
-    names = team_service.board_names(sessions, read.live)
+    names = team_service.board_names(sessions, read.live, cells=team_service.BOARD_NAME_CELLS)
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(
         f"aisquare board — {project.root.name or project.id} — {datetime.now():%H:%M:%S}\n",

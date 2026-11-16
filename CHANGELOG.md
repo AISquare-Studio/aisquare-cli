@@ -19,6 +19,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installers, the README and docs, `rlx doctor`'s issue link and the plugins' manifests.
   Links to the old name keep working, since GitHub redirects them, and the package, the
   plugin and its marketplace keep their names.
+- **The board names each agent as the left pane does, where it showed `role·<id>`.** In
+  asq's board, `board -w` and `aisquare board`, a line's author, the sessions block, a
+  task's claim and the done archive read `coder-auth` or `manager`, and a note you wrote
+  from the command line reads `you` (it read `cli`). A renamed agent shows its new name.
+  When two sessions share a name, such as an agent you restarted, the earlier one shows
+  the time it started: `coder-auth (14:02)`. A long name is cut short with `…`, and the
+  sessions block no longer wraps a row onto a second line. The short id is still in a
+  line's or a task's detail, and `o` still opens the right transcript. Agents still see
+  ids, as they address each other by them, and every `--json` is unchanged.
 
 ## [0.10.0] - 2026-11-16
 

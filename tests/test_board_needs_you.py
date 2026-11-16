@@ -375,3 +375,22 @@ def test_a_restart_tells_the_earlier_session_s_feed_lines_apart(board: dict[str,
     assert " coder-auth 💬 noted: first try" in before
     assert f" coder-auth ({stamp}) 💬 noted: first try" in redrawn
     assert " coder-auth 💬 noted: second try" in new
+
+
+def test_a_long_name_never_wraps_the_sessions_block(board: dict[str, Any]) -> None:
+    """#140: names are longer than ``role·<id>``. The sessions block is one row a session, its
+    end cut with ``…`` at the border, so it never grows and pushes the task table down."""
+    from textual.widgets import Static
+
+    long = CODER.model_copy(
+        update={"label": "reviewer-board-audit-of-the-whole-release", "state": "waiting"}
+    )
+    board["sessions"] = [MANAGER, long]
+
+    async def go(app: Host, panel: BoardPanel) -> int:
+        panel.refresh_data()
+        await settle_page(app)
+        return panel.query_one("#sessions", Static).region.height
+
+    # Two sessions, a row each, the block's closing newline, and the border's two.
+    assert drive(go) == 2 + 1 + 2, "a long name wrapped the sessions block"

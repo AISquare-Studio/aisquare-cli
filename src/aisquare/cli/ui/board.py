@@ -553,7 +553,7 @@ class BoardPanel(Vertical):
     BoardPanel #board-side.collapsed { display: none; }
     BoardPanel #side-divider.collapsed { display: none; }
     BoardPanel #sessions { height: auto; min-height: 3; border: round $primary;
-                           padding: 0 1; }
+                           padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis; }
     BoardPanel #tasks { height: 1fr; min-height: 4; border: round $primary; }
     BoardPanel #feedpane { width: 1fr; min-width: 32; }
     BoardPanel #feed { height: 1fr; border: round $secondary; }
@@ -726,7 +726,9 @@ class BoardPanel(Vertical):
             return
         self._roles = {s.id: s.role for s in sessions}
         self._live = dict(read.live)
-        self._rename(team_service.board_names(sessions, self._live))
+        self._rename(
+            team_service.board_names(sessions, self._live, cells=team_service.BOARD_NAME_CELLS)
+        )
         self._sessions = {s.id: s for s in sessions}
         self._statuses = {t.id: t.status for t in tasks}
         self._all_tasks = tasks

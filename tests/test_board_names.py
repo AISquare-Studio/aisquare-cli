@@ -257,3 +257,20 @@ def test_the_board_json_keeps_session_ids() -> None:
 
     assert [s["id"] for s in payload["sessions"]] == [MANAGER.id, CODER.id]
     assert payload["tasks"][0]["claimed_by"] == CODER.id
+
+
+def test_a_view_caps_a_long_name_and_never_what_tells_it_apart() -> None:
+    """``board -w`` and asq's board give a name at most ``BOARD_NAME_CELLS``: a long label ends in
+    ``…`` and keeps a row's chip in view; a told-apart name keeps its time whole."""
+    cap = team_service.BOARD_NAME_CELLS
+    long_label = "reviewer-board-audit-of-the-whole-release"
+    reviewer = _session("9999aaaa-rev", "reviewer", long_label)
+    earlier = _session("9999bbbb-old", "reviewer", long_label, started=120, ended=True)
+
+    capped = team_service.board_names([reviewer, earlier, CODER], cells=cap)
+    whole = team_service.board_names([reviewer, earlier, CODER])
+
+    assert capped[reviewer.id] == long_label[: cap - 1] + "…" and len(capped[reviewer.id]) == cap
+    assert capped[earlier.id].endswith(f"… ({_hhmm(120)})") and len(capped[earlier.id]) == cap
+    assert capped[CODER.id] == "coder-auth", "a name that fits is left whole"
+    assert whole[reviewer.id] == long_label, "aisquare board's text keeps every name whole"

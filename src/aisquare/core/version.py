@@ -19,9 +19,13 @@ from importlib.metadata import PackageNotFoundError, version
 
 DISTRIBUTION = "aisquare-cli"
 
+PRODUCT_NAME = "rlx"
+"""The product's name, as its command is spelled (#133): what asq's sidebar header reads.
+The package, the ``aisquare`` and ``asq`` commands and every other name are unchanged."""
+
 try:
     __version__ = version(DISTRIBUTION)
 except PackageNotFoundError:  # pragma: no cover - only when running from a raw checkout
     __version__ = "0.0.0+uninstalled"
 
-__all__ = ["DISTRIBUTION", "__version__"]
+__all__ = ["DISTRIBUTION", "PRODUCT_NAME", "__version__"]

@@ -330,6 +330,7 @@ def _build_app_class(interval: float, project: ProjectInfo | None = None) -> Any
     from aisquare.cli.ui.board import BoardHelp, BoardPanel
     from aisquare.cli.ui.clipboard import ClipboardApp
     from aisquare.cli.ui.theme import (
+        RLX_CSS,
         register_themes,
         restore_theme,
         theme_autosave,
@@ -379,6 +380,7 @@ def _build_app_class(interval: float, project: ProjectInfo | None = None) -> Any
 
     class BoardApp(ClipboardApp[None]):
         TITLE = "aisquare board"
+        CSS = RLX_CSS
         BINDINGS: ClassVar = [
             ("q", "quit", "quit"),
             ("t", "pick_theme", "themes"),

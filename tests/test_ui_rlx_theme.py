@@ -144,6 +144,9 @@ PAIRS: tuple[Pair, ...] = (
     Pair("text-muted", ("background",), TEXT, "dim lines"),
     Pair("text-muted", ("surface",), TEXT, "a dialog's hint"),
     Pair("text-muted", ("panel",), TEXT, "an odd card's subtitle"),
+    Pair("text-disabled", ("background",), TEXT, "an input's placeholder on a page"),
+    Pair("text-disabled", ("surface",), TEXT, "an input's placeholder, disabled text in a dialog"),
+    Pair("text-disabled", ("panel",), TEXT, "disabled text on an odd card"),
 )
 """Each colour ``rlx`` sets, on each ground it is drawn on (the CSS under ``src/aisquare``)."""
 

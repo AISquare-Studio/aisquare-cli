@@ -85,9 +85,38 @@ RLX_THEME = Theme(
         # Both are set as textual-dark draws them, or neither lift would show.
         "boost": "#FFFFFF0A",
         "block-hover-background": "#FFFFFF19",
+        # An input's placeholder and disabled text: Textual's 38% of the text colour is about
+        # 3.5:1 here. 52% reads at 4.5:1 or more on every ground rlx draws.
+        "text-disabled": "auto 52%",
     },
 )
 """Our own theme, and the default one (:data:`DEFAULT_THEME`)."""
+
+RLX_CSS = """
+/* rlx's buttons (#139). Every label in a coloured button is the near-black ground (the theme's
+   button-color-foreground) on a bright fill, so no state may darken that fill: Textual darkens
+   it on hover (-darken-2) and on a press (a 30% tint of the background), which took a label to
+   3:1. Under rlx, a hover brightens the fill and a press keeps it. A disabled button reads too
+   (4.5:1 or more): the muted text colour on the surface, at full opacity, where Textual
+   dims the whole button. Colours only: every size and border stays as it is. */
+App.-theme-rlx Button.-style-default {
+    &.-primary:hover { background: $primary-lighten-1; }
+    &.-success:hover { background: $success-lighten-1; }
+    &.-warning:hover { background: $warning-lighten-1; }
+    &.-error:hover { background: $error-lighten-1; }
+    &.-active { tint: transparent; }
+    &:disabled, &:disabled:hover {
+        opacity: 1;
+        text-opacity: 1;
+        color: $text-muted;
+        background: $surface;
+        border-top: tall $surface-lighten-1;
+        border-bottom: tall $surface-darken-1;
+    }
+}
+"""
+"""The rules ``rlx`` needs beyond its colours. Both apps add them to their own CSS; they
+apply only while the theme is ``rlx`` (Textual puts ``-theme-rlx`` on the app)."""
 
 DEFAULT_THEME = RLX_THEME.name
 """The theme both apps start in while neither ``state.json`` nor ``TEXTUAL_THEME`` names one

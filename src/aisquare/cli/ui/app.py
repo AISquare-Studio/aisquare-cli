@@ -137,6 +137,7 @@ from aisquare.cli.ui.terminal import (
     log_paste,
 )
 from aisquare.cli.ui.theme import (
+    RLX_CSS,
     ThemePicker,
     register_themes,
     restore_theme,
@@ -1123,10 +1124,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     TITLE = "aisquare"
     COMMAND_PALETTE_BINDING = "f1"
-    CSS = """
+    CSS = (
+        """
     #main { height: 1fr; }
     #content { width: 1fr; height: 1fr; }
     """
+        + RLX_CSS
+    )
     BINDINGS: ClassVar = [
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),

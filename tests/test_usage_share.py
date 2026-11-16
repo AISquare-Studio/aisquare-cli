@@ -413,7 +413,7 @@ def test_what_is_previewed_is_what_is_posted(machine: Machine) -> None:
     assert report.sent and len(server.calls) == 1
     assert server.calls[0].body == shown
     check_contract(shown)
-    assert server.calls[0].url.endswith("/api/v1/cli/metrics/")
+    assert server.calls[0].url.endswith("/api/v1/rlx/metrics/")
     assert server.calls[0].timeout == 5.0
 
 
@@ -594,6 +594,34 @@ def test_a_server_error_is_a_failure_and_a_200_without_a_body_is_not_trusted(
 
     assert first.error == "HTTP 503" and (second.error or "").startswith("HTTP 200")
     assert sharing.read().acked == {}
+
+
+def test_the_kill_switch_s_503_keeps_every_day_for_the_next_shipment(machine: Machine) -> None:
+    """The server's ingest ships dark behind a kill switch, and while it is off it answers 503 with
+    `Retry-After: 3600` (AISquare-Studio-BE #3791, its manager's note of 2026-11-16). That is a
+    retry-later, never a refusal: no day is acknowledged or skipped ahead of, the shipment is
+    tried again later, and then it sends the very same days to the endpoint."""
+    _history(machine)
+    _on()
+    dark = Server(status(503, {"detail": "ingest is off"}, **{"Retry-After": "3600"}))
+
+    first = usage_share.ship(now=NOW, tz=IST, transport=dark)
+    state = sharing.read()
+    due = sharing.parse_time(state.next_due_at)
+
+    assert not first.sent and first.error == "HTTP 503" and first.rejected_days == 0
+    assert state.acked == {} and state.failures == 1
+    assert due is not None and due > NOW, "tried again later, not given up and not now"
+    asked = [day["date"] for day in dark.calls[0].body["days"]]
+    assert asked, "the dark server was asked for the days"
+
+    lit = Server()
+    again = usage_share.ship(now=due + timedelta(minutes=1), tz=IST, transport=lit)
+
+    assert again.sent and again.error is None
+    assert lit.calls[0].url.endswith(usage_share.ENDPOINT_PATH)
+    assert [day["date"] for day in lit.calls[0].body["days"]] == asked
+    assert set(sharing.read().acked) == set(asked)
 
 
 def test_two_shippers_at_once_send_one(machine: Machine) -> None:
@@ -993,7 +1021,7 @@ def test_a_later_200_delivers_the_whole_backlog_oldest_first_in_batches_of_31(
     assert flat[-1] == "2026-10-26"  # the last batch ends with today
     for call in server.calls[3:]:
         check_contract(call.body)
-        assert call.url.endswith("/api/v1/cli/metrics/")
+        assert call.url.endswith("/api/v1/rlx/metrics/")
     after = sharing.read()
     assert after.failures == 0 and after.last_error is None and after.last_sent_at is not None
     # none of it is sent again, and the file that tracks it stays small
@@ -1408,7 +1436,7 @@ def test_a_redirect_is_never_followed_and_the_bearer_goes_to_one_origin_only(
         report = usage_share.ship(now=NOW, tz=IST)  # the real transport, over real sockets
 
         assert report.sent is False and report.error == f"HTTP {code}"
-        assert [(m, p) for m, p, _ in home.requests] == [("POST", "/api/v1/cli/metrics/")]
+        assert [(m, p) for m, p, _ in home.requests] == [("POST", "/api/v1/rlx/metrics/")]
         assert home.requests[0][2] == "Bearer aisq_secret_bearer"
         assert other.requests == []  # the redirect target was never contacted
         state = sharing.read()
@@ -1436,7 +1464,7 @@ def test_a_post_that_is_answered_directly_goes_through_the_real_transport(
         report = usage_share.ship(now=NOW, tz=IST)
 
         assert report.sent and report.days == 3
-        assert site.requests == [("POST", "/api/v1/cli/metrics/", None)]  # anonymous: no header
+        assert site.requests == [("POST", "/api/v1/rlx/metrics/", None)]  # anonymous: no header
     finally:
         site.close()
 
@@ -1805,6 +1833,28 @@ def test_a_feature_name_outside_the_contracts_shape_is_not_sent(machine: Machine
     day = usage_share.day_body(rollup, "ab" * 32, signed_in=False)
 
     assert day["features"] == {"cli.fleet.spawn": 3, "tui.launch": 2}
+
+
+def test_a_day_with_keys_outside_the_contracts_shape_still_ships_whole(machine: Machine) -> None:
+    """The server folds a feature key or an agent role outside `^[a-z0-9_.-]{1,64}$` into
+    "other", with no 400 for it (AISquare-Studio-BE #3791, its manager's note of 2026-11-16).
+    So the client holds nothing back for a key's shape: the day still goes, in the same one
+    POST as every other day, and is acknowledged. A name of that shape is left out of the
+    day's features (above) and an invented role is sent as "other", as before."""
+    _history(machine)
+    with store_session() as store:
+        store.add_feature_uses({("2026-10-26", "Has Space"): 2, ("2026-10-26", "x" * 65): 1})
+    _on()
+    server = Server()
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert report.sent and report.error is None and report.rejected_days == 0
+    (call,) = server.calls
+    today = next(day for day in call.body["days"] if day["date"] == "2026-10-26")
+    assert today["features"]["cli.fleet.spawn"] == 3, "the rest of the day went"
+    assert today["fleet"]["agents_spawned"].get("other") == 1, "the invented role went too"
+    assert set(sharing.read().acked) == {day["date"] for day in call.body["days"]}
 
 
 # --- a batch the server refuses for good does not block the newer ones (review of #444, 3) ----

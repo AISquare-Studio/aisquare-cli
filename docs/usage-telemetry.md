@@ -144,8 +144,9 @@ is agreed by both first. **v1.1** is v1 with the amendments of the team board (s
   `rlx metrics share on|off|status|preview`.
 
 ## Endpoint
-`POST {api_url}/api/v1/cli/metrics/` — `api_url` is the same base rlx's
-AISquare sign-in already uses. JSON body, `Content-Type: application/json`.
+`POST {api_url}/api/v1/rlx/metrics/` — `api_url` is the same base rlx's
+AISquare sign-in already uses. JSON body, `Content-Type: application/json`. Releases up to
+0.10.0 post to `/api/v1/cli/metrics/`, which the BE keeps as a deprecated alias until May 2027.
 
 Auth is OPTIONAL:
 - Signed in → rlx sends `Authorization: Bearer aisq_…` (its existing device-flow
@@ -153,7 +154,7 @@ Auth is OPTIONAL:
 - Not signed in → no header. Accepted, stored unlinked.
 - Invalid / expired / revoked / wrong-scope token → BE MUST still accept the
   batch as anonymous (200, `linked: false`), never 401. (DRF's default auth
-  raises before AllowAny; BE uses a lenient auth class.) Belt and braces: the
+  raises before AllowAny; BE uses a lenient auth class.) Belt and braces:
   rlx retries once without the header if it ever gets a 401.
 
 Throttle: per-IP named rate (env-backed, default 120/hour). Body cap 256 KB.

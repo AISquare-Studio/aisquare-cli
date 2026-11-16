@@ -20,8 +20,9 @@ what is and is never collected). This module is its client:
   while sharing is off or forced off (``core.sharing.forced_off_reason``).
 
 The transport is a seam (:data:`Transport`): the tests give :func:`ship` a fake, and no test
-reaches a server. The endpoint (``/api/v1/cli/metrics/`` of ``AISquare-Studio-BE``) is the
-contract's.
+reaches a server. The endpoint (``/api/v1/rlx/metrics/`` of ``AISquare-Studio-BE``) is the
+contract's. Releases up to 0.10.0 post to ``/api/v1/cli/metrics/``, which the server keeps as
+a deprecated alias until May 2027.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ from aisquare.services import settings as settings_service
 
 SCHEMA_VERSION = 1
 log = logging.getLogger("aisquare.usage_share")
-ENDPOINT_PATH = "/api/v1/cli/metrics/"
+ENDPOINT_PATH = "/api/v1/rlx/metrics/"
 WINDOW_DAYS = 31
 """A batch holds at most this many days: today and the 30 before."""
 REJECTED_IN_A_ROW = 3

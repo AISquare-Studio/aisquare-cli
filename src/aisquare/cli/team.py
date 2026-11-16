@@ -1749,7 +1749,10 @@ def board(
         )
         return
     stdout_console().print(
-        team_service.render_board(project, sessions, tasks, events), markup=False
+        team_service.render_board(
+            project, sessions, tasks, events, names=team_service.read_board_names(sessions)
+        ),
+        markup=False,
     )
 
 

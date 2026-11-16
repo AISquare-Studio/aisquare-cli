@@ -2264,3 +2264,30 @@ def test_a_session_start_reads_waiting_for_every_role_until_its_first_prompt(
     assert state() == "working"
     _start(runner, CODER, work_dir, source="resume")
     assert state() == "waiting"
+
+
+def test_aisquare_board_names_each_session_as_the_left_pane_does(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#140: the board's text names a session by its label (the manager, which has none, by
+    its role) and the owner's own note by "you", where it read ``role·<id>``; ``--json`` keeps
+    the ids, and the agent-facing text it is not."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "manager")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    assert runner.invoke(app, ["note", "PR ready", "--as", "bbbb2222"]).exit_code == 0
+    assert runner.invoke(app, ["note", "ship it"]).exit_code == 0
+    with store_session() as store:  # the label a fleet launch gives its session
+        store.update_session(CODER, label="coder-auth")
+
+    board = runner.invoke(app, ["board"])
+    shown = json.loads(runner.invoke(app, ["--json", "board"]).stdout)
+
+    assert board.exit_code == 0, board.output
+    assert "  - coder-auth — " in board.stdout and "  - manager — " in board.stdout
+    assert "coder-auth note: PR ready" in board.stdout
+    assert "you note: ship it" in board.stdout
+    assert "bbbb2222" not in board.stdout and "aaaa1111" not in board.stdout
+    assert {s["id"] for s in shown["sessions"]} >= {CODER, PLANNER}, "--json keeps the ids"

@@ -1238,14 +1238,16 @@ def board_data_in(
 
 
 class BoardRead(NamedTuple):
-    """What a painted board shows: :func:`board_data`'s four, and the ``fleet switch`` of
-    each limited session's chip (:func:`fleet_switches`)."""
+    """What a painted board shows: :func:`board_data`'s four, the ``fleet switch`` of each
+    limited session's chip (:func:`fleet_switches`), and each live session's fleet row's label
+    (:func:`live_labels`), which names it as asq's left pane does (:func:`board_names`, #140)."""
 
     project: ProjectInfo
     sessions: list[TeamSession]
     tasks: list[TeamTask]
     events: list[TeamEvent]
     switches: dict[str, str]
+    live: dict[str, str] = {}  # noqa: RUF012 — a NamedTuple default, never mutated
 
 
 def board_read(
@@ -1275,7 +1277,7 @@ def board_read(
             project=project,
             exclude_kinds=exclude_kinds,
         )
-        return BoardRead(*read, fleet_switches(store, read[1]))
+        return BoardRead(*read, fleet_switches(store, read[1]), live_labels(store, read[1]))
 
 
 def _read_board(
@@ -3764,6 +3766,68 @@ def hook_stop_failure(
     return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 
+PERSON = "you"
+"""What the human board calls the owner, the author of a line no session wrote (a note
+from the CLI, asq or the phone): the word the app uses for the person (#140). Agent-facing
+lines keep ``cli``."""
+
+
+def board_name(session: TeamSession, live: Mapping[str, str] | None = None) -> str:
+    """The name asq's left pane shows for ``session``'s agent (#140): its live fleet row's label
+    (``live``, :func:`live_labels`, as a ``fleet relabel`` left it), else the label it started
+    under, else its role: the manager's row has no label, and the pane shows "manager"."""
+    return (live or {}).get(session.id) or session.label or session.role
+
+
+def board_names(
+    sessions: Sequence[TeamSession], live: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Session id → :func:`board_name`, what the HUMAN board calls each session (#140), in place
+    of ``role·<id>``. Two sessions of one name (a restarted agent, an earlier round's agent of
+    the same label) are told apart only then: the live one, else the newest, keeps the name,
+    and each other gets the time it started, ``coder-1 (14:02)``, or its short id where that
+    time is shared too. The agent-facing lines keep ids (:func:`authors_of`)."""
+    names = {session.id: board_name(session, live) for session in sessions}
+    groups: dict[str, list[TeamSession]] = {}
+    for session in sessions:
+        groups.setdefault(names[session.id], []).append(session)
+    for name, group in groups.items():
+        if len(group) < 2:
+            continue
+        kept, *others = sorted(
+            group, key=lambda s: (s.ended_at is None, s.started_at), reverse=True
+        )
+        stamps = {s.id: f"{s.started_at.astimezone():%H:%M}" for s in others}
+        for session in others:
+            stamp = stamps[session.id]
+            shared = sum(1 for other in stamps.values() if other == stamp) > 1
+            names[session.id] = f"{name} ({short_id(session.id) if shared else stamp})"
+        names[kept.id] = name
+    return names
+
+
+def live_labels(store: ContextStore, sessions: Sequence[TeamSession]) -> dict[str, str]:
+    """Each live session's fleet row's label, by session id: what the left pane shows, which a
+    ``fleet relabel`` changes after the session recorded its own (#140). One indexed lookup per
+    live session (``fleet_agent_for_session``), in the board's own store session. A read that
+    fails costs the relabelled names, never the board: each falls back to its own label."""
+    found: dict[str, str] = {}
+    try:
+        for session in sessions:
+            if session.ended_at is None:
+                agent = store.fleet_agent_for_session(session.id)
+                if agent is not None:
+                    found[session.id] = agent.label
+    except Exception as exc:
+        _log.warning(
+            "the board's names read the labels the sessions started under: their fleet rows "
+            "could not be read (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+    return found
+
+
 def fleet_switches(store: ContextStore, sessions: list[TeamSession]) -> dict[str, str]:
     """The ``fleet switch`` that moves each ``limited`` session's agent, by session id: the
     project and label of its own live fleet row, in whichever project that is.
@@ -4270,8 +4334,13 @@ def render_board(
     sessions: list[TeamSession],
     tasks: list[TeamTask],
     events: list[TeamEvent],
+    *,
+    names: Mapping[str, str] | None = None,
 ) -> str:
-    """The human/board view (``asq board``), without the protocol contract."""
+    """The human/board view (``asq board``), without the protocol contract. With ``names``
+    (:func:`read_board_names`), what ``aisquare board`` prints for a person, each session is
+    named as asq's left pane names its agent (#140); without, as an agent reads it (the MCP
+    board): by its short id and role, which ``--as`` takes."""
     from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
 
     return _render_board(
@@ -4282,7 +4351,20 @@ def render_board(
         me=None,
         labels=accounts_service.slot_labels,
         links=_link_marks(project.id),
+        names=names,
     )
+
+
+def read_board_names(sessions: Sequence[TeamSession]) -> dict[str, str]:
+    """:func:`board_names`, with :func:`live_labels` read in a store session of its own: for a
+    board painted from :func:`board_data` (``aisquare board``), whose session has closed."""
+    try:
+        with store_session() as store:
+            live = live_labels(store, sessions)
+    except Exception as exc:
+        _log.warning("the board's names read the sessions' own labels (%s)", exc)
+        live = {}
+    return board_names(sessions, live)
 
 
 def _render_board(
@@ -4299,6 +4381,7 @@ def _render_board(
     fleet: ProjectInfo | None = None,
     cwd: Path | None = None,
     links: Mapping[str, str] | None = None,
+    names: Mapping[str, str] | None = None,
 ) -> str:
     """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
     name ``fleet`` (:func:`_cycle_project`). ``briefing`` is a session's first injection's
@@ -4330,7 +4413,8 @@ def _render_board(
         lines.append("sessions:")
         for session in live:
             stale = now - session.last_seen_at > _STALE_AFTER
-            parts = [f"  - {short_id(session.id)} {session.role}"]
+            named = names.get(session.id) if names is not None else None
+            parts = [f"  - {named}" if named else f"  - {short_id(session.id)} {session.role}"]
             if me is not None and session.id == me.id:
                 parts.append("(you)")
             label = account_label(session.account, labels)
@@ -4374,7 +4458,8 @@ def _render_board(
         lines.append(f"tasks ({counts}):")
         statuses = {t.id: t.status for t in tasks}
         for task in open_tasks[:_BOARD_TASKS]:
-            claim = f" @{short_id(task.claimed_by)}" if task.claimed_by else ""
+            holder = task.claimed_by
+            claim = f" @{(names or {}).get(holder) or short_id(holder)}" if holder else ""
             waiting = unmet_needs(task, statuses)
             waits = (
                 " ⧗ waits on "
@@ -4392,7 +4477,7 @@ def _render_board(
         lines.append("recent updates:")
         if me is None:  # the human board keeps every event's full text
             roles = {s.id: s.role for s in sessions}
-            lines.extend(f"  - {event_line(event, roles, numbers)}" for event in events)
+            lines.extend(f"  - {event_line(event, roles, numbers, names)}" for event in events)
         else:
             authors = authors_of(sessions)
             lines.extend(f"  - {short_line(event, authors, numbers)}" for event in events)
@@ -5758,15 +5843,27 @@ def _settle_owed_persona(store: ContextStore, session: TeamSession) -> None:
 
 
 def event_line(
-    event: TeamEvent, roles: dict[str, str], numbers: Mapping[str, int] | None = None
+    event: TeamEvent,
+    roles: dict[str, str],
+    numbers: Mapping[str, int] | None = None,
+    names: Mapping[str, str] | None = None,
 ) -> str:
     """``583dc9a8 (manager) added → coder: [#12 tsk_…] title``; ``numbers`` is the board's
-    task id → number (``store.task_numbers``), so the task reads as the board shows it."""
-    who = (
-        f"{short_id(event.session_id)} ({roles.get(event.session_id, '?')})"
-        if event.session_id
-        else "cli"
-    )
+    task id → number (``store.task_numbers``), so the task reads as the board shows it. With
+    ``names`` (:func:`board_names`), a person's board: ``manager added → coder: …``, and
+    :data:`PERSON` for a line no session wrote (#140)."""
+    if names is not None:
+        who = (
+            (names.get(event.session_id) or short_id(event.session_id))
+            if event.session_id
+            else PERSON
+        )
+    else:
+        who = (
+            f"{short_id(event.session_id)} ({roles.get(event.session_id, '?')})"
+            if event.session_id
+            else "cli"
+        )
     target = f" → {event.to_role}" if event.to_role else ""
     number = (numbers or {}).get(event.task_id) if event.task_id else None
     task = ""

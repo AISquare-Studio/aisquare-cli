@@ -4813,3 +4813,19 @@ def test_main_on_a_fresh_machine_installs_rlx(tmp_path: Path) -> None:
         result.stdout + result.stderr
     )
     assert "aisquare-cli" not in result.stdout.split("Written to:")[0].split("this will:")[1]
+
+
+def test_taken_commands_counts_links_into_either_name_s_tool_environment_as_ours(
+    tmp_path: Path,
+) -> None:
+    """#137: rlx and relax linked into tools/rlx/bin (a fresh install's) or into
+    tools/aisquare-cli/bin (one made before the move) are this package's own."""
+    home, tools = _commands_home(tmp_path)
+    bin_dir = home / ".local" / "bin"
+    (bin_dir / "rlx").unlink()
+    (bin_dir / "rlx").symlink_to(tools / "rlx" / "bin" / "rlx")
+    (bin_dir / "relax").symlink_to(tools / "aisquare-cli" / "bin" / "relax")
+
+    result = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+
+    assert (result.returncode, result.stdout) == (0, ""), result.stdout + result.stderr

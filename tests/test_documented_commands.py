@@ -62,7 +62,7 @@ at 22cf599), so no opt-out marker is added; a flag with no user is the
 speculative structure this repo's principles forbid. What is added instead is
 that every failure message names both resolutions, so the guard cannot push
 anyone toward the wrong one. CONTRIBUTING.md's `pip install
-'aisquare-cli[explainability]'` — a command that must NOT be run — is inline code
+'rlx[explainability]'` — a command that must NOT be run — is inline code
 inside a blockquote, which is exactly right and is why it is invisible here.
 
 DIRECTION IS A DECISION, NOT AN ACCIDENT — @9bbc8ed7 was right to ask, since the
@@ -655,13 +655,13 @@ def test_inline_code_is_not_read_as_an_instruction() -> None:
     """
     contributing = REPO / "CONTRIBUTING.md"
     text = contributing.read_text(encoding="utf-8")
-    assert "aisquare-cli[explainability]" in text, (
+    assert "rlx[explainability]" in text, (
         "CONTRIBUTING no longer names the extra — if the warning moved, this "
         "pin needs to move with it rather than being deleted"
     )
 
     fenced = [command for _number, command in _shell_lines(text)]
-    assert not any("aisquare-cli[explainability]" in command for command in fenced), (
+    assert not any("rlx[explainability]" in command for command in fenced), (
         "the do-not-run command is now inside a fenced block, where it reads as "
         "a step rather than a warning"
     )
@@ -693,7 +693,7 @@ def test_the_convention_survives_a_widening_in_both_directions() -> None:
     and this test builds its own invocation list.
     """
     text = (REPO / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    assert "aisquare-cli[explainability]" in text, "the page no longer carries a prohibition"
+    assert "rlx[explainability]" in text, "the page no longer carries a prohibition"
 
     widened = f"{text}\n```sh\naisquare launch coder --config-dir ~/.claude-account1\n```\n"
     invocations = _from_text("CONTRIBUTING.md", widened)
@@ -712,7 +712,7 @@ def test_the_convention_survives_a_widening_in_both_directions() -> None:
     assert any("--config-dir" in item for item in unknown_or_missing)
 
     # Direction 2: the inline prohibition is still invisible, in the SAME pass.
-    assert not any("aisquare-cli[explainability]" in i.text for i in invocations), (
+    assert not any("rlx[explainability]" in i.text for i in invocations), (
         "the inline prohibition was extracted — a warning would be graded as an "
         "instruction the moment this document is listed"
     )
@@ -763,6 +763,12 @@ _NOT_AN_INVOCATION = (
     # otherwise believe it is what classifies URLs.
     ("a URL", re.compile(r"https?://")),
     ("a pip requirement — the package name, not the command", re.compile(r"pip\s+install")),
+    # The package is named rlx, as its command is (#137): `uv tool install … rlx` names the
+    # package to install, and was classified only by `aisquare[/-]` while it said aisquare-cli.
+    (
+        "a uv tool install line — the package name, not the command",
+        re.compile(r"uv\s+tool\s+install"),
+    ),
     # `command -v aisquare` and `which aisquare` name the binary to LOCATE it;
     # the CLI is never run. Both arrived from §0/§5b edits that stopped guessing
     # a path, and `which aisquare` had been INVISIBLE here until then only

@@ -27,13 +27,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The package is `rlx` on PyPI, and every release is also published as `aisquare-cli`.**
+  A new install gets `rlx`: the one-line installer, `uv tool install rlx` or
+  `pip install rlx`. If you installed `aisquare-cli` before, there is nothing to do. Every
+  release goes out under both names, the same package at the same version, and your
+  install keeps updating under its own name, whether it came from the installer,
+  `uv tool`, pipx, pip or uvx. `aisquare upgrade`, asq's *Update*,
+  `uv tool upgrade aisquare-cli` and the one-line installer all keep it as
+  `aisquare-cli`. Nothing puts one name beside the other: the installer stops, in one
+  line, on a machine that has both as uv tools. `aisquare doctor` warns if both are
+  installed in one environment, where they share every file. The README's PyPI badge
+  stays on `aisquare-cli` until `rlx`'s first release is on PyPI.
 - **The product is named rlx, short for relax.** The README is titled rlx and opens with
   what it does for you: one place for your Claude Code and Codex agents across your
   projects, a manager you talk to in plain words, account usage managed for you, memory
   that carries across sessions, and a command for everything. It writes its commands as
   `rlx …` and names only what is live. The Codex plugin's page, CONTRIBUTING, SECURITY and
-  the two pages the README links say rlx too. The package is still `aisquare-cli` on PyPI,
-  and its keywords there name rlx.
+  the two pages the README links say rlx too, and its PyPI keywords name rlx.
 - **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count
   beside it is as before (`rlx · 3 live`), and nothing else in the sidebar moves, at any
   width.

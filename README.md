@@ -52,8 +52,10 @@ On Windows, run `irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-
 in PowerShell: it runs that installer inside your WSL2 distribution, or prints the
 one command that installs WSL2 if there is none.
 
-The package is `aisquare-cli`. Its command is `rlx`; `relax`, `asq` and
-`aisquare` start it too.
+The package is `rlx` on PyPI. Its command is `rlx`; `relax`, `asq` and
+`aisquare` start it too. If you installed it as `aisquare-cli`, its name
+before, there is nothing to do: every release is published under both names,
+and your install keeps updating under its own.
 
 ## Get started
 
@@ -113,7 +115,7 @@ Memory works without the fleet. It needs [uv](https://docs.astral.sh/uv/) and
 inside your repo:
 
 ```sh
-UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 aisquare-cli
+UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 rlx
 cd path/to/your/repo
 rlx init --local --agent claude-code
 rlx remember --user "prefer pytest over unittest"

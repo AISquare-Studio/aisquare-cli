@@ -4,6 +4,11 @@ name: Publish to PyPI
 # Triggered when a GitHub Release is published. The version that ships is whatever
 # is in pyproject.toml, so bump it before tagging the release.
 #
+# Under BOTH of the package's names (#137): rlx, and the same build as aisquare-cli,
+# so every install made before the move keeps upgrading under its own name. PyPI
+# needs a trusted publisher for each project: rlx's, and aisquare-cli's for this
+# repository (AISquare-Studio/rlx, publish.yml, no environment).
+#
 # After the build, `precheck` stamps install.sh and install.ps1 to the release
 # and checks them (installers-check.yml), and the publish waits for it: a wrong
 # tag or a stamp that fails a check stops the release before PyPI, which cannot
@@ -18,17 +23,21 @@ permissions:
 
 jobs:
   build:
-    name: Build sdist + wheel
+    name: Build sdist + wheel, as rlx and as aisquare-cli
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Build
+      # dist/rlx/ and dist/aisquare-cli/, and a red unless both versions are the tag's
+      # and the two wheels' files are identical outside their .dist-info.
+      - name: Build both names, and check they are one package
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           python -m pip install --upgrade build
-          python -m build
+          python scripts/build_dists.py --out dist --tag "$TAG"
       - uses: actions/upload-artifact@v7
         with:
           name: dist
@@ -52,7 +61,19 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # rlx first: a fresh machine installs it. Then aisquare-cli, the same build, for
+      # every install made before the move. skip-existing, so re-running a run whose
+      # second upload failed completes it: the first is then a no-op.
+      - name: Publish rlx
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/rlx/
+          skip-existing: true
+      - name: Publish aisquare-cli, the same build
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/aisquare-cli/
+          skip-existing: true
 
   installers:
     name: Attach the stamped installers

@@ -762,10 +762,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build sdist and wheel
+      # As publish.yml builds them (#137): rlx into dist/rlx/, and the same build as
+      # aisquare-cli into dist/aisquare-cli/, checked to be one package under two names.
+      # Built and checked here; nothing is uploaded anywhere.
+      - name: Build sdist and wheel, as rlx and as aisquare-cli
         run: |
           python -m pip install --upgrade pip build
-          python -m build
+          python scripts/build_dists.py --out dist
 
       # PyPI builds the project page from this metadata, and a release's page
       # cannot be edited after the upload. `--strict` fails on a missing long
@@ -777,7 +780,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           python -m pip install twine
-          python -m twine check --strict dist/*
+          python -m twine check --strict dist/rlx/* dist/aisquare-cli/*
 
       # One Python driver instead of two shell dialects: the venv layout differs
       # (bin/ vs Scripts/) and `dist/*.whl` is a shell glob that cmd.exe does not
@@ -791,23 +794,26 @@ jobs:
           import sys
           from pathlib import Path
 
-          wheels = sorted(Path("dist").glob("*.whl"))
-          assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
-
-          venv = Path(os.environ["RUNNER_TEMP"]) / "smoke"
-          subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
-          bindir = venv / ("Scripts" if sys.platform == "win32" else "bin")
+          # Each name's wheel in a venv of its own (#137): both install and run alike.
+          wheels = sorted(Path("dist").glob("*/*.whl"))
+          names = [wheel.parent.name for wheel in wheels]
+          assert names == ["aisquare-cli", "rlx"], f"expected one wheel per name, got {wheels}"
           suffix = ".exe" if sys.platform == "win32" else ""
 
-          subprocess.run([str(bindir / f"pip{suffix}"), "install", str(wheels[0])], check=True)
-          for argv in (
-              [f"aisquare{suffix}", "--version"],
-              [f"asq{suffix}", "--version"],
-              [f"rlx{suffix}", "--version"],
-              [f"relax{suffix}", "--version"],
-              [f"aisquare{suffix}", "--help"],
-          ):
-              subprocess.run([str(bindir / argv[0]), *argv[1:]], check=True)
+          for wheel in wheels:
+              venv = Path(os.environ["RUNNER_TEMP"]) / f"smoke-{wheel.parent.name}"
+              subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+              bindir = venv / ("Scripts" if sys.platform == "win32" else "bin")
+              subprocess.run([str(bindir / f"pip{suffix}"), "install", str(wheel)], check=True)
+              for argv in (
+                  [f"aisquare{suffix}", "--version"],
+                  [f"asq{suffix}", "--version"],
+                  [f"rlx{suffix}", "--version"],
+                  [f"relax{suffix}", "--version"],
+                  [f"aisquare{suffix}", "--help"],
+              ):
+                  subprocess.run([str(bindir / argv[0]), *argv[1:]], check=True)
+          # The rest runs in rlx's venv, the last one made.
 
           # Remote works out of the box (#34): with no extra, the bundled ngrok
           # imports and the server starts and serves its page, in a home of its own.
@@ -857,7 +863,7 @@ jobs:
           # paths into ONE argument if dist/ ever holds a second wheel, and pip
           # would then fail on a nonsense requirement rather than on the real
           # problem.
-          wheels = sorted(Path("dist").glob("*.whl"))
+          wheels = sorted(Path("dist/rlx").glob("*.whl"))
           assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
 
           venv = Path(os.environ["RUNNER_TEMP"]) / "extra"

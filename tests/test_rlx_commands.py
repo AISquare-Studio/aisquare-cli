@@ -412,3 +412,13 @@ def test_the_commands_row_is_in_the_doctors_report_beside_the_install_row(
 
     assert names[names.index("install") + 1] == "commands", names
     assert "commands" not in without, "control: only while one is another program's"
+
+
+def test_uvs_links_into_either_name_s_tool_environment_are_ours(tmp_path: Path) -> None:
+    """#137: the package is published as rlx and as aisquare-cli, and either tool environment's
+    rlx and relax are its own."""
+    route, bin_dir, prefix = _route(tmp_path)
+    (bin_dir / "rlx").symlink_to(prefix.parent / "rlx" / "bin" / "rlx")
+    (bin_dir / "relax").symlink_to(prefix.parent / "aisquare-cli" / "bin" / "relax")
+
+    assert install_route.taken_commands(route) == ()

@@ -66,19 +66,27 @@ jobs:
       - name: Wait until PyPI serves the version
         # So nobody fetches an installer pinned to a version pip cannot get yet.
         # `pip download` reads the same simple index uv installs from, which can
-        # trail the JSON API by a little. Ten minutes, then red.
+        # trail the JSON API by a little. Under BOTH names (#137): a fresh machine
+        # installs rlx, and an install made before the move aisquare-cli. Ten
+        # minutes, then red.
         run: |
           version=${TAG#v}
-          for attempt in $(seq 1 30); do
-            if python -m pip download --quiet --no-deps --dest /tmp/pypi-check \
-              "aisquare-cli==$version"; then
-              echo "PyPI serves aisquare-cli $version (attempt $attempt)"
-              exit 0
+          for name in rlx aisquare-cli; do
+            served=""
+            for attempt in $(seq 1 30); do
+              if python -m pip download --quiet --no-deps --dest /tmp/pypi-check \
+                "$name==$version"; then
+                echo "PyPI serves $name $version (attempt $attempt)"
+                served=1
+                break
+              fi
+              sleep 20
+            done
+            if [ -z "$served" ]; then
+              echo "::error::PyPI does not serve $name $version after 10 minutes"
+              exit 1
             fi
-            sleep 20
           done
-          echo "::error::PyPI does not serve aisquare-cli $version after 10 minutes"
-          exit 1
 
       - name: Upload to the release
         if: ${{ inputs.upload }}

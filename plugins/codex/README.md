@@ -5,7 +5,7 @@ This folder is the plugin (`.codex-plugin/plugin.json`, `hooks/hooks.json`, `scr
 This plugin, `aisquare@aisquare-cli` in Codex, gives Codex the hooks that `rlx agents connect codex` writes into `$CODEX_HOME/hooks.json`, without an installer and without writing hooks into that file. Installing it writes to Codex's `config.toml`: Codex records there the marketplace, that the plugin is enabled (`[plugins."aisquare@aisquare-cli"]`), and, once you trust them, its hooks (`[hooks.state]`). From a shell:
 
 ```sh
-codex plugin marketplace add AISquare-Studio/aisquare-cli
+codex plugin marketplace add AISquare-Studio/rlx
 codex plugin add aisquare@aisquare-cli
 ```
 

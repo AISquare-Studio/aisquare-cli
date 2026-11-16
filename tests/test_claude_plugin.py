@@ -1,6 +1,6 @@
 """The Claude Code plugin route: the marketplace, the plugin, its hooks and its launcher.
 
-``/plugin marketplace add AISquare-Studio/aisquare-cli``, then ``/plugin install
+``/plugin marketplace add AISquare-Studio/rlx``, then ``/plugin install
 aisquare@aisquare-cli``, gives Claude Code the six lifecycle hooks ``aisquare agents
 connect claude-code`` writes into settings.json, with no installer. Each one runs
 ``plugins/claude-code/scripts/aisquare-hook``, a POSIX launcher around ``aisquare hook

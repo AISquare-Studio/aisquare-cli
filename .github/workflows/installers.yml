@@ -3,8 +3,8 @@ name: Release installers
 # Attaches install.sh and install.ps1 to a GitHub Release, stamped to install
 # exactly that release, so these work from 0.9.0 on:
 #
-#   versioned  https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh
-#   latest     https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh
+#   versioned  https://github.com/AISquare-Studio/rlx/releases/download/v0.9.0/install.sh
+#   latest     https://github.com/AISquare-Studio/rlx/releases/latest/download/install.sh
 #
 # (and the same two for install.ps1). The copies on `main` stay unstamped and
 # keep installing the latest release.

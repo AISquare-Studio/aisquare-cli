@@ -1,7 +1,7 @@
 #!/bin/sh
 # aisquare one-line installer — curl … | sh to a green doctor and the fleet UI.
 #
-#   curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh | sh
 #
 # Design, measurements and the rejected alternatives: docs/plans/one-line-install.md.
 # Section marks below (§) point into it. Four things about this file are
@@ -81,7 +81,7 @@ NODESOURCE_DEB_URL="https://deb.nodesource.com/setup_NODEMAJOR.x"
 NODESOURCE_RPM_URL="https://rpm.nodesource.com/setup_NODEMAJOR.x"
 #: Where every release since 0.9.0 attaches its stamped install.sh (see
 #: `hand_off`, scripts/stamp_installers.py and .github/workflows/installers.yml).
-RELEASES_URL="https://github.com/AISquare-Studio/aisquare-cli/releases"
+RELEASES_URL="https://github.com/AISquare-Studio/rlx/releases"
 
 DEFAULT_PYTHON="3.13"
 # The highest version CI actually tests (.github/workflows/ci.yml is 3.11–3.13).
@@ -3201,7 +3201,7 @@ usage() {
     cat <<'USAGE'
 aisquare installer — one command to a working install and the fleet UI.
 
-  curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh | sh
 
 With options, note the `-s --` (sh reads the script on stdin, so the options
 have to be handed to sh explicitly):

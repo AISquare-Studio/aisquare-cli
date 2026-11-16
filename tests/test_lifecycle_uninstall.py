@@ -3418,7 +3418,7 @@ def test_a_purge_waits_for_an_mcp_server_that_fetches_aisquare(
         ["--with=aisquare-cli[serve]>=0.8", "run", "aisquare", "serve"],
         ["run", "-w", "requests,aisquare_cli", "aisquare", "serve"],
         ["run", "-waisquare-cli", "python", "-m", "aisquare", "serve"],
-        ["run", "--with", "git+https://github.com/AISquare-Studio/aisquare-cli", "aisquare"],
+        ["run", "--with", "git+https://github.com/AISquare-Studio/rlx", "aisquare"],
         ["run", "--with", "requests, ./aisquare-cli", "aisquare", "serve"],
         ["run", "-w", "dist/aisquare_cli-0.8.0-py3-none-any.whl", "aisquare", "serve"],
         ["run", "--with", "aisquare_cli @ https://example.com/a.whl", "aisquare", "serve"],

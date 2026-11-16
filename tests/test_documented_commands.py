@@ -746,6 +746,9 @@ _NOT_AN_INVOCATION = (
     # path. Without the lookahead this reason silently swallowed a cron
     # wrapper's `exec /usr/local/bin/aisquare explainability ship --strict`.
     ("a path segment, not a command word", re.compile(r"[/\w-]/aisquare(?!\s+\S)|aisquare[/-]")),
+    # The repository is AISquare-Studio/rlx since 2026-11-16: `codex plugin marketplace add
+    # AISquare-Studio/rlx` names it, and `rlx` there is the slug's last part, not the command.
+    ("the repository's slug, not the command", re.compile(r"\bAISquare-Studio/rlx\b")),
     ("a dotted Python module path", re.compile(r"aisquare\.\w")),
     ("a comment", re.compile(r"^\s*#")),
     ("nested in a command substitution the extractor cannot see into", re.compile(r"\$\(")),

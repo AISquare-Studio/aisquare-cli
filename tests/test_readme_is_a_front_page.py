@@ -80,17 +80,17 @@ _PENDING_WHILE_VERSION = "0.7.0"
 _COMMONMARK = MarkdownIt("commonmark").enable("table")
 _ABSOLUTE = re.compile(r"^(?:https?://|mailto:)", re.IGNORECASE)
 #: The two spellings of a link into this repository's `main` the README uses.
-_BLOB = "https://github.com/AISquare-Studio/aisquare-cli/blob/main"
-_RAW = "https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main"
+_BLOB = "https://github.com/AISquare-Studio/rlx/blob/main"
+_RAW = "https://raw.githubusercontent.com/AISquare-Studio/rlx/main"
 #: A release asset: install.sh and install.ps1, stamped copies of the files of
 #: the same name (scripts/stamp_installers.py), so the asset is read as that path.
-_RELEASE = "https://github.com/AISquare-Studio/aisquare-cli/releases/"
+_RELEASE = "https://github.com/AISquare-Studio/rlx/releases/"
 #: A URL into this repository's `main`, on github.com or as a raw download, or a
 #: release asset.
 _REPO_URL = re.compile(
-    r"https://(?:github\.com/AISquare-Studio/aisquare-cli/(?:blob|tree|raw)/main"
-    r"|raw\.githubusercontent\.com/AISquare-Studio/aisquare-cli/(?:refs/heads/)?main"
-    r"|github\.com/AISquare-Studio/aisquare-cli/releases/(?:latest/download|download/v[^/\s]+))"
+    r"https://(?:github\.com/AISquare-Studio/rlx/(?:blob|tree|raw)/main"
+    r"|raw\.githubusercontent\.com/AISquare-Studio/rlx/(?:refs/heads/)?main"
+    r"|github\.com/AISquare-Studio/rlx/releases/(?:latest/download|download/v[^/\s]+))"
     r"/([^\s)\"'<>\]`]+)",
     re.IGNORECASE,
 )
@@ -230,8 +230,8 @@ def test_every_readme_link_and_image_is_absolute() -> None:
     assert not relative, (
         f"README.md links {relative} relatively. PyPI resolves these against "
         "pypi.org, so they 404 on the project page; use "
-        "https://github.com/AISquare-Studio/aisquare-cli/blob/main/<path>, or "
-        "https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/<path> "
+        "https://github.com/AISquare-Studio/rlx/blob/main/<path>, or "
+        "https://raw.githubusercontent.com/AISquare-Studio/rlx/main/<path> "
         "for an image."
     )
 
@@ -333,8 +333,8 @@ def test_each_relative_shape_is_caught(shape: str) -> None:
 
 
 _ABSOLUTE_SHAPES = {
-    "absolute link": "See [the guide](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md).",
-    "absolute image": "![demo](https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/docs/demo.gif)",
+    "absolute link": "See [the guide](https://github.com/AISquare-Studio/rlx/blob/main/docs/fleet.md).",
+    "absolute image": "![demo](https://raw.githubusercontent.com/AISquare-Studio/rlx/main/docs/demo.gif)",
     "badge": "[![PyPI](https://img.shields.io/pypi/v/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)",
     "mail link": "[mail us](mailto:security@example.com)",
     "a relative link inside a fence": "```markdown\nSee [the guide](docs/fleet.md).\n```",
@@ -395,7 +395,7 @@ _RESOLVED_SHAPES = {
     "a page that exists": f"[install]({_BLOB}/docs/install.md)",
     "a heading the page has": f"[gui]({_BLOB}/docs/install.md#start-the-gui)",
     "a raw file that exists, in a fence": f"```sh\ncurl -fsSL {_RAW}/install.sh | sh\n```",
-    "a directory": "[docs](https://github.com/AISquare-Studio/aisquare-cli/tree/main/docs)",
+    "a directory": "[docs](https://github.com/AISquare-Studio/rlx/tree/main/docs)",
     "a link outside the repo": "[uv](https://docs.astral.sh/uv/gone.md)",
 }
 

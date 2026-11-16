@@ -134,18 +134,18 @@ def test_a_uv_tool_keeps_every_extra_and_package_it_was_installed_with(
         ),
         (
             [
-                '{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/aisquare-cli'
+                '{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/rlx'
                 '?rev=feat%2Fremote&subdirectory=cli" }'
             ],
             "",
             "uv tool install --python 3.13 'aisquare-cli @ git+https://github.com/"
-            "AISquare-Studio/aisquare-cli@feat/remote#subdirectory=cli'",
+            "AISquare-Studio/rlx@feat/remote#subdirectory=cli'",
         ),
         (
-            ['{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/aisquare-cli" }'],
+            ['{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/rlx" }'],
             "",
             "uv tool install --python 3.13 "
-            "'aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli'",
+            "'aisquare-cli @ git+https://github.com/AISquare-Studio/rlx'",
         ),
         (
             [

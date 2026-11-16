@@ -7,8 +7,8 @@
     "email": "anmol@aisquare.studio",
     "url": "https://github.com/AISquare-Studio"
   },
-  "homepage": "https://github.com/AISquare-Studio/aisquare-cli",
-  "repository": "https://github.com/AISquare-Studio/aisquare-cli",
+  "homepage": "https://github.com/AISquare-Studio/rlx",
+  "repository": "https://github.com/AISquare-Studio/rlx",
   "license": "MIT",
   "keywords": ["memory", "context", "hooks"],
   "interface": {
@@ -17,6 +17,6 @@
     "longDescription": "aisquare's lifecycle hooks: each new session is handed what you saved, and your prompts are captured to your local aisquare memory. They run the aisquare CLI, or the pinned release through uvx, and stand down where $CODEX_HOME/hooks.json already runs aisquare.",
     "developerName": "AISquare",
     "category": "Productivity",
-    "websiteURL": "https://github.com/AISquare-Studio/aisquare-cli"
+    "websiteURL": "https://github.com/AISquare-Studio/rlx"
   }
 }

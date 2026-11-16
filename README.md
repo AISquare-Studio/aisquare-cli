@@ -2,8 +2,8 @@
 
 [![PyPI](https://img.shields.io/pypi/v/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)
 [![Python versions](https://img.shields.io/pypi/pyversions/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)
-[![CI](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AISquare-Studio/aisquare-cli/blob/main/LICENSE)
+[![CI](https://github.com/AISquare-Studio/rlx/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/rlx/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AISquare-Studio/rlx/blob/main/LICENSE)
 
 **One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
@@ -33,7 +33,7 @@ and you get one full-screen, mouse-driven view of your projects and their agents
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh | sh
 ```
 
 On macOS, Linux and WSL2, that one line works out what your machine already
@@ -46,9 +46,9 @@ no-op. For Codex too, end the line with `| sh -s -- --agent both` instead of
 it, it is `install.sh` at the root of this repository.
 
 That installs the latest release. To pin one, every release from 0.9.0 on
-carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.10.0/install.sh | sh`.
+carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/rlx/releases/download/v0.10.0/install.sh | sh`.
 
-On Windows, run `irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex`
+On Windows, run `irm https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.ps1 | iex`
 in PowerShell: it runs that installer inside your WSL2 distribution, or prints the
 one command that installs WSL2 if there is none.
 
@@ -105,7 +105,7 @@ read. Codex's login is a file, so a fleet of Codex agents can start over SSH.
 A Codex account signs in with a device code, so `rlx accounts add --agent codex`
 works over SSH too: open the link it prints on any device and enter the code
 (`--browser` signs in with this machine's browser instead).
-[Running more than one rlx](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/multi-instance.md)
+[Running more than one rlx](https://github.com/AISquare-Studio/rlx/blob/main/docs/multi-instance.md)
 has the rest, including what happens when the two run different releases.
 
 ## Memory on its own
@@ -124,7 +124,7 @@ rlx remember --user "prefer pytest over unittest"
 `init` registers the repo you run it in and wires Claude Code's hooks, so every
 new session starts with what you told it to remember. `rlx context list` shows
 what is in scope. To install from inside Codex instead, see
-[the Codex plugin](https://github.com/AISquare-Studio/aisquare-cli/blob/main/plugins/codex/README.md).
+[the Codex plugin](https://github.com/AISquare-Studio/rlx/blob/main/plugins/codex/README.md).
 
 ## Everything is also a command
 
@@ -160,20 +160,20 @@ rlx doctor                           # is everything wired? (and how to fix anyt
 
 | Page | What is in it |
 | --- | --- |
-| [Usage sharing](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/usage-telemetry.md) | Opt-in, anonymous daily counts of how rlx is used: what is collected, what never is, how to see exactly what would be sent, and how to turn it off |
+| [Usage sharing](https://github.com/AISquare-Studio/rlx/blob/main/docs/usage-telemetry.md) | Opt-in, anonymous daily counts of how rlx is used: what is collected, what never is, how to see exactly what would be sent, and how to turn it off |
 
 ## Community
 
 Questions and ideas go to
-[Discussions](https://github.com/AISquare-Studio/aisquare-cli/discussions), bugs
-to [issues](https://github.com/AISquare-Studio/aisquare-cli/issues). Pull
+[Discussions](https://github.com/AISquare-Studio/rlx/discussions), bugs
+to [issues](https://github.com/AISquare-Studio/rlx/issues). Pull
 requests are welcome:
-[CONTRIBUTING](https://github.com/AISquare-Studio/aisquare-cli/blob/main/CONTRIBUTING.md)
+[CONTRIBUTING](https://github.com/AISquare-Studio/rlx/blob/main/CONTRIBUTING.md)
 has the setup and the one command CI runs. Releases are in the
-[changelog](https://github.com/AISquare-Studio/aisquare-cli/blob/main/CHANGELOG.md);
+[changelog](https://github.com/AISquare-Studio/rlx/blob/main/CHANGELOG.md);
 to report a vulnerability, see
-[SECURITY](https://github.com/AISquare-Studio/aisquare-cli/blob/main/SECURITY.md).
+[SECURITY](https://github.com/AISquare-Studio/rlx/blob/main/SECURITY.md).
 
 ## License
 
-[MIT](https://github.com/AISquare-Studio/aisquare-cli/blob/main/LICENSE)
+[MIT](https://github.com/AISquare-Studio/rlx/blob/main/LICENSE)

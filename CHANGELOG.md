@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`rlx` and `relax` start aisquare, as `asq` and `aisquare` do.** The product's name is
+  now rlx, short for relax, and all four commands run the same thing: bare `rlx` opens the
+  fleet UI, `rlx --help` names itself, and `rlx --install-completion` sets up completion for
+  `rlx`. The one-line installer, `aisquare upgrade` and asq's *Update* put the two new
+  commands in `~/.local/bin` beside the others. Hooks still call `aisquare`, whichever
+  command connected them.
+- **Another program's `rlx` or `relax` is never replaced or deleted.** When `~/.local/bin`
+  already holds one (PyPI's `relax` is another project), the installer, `aisquare upgrade`,
+  asq's *Update* and `aisquare uninstall` stop before they change anything, and say in one
+  line which file it is and what to do: rename or move it, then run again. Left to itself,
+  uv replaces such a file without a word on an upgrade, refuses the whole install on a fresh
+  machine, and deletes it on an uninstall. `aisquare doctor` names an `rlx` or `relax`
+  earlier on your PATH that runs another program.
+  The move to this release is made by the release you have, and on 0.10.0
+  `aisquare upgrade`, asq's *Update* and `uv tool upgrade aisquare-cli` replace such a file
+  without asking: move yours aside first, or upgrade with the one-line installer, which
+  checks.
+
+### Changed
+
+- **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count
+  beside it is as before (`rlx · 3 live`), and nothing else in the sidebar moves, at any
+  width.
+
 ## [0.10.0] - 2026-11-16
 
 **Codex support, in beta: run OpenAI's Codex CLI beside Claude Code, or instead of it, with

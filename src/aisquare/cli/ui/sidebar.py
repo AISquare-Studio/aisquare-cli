@@ -69,6 +69,7 @@ from aisquare.cli.ui.terminal import InPlaceField
 from aisquare.cli.ui.views.accounts import agent_mark
 from aisquare.core import codenames
 from aisquare.core.agent_adapters import default_binary, recorded_adapter
+from aisquare.core.version import PRODUCT_NAME
 from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
@@ -1976,9 +1977,10 @@ class OthersSection(Vertical):
 
 
 def fleet_title(live_total: int) -> Text:
-    """The header: ``Fleet``, then ``· N live`` while any agent is live across the fleet —
-    every project's, the captain excluded: ``aisquare fleet capacity``'s ``live_total``."""
-    title = Text("Fleet")
+    """The header: the product's name, ``rlx`` (:data:`PRODUCT_NAME`, ``Fleet`` before #133),
+    then ``· N live`` while any agent is live across the fleet — every project's, the captain
+    excluded: ``aisquare fleet capacity``'s ``live_total``."""
+    title = Text(PRODUCT_NAME)
     if live_total > 0:
         title.append(f" · {live_total} live", style="not bold")
     return title
@@ -2089,7 +2091,7 @@ class Sidebar(Vertical):
         highlight (the Welcome page, onboarding) leaves the place it was."""
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
         self.live_total = 0
-        """The header's "Fleet · N live", from the last frame read (:func:`fleet_title`)."""
+        """The header's "rlx · N live", from the last frame read (:func:`fleet_title`)."""
         self.arrangement: Arrangement | None = None
         """The order the last frame was painted in (groups, pins, loose) — #140."""
         self._marked: list[str] = []

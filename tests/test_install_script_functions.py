@@ -3639,11 +3639,11 @@ def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
 @pytest.mark.parametrize(
     ("machine", "want_agent", "bin_line", "tool_env", "hooks"),
     [
-        ("fresh", 1, "uv, aisquare, asq, claude", True, True),
-        ("fresh", 0, "uv, aisquare, asq", True, False),
+        ("fresh", 1, "uv, aisquare, asq, rlx, relax, claude", True, True),
+        ("fresh", 0, "uv, aisquare, asq, rlx, relax", True, False),
         ("current", 1, None, False, True),
         ("current", 0, None, False, False),
-        ("force", 1, "aisquare, asq", True, True),
+        ("force", 1, "aisquare, asq, rlx, relax", True, True),
         ("upgrade-all", 1, None, False, True),
     ],
     ids=["fresh", "fresh-no-agent", "current", "current-no-agent", "force", "upgrade-all"],
@@ -4345,3 +4345,190 @@ def test_an_install_run_from_the_home_does_not_read_aisquare_there_as_in_a_proje
     )
     amber = next(line for line in result.stdout.splitlines() if line.startswith("AMBER="))
     assert "sandbox" not in amber and "agents'" not in amber, result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# rlx and relax: another program's, in uv's executable directory (#133)
+# ---------------------------------------------------------------------------
+#
+# Measured with uv 0.11.6 in a scratch HOME: a plain `uv tool install aisquare-cli`
+# refuses the whole package over another program's `rlx` or `relax` there
+# ("Executables already exist"), and over an installed aisquare-cli it takes that
+# install away too; `uv tool install --force`, which this script's upgrade runs,
+# replaces it without a word. So the run stops before anything is installed.
+
+
+def _commands_home(tmp_path: Path) -> tuple[Path, Path]:
+    """A home whose ~/.local/bin holds, as uv leaves them, aisquare-cli's own `rlx` link, and
+    the place another tool's environment would be."""
+    home = tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    tools = home / ".local" / "share" / "uv" / "tools"
+    (bin_dir / "rlx").symlink_to(tools / "aisquare-cli" / "bin" / "rlx")
+    return home, tools
+
+
+def _hand_made(path: Path) -> None:
+    path.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("variables", "expected"),
+    [
+        ({"UV_TOOL_BIN_DIR": "/u/bin/", "XDG_BIN_HOME": "/x", "XDG_DATA_HOME": "/d"}, "/u/bin"),
+        ({"XDG_BIN_HOME": "/x/", "XDG_DATA_HOME": "/d"}, "/x"),
+        ({"XDG_DATA_HOME": "/d/"}, "/d/../bin"),
+        ({}, "{home}/.local/bin"),
+    ],
+    ids=["uv-tool-bin-dir", "xdg-bin-home", "xdg-data-home", "default"],
+)
+def test_uv_bin_dir_is_where_uv_puts_a_tools_executables(
+    tmp_path: Path, variables: dict[str, str], expected: str
+) -> None:
+    """uv's own order (its docs, `uv tool dir --bin`), worked out without running uv: under
+    --dry-run only version reads may run."""
+    unset = {"UV_TOOL_BIN_DIR": "", "XDG_BIN_HOME": "", "XDG_DATA_HOME": ""}
+    result = sh(
+        "uv_bin_dir",
+        env={**unset, **variables, "HOME": str(tmp_path)},
+        path=base_path(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected.format(home=tmp_path)
+
+
+def test_taken_commands_names_every_rlx_or_relax_but_aisquare_clis_own(tmp_path: Path) -> None:
+    """A hand-made script, another uv tool's link and a link to nothing are another
+    program's; uv's link to aisquare-cli's own script is not."""
+    home, tools = _commands_home(tmp_path)
+    bin_dir = home / ".local" / "bin"
+    (bin_dir / "relax").symlink_to(tools / "relax-other" / "bin" / "relax")  # dangling
+    clean = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+    (bin_dir / "relax").unlink()
+    _hand_made(bin_dir / "relax")
+    one = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+    (bin_dir / "rlx").unlink()
+    (bin_dir / "rlx").symlink_to(tools / "relax-other" / "bin" / "rlx")
+    both = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+    (bin_dir / "rlx").unlink()
+    (bin_dir / "rlx").symlink_to(tools / "aisquare-cli" / "bin" / "relax")  # ours, wrong name
+    renamed = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+
+    assert clean.stdout == f"{bin_dir}/relax\n", clean.stdout + clean.stderr
+    assert one.stdout == f"{bin_dir}/relax\n", one.stdout + one.stderr
+    assert both.stdout == f"{bin_dir}/rlx\n{bin_dir}/relax\n", both.stdout + both.stderr
+    assert renamed.stdout == f"{bin_dir}/rlx\n{bin_dir}/relax\n", renamed.stdout
+
+
+def test_taken_commands_is_empty_with_only_aisquare_clis_own_or_none(tmp_path: Path) -> None:
+    home, tools = _commands_home(tmp_path)
+    (home / ".local" / "bin" / "relax").symlink_to(tools / "aisquare-cli" / "bin" / "relax")
+    ours = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+    nothing = sh("taken_commands", env={"HOME": str(tmp_path / "empty")}, path=base_path(tmp_path))
+
+    assert (ours.returncode, ours.stdout) == (0, ""), ours.stderr
+    assert (nothing.returncode, nothing.stdout) == (0, ""), nothing.stderr
+
+
+@pytest.mark.parametrize("action", ["install", "upgrade", "repair"])
+def test_a_run_that_installs_the_cli_stops_on_another_programs_command_in_one_line(
+    tmp_path: Path, action: str
+) -> None:
+    """Never replaced unasked, and never the whole install refused halfway: one line says
+    which file and what to do, and the run exits 1."""
+    home, _ = _commands_home(tmp_path)
+    _hand_made(home / ".local" / "bin" / "relax")
+
+    result = sh(
+        f"CLI_ACTION={action}; refuse_taken_commands; echo went-on",
+        env={"HOME": str(home)},
+        path=base_path(tmp_path),
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "went-on" not in result.stdout
+    assert result.stderr == (
+        "error ~/.local/bin/relax is another program's, and aisquare-cli now installs a relax "
+        "command there: rename or move it, then run this again. Nothing was changed.\n"
+    )
+
+
+def test_two_taken_commands_are_named_in_the_one_line(tmp_path: Path) -> None:
+    home, _ = _commands_home(tmp_path)
+    (home / ".local" / "bin" / "rlx").unlink()
+    _hand_made(home / ".local" / "bin" / "rlx")
+    _hand_made(home / ".local" / "bin" / "relax")
+
+    result = sh("CLI_ACTION=install; refuse_taken_commands", env={"HOME": str(home)})
+
+    assert result.returncode == 1
+    assert result.stderr == (
+        "error ~/.local/bin/rlx and ~/.local/bin/relax are another program's, and aisquare-cli "
+        "now installs rlx and relax commands there: rename or move them, then run this again. "
+        "Nothing was changed.\n"
+    )
+
+
+def test_a_run_that_leaves_the_cli_as_it_is_says_nothing_of_them(tmp_path: Path) -> None:
+    """A current aisquare-cli is not reinstalled, so another program's `relax` is no matter."""
+    home, _ = _commands_home(tmp_path)
+    _hand_made(home / ".local" / "bin" / "relax")
+
+    result = sh(
+        "CLI_ACTION=current; refuse_taken_commands; echo went-on",
+        env={"HOME": str(home)},
+        path=base_path(tmp_path),
+    )
+
+    assert (result.returncode, result.stdout, result.stderr) == (0, "went-on\n", "")
+
+
+def test_main_stops_on_a_taken_command_before_uv_or_anything_runs(tmp_path: Path) -> None:
+    """From `main`, as a person runs it: an upgrade over another program's `rlx` runs no uv,
+    no package manager and no installer, and leaves that `rlx` as it was."""
+    home, _ = _commands_home(tmp_path)
+    taken = home / ".local" / "bin" / "rlx"
+    taken.unlink()
+    _hand_made(taken)
+    log = tmp_path / "calls.log"
+    record = f'printf "%s %s\\n" "$(basename "$0")" "$*" >>"{log}"\n'
+    stubs = stub_dir(
+        tmp_path,
+        "bin",
+        "uv",
+        "apt-get",
+        "dnf",
+        "pacman",
+        "apk",
+        "brew",
+        "claude",
+        "curl",
+        "wget",
+        "tmux",
+        "gh",
+        "git",
+        body=record + 'case "$1" in --version|-V|version) echo "x 1.0"; exit 0 ;; esac\nexit 1',
+    )
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body='case "$1" in --version) printf "aisquare 0.10.0\\n"; exit 0 ;; esac\nexit 1',
+    )
+
+    result = sh(
+        "main --yes --no-project --no-agent",
+        env={"HOME": str(home), "AISQUARE_INSTALL_PACKAGE": str(tmp_path / "x.whl")},
+        path=f"{stubs}:{cli}:{base_path(tmp_path)}",
+        no_terminal=True,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "~/.local/bin/rlx is another program's" in result.stderr, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    mutations = [call for call in calls if call.split()[1:2] not in ([], ["--version"], ["-V"])]
+    assert not mutations, f"the refusal still ran something: {calls}"
+    assert taken.read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"

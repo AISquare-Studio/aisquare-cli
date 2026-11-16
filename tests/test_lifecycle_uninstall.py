@@ -697,6 +697,58 @@ def test_it_refuses_while_fleet_agents_are_live_and_names_the_shutdown(
     assert _snapshot(tmp_path) == before and world.events == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="uv links the scripts on POSIX only")
+def test_it_refuses_over_another_programs_rlx_and_leaves_it_where_it_is(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """#133: `uv tool uninstall` deletes whatever is at each path its receipt records, another
+    program's `rlx` there too (measured, uv 0.11.6). Refused, in one line naming it and what
+    to do; nothing is touched, and that `rlx` is left as it was."""
+    _initialised(runner, tmp_path)
+    _hooked(isolated_agent_home / ".claude", tool.script)
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    names = ("aisquare", "asq", "asq-statusline", "rlx", "relax")
+    rows = ",\n".join(
+        f'    {{ name = "{name}", install-path = "{bin_dir / name}", from = "aisquare-cli" }}'
+        for name in names
+    )
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        '[tool]\nrequirements = [{ name = "aisquare-cli" }, { name = "tiktoken" }]\n'
+        f'python = "3.13"\nentrypoints = [\n{rows},\n]\n',
+        encoding="utf-8",
+    )
+    for name in names:
+        (bin_dir / name).symlink_to(tool.prefix / "bin" / name)
+    (bin_dir / "rlx").unlink()
+    (bin_dir / "rlx").write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+
+    before = _snapshot(tmp_path)
+    refused = runner.invoke(app, ["--json", "uninstall", "--yes"])
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    human = runner.invoke(app, ["uninstall", "--yes"])
+    after = _snapshot(tmp_path)
+
+    said = " ".join(human.stderr.split())
+    assert refused.exit_code == 1 and _one_object(refused.stdout)["error"] == "command_taken"
+    assert plan["commands_taken"] == [str(bin_dir / "rlx")], plan
+    assert plan["refusal"]["error"] == "command_taken", plan
+    assert (
+        f"{bin_dir / 'rlx'} is another program, which uv would delete with the package: move "
+        "it aside first, run `aisquare uninstall` again, then put it back."
+    ) in said, said
+    assert after == before and world.events == [], "nothing touched"
+    (bin_dir / "rlx").unlink()
+    (bin_dir / "rlx").symlink_to(tool.prefix / "bin" / "rlx")
+    agreed = runner.invoke(app, ["uninstall", "--yes"])
+    assert agreed.exit_code == 0, agreed.output
+    assert [kind for kind, _ in world.events][-1] == "package", "control: ours, it uninstalls"
+
+
 @pytest.mark.parametrize("by", ["serve", "panel"])
 def test_it_refuses_while_a_remote_is_on_in_another_process_and_names_it(
     tool: Tool,

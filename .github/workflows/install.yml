@@ -390,6 +390,8 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           aisquare --version
           asq --version
+          rlx --version
+          relax --version
 
       - name: The machine-wide checks that do not depend on a bare machine
         env:

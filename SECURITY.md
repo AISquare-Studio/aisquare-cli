@@ -36,7 +36,7 @@ setting it comes from.
   recorded (`rlx brief evidence|finding --artifact`, up to 16 MiB each),
   restricted to your user. A screenshot of a secret is kept here until the
   project is purged (`rlx project forget <id> --purge`).
-- `credentials` (from `rlx login`, `rlx init --api-key` and
+- `credentials` (from `aisquare login`, `aisquare init --api-key` and
   `rlx serve`) and the Explainability keys (`explainability-key`,
   `projects/<id>/explainability-key`) are restricted to your user. rlx
   warns when it cannot restrict them.
@@ -116,14 +116,14 @@ that mode, Claude Code's classifier, not you, approves each tool call.
 - **Plan usage.** Wherever rlx shows or checks a Claude account's plan
   usage, or picks an account by headroom, it reads that usage from Anthropic with the
   account's own sign-in.
-- **Signing in.** After `rlx login`, which sends this machine's hostname,
+- **Signing in.** After `aisquare login`, which sends this machine's hostname,
   rlx calls the AISquare API with your session. Choosing where a project's
   traces go mints an ingest key named after this machine and the project.
 - **Explainability, when on.** Your sessions go to its gateway. Through
   AISquare's hosted proxy, Claude Code's requests, with its Anthropic
   credential, and the responses pass through AISquare's server. Through the
   default local proxy (`127.0.0.1:9090`), requests go to Anthropic as usual, and
-  only the traces go to the gateway. Note that `rlx explainability doctor --fix
+  only the traces go to the gateway. Note that `aisquare explainability doctor --fix
   --target <name>` turns Explainability on without asking.
 - **The Collective Intelligence test bed, when on** (`AISQUARE_CI=1`, or
   `enabled` under `[experiment]`). Each prompt goes to the server you

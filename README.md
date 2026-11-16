@@ -60,7 +60,7 @@ The package is `aisquare-cli`. Its command is `rlx`; `relax`, `asq` and
 `rlx` opens on Welcome, three steps to a running fleet:
 
 1. **Project:** use the folder you are in, or choose another.
-2. **Coding agent:** Claude Code, or Codex (beta). Connect it: if it is missing,
+2. **Coding agent:** Claude Code, or Codex. Connect it: if it is missing,
    Welcome names the install command, and if it is signed out, it offers the
    sign-in.
 3. **Fleet:** press *Start manager*, then *Open the manager* and answer the
@@ -146,8 +146,8 @@ rlx doctor                           # is everything wired? (and how to fix anyt
 - macOS, Linux, or Windows through WSL2.
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
 - [Claude Code](https://claude.com/claude-code) or
-  [Codex](https://learn.chatgpt.com/docs/codex/cli) (beta; 0.164.0 or newer,
-  tested on 0.164.0, 0.166.0 and 0.167.0) for the agents, either or both, and
+  [Codex](https://learn.chatgpt.com/docs/codex/cli) (0.164.0 or newer, tested
+  on 0.164.0, 0.166.0 and 0.167.0) for the agents, either or both, and
   tmux 3.2+ for the fleet.
 - Node 22.12+, optional, for browser tools like the Chrome DevTools MCP; the one-liner
   offers both, Node and the MCP registered with Claude Code (`--with chrome-devtools`

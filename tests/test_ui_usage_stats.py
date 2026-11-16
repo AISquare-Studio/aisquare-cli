@@ -654,7 +654,7 @@ def test_the_page_fits_a_small_terminal(machine: Machine) -> None:
 def test_top_repositories_names_a_nicknamed_repository_by_its_remote(machine: Machine) -> None:
     """tsk_01m67vf4mpsgdcvt6kq6znsrwc: the owner could not tell which repository a nickname
     meant. The remote's name is shown — not the nickname, the codename or the folder (``ws7``)."""
-    repo = machine.repo("ws7", remote="git@github.com:AISquare-Studio/aisquare-cli.git")
+    repo = machine.repo("ws7", remote="git@github.com:AISquare-Studio/rlx.git")
     project = project_service.set_nickname(add_project(repo), "the big one")
     with store_session() as store:
         store.set_codename(project.id, "earnest-hawk")
@@ -669,7 +669,7 @@ def test_top_repositories_names_a_nicknamed_repository_by_its_remote(machine: Ma
 
     repos = _drive_page(real_loader(), go)
 
-    assert "aisquare-cli" in repos
+    assert "rlx" in repos
     for other in ("the big one", "earnest-hawk", "ws7"):
         assert other not in repos
 

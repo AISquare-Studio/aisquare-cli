@@ -3622,7 +3622,7 @@ def test_doctor_names_what_a_store_lacks_instead_of_calling_it_readable(
     assert "persona" not in row.detail, "another line's columns are not this build's to report"
     assert row.fix is not None and f"cp {_db_path()}" in row.fix, row.fix
     assert "mv " not in row.fix, "the corrupt-store move would drop an intact history"
-    assert "github.com/AISquare-Studio/aisquare-cli/issues" in row.fix, "report it where?"
+    assert "github.com/AISquare-Studio/rlx/issues" in row.fix, "report it where?"
 
 
 def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:

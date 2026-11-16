@@ -1668,8 +1668,8 @@ def test_welcome_calls_hooks_that_cannot_start_not_connected_and_connect_points_
     after = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
 
     assert not state.connected and not state.ready, state
-    assert state.problem == "aisquare's hooks name a program that does not exist or cannot start"
-    assert "not connected — Connect installs aisquare's hooks" in step_two, step_two
+    assert state.problem == "rlx's hooks name a program that does not exist or cannot start"
+    assert "not connected — Connect installs rlx's hooks" in step_two, step_two
     assert connected.exit_code == 0 and after.connected, (connected.output, after)
 
 

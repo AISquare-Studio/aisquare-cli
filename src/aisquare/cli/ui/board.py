@@ -489,7 +489,7 @@ class BoardHelp(ModalScreen[None]):
         self._extra = extra
 
     def compose(self) -> ComposeResult:
-        text = Text("aisquare board — keys\n\n", style="bold")
+        text = Text("rlx board — keys\n\n", style="bold")
         text.append_text(board_help())
         if self._extra:
             text.append("\n")

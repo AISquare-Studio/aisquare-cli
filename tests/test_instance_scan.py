@@ -293,12 +293,12 @@ def test_beside_an_asq_older_than_the_registry_asq_builds_nothing_and_says_how_t
 
     said = " ".join(capsys.readouterr().err.split())
     assert refused.value.exit_code == 1 and built == [] and asked == [], "nothing to ask it"
-    assert "asq of a release before the registry — pid 4242, /dev/ttys004, since " in said
+    assert "rlx of a release before the registry — pid 4242, /dev/ttys004, since " in said
     assert "~/.local/bin/asq" in said or f"{BIN}/asq" in said, "its command, named"
-    assert "The asq of pid 4242 predates the registry: its release is unknown" in said
+    assert "The rlx of pid 4242 predates the registry: its release is unknown" in said
     assert "Quit it in its own terminal (q), or end it with `kill 4242`: a SIGTERM skips" in said
-    assert "asq did not start. Start it again once that asq has quit." in said
-    assert instances.live_instances() == [], "nothing of this asq registered"
+    assert "rlx did not start. Start it again once that rlx has quit." in said
+    assert instances.live_instances() == [], "nothing of this rlx registered"
 
 
 _LINGERING_STAND_IN = r"""
@@ -349,7 +349,7 @@ def test_yes_waits_for_the_asked_asqs_process_to_end_not_only_its_record(
 
     said = capsys.readouterr().err
     assert registration is not None, said
-    assert "✓ asq 0.0.1" in said and "predates the registry" not in said
+    assert "✓ rlx 0.0.1" in said and "predates the registry" not in said
 
 
 def test_an_asq_whose_record_this_release_cannot_read_is_not_also_taken_for_a_pre_registry_one(
@@ -553,4 +553,4 @@ def test_two_renamed_host_asqs_asked_to_quit_at_once_are_both_waited_out(
     assert registration is not None, said
     assert "predates the registry" not in said
     for stand_in in stand_ins:
-        assert f"✓ asq 0.0.1 (pid {stand_in.pid}) quit" in said
+        assert f"✓ rlx 0.0.1 (pid {stand_in.pid}) quit" in said

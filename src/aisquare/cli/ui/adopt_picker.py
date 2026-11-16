@@ -99,7 +99,7 @@ class AdoptPicker(ModalScreen[str | None]):
             hint = (
                 "adopt a conversation into the fleet — ↑/↓ then Enter · Esc cancels"
                 if self._conversations
-                else "no conversation outside the fleet on the accounts the CLI knows · Esc"
+                else "no conversation outside the fleet on the accounts rlx knows · Esc"
             )
             yield Static(hint, id="adopthint")
             yield OptionList(id="adoptlist")

@@ -687,9 +687,9 @@ def test_a_codex_pane_that_closes_with_no_login_names_the_browser_sign_in(
     drive(go, overview=_real_overview())
     assert said["fresh"] == (
         "sign-in cancelled — Codex closed before a sign-in landed; the new slot was "
-        f"discarded. {HINT}: aisquare accounts add --agent codex --browser"
+        f"discarded. {HINT}: rlx accounts add --agent codex --browser"
     )
     assert said["existing"] == (
         "sign-in cancelled — Codex closed before a sign-in landed; nothing changed. "
-        f"{HINT}: aisquare accounts run {existing.slot} login"
+        f"{HINT}: rlx accounts run {existing.slot} login"
     )

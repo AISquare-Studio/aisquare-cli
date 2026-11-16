@@ -2006,7 +2006,7 @@ def test_a_cancel_whose_settling_fails_never_says_nothing_changed(
     assert seen["abandoned"] == [] and "nothing changed" not in said, said
     if fails == "its hooks":
         assert said.startswith(
-            "⚠ signed in, but aisquare's hooks did not install: settings.json is read-only"
+            "⚠ signed in, but rlx's hooks did not install: settings.json is read-only"
         ), said
     else:
         assert said.startswith("✗ sign-in cancelled — cancelled; whether its login landed"), said

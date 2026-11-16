@@ -216,7 +216,7 @@ def test_the_first_find_of_a_release_toasts_once() -> None:
     first = _drive(body)
     later = _drive(body, offer=updates.Offer("0.9.1", "0.9.0", runnable=True, announce=False))
 
-    said = "aisquare 0.9.1 is out (you run 0.9.0) — ⬆ in the sidebar restarts asq to update"
+    said = "rlx 0.9.1 is out (you run 0.9.0) — ⬆ in the sidebar restarts rlx to update"
     assert said in first
     assert not any("is out" in toast for toast in later), "announced already: the row alone"
 
@@ -427,9 +427,9 @@ def test_the_row_opens_the_dialog_and_cancel_or_escape_changes_nothing(
 
     title, said, buttons, still_open = _drive(body)
 
-    assert title == "Update aisquare 0.9.0 → 0.9.1"
+    assert title == "Update rlx 0.9.0 → 0.9.1"
     assert said == (
-        "asq closes, installs 0.9.1 and reopens here.\n"
+        "rlx closes, installs 0.9.1 and reopens here.\n"
         "2 agents keep running; any whose pane is gone afterwards is restarted on its session."
     )
     assert buttons == ["Restart & update", "Cancel"]
@@ -481,7 +481,7 @@ def test_an_install_asq_does_not_update_shows_the_command_and_no_restart(
     said, buttons, hand_off = _drive(body)
 
     assert "brew upgrade aisquare-cli" in said
-    assert said.startswith("asq does not update this install itself (Homebrew installs are")
+    assert said.startswith("rlx does not update this install itself (Homebrew installs are")
     assert buttons == ["Close"]
     assert hand_off is None and updates.take_press() is None
 
@@ -633,10 +633,10 @@ def test_an_update_kept_waiting_names_the_row_to_press_again(
     said, hand_off = _drive(body)
 
     assert said == [
-        "asq quits once the reads running end",
-        "Still waiting for a read after 10 s. Press the ⬆ row again to stay in asq; quit, and "
+        "rlx quits once the reads running end",
+        "Still waiting for a read after 10 s. Press the ⬆ row again to stay in rlx; quit, and "
         "it runs once they end.",
-        "Called off: asq carries on",
+        "Called off: rlx carries on",
     ], said
     assert hand_off is None
 
@@ -732,16 +732,16 @@ def test_the_row_says_what_the_dialogs_plan_says(
 
 
 _LAST_CHECKED = (
-    "asq closes, installs the newest release (0.9.1 when last checked) and reopens here."
+    "rlx closes, installs the newest release (0.9.1 when last checked) and reopens here."
 )
 
 
 @pytest.mark.parametrize(
     ("answer", "title", "says"),
     [
-        ("0.9.2", "Update aisquare 0.9.0 → 0.9.2", "asq closes, installs 0.9.2 and reopens here."),
-        ("0.9.1", "Update aisquare 0.9.0 → 0.9.1", "asq closes, installs 0.9.1 and reopens here."),
-        (None, "Update aisquare 0.9.0", f"{_LAST_CHECKED}\n"),
+        ("0.9.2", "Update rlx 0.9.0 → 0.9.2", "rlx closes, installs 0.9.2 and reopens here."),
+        ("0.9.1", "Update rlx 0.9.0 → 0.9.1", "rlx closes, installs 0.9.1 and reopens here."),
+        (None, "Update rlx 0.9.0", f"{_LAST_CHECKED}\n"),
     ],
     ids=["newer-since", "as-checked", "no-answer"],
 )
@@ -788,7 +788,7 @@ def test_the_dialog_asks_pypi_as_it_opens_and_restart_waits_for_the_answer(
 
     assert waiting.startswith(_LAST_CHECKED), waiting
     assert waiting.endswith("checking PyPI for the newest release…")
-    assert before == "Update aisquare 0.9.0", "no number named before PyPI answers"
+    assert before == "Update rlx 0.9.0", "no number named before PyPI answers"
     assert held is True and pressed == (None, True), "Restart waits for PyPI's answer"
     assert fresh.asked == 1
     assert after == title
@@ -843,7 +843,7 @@ def test_pypi_saying_nothing_is_newer_closes_the_dialog_and_says_so(
 
     assert asked == [1], "control: the plan was read"
     assert opened is (lands == "dialog-open"), "control: the answer landed where the test says"
-    assert "aisquare 0.9.0 is the newest release — nothing to update" in toasts, toasts
+    assert "rlx 0.9.0 is the newest release — nothing to update" in toasts, toasts
     assert stacked is False, "no dialog, open or opening"
     assert release is None and row is False, "the row goes"
     assert updates.take_press() is None
@@ -926,10 +926,10 @@ def test_a_closed_dialogs_answer_never_reaches_the_next_dialog(
     seen, asked, row = _drive(body)
 
     assert asked == 2, "control: each dialog asked"
-    confirmed = ("Update aisquare 0.9.0 → 0.9.2", False)
+    confirmed = ("Update rlx 0.9.0 → 0.9.2", False)
     if closed_lands == "while-this-one-asks":
         title, off, said = seen[0]
-        assert (title, off) == ("Update aisquare 0.9.0", True), seen[0]
+        assert (title, off) == ("Update rlx 0.9.0", True), seen[0]
         assert said.endswith(CHECKING), "the closed dialog's 0.9.1 named nothing"
     else:
         assert seen[0][:2] == confirmed, "control: this dialog's own answer was named"
@@ -1005,7 +1005,7 @@ def test_an_ask_unanswered_after_five_seconds_counts_as_unanswered(
     out, overdue, landed, row = _drive(body)
 
     assert out is True, "control: the ask was still out as the button came on"
-    assert overdue[:2] == ("Update aisquare 0.9.0", False), "on once the deadline passed"
+    assert overdue[:2] == ("Update rlx 0.9.0", False), "on once the deadline passed"
     assert overdue[2].startswith(_LAST_CHECKED) and overdue[2].endswith(UNCONFIRMED), overdue
     assert fresh.asked == 1, "control: the ask landed, the one there was"
     assert landed == overdue, "the answer after the deadline named nothing"
@@ -1052,7 +1052,7 @@ def test_the_deadline_is_no_textual_timer(
 
     looks = _drive(body)
 
-    assert looks[:2] == ("Update aisquare 0.9.0", True), "control: the ask was out"
+    assert looks[:2] == ("Update rlx 0.9.0", True), "control: the ask was out"
     assert any(target == "UpdateScreen" for target, _ in timers), "control: timers were seen"
     assert not [t for t in timers if t[0] == "FleetApp" or t[1] == deadline], timers
 
@@ -1275,7 +1275,7 @@ def test_the_housekeeping_tick_runs_remotes_auto_off_without_waiting(
 def test_a_ctrl_c_in_the_quit_names_the_command_without_asqs_own_flag() -> None:
     said = ui_app._hand_off_undone(ui_app.UPDATE_HAND_OFF)
 
-    assert said == "⚠ Update did not run: asq quit at the Ctrl-C — `aisquare upgrade` runs it"
+    assert said == "⚠ Update did not run: rlx quit at the Ctrl-C — `rlx upgrade` runs it"
 
 
 # --- the reopen -------------------------------------------------------------------------------

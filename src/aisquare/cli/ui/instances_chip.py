@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from rich.text import Text
 from textual.widgets import Static
 
+from aisquare.core import program as prog
 from aisquare.core.instances import Instance, host_name
 
 HERE = "here"
@@ -48,7 +49,7 @@ def chip_text(
     places = Counter(place(instance, host=here) for instance in live)
     mine = next((place(i, host=here) for i in live if i.id == this_id), None)
     order = sorted(places, key=lambda word: (word == "ssh", word not in ("Mac", "local"), word))
-    text = Text(f"{len(live)} asq · ")
+    text = Text(f"{len(live)} rlx · ")
     for index, word in enumerate(order):
         if index:
             text.append(" + ")
@@ -71,13 +72,13 @@ def differ(live: Sequence[Instance]) -> bool:
 
 def chip_tooltip(live: Sequence[Instance], this_id: str | None) -> str:
     """Each live asq on a line of its own (``Instance.label`` and since when), this one marked."""
-    lines = ["asq running on this home:"]
+    lines = ["rlx running on this home:"]
     for instance in live:
-        mark = "  ← this asq" if instance.id == this_id else ""
-        lines.append(f"• asq {instance.version} — {instance.where}{mark}")
+        mark = "  ← this rlx" if instance.id == this_id else ""
+        lines.append(f"• rlx {instance.version} — {instance.where}{mark}")
     if differ(live):
         lines.append("They run different releases: quit the older one (q in it).")
-    lines.append("`aisquare instances` lists them.")
+    lines.append(f"`{prog.command()} instances` lists them.")
     return "\n".join(lines)
 
 

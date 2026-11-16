@@ -224,17 +224,17 @@ def test_beside_another_release_with_no_terminal_asq_builds_nothing_and_says_how
     with asq_running(version="0.0.1") as other:
         with pytest.raises(typer.Exit) as refused:
             ui_app.run_ui()
-        assert instances.live_instances() == [other], "nothing of this asq registered"
+        assert instances.live_instances() == [other], "nothing of this rlx registered"
 
     said = capsys.readouterr().err
     assert refused.value.exit_code == 1
     assert built == [], "no FleetApp"
     assert not tmux_calls.exists(), tmux_calls.read_text() if tmux_calls.exists() else ""
     assert not (paths.aisquare_home() / "context.db").exists(), "no store"
-    assert f"asq {__version__} (store schema {SCHEMA_VERSION}) cannot run beside" in said
+    assert f"rlx {__version__} (store schema {SCHEMA_VERSION}) cannot run beside" in said
     where = f"ssh on {other.host}, pid {other.pid}, /dev/ttys009, since"
-    assert f"asq 0.0.1 (store schema {SCHEMA_VERSION}) — {where}" in said
-    assert "No terminal to ask in" in said and "press q in that asq" in said
+    assert f"rlx 0.0.1 (store schema {SCHEMA_VERSION}) — {where}" in said
+    assert "No terminal to ask in" in said and "press q in that rlx" in said
 
 
 def test_a_store_schema_that_differs_is_refused_as_a_release_is(
@@ -268,10 +268,10 @@ def test_no_leaves_the_other_running_and_says_how_to_quit_it(
         assert instances.live_instances() == [other] and f"{other.id}.quit" not in _files()
 
     said = " ".join(capsys.readouterr().err.split())
-    assert refused.value.exit_code == 1 and asked == ["Quit the other asq?"]
+    assert refused.value.exit_code == 1 and asked == ["Quit the other rlx?"]
     assert (
-        f"Quit it first — press q in that asq (ssh on {other.host}, pid {other.pid}, "
-        "/dev/ttys009) — then start asq again." in said
+        f"Quit it first — press q in that rlx (ssh on {other.host}, pid {other.pid}, "
+        "/dev/ttys009) — then start rlx again." in said
     )
 
 
@@ -296,8 +296,8 @@ def test_ctrl_c_or_the_end_of_input_at_the_question_is_a_no_that_says_how_to_qui
     said = " ".join(err.split())
     assert refused.value.exit_code == 1
     # The prompt's last character is the cut-off input function's to echo.
-    assert out == "Quit the other asq? [y/N]:\n", "the prompt's line ends before the refusal"
-    assert f"press q in that asq (ssh on {other.host}, pid {other.pid}, /dev/ttys009)" in said
+    assert out == "Quit the other rlx? [y/N]:\n", "the prompt's line ends before the refusal"
+    assert f"press q in that rlx (ssh on {other.host}, pid {other.pid}, /dev/ttys009)" in said
     assert "Aborted" not in out + err
 
 
@@ -312,7 +312,7 @@ def test_an_asq_that_cannot_be_asked_is_named_with_what_kill_costs(
 
     said = " ".join(capsys.readouterr().err.split())
     assert refused.value.exit_code == 1 and asked == [], "no question it could not act on"
-    assert f"asq 0.0.1 (pid {other.pid}) predates being asked to quit" in said
+    assert f"rlx 0.0.1 (pid {other.pid}) predates being asked to quit" in said
     assert f"`kill {other.pid}`: a SIGTERM skips its clean quit" in said
     assert "what it has not saved yet" in said and 'not told "Remote is off"' in said
 
@@ -329,7 +329,7 @@ def test_an_asq_that_does_not_quit_in_time_is_said_and_nothing_starts(
     assert refused.value.exit_code == 1 and instances.this_instance() is None
     me = {"version": __version__, "kind": "native", "host": other.host, "pid": os.getpid()}
     assert asked == me
-    assert f"asq 0.0.1 (pid {other.pid}) has not quit within 0.3 s" in said
+    assert f"rlx 0.0.1 (pid {other.pid}) has not quit within 0.3 s" in said
 
 
 _STAND_IN = r"""
@@ -372,7 +372,7 @@ def test_yes_asks_the_other_asq_to_quit_and_starts_once_it_has(
         assert (other.version, other.pid) == ("0.0.1", stand_in.pid)
 
         registration = instance_gate.admit(
-            ask=lambda q: q == "Quit the other asq?", interactive=True
+            ask=lambda q: q == "Quit the other rlx?", interactive=True
         )
 
         reaped.join(20)
@@ -382,9 +382,9 @@ def test_yes_asks_the_other_asq_to_quit_and_starts_once_it_has(
     said = capsys.readouterr().err
     assert registration is not None and instances.live_instances() == [registration.instance]
     me = registration.instance
-    assert out.strip() == f"asked by asq {__version__} (native on {me.host}, pid {os.getpid()})"
-    assert f"asking asq 0.0.1 (pid {other.pid}) to quit" in said
-    assert f"✓ asq 0.0.1 (pid {other.pid}) quit" in said
+    assert out.strip() == f"asked by rlx {__version__} (native on {me.host}, pid {os.getpid()})"
+    assert f"asking rlx 0.0.1 (pid {other.pid}) to quit" in said
+    assert f"✓ rlx 0.0.1 (pid {other.pid}) quit" in said
 
 
 def test_ui_project_reads_no_store_before_the_gate_lets_asq_start(
@@ -431,7 +431,7 @@ def test_run_ui_says_who_asked_in_its_own_terminal_and_leaves_before_a_hand_over
     ui_app.run_ui()
 
     said = capsys.readouterr().err
-    assert "asq quit: asq 0.0.1 (ssh on mini, pid 4242) asked it to" in said
+    assert "rlx quit: rlx 0.0.1 (ssh on mini, pid 4242) asked it to" in said
     assert "the last layout could not be saved" in said, "its unsaved lines, here"
     assert at_exec == [None, [instances.GATE_LOCK]], "deregistered before the exec"
 
@@ -456,9 +456,9 @@ def test_an_asq_asked_to_quit_quits_as_q_does(monkeypatch: pytest.MonkeyPatch) -
 
     asked_by, toasts = asyncio.run(run())
 
-    who = f"asq 0.0.1 (ssh on {asker.host}, pid 4242)"
+    who = f"rlx 0.0.1 (ssh on {asker.host}, pid 4242)"
     assert asked_by == QuitRequest(version="0.0.1", kind="ssh", host=asker.host, pid=4242)
-    assert f"{who} asked this asq to quit, to start in its place" in toasts
+    assert f"{who} asked this rlx to quit, to start in its place" in toasts
 
 
 @pytest.mark.parametrize(("command", "button"), [("upgrade", "Update"), ("uninstall", "Uninstall")])
@@ -545,7 +545,7 @@ def test_the_lifecycle_names_every_other_live_asq_but_this_one() -> None:
         assert instances.other_instances() == [other]
         from aisquare.services import lifecycle
 
-        assert lifecycle.running_asqs() == (f"asq 0.0.1 (ssh on {other.host}, pid {other.pid})",)
+        assert lifecycle.running_asqs() == (f"rlx 0.0.1 (ssh on {other.host}, pid {other.pid})",)
 
 
 def test_a_record_is_read_whatever_a_later_release_adds() -> None:
@@ -629,7 +629,7 @@ def test_4a_a_fresh_record_this_release_cannot_read_is_an_asq_of_an_unknown_rele
 
         said = " ".join(capsys.readouterr().err.split())
         assert refused.value.exit_code == 1 and asked == [] and instances.this_instance() is None
-        assert f"asq of a release this one cannot read — its record {path}" in said
+        assert f"rlx of a release this one cannot read — its record {path}" in said
     # Control: a minute old with no lock held (its asq gone), it is a leftover.
     with asq_running(version="0.9.9", hold_lock=False) as left:
         path = instances.registry_dir() / f"{left.id}.json"
@@ -655,7 +655,7 @@ def test_4b_a_gate_held_past_its_wait_refuses_rather_than_start_unchecked_and_un
 
     said = " ".join(capsys.readouterr().err.split())
     assert refused.value.exit_code == 1 and instances.this_instance() is None
-    assert "Another asq is checking this home and has held its gate over 0.2 s" in said
+    assert "Another rlx is checking this home and has held its gate over 0.2 s" in said
     assert "none will see it" not in said
 
 
@@ -849,7 +849,7 @@ def test_r3_on_a_home_asq_cannot_write_ui_project_says_so_once(
     result = runner.invoke(cli_app, ["ui", "--project", "alpha"])
 
     assert result.exit_code == 0, result.output
-    assert result.stderr.count("could not check the other asqs on this home") == 1
+    assert result.stderr.count("could not check the other rlx instances on this home") == 1
 
 
 def test_r4_a_record_whose_read_keeps_failing_while_its_lock_is_held_still_refuses(

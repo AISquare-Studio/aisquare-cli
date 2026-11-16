@@ -89,6 +89,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters.types import screen_of
 from aisquare.core.atomic import Replacement, replacement, write_replacing
 from aisquare.core.locking import acquire, open_lock_file, unlock
@@ -7059,7 +7060,7 @@ def _remote_quit_now(undone: str | None = None) -> NoReturn:
         if left:
             _remote_say(
                 f"Remote quit with {', '.join(left)} unfinished: "
-                "the fleet UI (`aisquare`) shows where the agent is"
+                f"the rlx UI (`{prog.command()}`) shows where the agent is"
             )
         if undone is not None:
             _remote_say(undone)

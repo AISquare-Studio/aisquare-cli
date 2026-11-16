@@ -1504,7 +1504,7 @@ def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
     )
     assert machine_fields == [], "no codename field of its own, and nothing machine-wide"
     assert "The fleet id follows it." in note
-    assert "aisquare project rename sets the same" in note
+    assert "rlx project rename sets the same" in note
     assert "`" not in note, "the note is a Text: backticks would show as they are"
 
 

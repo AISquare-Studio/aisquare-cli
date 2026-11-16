@@ -2602,7 +2602,7 @@ def test_help_from_the_board_opens_at_its_section_with_every_icon_in_view(
         # The heading is the box's first row: the key line right above it is scrolled off.
         # Its line in the text was not its row on screen — keys above it wrap (8 at 160x45).
         assert "this help — from anywhere" not in screen, screen
-    assert "aisquare fleet — keys" in from_the_sidebar
+    assert "rlx — keys" in from_the_sidebar
     assert not all(meaning in from_the_sidebar for meaning in meanings), (
         "the premise: from the top, the legend is below the fold"
     )

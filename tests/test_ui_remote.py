@@ -1544,8 +1544,9 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
                 if shown(state) != "off":
                     break
                 await asyncio.sleep(0.02)
-            assert shown(state) == f"{remote_view.ELSEWHERE}  · no auto-off"
-            assert shown(modal.query_one("#remote-link", Static)) == remote_view.ELSEWHERE_LINK
+            assert shown(state) == f"{remote_view.served_elsewhere_state()}  · no auto-off"
+            link = modal.query_one("#remote-link", Static)
+            assert shown(link) == remote_view.served_elsewhere_link()
             assert shown(modal.query_one("#remote-password", Static)) == passphrase
             modal.query_one("#remote-on", Switch).toggle()
             await written(pilot)
@@ -1605,7 +1606,7 @@ def test_while_another_process_serves_the_panel_shows_its_auto_off_and_picks_non
                 if shown(state) != "off":
                     break
                 await asyncio.sleep(0.02)
-            assert shown(state) == f"{remote_view.ELSEWHERE}  · {said}"
+            assert shown(state) == f"{remote_view.served_elsewhere_state()}  · {said}"
             assert modal.query_one("#remote-auto-off", Select).disabled
         finally:
             unlock(fd)
@@ -1651,7 +1652,7 @@ def test_the_sentences_beside_the_switches_are_painted_whole_at_any_width(
                 await asyncio.sleep(0.02)
             await pilot.pause()
             dated = f"auto-off at {deadline:%b} {deadline.day} 21:58"
-            assert painted_in(app, state) == f"{remote_view.ELSEWHERE} · {dated}"
+            assert painted_in(app, state) == f"{remote_view.served_elsewhere_state()} · {dated}"
             hint = modal.query_one("#remote-write-hint", Static)
             assert painted_in(app, hint) == READ_ONLY_REASON
         finally:

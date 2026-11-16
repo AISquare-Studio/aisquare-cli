@@ -518,7 +518,7 @@ def test_a_plugin_for_the_project_folder_alone_offers_connect_for_the_coders(
         return (card(page, "claude-status"), *offered)
 
     text, connect, manager = hosted(machine, go)
-    assert "✗ the coders may run without aisquare" in text and "✓ connected" not in text
+    assert "✗ the coders may run without rlx" in text and "✓ connected" not in text
     assert connect and not manager, text
 
 

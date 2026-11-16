@@ -61,8 +61,8 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.remote_control import AUTO_OFF_CHOICES, READ_ONLY_REASON, RemoteController
 from aisquare.cli.ui.ticks import while_running
+from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import (
-    ELSEWHERE,
     RemotePanel,
     _auto_off_label,
     _auto_off_time,
@@ -92,7 +92,7 @@ TOKEN_TITLE = "Paste your ngrok token"
 REPLACE_TITLE = "Replace your ngrok token"
 TOKEN_ABOUT = "Remote reaches your phone through ngrok: a free account's token, once."
 ENV_TOKEN = (
-    "NGROK_AUTHTOKEN is set where asq started: ngrok signs in with it, not with a token saved here"
+    "NGROK_AUTHTOKEN is set where rlx started: ngrok signs in with it, not with a token saved here"
 )
 """The one line beside the token field while ``NGROK_AUTHTOKEN`` overrides what it saves."""
 NGROK_MISSING = ngrok_sdk.SDK_MISSING
@@ -369,7 +369,11 @@ class RemoteSection(Vertical):
             self._paint_on()
         else:
             elsewhere = controller.served_elsewhere()
-            about = Text(ELSEWHERE, style="bold yellow") if elsewhere else Text(OFF_ABOUT)
+            about = (
+                Text(remote_view.served_elsewhere_state(), style="bold yellow")
+                if elsewhere
+                else Text(OFF_ABOUT)
+            )
             status = controller.status_line()
             if status:
                 about.append("\n" + status, style="yellow")

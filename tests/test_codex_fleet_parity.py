@@ -3111,7 +3111,7 @@ def test_the_settings_line_shows_one_permission_for_every_agent() -> None:
     assert line.index("Codex --approve-for-me") < line.index("Claude Code --permission-mode auto")
     assert "workspace:auto" in line and "--name" not in line
     # The store's profile is the same long run for every role: named, not spelled out.
-    assert "+ the aisquare store, read-only in its workspace sandbox" in line
+    assert "+ the rlx store, read-only in its workspace sandbox" in line
     assert "permissions.aisquare" not in line
     reviewer = launch_line("reviewer", "codex", FleetRoleSettings()).plain
     assert 'approvals_reviewer="auto_review"' in reviewer and "its read_only sandbox" in reviewer

@@ -142,7 +142,7 @@ def test_a_frame_paints_its_count_and_one_that_failed_keeps_the_last(
         "Fleet",
     ]
     assert seen[0][1] is None and seen[-1][1] is None
-    assert seen[2][1] is not None and "aisquare fleet capacity" in seen[2][1]
+    assert seen[2][1] is not None and "rlx fleet capacity" in seen[2][1]
 
 
 def test_the_header_follows_a_spawn_and_a_stop_on_the_next_frame(

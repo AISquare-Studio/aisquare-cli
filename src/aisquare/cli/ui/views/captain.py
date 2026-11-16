@@ -58,6 +58,7 @@ from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.views.agent import AgentView
+from aisquare.core import program as prog
 from aisquare.models import FleetAgentStatus
 
 _log = logging.getLogger(__name__)
@@ -77,8 +78,12 @@ VOICE_WORKER = "captain-voice-switch"
 MIC_WORKER = "captain-mic"
 BAR_WORKER = "captain-bar"
 
-START_COMMAND = "aisquare captain voice"
-"""What serves the page (T3's ``captain voice``; ``--mode``/``--speaker`` write the same keys)."""
+
+def start_command() -> str:
+    """What serves the page (T3's ``captain voice``; ``--mode``/``--speaker`` write the same
+    keys), with the word hints print."""
+    return prog.line("captain", "voice")
+
 
 PROBE_TIMEOUT_S = 0.3
 
@@ -184,7 +189,7 @@ class MicScreen(ModalScreen[None]):
                 )
             else:
                 yield Static(
-                    Text(f"○ not running — start it: {START_COMMAND}", style="yellow"),
+                    Text(f"○ not running — start it: {start_command()}", style="yellow"),
                     classes="mic-line",
                 )
             yield Static(

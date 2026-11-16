@@ -348,7 +348,7 @@ def _probe_claude(
             # a program that is gone or cannot start fail every event, unless the plugin
             # runs in their place, and the fleet started under "Your fleet is up" (review of
             # #257). Connect points them at this install.
-            problems.append("aisquare's hooks name a program that does not exist or cannot start")
+            problems.append("rlx's hooks name a program that does not exist or cannot start")
             is_connected = False
         if is_connected and connected is None and cwd is not None:
             coders = coder_folder(cwd)
@@ -569,7 +569,7 @@ def _probe_agent(
                     connected, trust = True, not install.trusted
                 elif connected and not agent_core.hooks_can_start(adapter.id, home):
                     problems.append(
-                        "aisquare's hooks name a program that does not exist or cannot start"
+                        "rlx's hooks name a program that does not exist or cannot start"
                     )
                     connected = trust = False
         except Exception as exc:

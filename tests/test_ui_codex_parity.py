@@ -73,7 +73,7 @@ def test_launch_lines_show_each_agents_flags_and_a_refusal() -> None:
     assert "Codex --approve-for-me" in launch_line("coder", "codex", coder).plain
     seat = launch_line("reviewer", "codex", reviewer).plain
     assert "--ask-for-approval on-request -c 'approvals_reviewer=\"auto_review\"'" in seat
-    assert "+ the aisquare store, read-only in its read_only sandbox" in seat
+    assert "+ the rlx store, read-only in its read_only sandbox" in seat
     claude = launch_line("coder", "claude-code", coder).plain
     assert "Claude Code --permission-mode auto" in claude and "--name" not in claude
     off = coder.model_copy(update={"approve_for_me": False})

@@ -113,7 +113,7 @@ ELSEWHERE_EVERY_SECONDS = 3.0
 taken for a moment each time (``remote_server.remote_served_elsewhere``)."""
 ALREADY_ON = f"Remote could not start — {remote_server.REMOTE_ALREADY_ON}"
 """What a start says that another Remote, on this home, kept off."""
-AUTO_OFF_MISSED = "Remote stayed off — its auto-off time passed while asq was not running"
+AUTO_OFF_MISSED = "Remote stayed off — its auto-off time passed while rlx was not running"
 """What a TUI start says of a Remote left on whose auto-off time has passed meanwhile
 (:meth:`RemoteController._auto_off_missed`)."""
 

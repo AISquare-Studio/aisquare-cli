@@ -48,6 +48,7 @@ from textual import events, on
 from textual.app import ComposeResult, RenderResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.geometry import Region
 from textual.message import Message
@@ -66,6 +67,7 @@ from aisquare.cli.ui.groups import (
 )
 from aisquare.cli.ui.instances_chip import InstancesChip
 from aisquare.cli.ui.terminal import InPlaceField
+from aisquare.cli.ui.theme import MARK_STYLE
 from aisquare.cli.ui.views.accounts import agent_mark
 from aisquare.core import codenames
 from aisquare.core.agent_adapters import default_binary, recorded_adapter
@@ -1976,14 +1978,17 @@ class OthersSection(Vertical):
 # --- the pane ---------------------------------------------------------------------
 
 
-def fleet_title(live_total: int) -> Text:
+def fleet_title(live_total: int) -> Content:
     """The header: the product's name, ``rlx`` (:data:`PRODUCT_NAME`, ``Fleet`` before #133),
     then ``· N live`` while any agent is live across the fleet — every project's, the captain
-    excluded: ``aisquare fleet capacity``'s ``live_total``."""
-    title = Text(PRODUCT_NAME)
-    if live_total > 0:
-        title.append(f" · {live_total} live", style="not bold")
-    return title
+    excluded: ``aisquare fleet capacity``'s ``live_total``.
+
+    The name is the product mark, drawn in the theme's mark colour (``MARK_STYLE``, #2F74F0
+    under ``rlx``): a ``Content`` span, whose variable is read as it is drawn, so ``t``
+    repaints it. The count keeps the header's text colour."""
+    if live_total <= 0:
+        return Content.styled(PRODUCT_NAME, MARK_STYLE)
+    return Content.assemble((PRODUCT_NAME, MARK_STYLE), (f" · {live_total} live", "not bold"))
 
 
 def fleet_title_tooltip(live_total: int) -> str | None:

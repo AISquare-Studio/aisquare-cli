@@ -136,7 +136,13 @@ from aisquare.cli.ui.terminal import (
     TerminalPane,
     log_paste,
 )
-from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
+from aisquare.cli.ui.theme import (
+    ThemePicker,
+    register_themes,
+    restore_theme,
+    theme_autosave,
+    theme_variable_defaults,
+)
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.update import (
     CHECK_WORKER,
@@ -1165,6 +1171,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         sharing: usage_sharing.Sharing | None = None,
     ) -> None:
         super().__init__()
+        register_themes(self)  # rlx, offered and restored like every built-in theme
         self._sharing = sharing
         """How the sharing switch, its dialogs and the shipper reach ``services.usage_share``
         (``None``: the real service); a test hands in a fake."""
@@ -1528,6 +1535,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.sidebar.focus()
 
     # --- theme ----------------------------------------------------------------------
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        # The product mark's colour, under every theme (cli/ui/theme.py's MARK_VARIABLE).
+        return {**super().get_theme_variable_defaults(), **theme_variable_defaults(self)}
 
     def action_pick_theme(self) -> None:
         self.push_screen(ThemePicker())

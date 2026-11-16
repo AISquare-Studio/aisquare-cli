@@ -68,6 +68,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import ReturnTo
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
+from aisquare.cli.ui.theme import MARK_STYLE
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
 from aisquare.core.agent_adapters import adapters, get_adapter, stage_mark_of
@@ -645,14 +646,13 @@ class WelcomeView(VerticalScroll):
                 yield Button("Start the coders", id="fleet-coders", variant="primary")
         yield Static(self._keys(), id="welcome-keys")
 
-    def _intro(self) -> Text:
-        text = Text()
-        text.append("aisquare fleet\n", style="bold")
-        text.append(
+    def _intro(self) -> Content:
+        # The heading is the product mark, in the theme's mark colour (cli/ui/theme.py).
+        return Content.assemble(
+            ("aisquare fleet\n", f"bold {MARK_STYLE}"),
             "Every project, its manager and the agents it spawns — each a real session, "
-            "surfaced here. Three steps to your first fleet:"
+            "surfaced here. Three steps to your first fleet:",
         )
-        return text
 
     def _keys(self) -> Text:
         return Text(

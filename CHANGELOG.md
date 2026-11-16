@@ -37,6 +37,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count
   beside it is as before (`rlx · 3 live`), and nothing else in the sidebar moves, at any
   width.
+- **asq opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
+  blue, #2F74F0, with magenta, lime, green, amber and coral on near-black. Press `t` to
+  pick another theme, as before. A theme you picked earlier is kept, and every theme asq
+  offered is still there. `aisquare board -w` shares your pick, so it opens in rlx too.
+- **The `rlx` at asq's top-left, and Welcome's heading, take their colour from the
+  theme.** Under rlx they are #2F74F0, and under any other theme they take its main
+  colour, so they change when you press `t`. Only colours change: nothing moves, at any
+  width. asq cannot set your terminal's font. JetBrains Mono, the font on rlx's web page,
+  is the one we recommend.
 
 ## [0.10.0] - 2026-11-16
 

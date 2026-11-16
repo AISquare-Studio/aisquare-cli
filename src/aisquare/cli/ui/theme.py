@@ -16,6 +16,7 @@ product mark's colour (:data:`MARK_VARIABLE`, :func:`theme_variable_defaults`).
 
 from __future__ import annotations
 
+import os
 from typing import Any, ClassVar
 
 from textual.app import App, ComposeResult
@@ -84,7 +85,8 @@ RLX_THEME = Theme(
 """Our own theme, and the default one (:data:`DEFAULT_THEME`)."""
 
 DEFAULT_THEME = RLX_THEME.name
-"""The theme both apps start in while ``state.json`` holds no theme they can show."""
+"""The theme both apps start in while neither ``state.json`` nor ``TEXTUAL_THEME`` names one
+they can show (:func:`restore_theme`)."""
 
 
 def register_themes(app: App[Any]) -> None:
@@ -152,18 +154,33 @@ class ThemePicker(ModalScreen[None]):
         self.dismiss(None)
 
 
-def restore_theme(app: App[Any]) -> bool:
-    """Apply the autosaved theme to ``app``, else :data:`DEFAULT_THEME`; ``False`` for the default.
+THEME_ENV = "TEXTUAL_THEME"
+"""Textual's own setting for the start theme, which a user may have exported before ``rlx``
+became the default. It still ranks above :data:`DEFAULT_THEME`, and below a saved pick."""
 
-    A saved name the running textual no longer ships is ignored rather than
-    raised: a theme is a preference, and losing it costs a look, not the app.
-    It gets the default, like a home with no theme saved.
+
+def _environment_theme(app: App[Any]) -> str | None:
+    """The first theme :data:`THEME_ENV` names that ``app`` offers, as Textual reads it: one
+    name, or several separated by commas."""
+    for name in os.environ.get(THEME_ENV, "").split(","):
+        if name.strip() in app.available_themes:
+            return name.strip()
+    return None
+
+
+def restore_theme(app: App[Any]) -> bool:
+    """Apply the start theme to ``app``; ``True`` only when it is the autosaved one.
+
+    The first of these that ``app`` offers: the theme saved in ``state.json``, the one
+    ``TEXTUAL_THEME`` names (:data:`THEME_ENV`), then :data:`DEFAULT_THEME`. A name the
+    running textual no longer ships is passed over rather than raised: a theme is a
+    preference, and losing it costs a look, not the app.
     """
     saved = _load_saved_theme()
     if saved and saved in app.available_themes:
         app.theme = saved
         return True
-    app.theme = DEFAULT_THEME
+    app.theme = _environment_theme(app) or DEFAULT_THEME
     return False
 
 

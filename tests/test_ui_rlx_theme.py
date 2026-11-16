@@ -360,6 +360,36 @@ def test_the_board_starts_in_rlx_unless_a_pick_it_can_show_is_saved(
     assert _state(isolated_home).get("board_theme") == saved
 
 
+ENVIRONMENT = [
+    pytest.param("dracula", None, "dracula", id="TEXTUAL_THEME over rlx"),
+    pytest.param("dracula", "nord", "nord", id="a saved pick over TEXTUAL_THEME"),
+    pytest.param("dracula", "a-theme-since-gone", "dracula", id="a stale pick: TEXTUAL_THEME"),
+    pytest.param("no-such-theme", None, "rlx", id="TEXTUAL_THEME names none: rlx"),
+    pytest.param("no-such-theme, gruvbox", None, "gruvbox", id="Textual's list: the first offered"),
+]
+
+
+@pytest.mark.parametrize(("environment", "saved", "starts"), ENVIRONMENT)
+def test_textual_theme_still_picks_the_start_theme_below_a_saved_pick(
+    environment: str,
+    saved: str | None,
+    starts: str,
+    tmp_path: Path,
+    script: Script,
+    board_dir: Path,
+    isolated_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user who exported Textual's ``TEXTUAL_THEME`` before rlx was the default keeps it, in
+    both apps: saved pick, then ``TEXTUAL_THEME``, then rlx. It is not saved as a pick."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    monkeypatch.setenv("TEXTUAL_THEME", environment)
+    if saved is not None:
+        _write_state(isolated_home, {"board_theme": saved})
+    assert (drive(_theme), _on_the_board(_theme)) == (starts, starts)
+    assert _state(isolated_home).get("board_theme") == saved
+
+
 def _listed(app: App[Any]) -> list[str]:
     listing = app.screen.query_one("#themelist", OptionList)
     return [str(listing.get_option_at_index(i).prompt) for i in range(listing.option_count)]

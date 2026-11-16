@@ -174,8 +174,9 @@ def test_the_board_shows_a_restored_session_again(runner: CliRunner, work_dir: P
     team_service.hook_prompt_heartbeat("sess-alive", work_dir)
     after = runner.invoke(app, ["board"], catch_exceptions=False).output
 
-    assert "sess-ali" not in before
-    assert "sess-ali" in after, after
+    # Named as the left pane names its agent (#140): this one has no label, so by its role.
+    assert "  - coder — " not in before
+    assert "  - coder — " in after, after
 
 
 def test_prune_still_retires_a_session_that_has_gone_quiet(work_dir: Path) -> None:

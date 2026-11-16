@@ -1240,7 +1240,7 @@ def board_data_in(
 class BoardRead(NamedTuple):
     """What a painted board shows: :func:`board_data`'s four, the ``fleet switch`` of each
     limited session's chip (:func:`fleet_switches`), and each live session's fleet row's label
-    (:func:`live_labels`), which names it as asq's left pane does (:func:`board_names`, #140)."""
+    (:func:`live_labels`), which names it as asq's left pane does (``cli.board_names``, #140)."""
 
     project: ProjectInfo
     sessions: list[TeamSession]
@@ -3783,51 +3783,6 @@ def board_name(session: TeamSession, live: Mapping[str, str] | None = None) -> s
     return (live or {}).get(session.id) or session.label or session.role
 
 
-BOARD_NAME_CELLS = 24
-"""The most a board VIEW gives a name (asq's board, ``board -w``): a longer label ends in ``…``,
-so a feed line or a sessions row keeps its chip, as ``role·<id>`` (at most 17) did (#140)."""
-
-
-def _fit(name: str, cells: int | None) -> str:
-    return name if cells is None or len(name) <= cells else name[: max(cells - 1, 1)] + "…"
-
-
-def board_names(
-    sessions: Sequence[TeamSession],
-    live: Mapping[str, str] | None = None,
-    *,
-    cells: int | None = None,
-) -> dict[str, str]:
-    """Session id → :func:`board_name`, what the HUMAN board calls each session (#140), in place
-    of ``role·<id>``. Two sessions of one name (a restarted agent, an earlier round's agent of
-    the same label) are told apart only then: the live one, else the newest, keeps the name,
-    and each other gets the time it started, ``coder-1 (14:02)``, or its short id where that
-    time is shared too. ``cells`` caps each (:data:`BOARD_NAME_CELLS` for a view), the name
-    shortened and never what tells it apart. The agent-facing lines keep ids
-    (:func:`authors_of`)."""
-    names = {session.id: board_name(session, live) for session in sessions}
-    told_apart: set[str] = set()
-    groups: dict[str, list[TeamSession]] = {}
-    for session in sessions:
-        groups.setdefault(names[session.id], []).append(session)
-    for name, group in groups.items():
-        if len(group) < 2:
-            continue
-        kept, *others = sorted(
-            group, key=lambda s: (s.ended_at is None, s.started_at), reverse=True
-        )
-        stamps = {s.id: f"{s.started_at.astimezone():%H:%M}" for s in others}
-        for session in others:
-            stamp = stamps[session.id]
-            shared = sum(1 for other in stamps.values() if other == stamp) > 1
-            suffix = f" ({short_id(session.id) if shared else stamp})"
-            room = None if cells is None else cells - len(suffix)
-            names[session.id] = _fit(name, room) + suffix
-            told_apart.add(session.id)
-        names[kept.id] = name
-    return {sid: name if sid in told_apart else _fit(name, cells) for sid, name in names.items()}
-
-
 def live_labels(store: ContextStore, sessions: Sequence[TeamSession]) -> dict[str, str]:
     """Each live session's fleet row's label, by session id: what the left pane shows, which a
     ``fleet relabel`` changes after the session recorded its own (#140). One indexed lookup per
@@ -4360,9 +4315,9 @@ def render_board(
     names: Mapping[str, str] | None = None,
 ) -> str:
     """The human/board view (``asq board``), without the protocol contract. With ``names``
-    (:func:`read_board_names`), what ``aisquare board`` prints for a person, each session is
-    named as asq's left pane names its agent (#140); without, as an agent reads it (the MCP
-    board): by its short id and role, which ``--as`` takes."""
+    (``cli.board_names.read_board_names``), what ``aisquare board`` prints for a person, each
+    session is named as asq's left pane names its agent (#140); without, as an agent reads it
+    (the MCP board): by its short id and role, which ``--as`` takes."""
     from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
 
     return _render_board(
@@ -4375,18 +4330,6 @@ def render_board(
         links=_link_marks(project.id),
         names=names,
     )
-
-
-def read_board_names(sessions: Sequence[TeamSession]) -> dict[str, str]:
-    """:func:`board_names`, with :func:`live_labels` read in a store session of its own: for a
-    board painted from :func:`board_data` (``aisquare board``), whose session has closed."""
-    try:
-        with store_session() as store:
-            live = live_labels(store, sessions)
-    except Exception as exc:
-        _log.warning("the board's names read the sessions' own labels (%s)", exc)
-        live = {}
-    return board_names(sessions, live)
 
 
 def _render_board(
@@ -5872,7 +5815,7 @@ def event_line(
 ) -> str:
     """``583dc9a8 (manager) added → coder: [#12 tsk_…] title``; ``numbers`` is the board's
     task id → number (``store.task_numbers``), so the task reads as the board shows it. With
-    ``names`` (:func:`board_names`), a person's board: ``manager added → coder: …``, and
+    ``names`` (``cli.board_names``), a person's board: ``manager added → coder: …``, and
     :data:`OWNER` for a line no session wrote (#140)."""
     if names is not None:
         who = (

@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.text import Text
 
+from aisquare.cli import board_names
 from aisquare.cli.common import format_reset, local_time
 from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
@@ -84,7 +85,7 @@ def _who(
     event: TeamEvent, roles: dict[str, str], names: Mapping[str, str] | None = None
 ) -> tuple[str, str, str]:
     """(emoji, name, style) for the author of an event: the name asq's left pane gives its
-    agent (``names``, ``team.board_names``, #140), the role's emoji and colour beside it; for a
+    agent (``names``, ``cli.board_names``, #140), the role's emoji and colour beside it; for a
     line no session wrote, the person (``team.PERSON``). A session the board's list no longer
     holds is named by its short id."""
     if event.session_id is None:
@@ -186,7 +187,7 @@ def _session_lines(
     names: Mapping[str, str] | None = None,
 ) -> Text:
     """The sessions block: who is here, in what state, on which account, how long ago. Each
-    by the name asq's left pane gives its agent (``names``, ``team.board_names``, #140).
+    by the name asq's left pane gives its agent (``names``, ``cli.board_names``, #140).
 
     A ``limited`` session is told the ``fleet switch`` that moves it, from ``switches``
     (``team_service.fleet_switches``): its own fleet row's project and label. Alone, the
@@ -500,7 +501,7 @@ def board_frame(height: int, width: int, project: ProjectInfo | None = None) -> 
         events=200, project=project, exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS
     )
     project, sessions, tasks, events, switches = read[:5]
-    names = team_service.board_names(sessions, read.live, cells=team_service.BOARD_NAME_CELLS)
+    names = board_names.board_names(sessions, read.live, cells=board_names.BOARD_NAME_CELLS)
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(
         f"aisquare board — {project.root.name or project.id} — {datetime.now():%H:%M:%S}\n",

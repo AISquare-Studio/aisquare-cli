@@ -63,7 +63,7 @@ from textual.widgets import Button, DataTable, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli import watch
+from aisquare.cli import board_names, watch
 from aisquare.cli.common import local_time
 from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.divider import Divider, floor_of
@@ -611,7 +611,7 @@ class BoardPanel(Vertical):
         self._tasks_by_id: dict[str, TeamTask] = {}
         self._roles: dict[str, str] = {}
         self._names: dict[str, str] = {}
-        """Each session's name as asq's left pane gives its agent (``team.board_names``, #140)."""
+        """Each session's name as asq's left pane gives its agent (``cli.board_names``, #140)."""
         self._live: dict[str, str] = {}
         """Each live session's fleet row's label (``team.live_labels``), the last refresh's."""
         self._statuses: dict[str, str] = {}
@@ -727,7 +727,7 @@ class BoardPanel(Vertical):
         self._roles = {s.id: s.role for s in sessions}
         self._live = dict(read.live)
         self._rename(
-            team_service.board_names(sessions, self._live, cells=team_service.BOARD_NAME_CELLS)
+            board_names.board_names(sessions, self._live, cells=board_names.BOARD_NAME_CELLS)
         )
         self._sessions = {s.id: s for s in sessions}
         self._statuses = {t.id: t.status for t in tasks}

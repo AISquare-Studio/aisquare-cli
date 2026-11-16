@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from aisquare.cli import watch
+from aisquare.cli import board_names, watch
 from aisquare.cli.ui.board import needs_you
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import team as team_service
@@ -83,14 +83,14 @@ def _hhmm(minutes_ago: int) -> str:
 
 
 def test_a_session_is_its_label_and_the_unlabelled_manager_is_manager() -> None:
-    assert team_service.board_names([MANAGER, CODER]) == {
+    assert board_names.board_names([MANAGER, CODER]) == {
         MANAGER.id: "manager",
         CODER.id: "coder-auth",
     }
 
 
 def test_a_relabelled_agent_is_named_by_its_fleet_row_as_the_left_pane_names_it() -> None:
-    names = team_service.board_names([MANAGER, CODER], {CODER.id: "login-fix"})
+    names = board_names.board_names([MANAGER, CODER], {CODER.id: "login-fix"})
     assert names[CODER.id] == "login-fix"
 
 
@@ -98,7 +98,7 @@ def test_two_sessions_of_one_name_are_told_apart_and_only_then() -> None:
     """A restarted agent: the live one keeps the name, the earlier one gets the time it
     started. An agent alone under its name is never decorated."""
     earlier = _session("3333cccc-old", "coder", "coder-auth", started=120, ended=True)
-    names = team_service.board_names([MANAGER, earlier, CODER])
+    names = board_names.board_names([MANAGER, earlier, CODER])
 
     assert names[CODER.id] == "coder-auth"
     assert names[earlier.id] == f"coder-auth ({_hhmm(120)})"
@@ -107,7 +107,7 @@ def test_two_sessions_of_one_name_are_told_apart_and_only_then() -> None:
 
 def test_the_live_one_keeps_the_name_even_when_an_ended_one_started_later() -> None:
     later_but_ended = _session("4444dddd-later", "coder", "coder-auth", started=10, ended=True)
-    names = team_service.board_names([CODER, later_but_ended])
+    names = board_names.board_names([CODER, later_but_ended])
 
     assert names[CODER.id] == "coder-auth"
     assert names[later_but_ended.id] == f"coder-auth ({_hhmm(10)})"
@@ -116,7 +116,7 @@ def test_the_live_one_keeps_the_name_even_when_an_ended_one_started_later() -> N
 def test_older_sessions_started_in_one_minute_are_told_apart_by_their_short_ids() -> None:
     first = _session("5555eeee-first", "coder", "coder-auth", started=90, ended=True)
     second = _session("6666ffff-second", "coder", "coder-auth", started=90, ended=True)
-    names = team_service.board_names([first, second, CODER])
+    names = board_names.board_names([first, second, CODER])
 
     assert names[CODER.id] == "coder-auth"
     assert names[first.id] == "coder-auth (5555eeee)"
@@ -165,7 +165,7 @@ def test_live_labels_reads_the_live_sessions_fleet_rows_and_survives_a_failure()
 
 def test_the_feed_names_its_author_and_the_person() -> None:
     roles = {MANAGER.id: "manager", CODER.id: "coder"}
-    names = team_service.board_names([MANAGER, CODER])
+    names = board_names.board_names([MANAGER, CODER])
 
     by_coder = watch.feed_line(_event(1, CODER.id), roles, names).plain
     by_manager = watch.feed_line(_event(2, MANAGER.id), roles, names).plain
@@ -179,7 +179,7 @@ def test_the_feed_names_its_author_and_the_person() -> None:
 
 def test_an_event_s_detail_keeps_the_short_id_reachable() -> None:
     roles = {CODER.id: "coder"}
-    names = team_service.board_names([CODER])
+    names = board_names.board_names([CODER])
 
     detail = watch._event_detail(_event(1, CODER.id), roles, names).plain
 
@@ -187,7 +187,7 @@ def test_an_event_s_detail_keeps_the_short_id_reachable() -> None:
 
 
 def test_the_sessions_block_names_each_live_session() -> None:
-    names = team_service.board_names([MANAGER, CODER])
+    names = board_names.board_names([MANAGER, CODER])
     block = watch._session_lines([MANAGER, CODER], {}, names=names).plain
 
     assert "manager  ▶ working" in block and "coder-auth  ▶ working" in block
@@ -195,7 +195,7 @@ def test_the_sessions_block_names_each_live_session() -> None:
 
 
 def test_a_claim_is_named_in_the_task_s_detail_with_its_short_id() -> None:
-    names = team_service.board_names([CODER])
+    names = board_names.board_names([CODER])
 
     detail = watch._task_detail(_task(CODER.id), {}, names).plain
 
@@ -215,7 +215,7 @@ def test_the_strip_names_a_relabelled_waiting_agent_as_the_left_pane_does() -> N
 
 
 def test_aisquare_board_s_text_names_sessions_claims_and_authors() -> None:
-    names = team_service.board_names([MANAGER, CODER])
+    names = board_names.board_names([MANAGER, CODER])
     events = [_event(1, CODER.id, text="PR ready"), _event(2, None, text="ship it")]
 
     text = team_service.render_board(
@@ -264,13 +264,13 @@ def test_the_board_json_keeps_session_ids() -> None:
 def test_a_view_caps_a_long_name_and_never_what_tells_it_apart() -> None:
     """``board -w`` and asq's board give a name at most ``BOARD_NAME_CELLS``: a long label ends in
     ``…`` and keeps a row's chip in view; a told-apart name keeps its time whole."""
-    cap = team_service.BOARD_NAME_CELLS
+    cap = board_names.BOARD_NAME_CELLS
     long_label = "reviewer-board-audit-of-the-whole-release"
     reviewer = _session("9999aaaa-rev", "reviewer", long_label)
     earlier = _session("9999bbbb-old", "reviewer", long_label, started=120, ended=True)
 
-    capped = team_service.board_names([reviewer, earlier, CODER], cells=cap)
-    whole = team_service.board_names([reviewer, earlier, CODER])
+    capped = board_names.board_names([reviewer, earlier, CODER], cells=cap)
+    whole = board_names.board_names([reviewer, earlier, CODER])
 
     assert capped[reviewer.id] == long_label[: cap - 1] + "…" and len(capped[reviewer.id]) == cap
     assert capped[earlier.id].endswith(f"… ({_hhmm(120)})") and len(capped[earlier.id]) == cap

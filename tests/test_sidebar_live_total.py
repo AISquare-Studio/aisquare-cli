@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Static
 
@@ -87,6 +88,29 @@ def test_the_header_says_rlx_then_how_many_are_live_and_nothing_with_none(
     assert fleet_title(live).plain == text
     said = fleet_title_tooltip(live)
     assert (said is None) if tip is None else (said is not None and said.startswith(tip))
+
+
+def test_the_title_is_the_product_s_name_in_bold_and_its_count_is_not(
+    tmp_path: Path, script: Script
+) -> None:
+    """#133: ``rlx``, as its command is spelled, in the header's bold (the sidebar's CSS), and
+    ``· N live`` beside it in the plain weight, as rc/0.9.2 drew the count."""
+    seed(tmp_path, *THREE)
+
+    async def body(pilot: Pilot[None]) -> list[tuple[str, bool]]:
+        app = fleet_app(pilot)
+        app.sidebar.show_live_total(3)
+        await settle(app)
+        title = app.query_one("#fleet-title", Static)
+        (strip,) = title.render_lines(Region(0, 0, title.size.width, 1))
+        return [(segment.text, bool(segment.style and segment.style.bold)) for segment in strip]
+
+    segments = drive(body)
+
+    words = [(text.strip(), bold) for text, bold in segments if text.strip()]
+    assert "".join(text for text, _ in segments).strip() == "rlx · 3 live", segments
+    assert words[0] == ("rlx", True), segments
+    assert all(not bold for text, bold in words[1:]), "the count is not bold"
 
 
 def test_the_count_is_fleet_capacitys_every_projects_and_never_the_captain(

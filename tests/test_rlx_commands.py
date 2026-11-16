@@ -28,6 +28,7 @@ from aisquare.core.agent_adapters import claude_usage, lasting, usage_tally
 from aisquare.core.version import __version__
 from aisquare.services import diagnostics, install_route, lifecycle
 from aisquare.services.install_route import Facts, InstallRoute, UvReceipt
+from tests.rendered import plain
 
 NAMES = ("aisquare", "asq", "rlx", "relax")
 """Every name the package's console scripts give ``main``."""
@@ -56,7 +57,9 @@ def test_the_usage_line_reads_the_name_it_was_started_by(
     monkeypatch.setenv("COLUMNS", "100")
     code = _run_main(monkeypatch, name, "--help")
 
-    out = capsys.readouterr().out
+    # Styling stripped at the assert site, as conftest says: typer forces a terminal under
+    # GITHUB_ACTIONS, read at its import, and its help then carries ANSI codes.
+    out = plain(capsys.readouterr().out)
     assert code == 0, out
     assert f"Usage: {name} [OPTIONS] COMMAND [ARGS]..." in out, out
     others = [other for other in NAMES if other != name and other not in name]
@@ -422,3 +425,19 @@ def test_uvs_links_into_either_name_s_tool_environment_are_ours(tmp_path: Path) 
     (bin_dir / "relax").symlink_to(prefix.parent / "aisquare-cli" / "bin" / "relax")
 
     assert install_route.taken_commands(route) == ()
+
+
+# --- the notes ------------------------------------------------------------------------------
+
+
+def test_the_notes_name_the_two_commands_the_guard_and_the_title() -> None:
+    """The [Unreleased] entry says what this ships, under the heading it ships as."""
+    text = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = text.split("## [Unreleased]")[1].split("\n## [")[0]
+    added = " ".join(unreleased.split("### Added")[1].split("### ")[0].split())
+    changed = " ".join(unreleased.split("### Changed")[1].split("### ")[0].split())
+
+    assert "**`rlx` and `relax` start aisquare, as `asq` and `aisquare` do.**" in added
+    assert "**Another program's `rlx` or `relax` is never replaced or deleted.**" in added
+    assert "Hooks still call `aisquare`" in added
+    assert "**asq's top-left reads `rlx`, the product's name, where it read `Fleet`.**" in changed

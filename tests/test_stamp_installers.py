@@ -407,7 +407,7 @@ def test_the_suites_really_read_the_override(stamped: Path) -> None:
 # --- the URLs people are given -------------------------------------------------
 
 _RELEASE_URL = re.compile(
-    r"https://github\.com/AISquare-Studio/aisquare-cli/releases/"
+    r"https://github\.com/AISquare-Studio/rlx/releases/"
     r"(latest/download|download/v[^/\s]+)/([^\s)`'\"|]+)"
 )
 _DOCUMENTED = (REPO / "README.md",)

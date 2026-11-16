@@ -606,13 +606,21 @@ def _ship(
             if refused_in_a_row == REJECTED_IN_A_ROW:
                 del pending[:-1]  # the rest wait for next time; the newest, with today, still goes
             continue
-        wait = result.retry_after() if result.status == 429 else None
+        wait = result.retry_after() if result.status in _SAYS_WHEN else None
         return _failed(moment, f"{what}{_detail(result)}", retry_after=wait, report=report)
     if first_refusal is not None:
         if not report.sent:
             return _failed(moment, first_refusal, report=report)
         _note_refusal(first_refusal)  # a debug line in the state; the shipment itself went
     return report
+
+
+_SAYS_WHEN = frozenset({429, 503})
+"""The answers whose ``Retry-After`` the next try waits for, when it is longer than the backoff:
+a throttle (429) and a server that is unavailable for now (503), as the server's ingest answers
+with ``Retry-After: 3600`` while its kill switch is off (AISquare-Studio-BE #3791). An answer that
+names no wait (``retry_after``'s 30 s default, under any backoff) keeps the backoff, as every
+other failure does."""
 
 
 def _refused(result: iam.HttpResult) -> bool:

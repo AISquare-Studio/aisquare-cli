@@ -599,8 +599,9 @@ def test_a_server_error_is_a_failure_and_a_200_without_a_body_is_not_trusted(
 def test_the_kill_switch_s_503_keeps_every_day_for_the_next_shipment(machine: Machine) -> None:
     """The server's ingest ships dark behind a kill switch, and while it is off it answers 503 with
     `Retry-After: 3600` (AISquare-Studio-BE #3791, its manager's note of 2026-11-16). That is a
-    retry-later, never a refusal: no day is acknowledged or skipped ahead of, the shipment is
-    tried again later, and then it sends the very same days to the endpoint."""
+    retry-later, never a refusal: no day is acknowledged or skipped ahead of, the next try waits
+    the hour the server asked for (not the backoff's first 5 minutes), and then it sends the very
+    same days to the endpoint."""
     _history(machine)
     _on()
     dark = Server(status(503, {"detail": "ingest is off"}, **{"Retry-After": "3600"}))
@@ -611,7 +612,7 @@ def test_the_kill_switch_s_503_keeps_every_day_for_the_next_shipment(machine: Ma
 
     assert not first.sent and first.error == "HTTP 503" and first.rejected_days == 0
     assert state.acked == {} and state.failures == 1
-    assert due is not None and due > NOW, "tried again later, not given up and not now"
+    assert due == NOW + timedelta(hours=1), "the hour Retry-After asked for, not 5 minutes"
     asked = [day["date"] for day in dark.calls[0].body["days"]]
     assert asked, "the dark server was asked for the days"
 
@@ -622,6 +623,23 @@ def test_the_kill_switch_s_503_keeps_every_day_for_the_next_shipment(machine: Ma
     assert lit.calls[0].url.endswith(usage_share.ENDPOINT_PATH)
     assert [day["date"] for day in lit.calls[0].body["days"]] == asked
     assert set(sharing.read().acked) == set(asked)
+
+
+@pytest.mark.parametrize("code", [500, 502, 503])
+def test_a_server_error_that_names_no_wait_keeps_the_backoff(machine: Machine, code: int) -> None:
+    """Only an answer that says when (429, 503 with `Retry-After`) moves the next try past the
+    backoff; a server error that names no wait is tried again on the backoff's own schedule, and
+    its days are kept as the kill switch's are."""
+    _history(machine)
+    _on()
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=Server(status(code, "later")))
+    state = sharing.read()
+
+    assert not report.sent and report.error == f"HTTP {code}" and report.rejected_days == 0
+    assert state.acked == {} and state.failures == 1
+    assert sharing.parse_time(state.next_due_at) == NOW + sharing.backoff(1)
+    assert sharing.backoff(1) == timedelta(minutes=5), "the backoff's first step, for the record"
 
 
 def test_two_shippers_at_once_send_one(machine: Machine) -> None:

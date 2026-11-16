@@ -457,6 +457,8 @@ def _programs(machine: Machine) -> Path:
     for relative in (
         "aisquare",
         "asq",
+        "rlx",
+        "relax",
         "python3",
         "My Tools/aisquare",
         "Jane's Tools/aisquare",
@@ -491,6 +493,9 @@ _OURS = [
     ("{bin}/python3 -m aisquare hook stop", True),
     ("aisquare hook stop", True),
     ("{bin}/asq hook stop", True),
+    # rlx and relax, which connect never writes, as a person may (#133).
+    ("{bin}/rlx hook stop", True),
+    ("'{bin}/relax' hook stop", True),
     ("{bin}/aisquare hook stop ", True),
     ("{bin}/aisquare\thook\tstop", True),
     ("{bin}/aisquare  hook  stop", True),

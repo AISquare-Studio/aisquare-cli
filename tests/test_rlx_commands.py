@@ -23,7 +23,8 @@ import pytest
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import main
 from aisquare.core import agents as agent_core
-from aisquare.core import instance_scan
+from aisquare.core import instance_scan, ledger
+from aisquare.core.agent_adapters import claude_usage, lasting, usage_tally
 from aisquare.core.version import __version__
 from aisquare.services import diagnostics, install_route, lifecycle
 from aisquare.services.install_route import Facts, InstallRoute, UvReceipt
@@ -110,8 +111,8 @@ def test_a_hook_connected_from_rlx_or_relax_runs_the_aisquare_script(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Hooks name the ``aisquare`` script whichever name connected them: another program can
-    take ``relax`` over, and a hook naming it would then run that program. The matcher is
-    the writer's exact inverse, so it does not take ``rlx … hook`` for aisquare's either."""
+    take ``relax`` over, and a hook naming it would then run that program. The matcher knows
+    every name, so a hook a person wrote with ``rlx`` is ours too."""
     bin_dir = tmp_path / "tools" / "aisquare-cli" / "bin"
     bin_dir.mkdir(parents=True)
     for name in NAMES:
@@ -127,10 +128,61 @@ def test_a_hook_connected_from_rlx_or_relax_runs_the_aisquare_script(
     assert written["rlx"] == written["relax"] == aisquare
     assert written["asq"] == shlex.quote(str((bin_dir / "asq").resolve())), "control"
     for name in NAMES:
-        ours = agent_core._is_aisquare_hook_command(f"{written[name]} hook stop")
-        assert ours, name
-    assert not agent_core._is_aisquare_hook_command(f"{bin_dir / 'rlx'} hook stop")
-    assert not agent_core._is_aisquare_hook_command(f"{bin_dir / 'relax'} hook stop")
+        assert agent_core._is_aisquare_hook_command(f"{written[name]} hook stop"), name
+        assert agent_core._is_aisquare_hook_command(f"{bin_dir / name} hook stop"), name
+        assert agent_core._is_aisquare_hook_command(f"{name} --no-color hook stop"), name
+    assert not agent_core._is_aisquare_hook_command(f"{bin_dir / 'relaxed'} hook stop")
+    assert not agent_core._is_aisquare_hook_command(f"{bin_dir / 'relax'} hook nothing")
+
+
+@pytest.mark.parametrize("name", ["rlx", "relax"])
+def test_the_usage_and_board_readers_know_every_name(name: str) -> None:
+    """An agent's shell may run ``rlx repo …`` or ``relax board``, and a hook line ``rlx hook
+    …``: counted as the ``aisquare`` forms are (#133)."""
+    assert claude_usage._AISQUARE_HOOK.search(f"/home/u/.local/bin/{name} hook stop")
+    assert claude_usage._LOOKUP_COMMAND.search(f"cd /w && {name} repo find auth")
+    assert usage_tally.is_lookup_command(f"{name} repo map")
+    assert ledger.BOARD_READ.match(f"{name} --json task list")
+    assert ledger.BOARD_READ.match(f"/home/u/.local/bin/{name} board")
+    assert not usage_tally.is_lookup_command(f"grep {name} repo/"), "a mention, not a command"
+    assert not ledger.BOARD_READ.match(f"{name}x board")
+
+
+@pytest.mark.parametrize(
+    ("spec", "runs", "fetches"),
+    [
+        ({"command": "/home/u/.local/bin/rlx", "args": ["serve"]}, True, False),
+        ({"command": r"C:\Users\u\.local\bin\relax.EXE", "args": ["serve"]}, True, False),
+        ({"command": "uvx", "args": ["--from", "aisquare-cli", "rlx", "serve"]}, True, True),
+        (
+            {"command": "uvx", "args": ["--from", "aisquare-cli[serve]==0.11.0", "relax"]},
+            True,
+            True,
+        ),
+        ({"command": "uv", "args": ["tool", "run", "--from", "aisquare_cli", "rlx"]}, True, True),
+        # PyPI's `relax` is another project: a bare name alone is not ours.
+        ({"command": "uvx", "args": ["relax", "serve"]}, False, False),
+        ({"command": "uvx", "args": ["--from", "relax-tools", "rlx"]}, False, False),
+        ({"command": "node", "args": ["/srv/relax/index.js"]}, False, False),
+        ({"command": "uvx", "args": ["--from", "aisquare-cli", "aisquare", "serve"]}, True, True),
+    ],
+    ids=[
+        "rlx-path",
+        "relax-exe",
+        "uvx-rlx",
+        "uvx-relax-pinned",
+        "uv-tool-run",
+        "uvx-relax-alone",
+        "uvx-other-package",
+        "a-path-holding-relax",
+        "control",
+    ],
+)
+def test_an_mcp_server_runs_aisquare_by_rlx_only_from_this_package(
+    spec: dict[str, object], runs: bool, fetches: bool
+) -> None:
+    assert lasting.runs_aisquare(spec) is runs
+    assert (runs and lasting.fetches_aisquare(spec)) is fetches
 
 
 @pytest.mark.parametrize("name", ["rlx", "relax"])

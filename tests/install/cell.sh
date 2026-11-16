@@ -482,6 +482,11 @@ else
     # does not keep the staging's `--with`.
     typer_cap=${TMPDIR:-/tmp}/typer-cap.txt
     printf '%s\n' 'typer<0.29' >"$typer_cap"
+    # A machine that has the pinned release has it as aisquare-cli, the name every
+    # release before rlx was published under, and nothing else (#137). Runs 1 to 3
+    # left the rlx tool this tree's wheel made: beside it, the staging would be two
+    # names side by side, which the installer refuses. So that tool goes first.
+    uv tool uninstall rlx >/dev/null 2>&1 || true
     # An EXACT PIN, deliberately — that is the shape `uv tool upgrade` refuses
     # to move, and installing without the pin would test nothing.
     uv tool install --force --python 3.13 --with tiktoken --with 'typer<0.29' \

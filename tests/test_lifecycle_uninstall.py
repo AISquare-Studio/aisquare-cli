@@ -37,6 +37,7 @@ from aisquare.core.tmux import (
     TmuxUnavailable,
     socket_answer,
 )
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import FleetAgent
 from aisquare.services import install_route, lifecycle
 from aisquare.services.install_route import Facts
@@ -543,7 +544,10 @@ def test_a_route_aisquare_does_not_remove_is_told_its_command(
     assert result.exit_code == 0, result.output
     assert agent_core.hook_commands("claude-code", site) == []
     assert "to finish, remove the package:" in result.stdout
-    assert " uninstall " in result.stdout and "aisquare-cli" in result.stdout
+    # The command names the distribution installed here, rlx in this tree (#137); the
+    # literal "aisquare-cli" also matched any run whose checkout path holds it.
+    assert " uninstall --python " in result.stdout
+    assert result.stdout.rstrip().endswith(f" {DISTRIBUTION}"), result.stdout
     assert world.execs == []
 
 

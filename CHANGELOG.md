@@ -11,10 +11,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The product is named rlx, short for relax.** The README is titled rlx and opens with
   what it does for you: one place for your Claude Code and Codex agents across your
   projects, a manager you talk to in plain words, account usage managed for you, memory
-  that carries across sessions, and a command for everything. It writes its commands as
-  `rlx …` and names only what is live. The Codex plugin's page, CONTRIBUTING, SECURITY and
-  the two pages the README links say rlx too. The package is still `aisquare-cli` on PyPI,
-  and its keywords there name rlx.
+  that carries across sessions, a command for everything, and all of it local-first. It
+  writes its commands as `rlx …` and names only what is live. Five of the seven pages it
+  links say rlx too: the Codex plugin's page, CONTRIBUTING, SECURITY, and the pages on
+  running more than one rlx and on usage sharing. The package is still `aisquare-cli` on
+  PyPI, and its keywords there name rlx.
+- The AISquare sign-in keeps its name: `aisquare login`, `logout` and `whoami`, `aisquare
+  init --api-key` and `aisquare explainability` are AISquare's, and every page writes them so.
 
 ## [0.10.0] - 2026-11-16
 

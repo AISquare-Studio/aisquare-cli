@@ -90,8 +90,8 @@ for arg do
             skip=1
             continue
             ;;
-        https://github.com/AISquare-Studio/aisquare-cli/releases/*)
-            arg="$LOCAL/releases/\${arg#https://github.com/AISquare-Studio/aisquare-cli/releases/}"
+        https://github.com/AISquare-Studio/rlx/releases/*)
+            arg="$LOCAL/releases/\${arg#https://github.com/AISquare-Studio/rlx/releases/}"
             ;;
         https://pypi.org/pypi/aisquare-cli/json) arg="$LOCAL/pypi/aisquare-cli/json" ;;
     esac
@@ -186,7 +186,7 @@ for name in $SHELLS; do
             fail "the release's installer did not install the latest release"
     fi
     expect "nothing above was actually run" "--dry-run was not passed through"
-    fetched "github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh" \
+    fetched "github.com/AISquare-Studio/rlx/releases/latest/download/install.sh" \
         "the latest release's installer was not fetched"
     fetched "--max-time" "the download had no timeout"
     fetched "--proto =https" "the download was not held to HTTPS"
@@ -198,7 +198,7 @@ for name in $SHELLS; do
     [ "$RC" = 0 ] || fail "the pinned hand-off exited $RC"
     expect "using the v$VERSION installer" "a pin did not hand off"
     expect "pinned to $VERSION" "a pin did not stay a pin"
-    fetched "github.com/AISquare-Studio/aisquare-cli/releases/download/v$VERSION/install.sh" \
+    fetched "github.com/AISquare-Studio/rlx/releases/download/v$VERSION/install.sh" \
         "the pinned release's installer was not fetched"
 
     head1 "$shell: piped, as curl … | sh runs it"

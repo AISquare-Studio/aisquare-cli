@@ -1,6 +1,6 @@
 """The Codex plugin route: the marketplace, the plugin, its hooks and its launcher.
 
-``codex plugin marketplace add AISquare-Studio/aisquare-cli``, then ``codex plugin add
+``codex plugin marketplace add AISquare-Studio/rlx``, then ``codex plugin add
 aisquare@aisquare-cli``, gives Codex the hooks ``aisquare agents connect codex`` writes
 into ``$CODEX_HOME/hooks.json``, with no installer. Each one runs
 ``plugins/codex/scripts/aisquare-hook codex <Event>``: the launcher the Claude Code plugin
@@ -555,7 +555,7 @@ def test_the_readme_gives_the_two_commands_and_the_trust_step() -> None:
     text = " ".join(README.read_text(encoding="utf-8").split())
     market = _load(MARKETPLACE)["name"]
 
-    assert "codex plugin marketplace add AISquare-Studio/aisquare-cli" in text
+    assert "codex plugin marketplace add AISquare-Studio/rlx" in text
     assert f"codex plugin add {agent_core.CLAUDE_PLUGIN_ID}" in text
     assert f"codex plugin remove {agent_core.CLAUDE_PLUGIN_ID}" in text
     assert f"codex plugin marketplace remove {market}" in text

@@ -95,7 +95,7 @@ PYPI_JSON_URL = f"https://pypi.org/pypi/{DISTRIBUTION}/json"
 LOOKUP_TIMEOUT_SECONDS = 5.0
 
 INSTALLER_ONE_LINER = (
-    "curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh"
+    "curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh | sh"
 )
 """The last resort every failure names: it repairs a broken install from nothing."""
 

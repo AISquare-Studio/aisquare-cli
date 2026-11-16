@@ -133,7 +133,7 @@ counts from when the feed last showed the item, not from its push."""
 LOCKOUT_ALERT_WINDOW = timedelta(minutes=30)
 """One lockout alert per window: the unlock budget's own 30 minutes."""
 
-VAPID_SUBJECT = "https://github.com/AISquare-Studio/aisquare-cli"
+VAPID_SUBJECT = "https://github.com/AISquare-Studio/rlx"
 """Who sends (RFC 8292 ``sub``): where a push service turns when a sender misbehaves."""
 VAPID_LIFETIME = timedelta(hours=12)
 """A VAPID JWT's ``exp``; the services refuse anything over 24 h."""

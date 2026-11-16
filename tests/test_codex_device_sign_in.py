@@ -337,7 +337,7 @@ def test_claude_codes_doctor_row_and_sign_in_button_for_a_slot_with_no_login_are
         [
             (
                 "Sign in account 3",
-                f"{hint}\nOpens the Accounts page with aisquare accounts run 3 in its pane.",
+                f"{hint}\nOpens the Accounts page with rlx accounts run 3 in its pane.",
             )
         ],
         [3],
@@ -653,7 +653,7 @@ def test_the_doctors_sign_in_for_a_codex_slot_stays_one_click_that_opens_its_log
         [
             (
                 f"Sign in account {account.slot}",
-                f"{hint}\nOpens the Accounts page with aisquare accounts run "
+                f"{hint}\nOpens the Accounts page with rlx accounts run "
                 f"{account.slot} in its pane.",
             )
         ],

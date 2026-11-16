@@ -1,7 +1,7 @@
-# Contributing to aisquare
+# Contributing to rlx
 
-Thanks for your interest in aisquare! This is an early-stage, open-source
-project and contributions are welcome.
+Thanks for your interest in rlx! It is an open-source project, and
+contributions are welcome.
 
 ## Where to start
 

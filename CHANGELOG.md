@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The product is named rlx, short for relax.** The README is titled rlx and opens with
+  what it does for you: one place for your Claude Code and Codex agents across your
+  projects, a manager you talk to in plain words, account usage managed for you, memory
+  that carries across sessions, and a command for everything. It writes its commands as
+  `rlx …` and names only what is live. The Codex plugin's page, CONTRIBUTING and the two
+  pages the README links say rlx too. The package is still `aisquare-cli` on PyPI, and its
+  keywords there name rlx.
+
 ## [0.10.0] - 2026-11-16
 
 **Codex support, in beta: run OpenAI's Codex CLI beside Claude Code, or instead of it, with

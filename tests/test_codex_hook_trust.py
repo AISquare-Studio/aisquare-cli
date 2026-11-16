@@ -739,8 +739,9 @@ def test_upgrade_help_and_the_plugin_readme_say_the_trust_is_recorded_not_asked_
 
     readme = Path(__file__).parents[1] / "plugins" / "codex" / "README.md"
     text = " ".join(readme.read_text("utf-8").split())
+    # The page writes the commands a user types as `rlx …` since the product became rlx.
     assert (
-        "`aisquare agents connect codex` and `aisquare upgrade` record Codex's trust of the "
+        "`rlx agents connect codex` and `rlx upgrade` record Codex's trust of the "
         "`hooks.json` hooks they write" in text
     )
     assert "Trust both in `/hooks`" not in text

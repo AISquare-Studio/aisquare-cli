@@ -1532,8 +1532,8 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
         drive(go, doctor=lambda: list(checks))
     )
     refused = [
-        ("aisquare project onboard --refresh", True),  # no project: correctly refused
-        ("aisquare agents connect claude-code", False),
+        ("rlx project onboard --refresh", True),  # no project: correctly refused
+        ("rlx agents connect claude-code", False),
     ]
     assert global_cwd is None and global_buttons == refused
     assert selected_cwd is None and selected_buttons == refused, (
@@ -1541,8 +1541,8 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
     )
     assert page_cwd == projects[0].root
     assert page_buttons == [
-        ("aisquare project onboard --refresh", False),  # run for the project: armed
-        ("aisquare agents connect claude-code", False),
+        ("rlx project onboard --refresh", False),  # run for the project: armed
+        ("rlx agents connect claude-code", False),
     ]
     assert views == 1, "the project page has no Doctor tab of its own"
 

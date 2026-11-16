@@ -161,8 +161,8 @@ def test_the_install_route_is_read_off_the_ui_thread_and_update_waits_for_it() -
     while_read, after = asyncio.run(drive_view())
 
     assert len(threads) == 1 and threads[0] != threading.get_ident(), "off the UI thread"
-    assert while_read == (True, "Checking how aisquare was installed…")
-    assert after == (False, doctor_view._UPDATE_TOOLTIP), "offered once it is known"
+    assert while_read == (True, "Checking how rlx was installed…")
+    assert after == (False, doctor_view._update_tooltip()), "offered once it is known"
 
 
 # --------------------------------------------------------------------------- the app

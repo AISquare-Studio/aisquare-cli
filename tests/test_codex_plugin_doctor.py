@@ -90,9 +90,9 @@ def test_doctor_says_both_routes_and_lets_the_operator_keep_one(codex: Path) -> 
 
     two_ways = rows[0]
     assert two_ways.status is CheckStatus.warn
-    assert f"runs aisquare two ways in {codex}" in two_ways.detail
+    assert f"runs rlx two ways in {codex}" in two_ways.detail
     assert two_ways.fix is not None
-    assert f"aisquare agents disconnect codex --config-dir {codex}" in two_ways.fix
+    assert f"rlx agents disconnect codex --config-dir {codex}" in two_ways.fix
     assert "codex plugin remove aisquare@aisquare-cli" in two_ways.fix
     assert len(rows) == 2, "hooks.json's hooks, which every event runs, are graded too"
 
@@ -109,7 +109,7 @@ def test_doctor_says_the_plugin_runs_in_place_of_hooks_that_cannot_start(codex: 
     assert row.status is CheckStatus.warn
     assert "cannot start, so they fail on every event" in row.detail
     assert f"the aisquare plugin {_version()} runs in their place" in row.detail
-    assert row.fix is not None and "aisquare agents disconnect codex" in row.fix
+    assert row.fix is not None and "rlx agents disconnect codex" in row.fix
 
 
 def test_doctor_is_unchanged_without_the_plugin(codex: Path) -> None:  # noqa: F811

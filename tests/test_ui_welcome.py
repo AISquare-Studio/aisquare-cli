@@ -1986,7 +1986,7 @@ def test_a_refused_restart_is_said_under_its_coder_with_the_way_out(
         lines = text.splitlines()
         lost = lines.index("✗ coder-1 — lost (pane gone)")
         assert lines[lost + 1] == f"✗ coder-1: {reason}", text
-        way_out = f"aisquare fleet reap --project {codename or project.id} ends the rows"
+        way_out = f"rlx fleet reap --project {codename or project.id} ends the rows"
         assert f"coder-1 could not be restarted: {way_out}" in text, text
         assert "trusting this folder" not in text, text
     assert offered, "a refusal that may pass (a hand-over in flight) can still be retried"

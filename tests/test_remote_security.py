@@ -3075,7 +3075,7 @@ def test_a_board_write_where_nothing_was_added_is_refused_not_added(
 
     assert (refused.status_code, refused.json()["error"]) == (409, "not_added"), refused.text
     said = refused.json()["message"]
-    assert "is not one of your projects — add it first: aisquare project onboard" in said
+    assert "is not one of your projects — add it first: rlx project onboard" in said
     assert project_service.list_projects(all=True) == []
 
 

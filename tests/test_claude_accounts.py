@@ -941,7 +941,7 @@ def test_doctor_says_nothing_with_no_added_accounts_and_names_each_one_otherwise
 
     assert check.name == "claude-accounts" and check.status.value == "warn"
     assert "2 two@example.com" in check.detail and "3 not signed in" in check.detail
-    assert check.fix is not None and "aisquare accounts run 3" in check.fix
+    assert check.fix is not None and "rlx accounts run 3" in check.fix
     assert "run 2" not in check.fix  # only the slot that needs it
     _sign_in(third, "three@example.com")
     [check] = diagnostics._claude_accounts_checks()
@@ -1213,7 +1213,7 @@ def test_accounts_add_names_the_connect_to_run_quoted_for_a_slot_under_a_path_wi
 
     _installed(monkeypatch)
     monkeypatch.setattr(accounts_cli, "not_interactive_reason", lambda: None)
-    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "rlx home"))
 
     def signs_in(account: ClaudeAccount, *args: Any, **kwargs: Any) -> int:
         _sign_in(account, "two@example.com")
@@ -1234,7 +1234,7 @@ def test_accounts_add_names_the_connect_to_run_quoted_for_a_slot_under_a_path_wi
 
     assert result.exit_code == 0 and account is not None, result.output
     assert " " in str(account.config_dir), "the slot is under a path with a space"
-    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+    connect = ["rlx", "agents", "connect", "claude-code", "--config-dir"]
     assert argv == [*connect, str(account.config_dir)], printed
     assert printed == install_route.command_line(argv), "quoted for this shell"
     assert again.exit_code == 0, again.output

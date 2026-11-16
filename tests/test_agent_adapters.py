@@ -91,7 +91,7 @@ def _step_two(fix: str | None) -> str:
     return f"Connect cannot change that. {said[:1].upper()}{said[1:]}".rstrip()
 
 
-_DISCONNECT = "aisquare agents disconnect claude-code"
+_DISCONNECT = "rlx agents disconnect claude-code"
 
 
 def _repair(refusal: agents_service.Refusal | None, then: str = "then connect again") -> str:
@@ -431,16 +431,16 @@ def test_a_record_an_older_aisquare_wrote_is_no_connection(
     assert (listed[name]["connected"], listed[name]["sites"]) == (False, []), listed[name]
     assert (status["connected"], status["sites"]) == (False, []), status
     assert name not in summary["agents_connected"], summary
-    assert f"{label} detected at {agent_dir}, but aisquare can't connect it yet" in row.detail
+    assert f"{label} detected at {agent_dir}, but rlx can't connect it yet" in row.detail
     claude = listed["claude-code"]
     assert [site["config_dir"] for site in claude["sites"]] == [str(claude_home)], (
-        "control: a record of an agent aisquare has hooks for is still a site"
+        "control: a record of an agent rlx has hooks for is still a site"
     )
     assert claude["sites"][0]["hooks_installed"] is False, "control: and reads as missing"
     assert claude["connected"] is False and "claude-code" not in summary["agents_connected"], (
         "with its hooks gone, as the doctor and Welcome read it"
     )
-    assert disconnected.exit_code == 0 and "no aisquare hooks" not in disconnected.output
+    assert disconnected.exit_code == 0 and "no rlx hooks" not in disconnected.output
     assert name not in after["connected"] and not after["connections"].get(name), after
     assert "claude-code" in after["connected"], "disconnecting it leaves claude-code's record"
     assert list(agent_dir.iterdir()) == [], f"nothing is ever written under ~/.{name}"
@@ -663,14 +663,14 @@ def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget
     assert f"hooks cannot be written in {gone}: {reason}" in row.detail, row
     assert f"{diagnostics._STALE_HOOKS} in: {kept}" in row.detail, "only kept is missing"
     # Forgotten as it is, or, for the directory this shell reads, with the variable moved.
-    assert f"aisquare agents disconnect claude-code --config-dir {gone}" in str(row.fix), row.fix
+    assert f"rlx agents disconnect claude-code --config-dir {gone}" in str(row.fix), row.fix
     connect = ("agents", "connect", "claude-code", "--config-dir")
     assert (*connect, str(gone)) not in buttons, buttons
     assert (*connect, str(kept)) in buttons, "control: a recorded dir still there keeps Connect"
     assert (sites[str(gone)]["refused"], sites[str(kept)]["refused"]) == (reason, None), sites
     assert f"cannot be written in {gone}: {reason}" in cell, cell
     assert clicked.exit_code == 1 and clicked.output.strip() == f"✗ {reason}", clicked.output
-    assert forget.exit_code == 0 and "no aisquare hooks found" not in forget.output, forget.output
+    assert forget.exit_code == 0 and "no rlx hooks found" not in forget.output, forget.output
     assert str(gone) not in {site["config_dir"] for site in after[0]["sites"]}, "forgotten"
 
 
@@ -698,7 +698,7 @@ def test_a_recorded_dir_that_became_a_symlink_loop_is_gone_to_every_reader(
 
     reason = f"{loop} is a link to {loop.name}: {_stat_error(loop)}"
     assert f"hooks cannot be written in {loop}: {reason}" in row.detail, row
-    fix = f"forget it: aisquare agents disconnect claude-code --config-dir {loop}"
+    fix = f"forget it: rlx agents disconnect claude-code --config-dir {loop}"
     assert fix in str(row.fix), row.fix
     assert loop not in stuck, "uninstall reads it as the doctor does: nothing there"
     assert forget.exit_code == 0, forget.output
@@ -968,7 +968,7 @@ def _commands(fix: str) -> list[list[str]]:
     """The aisquare commands a remedy names, as argv."""
     return [
         command.split()
-        for command in re.findall(r"aisquare (agents \w+ claude-code --config-dir \S+)", fix)
+        for command in re.findall(r"rlx (agents \w+ claude-code --config-dir \S+)", fix)
     ]
 
 
@@ -1516,7 +1516,7 @@ def test_welcome_step_two_ends_on_the_command_it_names_as_printed(
     _utf16(claude_home / "CLAUDE.md")
     welcome = first_run.probe_claude(sign_in=False, which=lambda _name: "/opt/claude")
     step_two = claude_text(welcome, platform="linux").plain
-    printed = step_two.rsplit("disconnect this one: aisquare ", 1)[-1].split()
+    printed = step_two.rsplit("disconnect this one: rlx ", 1)[-1].split()
     done = runner.invoke(app, printed)
 
     assert step_two.endswith(f"--config-dir {claude_home}"), step_two
@@ -1548,13 +1548,13 @@ def test_a_config_dir_with_a_space_or_a_dollar_is_quoted_and_its_button_names_it
     forgot = runner.invoke(app, install_route.split_line(printed)[1:])
 
     connect = ["agents", "connect", "claude-code", "--config-dir", str(profile)]
-    assert install_route.command_line(["aisquare", *connect]) in str(row.fix), row.fix
+    assert install_route.command_line(["rlx", *connect]) in str(row.fix), row.fix
     assert buttons == [tuple(connect)], buttons
     label = install_route.command_line(["rlx", *connect])
     assert [fix.label for fix in fix_commands([row])] == [label], "as the fix above it prints it"
     assert pressed is not None and pressed.exit_code == 0, pressed
     assert install_route.split_line(printed) == [
-        "aisquare",
+        "rlx",
         "agents",
         "disconnect",
         "claude-code",
@@ -2023,12 +2023,12 @@ def test_a_detect_only_agent_row_names_the_path_it_checked(
     home.mkdir(parents=True)
     present = _row(name)
 
-    support = f" (aisquare support is planned for {planned})" if planned else ""
+    support = f" (rlx support is planned for {planned})" if planned else ""
     later = f" (planned for {planned})" if planned else ""
     spec = agent_core.spec(name)
     assert spec is not None and spec.planned == planned, spec
     assert absent.detail == f"{label} not detected at {home}{support}"
-    assert present.detail == f"{label} detected at {home}, but aisquare can't connect it yet{later}"
+    assert present.detail == f"{label} detected at {home}, but rlx can't connect it yet{later}"
     for row in (absent, present):
         assert (row.status, row.fix) == (CheckStatus.ok, None), row
 
@@ -2105,7 +2105,7 @@ def test_every_reader_follows_the_shared_check(
 
     row, site, slot = before
     assert row.status is CheckStatus.warn, "control: unconnected, and every reader says so"
-    assert row.fix == f"aisquare agents connect claude-code --config-dir {claude_home}"
+    assert row.fix == f"rlx agents connect claude-code --config-dir {claude_home}"
     assert (site, slot) == (False, False)
     row, site, slot = after
     assert row.status is CheckStatus.ok and fix_commands([row]) == [], row

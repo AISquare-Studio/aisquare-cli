@@ -600,7 +600,7 @@ def _row(
 
 def _listing(project: ProjectInfo) -> str:
     """``fleet ls`` for ``project``, as a refusal names it (review of #259, round 21)."""
-    return f"aisquare fleet ls --project {project.codename or project.id}"
+    return f"rlx fleet ls --project {project.codename or project.id}"
 
 
 def _replaced(project: ProjectInfo) -> None:
@@ -2902,7 +2902,7 @@ def test_a_tell_to_a_label_no_row_holds_is_404_and_makes_no_lock(
 ) -> None:
     response = phone.post("agent/tell", agent="ghost-7", text="hi")
     assert response.status_code == 404
-    listing = f"aisquare fleet ls --project {project.codename or project.id} --all"
+    listing = f"rlx fleet ls --project {project.codename or project.id} --all"
     assert response.json() == {
         "error": "no_such_agent",
         "message": f"no agent 'ghost-7' in api — `{listing}` shows every row",

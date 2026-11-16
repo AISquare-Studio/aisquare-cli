@@ -265,7 +265,7 @@ def test_a_name_no_agent_declares_is_a_warn_the_per_agent_rows_cannot_give(
     assert row is not None and row.name == "accounts sharing" and row.status.value == "warn"
     assert "names skils, agentz," in row.detail, "the typos, and not skills, which is some agent's"
     assert "parts are memory, skills" in row.detail
-    assert "aisquare config set accounts.share" in (row.fix or "")
+    assert "rlx config set accounts.share" in (row.fix or "")
     assert "accounts sharing" in [check.name for check in diagnostics.doctor()], (
         "it is part of the doctor"
     )

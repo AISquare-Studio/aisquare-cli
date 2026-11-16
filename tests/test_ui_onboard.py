@@ -251,8 +251,8 @@ def test_pressing_onboard_runs_init_and_doctor_and_posts_project_onboarded(tmp_p
     onboarded = received[0]
     assert isinstance(onboarded, ProjectOnboarded)
     assert onboarded.project_id == project_id_for(proj) and onboarded.path == proj
-    assert log[0] == f"$ aisquare --json init --no-explainability {proj}"
-    assert "$ aisquare --json doctor" in log
+    assert log[0] == f"$ rlx --json init --no-explainability {proj}"
+    assert "$ rlx --json doctor" in log
     assert any("⚠ claude-code" in line for line in log)
     assert doctor_shown, "the findings appear under the log"
     assert fix_labels == ["rlx agents connect claude-code"], (
@@ -628,7 +628,7 @@ def test_a_reload_while_onboarding_leaves_the_run_its_log_and_its_button(tmp_pat
     assert during["run disabled"], "nor its button, which stays off until the run ends"
     assert not during["reload disabled"], "↻ is allowed during a run"
     assert seen["received"] == ["ProjectOnboarded"]
-    assert "$ aisquare --json doctor" in list(seen["log"])  # type: ignore[call-overload]
+    assert "$ rlx --json doctor" in list(seen["log"])  # type: ignore[call-overload]
     assert not seen["run disabled"], "the run's end arms the button as ever"
 
 

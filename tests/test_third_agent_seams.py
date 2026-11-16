@@ -369,7 +369,7 @@ def test_the_doctors_sign_in_for_its_slot_is_one_click_by_its_own_sign_in_args(
     checks = diagnostics._agent_accounts_checks(third.id)
     [check] = [c for c in checks if c.name == f"{third.id}-accounts"]
 
-    run = " ".join(("aisquare accounts run", str(slot.slot), *third.accounts.sign_in_args()))
+    run = " ".join(("rlx accounts run", str(slot.slot), *third.accounts.sign_in_args()))
     assert check.fix is not None and check.fix.endswith(run)
     [fix] = onboarding.fix_commands([check])
     assert (fix.argv, fix.interactive, fix.sign_in_slot) == (

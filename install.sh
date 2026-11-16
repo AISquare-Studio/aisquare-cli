@@ -2803,12 +2803,16 @@ codex_awaits_trust_only() {
 }
 
 # Whether DOCTOR_RAW's codex rows show aisquare's hooks in a Codex home: any row but
-# the two a Codex this home never connected reads as (not detected, not selected).
+# the two a Codex this home never connected reads as (not detected, not selected). The
+# doctor wrote "AISquare integration not selected" before the rlx rename (#135) and "rlx
+# integration not selected" since: both are read, as a --no-handoff or offline copy of
+# this script can meet a doctor of another release.
 codex_row_connected() {
     _cx_rows=$(_doctor_row codex)
     [ -n "$_cx_rows" ] || return 1
     printf '%s\n' "$_cx_rows" |
-        grep -v -e 'not detected on this machine' -e 'AISquare integration not selected' >/dev/null
+        grep -v -e 'not detected on this machine' -e 'AISquare integration not selected' \
+            -e 'rlx integration not selected' >/dev/null
 }
 
 # A JSON string's body ($1) as the text it encodes, for printing (RFC 8259 §7).

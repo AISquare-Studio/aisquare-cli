@@ -6646,14 +6646,14 @@ def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
 
     restart = project_service.fleet_command("restart", named, "manager")
     assert f"`{restart}` starts it again" in said, said
-    assert said.count("aisquare fleet restart") == 1, said
+    assert said.count("rlx fleet restart") == 1, said
     onboard = project_service.onboard_command(plain_project.root)
     assert f"{plain_project.root.name} is forgotten: {onboard} adds it back first" in said
     # Round 23, 5/10: `reap --all` walks the projects it reaches, so it records the one row
     # of a live project, "it", and never the forgotten project's alone.
     assert "(`aisquare fleet reap --all` records it; " in said, said
     alone = fleet_service._exited_note(tmux, [theirs])
-    assert "reap --all" not in alone and "aisquare fleet restart" not in alone, alone
+    assert "reap --all" not in alone and "rlx fleet restart" not in alone, alone
     assert f"({plain_project.root.name} is forgotten: {onboard} adds it back first)" in alone
 
 
@@ -8062,9 +8062,9 @@ def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
 
     frame = board_frame(height=40, width=200).plain
 
-    switch = f"aisquare fleet switch --project {stored.codename} {agent.label}"
+    switch = f"rlx fleet switch --project {stored.codename} {agent.label}"
     assert f"⏳ limited — `{switch}`" in frame
-    assert frame.count("aisquare fleet switch") == 1, "the session with no row: the chip alone"
+    assert frame.count("rlx fleet switch") == 1, "the session with no row: the chip alone"
     assert team_project(hub).id not in frame
 
 
@@ -8097,7 +8097,7 @@ def test_the_limited_chips_switch_is_read_in_the_boards_own_store_session(
 
     frame = board_frame(height=40, width=200).plain
 
-    assert f"`aisquare fleet switch --project {stored.codename} {agent.label}`" in frame
+    assert f"`rlx fleet switch --project {stored.codename} {agent.label}`" in frame
     assert opened == ["store"]
 
 
@@ -16059,7 +16059,7 @@ def test_a_row_whose_record_is_lost_after_the_census_is_told_nothing_and_never_k
         fleet_service.stop(project, agent.label)
 
     assert not told.delivered and "no launch record" in told.how
-    assert "end its agent in its own window, then `aisquare fleet stop" in str(refused.value)
+    assert "end its agent in its own window, then `rlx fleet stop" in str(refused.value)
     assert tmux.typed == [] and tmux.killed == [], "nothing typed or killed on its word"
     tmux.die(agent.pane_id, 0)  # its agent ended in its own window
     receipt = fleet_service.stop(project, agent.label)
@@ -21251,7 +21251,7 @@ def test_the_auto_mode_board_line_s_own_way_out_brings_the_agent_back_off_auto(
     [line] = _events(project, auto_mode.EVENT_KIND)
     way_out = re.search(
         r"set a non-classifier mode \((aisquare config set [^)]+)\) and "
-        r"`(aisquare fleet restart [^`]+)`",
+        r"`(rlx fleet restart [^`]+)`",
         line,
     )
     assert way_out is not None, line
@@ -23906,7 +23906,7 @@ def test_the_doctor_capacity_row_warns_when_a_spawn_would_be_refused(
     _memory(monkeypatch, 1500)
     row = diagnostics._check_fleet_capacity()
     assert row.status.value == "warn"
-    assert "1500 MB available" in row.detail and "aisquare fleet capacity" in (row.fix or "")
+    assert "1500 MB available" in row.detail and "rlx fleet capacity" in (row.fix or "")
     _memory(monkeypatch, 8000)
     row = diagnostics._check_fleet_capacity()
     assert row.status.value == "ok" and "8000 MB available, pressure normal" in row.detail

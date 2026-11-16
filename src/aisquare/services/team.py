@@ -42,6 +42,7 @@ from aisquare.core import (
     workspace,
 )
 from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import DEFAULT_AGENT, recorded_adapter
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
@@ -5362,7 +5363,8 @@ def _role_cycle(
         return harness.role_cycle(
             base_role(me.role),
             short_id(me.id),
-            fleet=lambda verb: project_service.fleet_command(verb, project),
+            # The role cycle is the agents' protocol, which names its commands with aisquare.
+            fleet=lambda verb: project_service.fleet_command(verb, project, word=prog.PROTOCOL),
             paused=harness.pause_signal(project.id, me.project_id),
             task=spawned_for,
             state_file=state_file,

@@ -400,7 +400,7 @@ def test_doctor_names_a_shared_number_and_the_commands_that_fix_it(signed: Pair)
         "slot 5 is two accounts, Codex's (codex:5) and Claude Code's (claude-code:5): name each "
         "as shown; the one listed last cannot be moved or made the default"
     )
-    assert row.fix == "aisquare accounts remove claude-code:5, then aisquare accounts add"
+    assert row.fix == "rlx accounts remove claude-code:5, then rlx accounts add"
     assert any(check.name == "account-numbers" for check in diagnostics.doctor())
 
 

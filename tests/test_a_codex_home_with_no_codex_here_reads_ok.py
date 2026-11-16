@@ -114,7 +114,7 @@ def test_a_record_is_still_graded_where_codex_is_installed(
     rows = _codex_rows()
 
     assert [row.status for row in rows] == [CheckStatus.warn], rows
-    assert "aisquare's hooks are not installed there" in rows[0].detail
+    assert "rlx's hooks are not installed there" in rows[0].detail
     assert _install_sh_amber(rows) == [CODEX]
 
 
@@ -158,10 +158,10 @@ def test_an_exported_empty_codex_home_with_no_codex_reads_not_detected(
 
     (tmp_path / "codex-home" / "auth.json").write_text("{}", encoding="utf-8")
     assert [row.detail for row in _codex_rows()] == [
-        "Codex detected; AISquare integration not selected"
+        "Codex detected; rlx integration not selected"
     ], "a home with Codex's files in it"
     (tmp_path / "codex-home" / "auth.json").unlink()
     codex_on_path(True)
     assert [row.detail for row in _codex_rows()] == [
-        "Codex detected; AISquare integration not selected"
+        "Codex detected; rlx integration not selected"
     ], "Codex installed"

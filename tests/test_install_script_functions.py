@@ -3419,7 +3419,7 @@ def _claude_code_state(
     ("state", "row_says"),
     [
         ("switched off", 'hooks are switched off ("disableAllHooks": true)'),
-        ("plugin and hooks", "runs aisquare two ways"),
+        ("plugin and hooks", "runs rlx two ways"),
         ("another install", "(0.7.0) — this install is"),
         ("switched off beside missing hooks", "; hooks are missing or outdated"),
         ("missing hooks", "hooks are missing or outdated"),
@@ -4282,11 +4282,28 @@ def test_codex_hooks_awaiting_trust_are_the_users_step_not_a_surprise(tmp_path: 
             ],
             0,
         ),
+        (
+            [
+                {
+                    "name": "codex",
+                    "status": "ok",
+                    "detail": "Codex detected; rlx integration not selected",
+                }
+            ],
+            0,
+        ),
         ([_codex_row("unverified")], 1),
         ([_codex_row("observed")], 1),
         ([], 0),
     ],
-    ids=["not-detected", "not-selected", "unverified", "observed", "no-row"],
+    ids=[
+        "not-detected",
+        "not-selected",
+        "not-selected-since-rlx",
+        "unverified",
+        "observed",
+        "no-row",
+    ],
 )
 def test_a_codex_never_connected_is_work_to_do(
     tmp_path: Path, rows: list[dict[str, str]], connected: int
@@ -4299,6 +4316,31 @@ def test_a_codex_never_connected_is_work_to_do(
         path=base_path(tmp_path),
     )
     assert result.stdout.strip() == ("yes" if connected else "no"), result.stdout
+
+
+def test_the_doctors_own_not_selected_codex_row_is_read_as_not_connected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """install.sh reads the doctor's words: a Codex the doctor calls "… integration not
+    selected" has no hooks of ours. The doctor wrote AISquare there before the rlx rename
+    (#135) and rlx since, so the row the doctor writes today is fed in as it is written."""
+    codex = str(tmp_path / "bin" / "codex")
+    monkeypatch.setattr(agent_core, "on_path", lambda name: codex if name == "codex" else None)
+    [row] = [c for c in diagnostics._check_other_agents() if c.name == "codex"]
+    said = row.model_dump(mode="json")
+
+    def connected(payload: dict[str, Any]) -> str:
+        return sh(
+            "DOCTOR_RAW=$PAYLOAD; if codex_row_connected; then echo yes; else echo no; fi",
+            env={"PAYLOAD": json.dumps([payload])},
+            path=base_path(tmp_path),
+        ).stdout.strip()
+
+    assert row.detail.endswith("integration not selected"), row
+    assert connected(said) == "no", row
+    assert connected({**said, "detail": "Codex connected (hooks installed)"}) == "yes", (
+        "control: the same row read as connected once it says so"
+    )
 
 
 def test_unknown_agent_is_refused_before_installation() -> None:

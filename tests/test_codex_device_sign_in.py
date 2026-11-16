@@ -315,7 +315,7 @@ def test_claude_codes_doctor_row_and_sign_in_button_for_a_slot_with_no_login_are
 
     checks = diagnostics._claude_accounts_checks()
 
-    hint = "Sign in from asq → Accounts, or: aisquare accounts run 3"
+    hint = "Sign in from rlx → Accounts, or: rlx accounts run 3"
     assert [(c.name, c.status.value, c.detail, c.fix) for c in checks] == [
         (
             "claude-accounts",
@@ -637,8 +637,8 @@ def test_the_doctors_sign_in_for_a_codex_slot_stays_one_click_that_opens_its_log
 
     [check] = diagnostics._agent_accounts_checks(CODEX)
 
-    run = " ".join(("aisquare accounts run", str(account.slot), *DEVICE))
-    hint = f"Sign in from asq → Accounts, or: {run}"
+    run = " ".join(("rlx accounts run", str(account.slot), *DEVICE))
+    hint = f"Sign in from rlx → Accounts, or: {run}"
     assert (check.name, check.fix) == ("codex-accounts", hint)
     assert onboarding.fix_commands([check]) == [
         onboarding.FixCommand(

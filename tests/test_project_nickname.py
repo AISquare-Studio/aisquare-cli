@@ -230,7 +230,7 @@ def test_rename_of_a_directory_never_added_says_how_to_add_it(
 ) -> None:
     result = runner.invoke(app, ["project", "rename", "x"])
     assert result.exit_code == 1
-    assert "is not one of your projects — add it first: aisquare project onboard" in (result.output)
+    assert "is not one of your projects — add it first: rlx project onboard" in (result.output)
 
 
 def test_fleet_titles_and_the_sidebar_show_the_nickname(

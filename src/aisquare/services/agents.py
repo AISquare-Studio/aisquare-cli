@@ -13,12 +13,12 @@ from pathlib import Path
 
 from aisquare.core import agents as agent_core
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core import sandbox_roots as sandbox_roots_core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
-from aisquare.services import install_route
 
 
 def list_agents() -> list[AgentInfo]:
@@ -453,12 +453,11 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
 
 
 def config_dir_command(verb: str, name: str, directory: Path) -> str:
-    """``aisquare agents <verb> <name> --config-dir <directory>`` as a line to paste, the path
-    quoted for this shell (``install_route.command_line``): a space or a ``$`` in it broke
-    the command, or named another directory (review of #257)."""
-    return install_route.command_line(
-        ["aisquare", "agents", verb, name, "--config-dir", str(directory)]
-    )
+    """``rlx agents <verb> <name> --config-dir <directory>`` as a line to paste (the word
+    hints print, ``core.program``), the path quoted for this shell
+    (``install_route.command_line``): a space or a ``$`` in it broke the command, or named
+    another directory (review of #257)."""
+    return prog.line("agents", verb, name, "--config-dir", str(directory))
 
 
 def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:

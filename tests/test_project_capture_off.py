@@ -76,7 +76,7 @@ def test_a_board_write_where_nothing_was_added_is_refused_and_adds_nothing(
     assert result.exit_code == 1, result.output
     payload = json.loads(result.stdout)
     assert payload["error"] == "not_added" and payload["ref"] == str(work_dir.resolve())
-    assert f"add it first: aisquare project onboard {work_dir.resolve()}" in payload["detail"]
+    assert f"add it first: rlx project onboard {work_dir.resolve()}" in payload["detail"]
     assert _rows() == [], "a refusal writes no row"
 
 
@@ -85,7 +85,7 @@ def test_the_refusal_says_what_to_run_where_a_person_reads_it(
 ) -> None:
     result = runner.invoke(app, ["note", "hello"])
     assert result.exit_code == 1
-    assert "repo is not one of your projects — add it first: aisquare project onboard" in (
+    assert "repo is not one of your projects — add it first: rlx project onboard" in (
         result.output
     )
 
@@ -105,7 +105,7 @@ def test_the_refusal_quotes_the_onboard_for_this_shell(monkeypatch: pytest.Monke
     said = str(project_service.NotAdded(ProjectInfo(id="prj_x", root=root)))
     onboard = said.split("add it first: ", 1)[1]
 
-    assert install_route.split_line(onboard) == ["aisquare", "project", "onboard", str(root)]
+    assert install_route.split_line(onboard) == ["rlx", "project", "onboard", str(root)]
 
 
 @pytest.mark.parametrize(
@@ -130,14 +130,14 @@ def test_a_windows_path_a_shell_would_expand_is_quoted_for_powershell(
     monkeypatch.setattr(sys, "platform", "win32")
     onboard = project_service.onboard_command(Path(root))
 
-    word = onboard.removeprefix("aisquare project onboard ")
+    word = onboard.removeprefix("rlx project onboard ")
     assert word == "'" + root.replace("'", "''") + "'", onboard  # nothing PowerShell expands
-    assert install_route.split_line(onboard) == ["aisquare", "project", "onboard", root]
+    assert install_route.split_line(onboard) == ["rlx", "project", "onboard", root]
     # A word with none of them keeps the double quotes both shells read literally.
-    plain = install_route.command_line(["aisquare", "project", "onboard", r"C:\My Repo"])
-    assert plain == r'aisquare project onboard "C:\My Repo"'
+    plain = install_route.command_line(["rlx", "project", "onboard", r"C:\My Repo"])
+    assert plain == r'rlx project onboard "C:\My Repo"'
     with pytest.raises(ValueError, match="no closing quotation"):
-        install_route.split_line("aisquare project onboard 'C:\\x")
+        install_route.split_line("rlx project onboard 'C:\\x")
 
 
 def test_a_board_read_where_nothing_was_added_is_empty_and_adds_nothing(
@@ -260,7 +260,7 @@ def test_team_spawn_says_when_the_line_it_prints_joins_no_board(
     assert printed.exit_code == 0, printed.output
     said = json.loads(printed.stdout)["not_added"] if json_output else printed.stderr
     said = " ".join(said.split())
-    onboard = f"aisquare project onboard {work_dir.resolve()}"
+    onboard = f"rlx project onboard {work_dir.resolve()}"
     assert f"repo is not one of your projects — add it first: {onboard}" in said
     assert "joins no board" in said
     assert _rows() == [], "saying so adds nothing"
@@ -284,7 +284,7 @@ def test_a_destination_where_nothing_was_added_is_refused_before_any_sign_in(
     assert result.exit_code == 1, result.output
     payload = json.loads(result.stdout)
     assert payload["error"] == "not_added"
-    assert "aisquare project onboard" in payload["detail"]
+    assert "rlx project onboard" in payload["detail"]
     assert _rows() == []
 
 
@@ -318,8 +318,8 @@ def test_doctor_names_the_prune_that_clears_what_capture_left(tmp_path: Path) ->
     [check] = diagnostics._check_captured_projects()
 
     assert check.detail.startswith("1 captured directory left from before project capture")
-    assert "aisquare project list --all" in check.detail
-    assert check.detail.endswith("aisquare project prune --captured-only --older-than 0")
+    assert "rlx project list --all" in check.detail
+    assert check.detail.endswith("rlx project prune --captured-only --older-than 0")
 
 
 def test_doctor_names_the_rows_that_prune_keeps_and_what_drops_them(tmp_path: Path) -> None:
@@ -337,9 +337,9 @@ def test_doctor_names_the_rows_that_prune_keeps_and_what_drops_them(tmp_path: Pa
 
     said = " ".join(check.detail.split())
     assert said.startswith("1 captured directory left from before project capture"), said
-    assert "drop them: aisquare project prune --captured-only --older-than 0" in said
+    assert "drop them: rlx project prune --captured-only --older-than 0" in said
     assert "1 more holds saved context, which that prune keeps: notes" in said
-    assert f"aisquare project forget {tmp_path / 'notes'}" in said
+    assert f"rlx project forget {tmp_path / 'notes'}" in said
 
     from aisquare.services import project as project_service
 
@@ -351,7 +351,7 @@ def test_doctor_names_the_rows_that_prune_keeps_and_what_drops_them(tmp_path: Pa
     said = " ".join(check.detail.split())
     assert said.startswith(
         "1 captured directory left from before project capture was turned off holds saved "
-        "context, which aisquare project prune keeps: notes"
+        "context, which rlx project prune keeps: notes"
     ), said
     assert "--older-than 0" not in said
 
@@ -479,22 +479,22 @@ def test_doctors_capture_off_line_for_each_count(tmp_path: Path, dropped: int, k
     gone, held = _captured_rows(tmp_path, "d", dropped), _captured_rows(tmp_path, "k", kept)
     plan = [PruneCandidate(project=p, reason="captured") for p in gone]
     forgets = [
-        install_route.command_line(["aisquare", "project", "forget", str(p.root)]) for p in held
+        install_route.command_line(["rlx", "project", "forget", str(p.root)]) for p in held
     ]
     drop = f"drop it with {forgets[0]}" if kept == 1 else f"drop them ({'; '.join(forgets)})"
     names = ", ".join(p.root.name for p in held[:3]) + (f", +{kept - 3} more" if kept > 3 else "")
     left = "left from before project capture was turned off"
-    listed = "listed only by aisquare project list --all"
+    listed = "listed only by rlx project list --all"
     wanted = {
         (2, 0): f"2 captured directories {left} (a hooked session ran there; nothing added it "
-        f"on purpose) — {listed}; drop them: aisquare project prune --captured-only "
+        f"on purpose) — {listed}; drop them: rlx project prune --captured-only "
         "--older-than 0",
         (2, 1): f"; 1 more holds saved context, which that prune keeps: {names} — {drop}",
         (1, 2): f"; 2 more hold saved context, which that prune keeps: {names} — {drop}",
         (0, 1): f"1 captured directory {left} holds saved context, which "
-        f"aisquare project prune keeps: {names} — {listed}; {drop}",
+        f"rlx project prune keeps: {names} — {listed}; {drop}",
         (0, 4): f"4 captured directories {left} hold saved context, which "
-        f"aisquare project prune keeps: {names} — {listed}; {drop}",
+        f"rlx project prune keeps: {names} — {listed}; {drop}",
     }[(dropped, kept)]
 
     said = diagnostics._left_from_before_capture([*gone, *held], plan, {})
@@ -539,15 +539,15 @@ def test_doctor_names_the_captured_rows_with_a_live_agent_apart_from_what_forget
     [check] = diagnostics._check_captured_projects()
 
     def forget(name: str) -> str:
-        return install_route.command_line(["aisquare", "project", "forget", str(rows[name].root)])
+        return install_route.command_line(["rlx", "project", "forget", str(rows[name].root)])
 
     said = " ".join(check.detail.split())
     assert said.startswith("1 captured directory left from before project capture"), said
     assert "; 1 more holds saved context, which that prune keeps: notes — drop it with " in said
     assert (
-        "; 2 more have fleet agents still running, which that prune keeps and aisquare project "
-        f"forget refuses: both, busy — stop their agents first (aisquare fleet stop --project "
-        f"{rows['both'].id} <label>; aisquare fleet stop --project {rows['busy'].id} <label>), "
+        "; 2 more have fleet agents still running, which that prune keeps and rlx project "
+        f"forget refuses: both, busy — stop their agents first (rlx fleet stop --project "
+        f"{rows['both'].id} <label>; rlx fleet stop --project {rows['busy'].id} <label>), "
         f"then drop them ({forget('both')}; {forget('busy')})"
     ) in said, said
     refused = runner.invoke(app, ["--json", "project", "forget", str(tmp_path / "busy")])
@@ -595,11 +595,11 @@ def test_doctor_names_a_captured_hub_prune_keeps_apart_with_the_project_that_rea
                 store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
 
     def forget(name: str) -> str:
-        return install_route.command_line(["aisquare", "project", "forget", str(rows[name].root)])
+        return install_route.command_line(["rlx", "project", "forget", str(rows[name].root)])
 
     hubs = (
         "; 2 more are the boards another project's fleet agents read (api), running or stopped, "
-        "which that prune keeps and aisquare project forget refuses: notes, tools — once you are "
+        "which that prune keeps and rlx project forget refuses: notes, tools — once you are "
         "done with its agents, stop the running ones "
         f"({project_service.fleet_command('stop', rows['api'])} <label>) and forget it "
         f"({forget('api')}), then drop them ({forget('notes')}; {forget('tools')})"
@@ -669,7 +669,7 @@ def test_doctor_names_every_project_reading_a_captured_hub_with_what_frees_each(
         store.forget_project(rows["old"].id)
 
     def forget(name: str) -> str:
-        return install_route.command_line(["aisquare", "project", "forget", str(rows[name].root)])
+        return install_route.command_line(["rlx", "project", "forget", str(rows[name].root)])
 
     def stop(name: str) -> str:
         return project_service.fleet_command("stop", rows[name]) + " <label>"
@@ -678,9 +678,9 @@ def test_doctor_names_every_project_reading_a_captured_hub_with_what_frees_each(
     said = " ".join(check.detail.split())
     assert said == (
         "2 captured directories left from before project capture was turned off are the boards "
-        "other projects' fleet agents read (old, api, web), running or stopped, which aisquare "
-        "project prune keeps and aisquare project forget refuses: notes, tools — listed only by "
-        "aisquare project list --all; once you are done with their agents, add the forgotten "
+        "other projects' fleet agents read (old, api, web), running or stopped, which rlx "
+        "project prune keeps and rlx project forget refuses: notes, tools — listed only by "
+        "rlx project list --all; once you are done with their agents, add the forgotten "
         f"one back ({project_service.onboard_command(rows['old'].root)}), stop the running ones "
         f"({stop('old')}; {stop('web')}) and forget them ({forget('old')}; {forget('api')}; "
         f"{forget('web')}), then drop them ({forget('notes')}; {forget('tools')})"
@@ -775,13 +775,13 @@ def test_doctor_frees_a_row_outside_the_plan_of_a_reader_that_prune_drops(
             )
         )  # fmt: skip
         store.end_fleet_agent(manager.id, exit_status=0, ended_by="stopped")
-    forget = install_route.command_line(["aisquare", "project", "forget", str(rows["notes"].root)])
+    forget = install_route.command_line(["rlx", "project", "forget", str(rows["notes"].root)])
 
     [check] = diagnostics._check_captured_projects()
 
     said = " ".join(check.detail.split())
     assert said.endswith(
-        "drop them: aisquare project prune --captured-only --older-than 0; 1 more holds saved "
+        "drop them: rlx project prune --captured-only --older-than 0; 1 more holds saved "
         f"context, which that prune keeps: notes — drop it with {forget}"
     ), said
     assert str(rows["scratch"].root) not in said, said
@@ -843,7 +843,7 @@ def test_doctor_reads_the_rows_that_hold_a_board_once_a_run(
     assert said.startswith("1 captured directory left from before"), said
     assert str(rows["scratch"].root) not in said, said
     assert "which that prune keeps: notes — " in said, said
-    assert "aisquare project forget refuses: tools — " in said, said
+    assert "rlx project forget refuses: tools — " in said, said
 
 
 def test_doctor_works_out_the_hold_of_each_captured_row_once_a_run(
@@ -892,7 +892,7 @@ def test_doctor_works_out_the_hold_of_each_captured_row_once_a_run(
     names = {row.id: name for name, row in rows.items()}
     assert sorted(names[project_id] for project_id in asked) == ["notes", "scratch", "tools"]
     assert check.detail == before.detail
-    assert "aisquare project forget" in check.detail and "tools" in check.detail
+    assert "rlx project forget" in check.detail and "tools" in check.detail
 
 
 def test_doctors_stop_for_a_captured_rows_agent_names_that_project(
@@ -926,7 +926,7 @@ def test_doctors_stop_for_a_captured_rows_agent_names_that_project(
     said = " ".join(check.detail.split())
     stop = said.split("stop its agents first (", 1)[1].split(" <label>)", 1)[0]
     argv = install_route.split_line(stop)
-    assert argv[:4] == ["aisquare", "fleet", "stop", "--project"], said
+    assert argv[:4] == ["rlx", "fleet", "stop", "--project"], said
     assert fleet_service.resolve_project(argv[4]).id == busy.id, "the captured row's"
     assert fleet_service.resolve_project(None).id == main.id, "the premise: not the active one"
 
@@ -964,7 +964,7 @@ def test_doctors_stop_names_each_busy_captured_row_by_a_ref_of_its_own(tmp_path:
     named: list[str] = []
     for stop in stops:
         argv = install_route.split_line(stop.removesuffix(" <label>"))
-        assert argv[:4] == ["aisquare", "fleet", "stop", "--project"], said
+        assert argv[:4] == ["rlx", "fleet", "stop", "--project"], said
         named.append(fleet_service.resolve_project(argv[4]).id)
     assert sorted(named) == sorted(row.id for row in rows), said
 
@@ -1009,7 +1009,7 @@ def test_doctors_forget_names_each_kept_captured_row_by_its_own_directory(
     for rows, after in ((held, "hold saved context"), (busy, "have fleet agents")):
         forgets = said.split(after, 1)[1].split("drop them (", 1)[1].split(")", 1)[0]
         argvs = [install_route.split_line(each) for each in forgets.split("; ")]
-        assert all(argv[:3] == ["aisquare", "project", "forget"] for argv in argvs), said
+        assert all(argv[:3] == ["rlx", "project", "forget"] for argv in argvs), said
         assert sorted(Path(argv[3]) for argv in argvs) == sorted(row.root for row in rows), said
 
 
@@ -1026,13 +1026,13 @@ def test_one_helper_names_a_project_in_a_fleet_command(
     named = ProjectInfo(id="prj_named", root=tmp_path / "web", codename="calm-otter", nickname="w")
     plain = ProjectInfo(id="prj_plain", root=tmp_path / "web")
     assert project_service.fleet_command("stop", named) == (
-        "aisquare fleet stop --project calm-otter"
+        "rlx fleet stop --project calm-otter"
     )
-    assert project_service.fleet_command("reap", plain) == "aisquare fleet reap --project prj_plain"
+    assert project_service.fleet_command("reap", plain) == "rlx fleet reap --project prj_plain"
     # Words after the project (a label, a flag) are quoted for this shell too (round 21).
     restart = project_service.fleet_command("restart", named, "coder 1", "--fresh")
     assert install_route.split_line(restart) == [
-        *("aisquare", "fleet", "restart", "--project", "calm-otter", "coder 1", "--fresh")
+        *("rlx", "fleet", "restart", "--project", "calm-otter", "coder 1", "--fresh")
     ]
 
     asked: list[tuple[str, str]] = []

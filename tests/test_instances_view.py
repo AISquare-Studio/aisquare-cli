@@ -243,7 +243,7 @@ def test_doctor_says_none_runs() -> None:
     row = diagnostics._check_instances()
     assert row.name == "asq instances"
     assert row.status is CheckStatus.ok
-    assert row.detail == "no asq is running on this home"
+    assert row.detail == "no rlx is running on this home"
     assert not instances.registry_dir().exists()
 
 
@@ -269,8 +269,8 @@ def test_doctor_warns_on_another_release_or_schema(differs: str) -> None:
         row = diagnostics._check_instances()
     assert row.status is CheckStatus.warn
     assert old.label in row.detail
-    assert row.detail.startswith("2 running, 1 on another release than this aisquare")
-    assert row.fix is not None and "q in that asq" in row.fix
+    assert row.detail.startswith("2 running, 1 on another release than this rlx")
+    assert row.fix is not None and "q in that rlx" in row.fix
 
 
 def test_the_row_is_in_the_doctor() -> None:

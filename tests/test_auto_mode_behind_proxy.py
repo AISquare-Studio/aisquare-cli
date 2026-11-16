@@ -415,7 +415,7 @@ def test_the_doctor_line_names_the_agents_still_running_in_auto(
     assert "141k" in check.detail
     # Its own restart, naming its project: alone, the active project's (#259, round 21).
     restart = (
-        f"aisquare fleet restart --project {project.id} coder-auto --permission-mode acceptEdits"
+        f"rlx fleet restart --project {project.id} coder-auto --permission-mode acceptEdits"
     )
     assert check.fix and restart in check.fix, check.fix
     assert "config set" not in check.fix and "[fleet.roles" not in check.fix
@@ -611,7 +611,7 @@ def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
     command = "aisquare config set fleet.roles.coder.permission_mode acceptEdits"
     assert (
         f"set a non-classifier mode for coder ({command}) and "
-        "`aisquare fleet restart --project calm-otter coder-auth --permission-mode acceptEdits` "
+        "`rlx fleet restart --project calm-otter coder-auth --permission-mode acceptEdits` "
         "(its session resumes)" in note
     )
     result = runner.invoke(app, command.split()[1:])
@@ -697,7 +697,7 @@ def test_a_refused_session_is_put_in_attention_once_with_one_board_line(
     assert (
         "5 refusals" in blocked[0] and "fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
     )
-    assert f"aisquare fleet restart --project {project.id} coder-auth" in blocked[0]
+    assert f"rlx fleet restart --project {project.id} coder-auth" in blocked[0]
 
     # The next Stop finds the same refusals: the feed does not repeat, the row is waiting again.
     again = runner.invoke(app, ["hook", "stop"], input=payload)
@@ -727,7 +727,7 @@ def test_under_a_hub_the_refused_agent_is_restarted_in_its_own_rows_project(
 
     blocked = [text for kind, text in _events(hub) if kind == auto_mode.EVENT_KIND]
     assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode"), blocked
-    assert f"aisquare fleet restart --project {project.id} coder-auth" in blocked[0]
+    assert f"rlx fleet restart --project {project.id} coder-auth" in blocked[0]
 
 
 def test_fewer_refusals_than_the_threshold_or_no_transcript_change_nothing(
@@ -887,7 +887,7 @@ def test_a_refused_turn_that_ends_inside_a_hand_over_leaves_the_notice_to_the_re
     assert _state("sess-coder") == "attention"
     [line] = _blocked(project)
     assert line.startswith("coder-auth: auto mode is refusing") and "(3 refusals" in line
-    assert f"aisquare fleet restart --project {project.id} coder-auth" in line
+    assert f"rlx fleet restart --project {project.id} coder-auth" in line
     # Said once, as for any session.
     assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
     assert len(_blocked(project)) == 1

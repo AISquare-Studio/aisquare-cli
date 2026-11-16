@@ -137,9 +137,9 @@ def test_onboard_runs_init_then_doctor_in_the_path(tmp_path: Path) -> None:
     # The log tells the story in order: the command, its result, the doctor, the warning + fix.
     log = "\n".join(outcome.log)
     assert (
-        log.index("$ aisquare --json init")
+        log.index("$ rlx --json init")
         < log.index("✓ initialized")
-        < log.index("$ aisquare --json doctor")
+        < log.index("$ rlx --json doctor")
     )
     assert "note: connected claude-code" in log
     assert "⚠ claude-code: hooks are missing" in log and "→ (Re)connect it" in log
@@ -241,7 +241,7 @@ def test_onboard_never_raises_when_the_runner_does(tmp_path: Path) -> None:
     outcome = onboard(tmp_path, run=_raising)
     assert not outcome.ok
     assert outcome.reason is not None
-    assert outcome.reason.startswith("could not run aisquare --json init")
+    assert outcome.reason.startswith("could not run rlx --json init")
     assert "no such interpreter" in outcome.reason
 
 

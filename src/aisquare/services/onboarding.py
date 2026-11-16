@@ -242,7 +242,7 @@ def _invoke(
     try:
         return run(args, cwd=cwd), None
     except Exception as exc:
-        return None, f"could not run aisquare {' '.join(args)}: {exc or type(exc).__name__}"
+        return None, f"could not run {_typed(args)}: {exc or type(exc).__name__}"
 
 
 def _json_object(stdout: str) -> dict[str, object] | None:
@@ -351,7 +351,7 @@ def run_doctor(
     """
     args = ["--json", "doctor"]
     if on_line is not None:
-        on_line(f"$ aisquare {' '.join(args)}")
+        on_line(f"$ {_typed(args)}")
     result, asked = _invoke(run, args, cwd)
     if result is None:
         return [], asked
@@ -396,7 +396,7 @@ def onboard(
         return OnboardOutcome(path=path, reason=reason, log=tuple(lines))
 
     init_args = ["--json", "init", *INIT_FLAGS, str(path)]
-    say(f"$ aisquare {' '.join(init_args)}")
+    say(f"$ {_typed(init_args)}")
     result, asked = _invoke(run, init_args, path)
     if result is None:
         return failed(asked or "init could not be run")
@@ -537,6 +537,12 @@ class FixCommand:
         return int(self.argv[2])
 
 
+def _typed(args: Sequence[str]) -> str:
+    """``rlx <args>`` as the onboarding transcript and its errors show what ran: the words
+    joined, as they always were, with the word hints print (``core.program.command``)."""
+    return " ".join((program.command(), *args))
+
+
 def _sign_in_tokens() -> frozenset[str]:
     """Every token of a registered agent's own sign-in (``AgentAccounts.sign_in_args``), as
     the doctor's accounts rows write it after ``accounts run <n>``: Codex's ``login`` and
@@ -646,7 +652,7 @@ def apply_fix(fix: FixCommand, cwd: Path | None, *, run: Runner = selfcli.run) -
         return FixResult(
             fix=fix,
             returncode=None,
-            reason="it opens the agent's own sign-in: run it in a terminal, or from asq → Accounts",
+            reason="it opens the agent's own sign-in: run it in a terminal, or from rlx → Accounts",
         )
     result, asked = _invoke(run, ["--json", *fix.argv], cwd)
     if result is None:

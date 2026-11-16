@@ -28,6 +28,10 @@ COMMAND = "rlx"
 """The word a hint's command starts with while it runs this install (:func:`command`)."""
 FALLBACK = "aisquare"
 """The word it starts with otherwise: the name this install has always answered to."""
+PROTOCOL = "aisquare"
+"""The word the agents' protocol text names its commands with (the start pack, the role
+cycles, the commands an agent is told to run): unchanged by the rename (#135, Q9), and the
+same command either way."""
 PRINTED = (COMMAND, FALLBACK)
 """Every word a printed command can start with. ``services.onboarding`` reads the doctor's
 hints back into buttons, so it matches each of these."""
@@ -71,4 +75,4 @@ def line(*args: str) -> str:
     return command_line([command(), *args])
 
 
-__all__ = ["COMMAND", "FALLBACK", "PRINTED", "command", "line", "ours_on_path"]
+__all__ = ["COMMAND", "FALLBACK", "PRINTED", "PROTOCOL", "command", "line", "ours_on_path"]

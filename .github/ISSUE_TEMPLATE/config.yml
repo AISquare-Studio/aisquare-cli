@@ -1,11 +1,11 @@
 blank_issues_enabled: true
 contact_links:
   - name: Question, or stuck installing
-    url: https://github.com/AISquare-Studio/aisquare-cli/discussions/categories/q-a
+    url: https://github.com/AISquare-Studio/rlx/discussions/categories/q-a
     about: Ask how to do something or get unstuck; answers stay findable for the next person.
   - name: Idea or proposal
-    url: https://github.com/AISquare-Studio/aisquare-cli/discussions/categories/ideas
+    url: https://github.com/AISquare-Studio/rlx/discussions/categories/ideas
     about: Not sure it is a feature yet? Start a discussion.
   - name: Security vulnerability
-    url: https://github.com/AISquare-Studio/aisquare-cli/security/policy
+    url: https://github.com/AISquare-Studio/rlx/security/policy
     about: Please report security problems privately, never as a public issue.

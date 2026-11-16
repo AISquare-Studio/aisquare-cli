@@ -32,7 +32,7 @@ import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-GITHUB_REPO = "AISquare-Studio/aisquare-cli"
+GITHUB_REPO = "AISquare-Studio/rlx"
 
 #: The assets every release carries, in upload order.
 ASSETS = ("install.sh", "install.ps1")

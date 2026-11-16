@@ -264,23 +264,22 @@ def test_the_same_url_without_editable_is_a_local_source(tmp_path: Path) -> None
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "main"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git@main",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git@main",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd"},
             "cli",
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git"
-            "#subdirectory=cli",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git#subdirectory=cli",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "v0.8.0"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "0123abcd"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git",
         ),
     ],
     ids=["branch", "subdirectory", "release-tag", "commit"],
@@ -291,7 +290,7 @@ def test_a_vcs_install_is_reinstalled_from_a_reference_pip_can_read(
     """PEP 610 records the URL without ``git+``; pip reads a bare https URL as an
     archive to download, so the reference is rebuilt (review of #251, finding 5)."""
     record: dict[str, Any] = {
-        "url": "https://github.com/AISquare-Studio/aisquare-cli.git",
+        "url": "https://github.com/AISquare-Studio/rlx.git",
         "vcs_info": vcs_info,
     }
     if subdirectory:

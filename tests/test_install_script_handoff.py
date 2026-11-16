@@ -55,7 +55,7 @@ REPO = Path(__file__).resolve().parents[1]
 #: what an UNSTAMPED script does, and a stamped one is made here when needed.
 SCRIPT = REPO / "install.sh"
 SH = shutil.which("sh") or "/bin/sh"
-RELEASES = "https://github.com/AISquare-Studio/aisquare-cli/releases"
+RELEASES = "https://github.com/AISquare-Studio/rlx/releases"
 LATEST_URL = f"{RELEASES}/latest/download/install.sh"
 PYPI_URL = "https://pypi.org/pypi/aisquare-cli/json"
 #: The release the served installer is stamped to. Not the tree's own version,

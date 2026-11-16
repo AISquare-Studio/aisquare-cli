@@ -582,11 +582,9 @@ def test_no_window_is_renamed_on_a_server_that_is_not_the_rows(
     """A server started since numbers its panes from %0 again: the row's pane id is another
     agent's there, and its window keeps its name."""
     coder = _coder(project, label="coder-1")
-    with store_session() as store:
-        store.upsert_fleet_agent(
-            coder.model_copy(update={"server_started_at": datetime(2026, 1, 1, tzinfo=UTC)})
-        )
-    tmux.started = datetime(2026, 2, 1, tzinfo=UTC)
+    # The server at its socket started after the agent's window was made: its launch record
+    # says where and when (#113), whatever the row is rewritten to.
+    tmux.started = coder.created_at + timedelta(hours=1)
     receipt = fleet_service.relabel(project, "coder-1", "login fix")
     assert receipt.changed and tmux.renamed_windows == []
     assert any("not the one it was started on" in note for note in receipt.notes)

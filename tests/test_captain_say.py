@@ -20,7 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import transcripts
+from aisquare.core.agent_adapters import claude_transcript as transcripts
 from aisquare.core.tmux import TmuxError
 from aisquare.models import FleetAgent, FleetAgentState, FleetAgentStatus, TeamSession
 from aisquare.services import fleet
@@ -158,6 +158,7 @@ from tests.captain_screens import (  # noqa: E402
     REAL_TRUST,
     REAL_WORKING,
 )
+from tests.test_remote_agent_pane import _recorded  # noqa: E402
 
 
 def _pane(*transcript: str, box: bool = True) -> list[str]:
@@ -312,6 +313,7 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
     monkeypatch.setattr(fleet, "server_for", lambda socket, config=None: Pane())
     monkeypatch.setattr(fleet, "pane_is_the_agent", lambda srv, pane_id: True)
     fake_live = make_row()
+    _recorded(fake_live)  # its launch record, by which the fleet places its pane
     fake.row = None
 
     def present() -> None:

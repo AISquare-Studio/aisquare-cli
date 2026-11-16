@@ -364,6 +364,20 @@ def test_the_release_checks_match_install_yml(pin: str) -> None:
     assert ours and ours == theirs, (ours, theirs)
 
 
+@pytest.mark.parametrize("workflow", ["install.yml", "installers-check.yml"])
+def test_the_analyzer_download_survives_a_gallery_hiccup(workflow: str) -> None:
+    """The PowerShell Gallery failed to serve PSScriptAnalyzer once, and install.sh's run
+    42267078402 was red for it with nothing wrong in install.ps1 (#107). Each install of the
+    module is tried again with backoff, and still fails, saying so, if the Gallery stays down."""
+    text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    start = text.index("while ($true)")
+    install = text.index("Install-Module PSScriptAnalyzer -RequiredVersion", start)
+    loop = text[start : text.index("Import-Module", install)]
+
+    assert "-ErrorAction Stop" in loop and "catch" in loop and "Start-Sleep" in loop, loop
+    assert "if ($tries -ge 6)" in loop and "exit 1" in loop, loop
+
+
 # The condition and reason of tests/test_install_script_functions.py's own
 # module-level skip: the probe imports that module, so it runs where it does.
 @pytest.mark.skipif(sys.platform == "win32", reason="install.sh is a POSIX shell script")

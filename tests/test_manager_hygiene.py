@@ -19,7 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import harness, paths
+from aisquare.core import harness, ids, paths
 from aisquare.core.config import load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -117,6 +117,16 @@ def test_the_pack_stays_within_its_budget_and_says_what_it_left_out(
     not and where they are. Every line it keeps is whole."""
     ordered_ids.install(monkeypatch)  # 200 tasks in a loop, listed by id: two in one ms, either way
     _start(monkeypatch, work, MANAGER, "manager", "startup")
+    # Every task id ends in a title's look-alike, `t199`, as one in about 5,000 does by chance
+    # (a line carries the id before the title): a test that finds a title anywhere in the pack
+    # reads task 199 as shown, and the 0.9% of runs it failed in were a draw of this.
+    make_id = ids._new_id
+
+    def look_alike(prefix: str) -> str:
+        made = make_id(prefix)
+        return made[:-4] + "t199" if prefix == ids.TASK_PREFIX else made
+
+    monkeypatch.setattr(ids, "_new_id", look_alike)
     for n in range(200):
         team_service.add_task(f"t{n:03d} " + "x" * 145, session_ref=MANAGER)
     state = _state(work, "s" * 12_000)

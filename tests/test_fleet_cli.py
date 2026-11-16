@@ -336,6 +336,10 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "worktree": False,
         "permission_mode": "acceptEdits",
         "binary": "claude-nightly",
+        "wrapper": None,  # --command / -c: a program run AS the agent (#105's reopen 2)
+        "agent": None,
+        "sandbox": None,
+        "approval_policy": None,
         "prompt": "run the suite",
         "agent_args": [],
         "spawned_by": "mgr-session",
@@ -597,7 +601,7 @@ def test_ls_json_names_where_each_agents_server_is_asked(
     it): the path its tmux server is asked at (`tmux -S`), or null where it is asked by
     its socket's name (`tmux -L`). The keys each agent has are pinned with it, so one
     added or dropped is a change the CHANGELOG has to name: `held` since (review of #259,
-    round 1), and `remote_control` (#289)."""
+    round 1), `remote_control` (#289), and `exit_command`, what a stop types into it (#60)."""
     at = Path("/tmp/tmux-1000/asq")
     agents = [
         _status(_agent("coder-auth"), "working").model_copy(update={"socket_at": at}),
@@ -621,6 +625,7 @@ def test_ls_json_names_where_each_agents_server_is_asked(
             "socket_at",
             "held",
             "remote_control",
+            "exit_command",
         }
         for agent in listed
     ), listed
@@ -871,12 +876,33 @@ def test_stop_json_returns_the_agent_row(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent", "claims_released", "release_failed", "marked_only"}
+    assert set(payload) == {
+        "agent",
+        "claims_released",
+        "release_failed",
+        "killed",
+        "marked_only",
+    }
     assert payload["agent"]["label"] == "coder-auth"
     assert payload["agent"]["ended_at"] is not None
     assert payload["agent"]["exit_status"] == 0
     assert payload["claims_released"] == ["tsk_01x"], "what the stop returned to the pool"
     assert payload["release_failed"] is None
+    assert payload["killed"] is None, "its exit command was typed"
+
+
+def test_stop_says_why_it_killed_a_codex_at_a_dialog(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    why = "its pane showed Codex at a dialog or a draft, not its empty prompt"
+    agent = _agent("coder-auth", ended=True, exit_status=None)
+    _install(monkeypatch, "stop", StopReceipt(agent, [], killed=why))
+
+    result = runner.invoke(app, ["fleet", "stop", "coder-auth"])
+    payload = json.loads(runner.invoke(app, ["--json", "fleet", "stop", "coder-auth"]).stdout)
+
+    assert result.exit_code == 0, result.output
+    assert why in result.stdout and payload["killed"] == why
 
 
 def test_stop_names_the_claims_it_released(

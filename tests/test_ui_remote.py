@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import itertools
 import json
 import os
 import shutil
@@ -94,10 +95,30 @@ def installed_page(isolated_home: Path) -> Path:
     return dist
 
 
+#: Below every system's ephemeral range (Linux 32768-60999, macOS and Windows 49152-65535):
+#: a port here is one the system never hands to a bind of port 0 or an outgoing connection.
+_PORT_BASE, _PORTS_EACH = 20000, 600
+_PORT_TURNS = itertools.count()
+
+
 def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    """A port no other test of this run, and nothing the system hands out, takes before the
+    Remote under test binds it: below the ephemeral range, in a block of its own per xdist
+    worker, and free now. One bound as port 0 and closed was free for that instant only: an
+    outgoing connection of another worker's test could be given it before the server bound
+    it, and the Remote's start failed on "is the port in use?" in place of the failure the
+    test was about (CI 41895486812, attempt 1, py3.12 shard 1/4)."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
+    block = _PORT_BASE + (int(worker) % 16 if worker.isdigit() else 0) * _PORTS_EACH
+    for _ in range(_PORTS_EACH):
+        port = block + next(_PORT_TURNS) % _PORTS_EACH
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue  # held, or still in TIME_WAIT from an earlier test's server
+            return port
+    raise RuntimeError(f"no free port in {block}-{block + _PORTS_EACH - 1}")
 
 
 @pytest.fixture(autouse=True)

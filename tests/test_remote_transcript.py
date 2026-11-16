@@ -439,6 +439,23 @@ def test_paging_backwards_neither_duplicates_nor_drops_a_turn(conversation: Path
     assert stitched == whole.lines
 
 
+def test_lines_forward_reads_the_lines_backwards_reads_from_the_other_end(
+    tmp_path: Path,
+) -> None:
+    """``transcripts.lines_forward``, what a page's reader reads ahead into: from a line's
+    offset on, oldest first, the same ``(offset, line)`` pairs ``lines_backwards`` gives,
+    the file's last line without its newline too, and no line the budget cuts."""
+    from aisquare.core.agent_adapters.transcripts import lines_backwards, lines_forward
+
+    file = tmp_path / "t.jsonl"
+    file.write_bytes(b'{"n": 1}\n\n{"n": 2}\n{"n": 3}\n{"n": 4}')
+    backwards = list(lines_backwards(file, file.stat().st_size, budget=1 << 20))
+    start = backwards[2][0]  # {"n": 2}'s
+    assert list(lines_forward(file, start, budget=1 << 20)) == backwards[2::-1]
+    assert list(lines_forward(file, start, budget=12)) == [backwards[2]], "{n: 3} is cut"
+    assert list(lines_forward(file, file.stat().st_size, budget=1 << 20)) == []
+
+
 def test_the_newest_page_comes_first_when_paging(conversation: Path) -> None:
     newest = plain(read_page(conversation, limit=2).lines)
     older = plain(

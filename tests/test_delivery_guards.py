@@ -84,10 +84,22 @@ def _deferred(manager: FleetAgent) -> str | None:
 
 
 def test_the_screen_reader_lives_in_core_and_the_captain_reads_the_same_one() -> None:
-    """``services.captain.screen`` is ``core.claude_screen`` under its old name: the captain's
-    ``say``/``press`` and the fleet's door read one parser, never two that could disagree."""
+    """``core.claude_screen`` is Claude Code's adapter's reader
+    (``core.agent_adapters.claude_screen``) under the name the fleet's door imports, and the
+    captain's ``say``/``press`` ask a Claude Code pane's adapter for that same reader
+    (``services.captain.screen``, by the pane's own agent, #113): one parser, never two that
+    could disagree."""
+    from aisquare.core.agent_adapters import DEFAULT_AGENT, get_adapter
+    from aisquare.core.agent_adapters import claude_screen as adapters_screen
+    from aisquare.core.agent_adapters.types import screen_of
+
     for name in ("composer_text", "input_box_at", "modal_showing", "box_idle", "prompt_showing"):
-        assert getattr(captain_screen, name) is getattr(claude_screen, name), name
+        assert getattr(claude_screen, name) is getattr(adapters_screen, name), name
+    read = screen_of(get_adapter(DEFAULT_AGENT))
+    assert read.screen_prompt is claude_screen.prompt_showing
+    assert read.ready_on_screen is claude_screen.box_idle
+    assert read.modal_on_screen is claude_screen.modal_showing
+    assert captain_screen.prompt_showing.__module__ == "aisquare.services.captain.screen"
 
 
 def test_the_composer_reads_a_box_on_every_captured_screen_and_nothing_else() -> None:

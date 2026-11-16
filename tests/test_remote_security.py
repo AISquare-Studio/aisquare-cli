@@ -255,6 +255,7 @@ def pane(monkeypatch: pytest.MonkeyPatch) -> FakePane:
         socket_path: Path | None = None  # asked by the name (`fleet._address`)
         server_started_at: datetime | None = None  # judged by its own time (`fleet._outlived`)
         created_at = FakePane.STARTED + timedelta(hours=1)
+        agent: str | None = None  # a row from before adapters: Claude Code's
 
     class Store:
         def fleet_agent_by_label(self, *args: object, **kwargs: object) -> Agent:
@@ -273,6 +274,8 @@ def pane(monkeypatch: pytest.MonkeyPatch) -> FakePane:
     monkeypatch.setattr(remote_server, "_resolve_project", lambda ref: Project())
     monkeypatch.setattr(store_module, "store_session", lambda: Store())
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: fake)
+    # The store is faked whole and keeps no launch records: placement has tests of its own.
+    monkeypatch.setattr(fleet_service, "placed_row", lambda row: row)
     return fake
 
 
@@ -571,12 +574,13 @@ def test_a_call_to_the_limiter_costs_what_aged_out_not_every_client_it_holds() -
     def at(n: int) -> float:
         return n / 1000  # 20 000 clients over the first 20 s of a minute
 
-    began = time.perf_counter()
+    # This thread's CPU time: the wall clock also counts pytest's other workers on a runner.
+    began = time.thread_time()
     for n in range(clients):
         now[0] = at(n)
         assert limiter.limiter_retry_after(f"2001:db8::{n:x}", *rule) is None
-    took = time.perf_counter() - began
-    assert took < 5.0, f"{clients} calls took {took:.1f} s: each walked every client"
+    took = time.thread_time() - began
+    assert took < 5.0, f"{clients} calls took {took:.1f} s of CPU: each walked every client"
     assert len(limiter._attempts) == clients
     for _ in range(UNLOCK_LIMIT):
         assert limiter.limiter_retry_after("2001:db8::ffff", *rule) is None

@@ -22,9 +22,10 @@ import json
 import os
 import stat
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -32,8 +33,10 @@ from typer.testing import CliRunner
 
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
+from aisquare.core import claude_screen as screen
 from aisquare.core import harness
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters.types import AgentScreen
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
 from aisquare.core.tmux import WindowInfo
@@ -41,7 +44,6 @@ from aisquare.models import CheckStatus, FleetAgent, ProjectInfo
 from aisquare.services import delivery, diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
-from aisquare.services.captain import screen
 from tests import test_fleet_service as fleet_suite
 from tests.captain_screens import MARK, REAL_RULE, REAL_TOP_RULE
 from tests.cycles import unscoped
@@ -153,6 +155,66 @@ def test_the_composer_reads_a_draft_and_never_claude_codes_own_dim_words() -> No
     assert screen.composer_text(_box(dim='Try "edit <filepath> to..."')) == ""
     assert screen.composer_text(_box()) == ""
     assert screen.composer_text(["Quick safety check", f" {MARK} No, exit"]) is None, "no box"
+
+
+#: Claude Code 2.1.318's input line, escapes kept, as R6's tester captured it (#92's P1).
+_PLACEHOLDER_WITH_CURSOR = f'\x1b[39m{MARK}\xa0\x1b[7mT\x1b[0;2mry "edit <filepath> to..."\x1b[0m '
+
+
+@pytest.mark.parametrize(
+    ("line", "read"),
+    [
+        (_PLACEHOLDER_WITH_CURSOR, ""),
+        (f"\x1b[39m{MARK}\xa0\x1b[7m \x1b[0m                           ", ""),
+        (f"\x1b[39m{MARK}\xa0my draft\x1b[7m \x1b[0m", "my draft"),
+        (f"\x1b[39m{MARK}\xa0my dr\x1b[7ma\x1b[0mft", "my draft"),
+        (f"\x1b[39m{MARK}\xa0T\x1b[7m \x1b[0m", "T"),
+        (f"\x1b[39m{MARK}\xa0/com\x1b[7mp\x1b[0;2mact\x1b[0m", "/com"),
+    ],
+    ids=["fresh placeholder", "after a turn", "draft", "cursor inside", "one letter", "ghost"],
+)
+def test_the_cursor_on_the_fresh_placeholders_first_letter_is_no_draft(
+    line: str, read: str
+) -> None:
+    """#92's P1: with prompt suggestions on, a fresh 2.1.318 session draws its placeholder with
+    the cursor, one reverse-video cell, on its first letter, and the box read ``T``, a draft, so
+    every tell to an agent spawned with no first message became a board note (8/8 measured).
+    The cell that opens a dim run is the placeholder's; a cursor after or inside a draft, or
+    on a dim completion after one, leaves the draft as typed."""
+    rule = "─" * 60
+    assert screen.composer_text([rule, line, rule, "  ⏵⏵ auto mode on"]) == read
+
+
+def test_the_wait_for_the_box_hands_the_agents_screen_its_rows_as_plain_text(
+    tmp_path: Path,
+) -> None:
+    """The wait for a typed prompt's box reads the pane with its escapes (Claude Code's
+    folder-trust question is read off them), and hands the agent's screen
+    (``AgentScreen.ready``, ``modal``) the rows as ``capture-pane -p`` gives them, its contract:
+    a reader that matches a row's start, as Codex's do, found none on a styled row (#39's
+    reopen)."""
+    seen: list[list[str]] = []
+
+    def ready(rows: Sequence[str]) -> bool:
+        seen.append(list(rows))
+        return True
+
+    def modal(rows: Sequence[str]) -> str | None:
+        seen.append(list(rows))
+        return None
+
+    pane = SimpleNamespace(captured=lambda: _box(dim="check the board again"))
+    at = fleet_service._at_input_box(
+        pane,  # type: ignore[arg-type]
+        AgentScreen(ready_on_screen=ready, modal_on_screen=modal),
+        [],
+        to=(ProjectInfo(id="prj_plain", root=tmp_path), "coder-1"),
+        wait=False,
+    )
+
+    assert at and len(seen) == 2
+    assert not [row for rows in seen for row in rows if "\x1b" in row], seen
+    assert f"{MARK}\xa0check the board again" in seen[0]
 
 
 # --- the typed way: pressed again only while it provably did not submit ----------------------
@@ -316,6 +378,9 @@ def test_the_typed_way_is_kept_for_type_and_it_waits_for_the_box(
     monkeypatch.setattr(fleet_service, "server", lambda config=None: fake)
     monkeypatch.setattr(tmux_core, "desktop_environment", lambda environ=None: {})
     monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(first_prompt="type"))
+    # Its SessionStart taken as come, as the fleet suite's `tmux` fixture has it: a Claude Code
+    # prompt typed waits for that start first (`fleet._type_at_its_start`, #113).
+    monkeypatch.setattr(fleet_service, "_started_since", lambda session_id, launched: True)
     looks, captures = 0, 0
     original, original_capture = fake.pane_facts, fake.capture
 

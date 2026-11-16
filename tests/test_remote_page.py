@@ -1750,6 +1750,31 @@ def test_a_stop_refused_at_a_prompt_is_explained_in_the_pages_own_words(
     assert stop["toast"] == "Stopped coder-1"
 
 
+def test_stop_says_the_exit_command_the_machine_says_and_spells_none_of_its_own(
+    boot_report: dict[str, Any],
+) -> None:
+    """#60: the sheet spelled ``/exit`` for every agent. It says the ``exit_command`` the
+    machine sends on the agent's fleet row (an agent's own, ``/quit``), Force included, or on
+    its card where the page has not read that project's fleet; a row that carries none, "its
+    exit command"."""
+    said = boot_report["stopSaysTheMachinesExit"]
+    assert said["own"] == {
+        "lead": "Stop coder-1: Esc if it is busy, then /quit; its window is killed 5 s later.",
+        "force": "Force: kill the window now, without /quit",
+        "forced": "Stop coder-1 now: its window is killed without /quit.",
+    }
+    assert said["none"] == {
+        "lead": "Stop coder-1: Esc if it is busy, then its exit command; its window is killed "
+        "5 s later.",
+        "force": "Force: kill the window now, without its exit command",
+        "forced": "Stop coder-1 now: its window is killed without its exit command.",
+    }
+    assert said["card"]["lead"] == (
+        "Stop coder-9: Esc if it is busy, then /quit; its window is killed 5 s later."
+    )
+    assert said["card"]["forced"] == "Stop coder-9 now: its window is killed without /quit."
+
+
 def test_a_write_refused_read_only_shuts_every_write_button_at_once(
     boot_report: dict[str, Any],
 ) -> None:
@@ -1994,7 +2019,7 @@ def test_an_answer_that_comes_after_the_human_moved_on_acts_on_its_own_sheet_onl
     answered dialog_open once its sheet is gone says why, but not to press a button that is
     gone with it."""
     late = boot_report["lateAnswers"]
-    not_sent = "coder-1: the second Ctrl-C was not sent — it would exit Claude Code."
+    not_sent = "coder-1: the second Ctrl-C was not sent — it would exit the coding agent."
     assert late["doublePress"] == {"sheet": "Send Ctrl-C?", "toast": not_sent, "exits": 0}
     assert late["doubleUnderASheet"] == {"sheet": "Act on coder-1", "toast": not_sent}
     assert late["doubleElsewhere"] == {"sheet": None, "toast": not_sent}
@@ -2115,7 +2140,7 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
     boot_report: dict[str, Any],
 ) -> None:
     """Only the page asks before ^C or ^D (one interrupts the agent, a second within 3 s exits
-    Claude Code) and before a second Esc within 1.5 s (two open its Rewind selector): the
+    it) and before a second Esc within 1.5 s (two open its rewind): the
     machine lets the first of each through. Nothing tested any of them, nor the resend of a
     second ^C the machine refused. Round-7 verifier: an Esc sheet closed unanswered ended the
     window, so the next tap went with no sheet as the second Esc; only a confirmed one does.
@@ -2142,6 +2167,27 @@ def test_the_pads_exit_and_rewind_guards_each_ask_before_a_key_goes(
     ]
     escapes = [["Escape"]] * 5
     assert pad["keys"] == [["C-c"], ["C-c"], ["C-c", "confirm_exit"], *escapes]
+
+
+def test_one_press_that_can_exit_the_agent_asks_again_in_its_agents_words(
+    boot_report: dict[str, Any],
+) -> None:
+    """Codex exits on one Ctrl-D at its empty prompt (0.162.1): the machine refuses it
+    ``one_press_exit``, its ``reason`` naming the agent, and the page asks again in those words
+    before it sends the key with ``confirm_exit``, as it asks before a second press."""
+    pad = boot_report["padOnePressExit"]
+    assert pad["steps"] == [
+        ["^D", "Send Ctrl-D?", "Ctrl-D can interrupt or exit coder-1.", 0],
+        [
+            "Send Ctrl-D",
+            "Send Ctrl-D to coder-1 again?",
+            "coder-1 is at Codex's empty prompt, where one Ctrl-D can exit it, and coder-1 "
+            "with it.",
+            1,
+        ],
+        ["Send and exit", None, None, 2],
+    ]
+    assert pad["keys"] == [["C-d"], ["C-d", "confirm_exit"]]
 
 
 def test_a_page_that_slept_holds_its_keys_until_the_machine_says_what_is_on_screen(
@@ -2288,7 +2334,7 @@ def test_the_transcript_tabs_key_pad_types_nothing_while_a_prompt_may_be_up(
     ⏎ or ``1`` took "1. Yes" and ran the command blind. Each such key asks the machine to
     type nothing while a prompt may be up, and a refusal says where to look. Esc answers a
     prompt only No and stops a turn, so it goes as it does from Live, but a second Esc
-    straight after it, which opens Claude Code's Rewind selector, is not sent from here.
+    straight after it, which opens the agent's rewind, is not sent from here.
     Round-7 verifier: the refused tap reset the window, so a third tap went as the second
     Esc. Each refused tap runs the window on, and an Esc goes once 1.5 s pass without one."""
     pad = boot_report["transcriptPad"]
@@ -2305,7 +2351,7 @@ def test_the_transcript_tabs_key_pad_types_nothing_while_a_prompt_may_be_up(
         "Look at it on Live first."
     )
     assert pad["twice"] == {
-        "toast": "Not sent — two Esc open the Rewind selector. Send it from Live.",
+        "toast": "Not sent — two Esc open the agent's rewind. Send it from Live.",
         "sheet": None,
     }
 
@@ -2843,8 +2889,9 @@ def test_a_reply_to_a_coder_gone_since_it_asked_is_refused_as_a_tell_and_answere
     place, to the coder's label, answers the card on the board, as Reply always did."""
     from datetime import UTC, datetime, timedelta
 
+    from aisquare.core import launch_seal
     from aisquare.core.store import store_session
-    from aisquare.models import FleetAgent, TeamEvent, TeamSession
+    from aisquare.models import FleetAgent, LaunchSpec, TeamEvent, TeamSession
     from aisquare.services import fleet as fleet_service
     from aisquare.services.remote_server import RequestError, live_writes
     from tests.test_remote_needs import FakeTmux, _rooted
@@ -2867,6 +2914,17 @@ def test_a_reply_to_a_coder_gone_since_it_asked_is_refused_as_a_tell_and_answere
                     pane_id=pane, session_id=session, cwd=project.root, created_at=started,
                 )
             )  # fmt: skip
+        # And what its spawn writes outside the store, which the fleet places it by.
+        assert launch_seal.write(
+            launch_seal.LaunchRecord(
+                id=agent, project_id=project.id, project_root=str(project.root),
+                role="coder", agent="claude-code", binary="claude", cwd=str(project.root),
+                spec=LaunchSpec(binary="claude"), label="coder-1",
+            )
+        ) is None  # fmt: skip
+        assert launch_seal.placed(
+            agent, launch_seal.WindowPlace(tmux_socket="asq", pane_id=pane, created_at=started)
+        ) is None  # fmt: skip
 
     with store_session() as store:
         project = store.onboard_project(_rooted(root))

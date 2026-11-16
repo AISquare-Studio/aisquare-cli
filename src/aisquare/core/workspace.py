@@ -13,6 +13,9 @@ import hashlib
 import os
 import stat
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from aisquare.core import paths
@@ -125,6 +128,82 @@ def marks_project_root(directory: Path) -> bool:
     return False
 
 
+#: What every git aisquare itself runs is given first: no hook of the repository's runs
+#: (``core.hooksPath`` pointed at nothing) and no file-system monitor command
+#: (``core.fsmonitor``). A hook in the tree (``.husky/``, ``.githooks/``) or a monitor
+#: command is the sandboxed agent's to write, and aisquare runs git outside its sandbox: the
+#: agent's own hooks (``services.ci_snapshot``'s ``git stash create``), the fleet's worktrees
+#: (review r11 of #113, finding 4; r12, finding 2). Git config the repository includes
+#: from a file in its own tree is the tree's, as it is for every git run there.
+GIT_OWN = ("-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false")
+
+_REPOSITORY_HOOKS: ContextVar[bool] = ContextVar("aisquare_git_repository_hooks", default=False)
+
+
+@contextmanager
+def repository_hooks(run: bool) -> Iterator[None]:
+    """Within it, :func:`git_argv` is plain ``git`` when ``run``: the repository's hooks and
+    file-system monitor run, as they did for every git 0.9.2 ran.
+
+    For work done for an agent that does not sandbox its tools in a project where no agent
+    that does has run (``services.fleet``'s worktree for a Claude Code spawn): no sandbox's
+    files are in the tree, so nothing runs outside one that the agent could not run itself,
+    and the repository's ``post-checkout`` (husky, lefthook, ``.git/hooks``) runs for the
+    spawn's ``git worktree add`` as it did on 0.9.2 (review r40 of #113, finding 6).
+    :data:`GIT_OWN` is the default for every other git aisquare runs."""
+    token = _REPOSITORY_HOOKS.set(run)
+    try:
+        yield
+    finally:
+        _REPOSITORY_HOOKS.reset(token)
+
+
+def git_argv(*args: str) -> list[str]:
+    """``git`` with :data:`GIT_OWN` and then ``args``: the one way aisquare runs git. Plain
+    ``git`` within :func:`repository_hooks` (``True``)."""
+    if _REPOSITORY_HOOKS.get():
+        return ["git", *args]
+    return ["git", *GIT_OWN, *args]
+
+
+def repository_has_hooks(root: Path) -> bool:
+    """Whether git in ``root`` would run a hook of the repository's: ``core.hooksPath`` is set,
+    or git's own hooks folder (``.git/hooks``, wherever its links lead) holds anything but
+    git's ``*.sample`` files. For the line a spawn says where the guard skips them
+    (``services.fleet._repository_hooks_run``): a repository with none is told nothing. Asked
+    of git as it runs here, which a hook of the repository's never answers. A git that cannot
+    say has hooks: what is not known is said (#97, failing closed)."""
+    hooks: Path | None = None
+    for args in (
+        ("config", "--type=path", "--get", "core.hooksPath"),
+        ("rev-parse", "--git-path", "hooks"),
+    ):
+        with repository_hooks(True):  # neither runs a hook; GIT_OWN would answer its own
+            argv = git_argv("-C", str(root), *args)
+        try:
+            done = subprocess.run(
+                argv, capture_output=True, text=True, timeout=10, check=False, env=git_env()
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        said = done.stdout.strip()
+        if args[0] == "config":
+            if done.returncode == 1 and not said:
+                continue  # none set: git's own folder
+            return True  # a folder of the repository's, or a config git could not read
+        if done.returncode != 0 or not said:
+            return True
+        hooks = Path(said) if Path(said).is_absolute() else root / said
+    if hooks is None:
+        return True
+    try:
+        return any(not entry.name.endswith(".sample") for entry in hooks.iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def _resolved(path: Path) -> Path:
     """``path.resolve()``, a symlink loop on the way raised as ``OSError`` (``ELOOP``) on every
     Python, as ``stat`` raises it. A path that is missing still resolves: ``directory_project``
@@ -226,7 +305,7 @@ def git_common_root(start: Path) -> Path | None:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--git-common-dir", "--show-cdup"],
+            git_argv("-C", str(start), "rev-parse", "--git-common-dir", "--show-cdup"),
             stdin=subprocess.DEVNULL,  # an MCP server's stdin is its protocol pipe: not git's
             capture_output=True,
             text=True,
@@ -289,6 +368,65 @@ def find_project_root(start: Path) -> Path:
         if marks_project_root(directory):
             return directory
     return start
+
+
+def real_project_root(start: Path) -> Path | None:
+    """The project root git or a project marker finds for ``start``, as
+    :func:`find_project_root` does, but never its fallback, ``start`` itself for want of
+    one, and never the home or a filesystem root: ``None`` there. Where a launch or a
+    doctor run is in a project, rather than above one (review r13 of #113, findings 2
+    and 10)."""
+    try:
+        start = start.resolve()
+        root = git_common_root(start)
+        if root is None:
+            root = next((d for d in (start, *start.parents) if marks_project_root(d)), None)
+        if root is None:
+            return None
+        root = root.resolve()
+        if same_directory(root, Path.home().resolve()) or root == Path(root.anchor):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return root
+
+
+def same_directory(one: Path, other: Path) -> bool:
+    """Whether ``one`` and ``other`` are one directory: equal as paths, or the same file
+    (``os.path.samefile``: device and inode). On a volume that folds case (macOS's, by
+    default) a home spelt in another case than the disk's (``HOME=/users/me``) resolves to a
+    path unequal to the one git names (``/Users/me``), and the home was a project root again
+    (review r39 of #113, 1b). ``False`` when either cannot be asked."""
+    if one == other:
+        return True
+    try:
+        return os.path.samefile(one, other)
+    except OSError:
+        return False
+
+
+def project_tree(start: Path) -> Path | None:
+    """The tree a launch at ``start`` writes as its project's: the checkout ``start`` is in
+    (the nearest directory holding a ``.git``, file or directory: a linked worktree's own
+    top, even one outside its principal repository, review r14 of #113, finding 8), within
+    a real project (:func:`real_project_root`); else that project's root. ``None`` outside
+    a real project."""
+    root = real_project_root(start)
+    if root is None:
+        return None
+    try:
+        start = start.resolve()
+        for directory in (start, *start.parents):
+            if (directory / ".git").exists():
+                top = directory.resolve()
+                if top == Path.home().resolve() or top == Path(top.anchor):
+                    return root
+                return top
+            if directory == root:
+                break
+    except (OSError, RuntimeError):
+        return root
+    return root
 
 
 def worktree_principal(root: Path) -> Path | None:

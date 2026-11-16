@@ -37,6 +37,7 @@ from typing import Any, ClassVar
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -79,9 +80,9 @@ ABOUT: dict[fleet_service.BulkAction, str] = {
     "transcript when that is on disk. An agent that died without being stopped (killed, "
     "crashed, its tmux server gone) is brought back too; one stopped on purpose is left as "
     "it is.",
-    "stop": "Each one is sent /exit, given a grace period, and then its window is killed. "
+    "stop": "Each one is sent {exit}, given a grace period, and then its window is killed. "
     "Its claims go back to the board. Exited (💤) agents are left as they are.",
-    "pause": "Each one is sent /exit as a stop does, and keeps its label, task claim, "
+    "pause": "Each one is sent {exit} as a stop does, and keeps its label, task claim, "
     "worktree, account and session for a resume. Its project is fleet-paused, so its manager "
     "spawns nothing. Exited (💤) agents are left as they are.",
     "resume": "Each paused agent is started again under its label, with the same role, task, "
@@ -89,6 +90,11 @@ ABOUT: dict[fleet_service.BulkAction, str] = {
     "project's fleet-paused signal is cleared. An agent that exited without a pause stays as "
     "it is.",
 }
+"""What each action does, above the list (:func:`about_text`): ``{exit}`` is what a stop or a
+pause types into each agent, :func:`exit_words`'s, and never spelled here."""
+OWN_EXIT = "its own exit command"
+"""What a stop or a pause is said to type into agents whose exit commands differ (a Claude
+Code agent beside one whose command is its own), or before the plan says whose they are."""
 WILL_START = "will be started again"
 """A dead row a restart brings back (#38), after its state in the dialog's list."""
 WILL_RESUME = "will be resumed"
@@ -137,6 +143,23 @@ def count_words(count: int, *, managers_only: bool, dead: int = 0) -> str:
     noun = "manager" if managers_only else "agent"
     words = f"{count} {noun}{'' if count == 1 else 's'}"
     return f"{words} ({count - dead} running, {dead} dead)" if dead else words
+
+
+def exit_words(plan: fleet_service.BulkPlan | None) -> str:
+    """What a stop or a pause types into the agents ``plan`` acts on, asked of the service
+    (``fleet_service.exit_command_for``, what ``fleet stop`` types into each): the one command
+    they all share, or :data:`OWN_EXIT` when theirs differ, none is acted on or the plan is
+    not read yet. The dialog spelled ``/exit`` for every agent (tester of #58, seq 10298)."""
+    if plan is None:
+        return OWN_EXIT
+    commands = {fleet_service.exit_command_for(row.agent) for row in plan.targets}
+    return commands.pop() if len(commands) == 1 else OWN_EXIT
+
+
+def about_text(action: fleet_service.BulkAction, plan: fleet_service.BulkPlan | None) -> str:
+    """What ``action`` does to the agents ``plan`` acts on (:data:`ABOUT`), its exit command
+    theirs (:func:`exit_words`)."""
+    return ABOUT[action].replace("{exit}", exit_words(plan))
 
 
 def plan_text(plan: fleet_service.BulkPlan) -> Text:
@@ -197,6 +220,16 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     second click that reaches it before the dialog is painted is not a confirmation; one
     after it is, at once. ``project`` keeps it to that project's agents (a card's *Pause
     agents*), its title naming it.
+
+    Tab goes from the switch to Confirm to Cancel, and a focused button shows the one band
+    Cancel shows, Confirm's own colour or not. A focused Confirm drew its label orange on
+    a dark band, no focus to the eye, behind a tab stop the list made that drew nothing, so
+    a keyboard Resume took three tries (SMOKE12 O2 of #113).
+
+    The list's keys are the dialog's, whichever of the three has the focus: ↑ ↓, PgUp PgDn,
+    Home and End scroll it. Out of Tab's order and twenty rows high, a longer list scrolled
+    by the wheel alone, so a keyboard user (tmux over SSH) confirmed agents they could not
+    read (r37 finding 6 of #113).
     """
 
     CSS = """
@@ -216,8 +249,15 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     ConfirmBulk #bulk-list { height: auto; }
     ConfirmBulk #bulk-buttons { height: auto; margin-top: 1; align: right middle; }
     ConfirmBulk #bulk-buttons Button { margin-left: 2; }
+    ConfirmBulk #bulk-buttons Button:focus { color: $button-foreground; text-style: bold reverse; }
     """
-    BINDINGS: ClassVar = [("escape", "cancel_bulk", "cancel")]
+    BINDINGS: ClassVar = [
+        ("escape", "cancel_bulk", "cancel"),
+        *(
+            Binding(key, f"scroll_list('{key}')", show=False)
+            for key in ("up", "down", "pageup", "pagedown", "home", "end")
+        ),
+    ]
 
     def __init__(
         self, action: fleet_service.BulkAction, project: ProjectInfo | None = None
@@ -239,11 +279,16 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
         verb = VERB[self.action]
         with Vertical(id="bulk-box", classes=self.action):
             yield Static(Text(self.heading()), id="bulk-title")
-            yield Static(Text(ABOUT[self.action]), id="bulk-about")
+            yield Static(Text(about_text(self.action, None)), id="bulk-about")
             with Horizontal(id="bulk-switch-row"):
                 yield Switch(False, id="bulk-managers")
                 yield Label("Managers only")
-            with VerticalScroll(id="bulk-scroll"):
+            listing = VerticalScroll(id="bulk-scroll")
+            # Read, and scrolled by the wheel and the dialog's keys, never a stop of Tab's: it
+            # drew no focus, and an Enter there did nothing, between the switch and the
+            # buttons (SMOKE12 O2).
+            listing.can_focus = False
+            with listing:
                 yield Static(Text("reading the fleet…", style="dim"), id="bulk-list")
             with Horizontal(id="bulk-buttons"):
                 yield GuardedButton(
@@ -300,6 +345,8 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
         listing = self.query_one("#bulk-list", Static)
         confirm = self.query_one("#bulk-confirm", Button)
         plan = self.shown()
+        # The agents shown, the managers' alone with the switch on: what each is sent.
+        self.query_one("#bulk-about", Static).update(Text(about_text(self.action, plan)))
         if plan is None:
             listing.update(Text(self.failed or "reading the fleet…", style="dim"))
             confirm.disabled = True
@@ -339,6 +386,19 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
 
     def action_cancel_bulk(self) -> None:
         self.dismiss(None)
+
+    def action_scroll_list(self, key: str) -> None:
+        """Scroll the list by ``key`` (a binding's), at once, with the focus left where it is."""
+        listing = self.query_one("#bulk-scroll", VerticalScroll)
+        scroll = {
+            "up": listing.scroll_up,
+            "down": listing.scroll_down,
+            "pageup": listing.scroll_page_up,
+            "pagedown": listing.scroll_page_down,
+            "home": listing.scroll_home,
+            "end": listing.scroll_end,
+        }[key]
+        scroll(animate=False)
 
 
 def named(receipt: fleet_service.BulkReceipt) -> str:

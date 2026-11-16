@@ -211,7 +211,7 @@ def test_usage_reads_percentages_over_the_shared_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _certifi_only(monkeypatch, https_server.ca_file)
-    monkeypatch.setattr(service, "USAGE_URL", https_server.url)
+    monkeypatch.setattr(core, "USAGE_URL", https_server.url)
     account = core.create_account()
     _sign_in(account, "two@example.com")
 
@@ -260,7 +260,7 @@ def test_a_certificate_that_does_not_verify_is_named_as_tls_not_urlerror(
     (tmp_path / "other").mkdir()
     other_ca, _, _ = _private_ca(tmp_path / "other")
     _certifi_only(monkeypatch, other_ca)
-    monkeypatch.setattr(service, "USAGE_URL", https_server.url)
+    monkeypatch.setattr(core, "USAGE_URL", https_server.url)
     account = core.create_account()
     _sign_in(account, "two@example.com")
 
@@ -558,6 +558,14 @@ def test_a_stalled_handshake_holds_up_no_other_thread(https_server: _Server) -> 
             tls.handshake("127.0.0.1", port=port, timeout=timeout)
         took[name] = time.monotonic() - began
 
+    # One handshake first, untimed: a process's first verification can be slow on its own.
+    # On CI's Windows runner, in a shard where this was the first verification in its
+    # worker, both handshakes ended together 8 to 10 s in, the stalled one long past its
+    # 3 s timeout (run 41888119902, three attempts): no thread waiting on another's
+    # handshake, which is what this asks. Warmed, a shared context still holds the answered
+    # handshake up behind the stalled one (the mutant: one context for the process).
+    with contextlib.suppress(OSError):
+        tls.handshake("127.0.0.1", port=answering, timeout=30.0)
     try:
         stalled = threading.Thread(target=shake, args=("stalled", silent.getsockname()[1], 3.0))
         stalled.start()
@@ -963,7 +971,7 @@ def test_a_bundle_that_will_not_load_is_named_on_the_usage_row(
     "could not reach the usage endpoint (FileNotFoundError)" on every row, while doctor's
     tls row already said the bundle could not be loaded. The row says it too now."""
     monkeypatch.setenv("SSL_CERT_FILE", bundle)
-    monkeypatch.setattr(service, "USAGE_URL", https_server.url)
+    monkeypatch.setattr(core, "USAGE_URL", https_server.url)
     account = core.create_account()
     _sign_in(account, "two@example.com")
 

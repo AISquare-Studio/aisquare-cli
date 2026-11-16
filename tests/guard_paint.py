@@ -14,7 +14,9 @@ mount of a view, the press waits in its queue as the terminal's driver puts it t
 the screen lays out and paints apart. :func:`next_frame` runs a step right after the next
 frame, before the app reads another message: a press in the gap between a frame and the
 next one. :func:`terminal_behind` gives the app a terminal that has not read what it was
-sent: a press after the paint and before the terminal shows it.
+sent: a press after the paint and before the terminal shows it. :func:`slow_after_refresh`
+holds the screen's callbacks after the frame that shows a change, as a slow one queued
+there does.
 """
 
 from __future__ import annotations
@@ -107,6 +109,34 @@ def next_frame(monkeypatch: pytest.MonkeyPatch) -> NextFrame:
 
     monkeypatch.setattr(Screen, "_compositor_refresh", painted)
     return frame
+
+
+def slow_after_refresh(monkeypatch: pytest.MonkeyPatch, shows: Callable[[], bool]) -> asyncio.Event:
+    """At the first frame the current screen paints with ``shows()`` true, queue a callback after
+    that refresh that runs until the event returned is set. Textual runs a screen's callbacks
+    after a refresh (``call_after_refresh``) one by one, in its own queue, so each one asked
+    for after this frame waits behind it. On the Settings hub that was the restyle of the focus
+    moving to its first link, up to a second (UI tester on #8, PR #478 at 41569b99).
+
+    It is queued as the frame goes out, before the layout signal sent with it, and before any
+    widget can ask for a callback after it. The frame and the signal go out as ever, and the
+    app's own queue moves as ever."""
+    done = asyncio.Event()
+    compositor_refresh = Screen._compositor_refresh
+    queued = False
+
+    async def restyle() -> None:
+        await done.wait()
+
+    def painted(screen: Screen[Any]) -> None:
+        nonlocal queued
+        compositor_refresh(screen)
+        if not queued and screen.is_current and shows():
+            queued = True
+            screen._invoke_later(restyle, screen)
+
+    monkeypatch.setattr(Screen, "_compositor_refresh", painted)
+    return done
 
 
 def queue_press(app: App[Any], where: Offset, *, at: float | None = None) -> float:

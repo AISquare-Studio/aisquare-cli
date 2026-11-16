@@ -36,10 +36,14 @@ _SAMPLE = ["tests/test_ci_concurrency.py", "tests/test_ci_checks_the_lock.py"]
 _SPLIT = re.compile(r"--splits \$\{\{ matrix\.shards \}\} --group \$\{\{ matrix\.shard \}\}")
 
 #: What every shard runs, the plain and the ambient step alike.
+#: The py3.12 leg measures coverage as it runs (tests/coverage_floors.py); every other
+#: leg's line reads as it did.
+COVERAGE = "${{ matrix.leg == 'py3.12' && '--cov --cov-report=' || '' }}"
 SHARD_PYTEST = (
     "pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }}"
     " --splitting-algorithm least_duration"
     ' --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"'
+    f" {COVERAGE}"
 )
 
 
@@ -423,7 +427,10 @@ def test_every_job_has_a_timeout() -> None:
     for name, job in workflow()["jobs"].items():
         assert "timeout-minutes" in job, f"{name} has no timeout"
     test = str(workflow()["jobs"]["test"]["timeout-minutes"])
-    assert test == "${{ matrix.os == 'windows-latest' && 25 || 15 }}", test
+    # Coverage's leg (py3.12) as long as Windows': its shards run 9.5-12 minutes under --cov.
+    assert test == "${{ (matrix.os == 'windows-latest' || matrix.leg == 'py3.12') && 25 || 15 }}", (
+        test
+    )
 
 
 def test_ci_ok_needs_every_job_and_fails_unless_all_passed() -> None:

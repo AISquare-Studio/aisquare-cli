@@ -12,9 +12,9 @@ from aisquare.core.config import load_config
 from aisquare.core.editor import edit_text
 from aisquare.core.entries import new_entry
 from aisquare.core.injection import build_block, record_injection
-from aisquare.core.store import store_session
-from aisquare.core.workspace import active_project
-from aisquare.models import ContextEntry, ExportFormat, Pool
+from aisquare.core.store import ContextStore, store_session
+from aisquare.core.workspace import active_project, current_project
+from aisquare.models import ContextEntry, ExportFormat, Pool, ProjectInfo
 
 
 def remember(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
@@ -22,10 +22,31 @@ def remember(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
     return add_entry(text, pool, tags)
 
 
+def pool_project(store: ContextStore) -> ProjectInfo:
+    """The project whose pool (and captured prompts) a command reads: for one a sandboxed
+    agent's broker runs, the launch's own, the pool its broker names (``own_pool``), never a
+    ``project switch`` pin nor the project another directory in its tree resolves to (a
+    submodule's, a nested marker's: review r11 of #113, finding 7; r12, finding 12; r13,
+    finding 5); else the active one (the pin, else the directory's). :class:`OutOfScope`
+    for a brokered command whose pool is no project the store knows."""
+    from aisquare.services.store_broker import OutOfScope, own_pool
+
+    scoped = own_pool()
+    if scoped is None:
+        return active_project(store)
+    found = store.get_project(scoped)
+    if found is not None:
+        return found
+    here = current_project()
+    if here.id == scoped:
+        return here
+    raise OutOfScope(f"this agent's project ({scoped}) is not one the store knows", kind="pool")
+
+
 def inject() -> str:
     """Assemble the in-scope context block, record the injection, and return it."""
     with store_session() as store:
-        project = active_project(store)
+        project = pool_project(store)
         entries = store.entries(project_id=project.id)
     record_injection(entries, project)
     return build_block(entries, project)
@@ -34,16 +55,39 @@ def inject() -> str:
 def list_entries() -> list[ContextEntry]:
     """List context in scope here: the user pool plus the active project's."""
     with store_session() as store:
-        return store.entries(project_id=active_project(store).id)
+        return store.entries(project_id=pool_project(store).id)
 
 
 def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
-    """Add a context entry to the user or project pool."""
-    resolved: Pool = pool or load_config().default_pool
+    """Add a context entry to the user or project pool.
+
+    From a sandboxed agent's broker (``services.store_broker.own_pool``) only its launch's
+    project pool: the user pool is injected into every project's agents, and another
+    project's pool into that project's (review r10 of #113, finding 3)."""
+    from aisquare.services.store_broker import OutOfScope, own_pool
+
+    scoped = own_pool()
+    if scoped is not None and pool == "user":
+        raise OutOfScope(
+            "the user pool is given to every project's agents: a command from an agent's "
+            "sandbox writes only its own project's pool (drop --user)",
+            kind="pool",
+        )
+    resolved: Pool = pool or ("project" if scoped is not None else load_config().default_pool)
     with store_session() as store:
         project_id: str | None = None
         if resolved == "project":
-            project = active_project(store)
+            # Brokered: the launch's own project, by its directory, never a `project switch`
+            # pin, which `project forget` sets too (review r11 of #113, finding 7).
+            project = current_project() if scoped is not None else active_project(store)
+            if scoped is not None and project.id != scoped:
+                raise OutOfScope(
+                    f"{project.root} is not this agent's project: a command from its sandbox "
+                    "writes only its own project's pool",
+                    kind="pool",
+                )
+            if scoped is not None:
+                project = store.get_project(project.id) or project
             store.onboard_project(project)  # a fact added by hand is a deliberate add (#139)
             project_id = project.id
         return store.add(new_entry(text, resolved, project_id, tags, "cli"))
@@ -54,11 +98,25 @@ def show_entry(entry_id: str) -> ContextEntry:
 
     Raises ``KeyError`` if nothing matches and ``AmbiguousIdError`` if the id
     prefix matches more than one entry.
+
+    From a sandboxed agent's broker (``store_broker.own_pool``), only an entry of the pools
+    it is given, its project's and the user pool, which every project's agents are given:
+    :class:`~aisquare.services.store_broker.OutOfScope` for another project's, whose id
+    or prefix found it (review r13 of #113, finding 4).
     """
+    from aisquare.services.store_broker import OutOfScope, own_pool
+
     with store_session() as store:
         entry = store.get(entry_id)
         if entry is None:
             raise KeyError(entry_id)
+        scoped = own_pool()
+        if scoped is not None and entry.pool != "user" and entry.project_id != scoped:
+            raise OutOfScope(
+                f"{entry_id} is an entry of another project's pool: a command from this "
+                "agent's sandbox reads only its own project's pool and the user pool",
+                kind="pool",
+            )
         return entry
 
 
@@ -83,13 +141,13 @@ def remove_entry(entry_id: str) -> None:
 def search_entries(query: str) -> list[ContextEntry]:
     """Search context in scope here: the user pool plus the current project's."""
     with store_session() as store:
-        return store.search(query, project_id=active_project(store).id)
+        return store.search(query, project_id=pool_project(store).id)
 
 
 def preview() -> str:
     """Return the context block that would be injected right now (no side effects)."""
     with store_session() as store:
-        project = active_project(store)
+        project = pool_project(store)
         entries = store.entries(project_id=project.id)
     return build_block(entries, project)
 

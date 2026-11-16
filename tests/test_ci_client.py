@@ -89,15 +89,21 @@ def test_a_broken_config_enables_nothing(isolated_home: Path) -> None:
 def test_off_reads_no_config_and_costs_no_measurable_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """A config read on the off path would be paid by every prompt of every
     user who never opted in. Proven by making the read explode, and bounded by
-    a generous wall clock rather than a literal."""
+    a generous wall clock rather than a literal: the WALL clock, because what
+    a prompt pays is the wait, and a sleep or a child process in the off path
+    costs no CPU time here (R9i reopen 1). The least of three rounds of 200
+    calls: a stall on a shared runner lands on one round, a wait on every one."""
     monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "0")
     monkeypatch.setattr(
         ci_client, "load_config", lambda: (_ for _ in ()).throw(RuntimeError("read"))
     )
-    started = time.perf_counter()
-    for _ in range(200):
-        assert ci_client.enabled() is False
-    assert time.perf_counter() - started < 0.2
+    rounds: list[float] = []
+    for _ in range(3):
+        started = time.perf_counter()
+        for _ in range(200):
+            assert ci_client.enabled() is False
+        rounds.append(time.perf_counter() - started)
+    assert min(rounds) < 0.2, rounds
 
 
 @pytest.mark.parametrize(

@@ -84,7 +84,7 @@ def test_connect_not_installed_fails(runner: CliRunner, monkeypatch: pytest.Monk
     # The suite's agent home has no ~/.claude, and here no `claude` is on PATH either
     # (with one, connect makes the directory: test_agent_adapters.py). Cursor, the old
     # example here, is refused as not connectable before presence is asked.
-    monkeypatch.setattr(agents, "claude_on_path", lambda: None)
+    monkeypatch.setattr(agents, "on_path", lambda name: None)
     result = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert result.exit_code == 1
     assert "not installed" in result.output
@@ -136,7 +136,8 @@ def test_connect_preserves_existing_hooks(runner: CliRunner, fake_home: Path) ->
 def test_disconnect_removes_hooks(runner: CliRunner, fake_home: Path) -> None:
     runner.invoke(app, ["agents", "connect", "claude-code"])
     runner.invoke(app, ["agents", "disconnect", "claude-code"])
-    assert _hook_commands(fake_home / ".claude" / "settings.json") == []
+    # The settings.json connect made, empty again, goes with them (SMOKE13 N2).
+    assert not (fake_home / ".claude" / "settings.json").exists()
 
 
 def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: Path) -> None:
@@ -162,8 +163,7 @@ def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: P
         app, ["agents", "disconnect", "claude-code", "--config-dir", str(alt)]
     )
     assert disconnect.exit_code == 0
-    settings = json.loads((alt / "settings.json").read_text(encoding="utf-8"))
-    assert "hooks" not in settings
+    assert not (alt / "settings.json").exists(), "connect made it: it goes empty (SMOKE13 N2)"
 
 
 def test_claude_config_dir_env_is_honoured(
@@ -345,8 +345,8 @@ def test_spaced_install_path_roundtrips_through_hooks(
     settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert len(settings["hooks"]["SessionStart"]) == 1
     assert runner.invoke(app, ["agents", "disconnect", "claude-code"]).exit_code == 0
-    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    assert "hooks" not in settings  # removable too
+    # Removable too: connect made the file, which goes with them (SMOKE13 N2).
+    assert not (fake_home / ".claude" / "settings.json").exists()
 
 
 def test_settings_json_is_written_in_utf8_as_claude_code_writes_it(

@@ -1,0 +1,20 @@
+{
+  "name": "aisquare-cli",
+  "interface": {
+    "displayName": "aisquare"
+  },
+  "plugins": [
+    {
+      "name": "aisquare",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -2,14 +2,15 @@
 
 When a source fails the recognised test — plain text, a JSON or YAML persona from
 another tool, a page fetched from a URL — or ``--llm``/``--condense`` asks for it, an
-engine turns it into a skill: ``manager`` (headless Claude Code under the manager
-role's binding) first, then ``api`` (the official ``anthropic`` SDK, the ``llm``
-extra), then a refusal naming both fixes. The output is STRUCTURED
+engine turns it into a skill: ``manager`` (one headless turn of the manager role's own
+coding agent, ``AgentAdapter.headless_call``, on the manager's account) first, then
+``api`` (the official ``anthropic`` SDK, the ``llm`` extra), then a refusal naming both
+fixes. The output is STRUCTURED
 (:class:`PersonaDraft`) and never scraped out of prose; the caller validates it with
 the same rules as a copied skill.
 
 A running import can be cancelled (#211): each engine takes a ``cancel`` event. The
-manager engine's ``claude -p`` runs in a session of its own and is waited on in short
+manager engine's headless agent runs in a session of its own and is waited on in short
 steps; once ``cancel`` is set, it and everything it started are ended (``SIGTERM``, two
 seconds, then ``SIGKILL``) and :class:`ImportCancelled` is raised, so a Cancel or a
 Ctrl-C is over in about two seconds rather than at the 180-second timeout. The api
@@ -31,10 +32,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
-from typing import Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ValidationError
 
@@ -42,25 +45,38 @@ from aisquare.core import harness
 from aisquare.core.paths import aisquare_home
 from aisquare.core.personas import BODY_SOFT_CAP, SKILL_NAME_MAX
 
+if TYPE_CHECKING:
+    from aisquare.services.agent_launch import ResolvedAgent
+
 Engine = Literal["auto", "manager", "api", "off"]
 RanEngine = Literal["manager", "api"]
 
 MANAGER_TIMEOUT_SECONDS = 180.0
 """How long the manager engine waits for its answer; read at each call."""
 POLL_SECONDS = 0.2
-"""How often the manager engine looks at the cancel event while ``claude -p`` runs."""
+"""How often the manager engine looks at the cancel event while the agent runs."""
 STOP_GRACE_SECONDS = 2.0
-"""How long a cancelled ``claude -p`` gets to end on ``SIGTERM`` before ``SIGKILL``."""
+"""How long a cancelled agent gets to end on ``SIGTERM`` before ``SIGKILL``."""
 MANAGER_SOURCE_MAX_BYTES = 200_000
-"""The largest source fed to headless Claude Code on stdin."""
+"""The largest source fed to the manager's headless turn on stdin."""
 API_MAX_TOKENS = 16_000
 
-#: The manager engine's flags around ``--json-schema``: ``harness.probe_model``'s
-#: isolation. No ``--bare`` — Claude Code 2.1.272 documents that under it "OAuth and
-#: keychain are never read", so an OAuth-bound manager account could not pay; dropped
-#: on the manager's answer (board seq 7100), the isolation kept exactly.
-_MANAGER_FLAGS_HEAD = ("--tools", "", "--max-turns", "1", "--output-format", "json")
-_MANAGER_FLAGS_TAIL = ("--no-session-persistence", "--settings", "{}", "--strict-mcp-config")
+#: The JSON Schema the manager engine's answer must meet, :class:`PersonaDraft`'s fields
+#: written out in the subset a STRICT structured output takes (Codex sends its
+#: ``--output-schema`` as ``strict: true``, measured on 0.162.1, and a strict schema
+#: requires every property and no other): every field required, ``notes`` an empty list
+#: when nothing was dropped.
+DRAFT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "body": {"type": "string"},
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["name", "description", "body", "notes"],
+    "additionalProperties": False,
+}
 
 _OPEN = "<<<SOURCE"
 _CLOSE = "SOURCE>>>"
@@ -125,38 +141,63 @@ def framed(source_text: str) -> str:
     return f"{_OPEN}\n{source_text.replace(_CLOSE, 'SOURCE> > >')}\n{_CLOSE}"
 
 
-def manager_model() -> str | None:
-    """The manager's model, from its ladder without probing (``fable → opus → sonnet``)."""
-    resolution = harness.resolve_model("manager", probe=False)
-    return None if resolution is None else resolution.model
+def manager() -> ResolvedAgent:
+    """The manager role's coding agent and binary, as ``aisquare launch manager`` resolves
+    them (``team bind manager --agent``, the project's agent, the user's default);
+    :class:`EngineUnavailable` for a binding this install cannot resolve."""
+    from aisquare.services import agent_launch
+
+    try:
+        return agent_launch.resolve("manager")
+    except ValueError as exc:
+        raise EngineUnavailable(f"manager engine: {exc}") from None
 
 
-def _manager_env() -> dict[str, str]:
+def manager_model(selected: ResolvedAgent | None = None) -> str | None:
+    """The manager's model without probing: Claude Code's ladder (``fable → opus →
+    sonnet``), another agent's pin (``[agents.models.<agent>]``, ``AISQUARE_MODEL_MANAGER``)
+    or ``None``, its own default. A pin that does not validate is ``None`` too: the
+    engine runs on the agent's default rather than not at all."""
+    from aisquare.services import agent_launch
+
+    try:
+        resolution = agent_launch.model_for(selected or manager(), "manager", probe=False)
+    except (EngineUnavailable, ValueError):
+        return None
+    return None if resolution is None else resolution.model or None
+
+
+def _manager_env(selected: ResolvedAgent) -> tuple[dict[str, str], Path]:
     """The probe's environment — no role, no team, no model overrides, no tracing
     identity — plus the manager profile's own variables and the account the manager
     launches under, so the manager's account pays; the team switch is forced off again
     after the merge.
 
-    The account is ``services.claude_accounts.choose``'s answer for the manager role,
-    the one resolver ``launch`` and ``fleet spawn`` ask (``team bind manager --account``,
-    else the project's or the machine's default), applied the way ``launch`` applies it:
-    an account wins over the binding's env. With the binding's env alone, a manager bound
+    The account is ``services.claude_accounts.choose``'s answer for the manager role and
+    its agent, the one resolver ``launch`` and ``fleet spawn`` ask (``team bind manager
+    --account``, else the project's or the machine's default), applied the way ``launch``
+    applies it: an account wins over the binding's env, through that agent's own home
+    variable (``CODEX_HOME`` for Codex). With the binding's env alone, a manager bound
     with ``--account 2`` imported on whatever login this shell had (review of #240, "also
     confirmed": the manager engine ignores the account binding). A binding to an account
-    that does not exist is a reason for the ladder, as it stops a launch."""
+    that does not exist, or is another agent's, is a reason for the ladder, as it stops a
+    launch. With it, the config dir that environment runs the agent from: the account's,
+    else the one ``selected`` resolved."""
     from aisquare.core import claude_accounts as accounts_core
     from aisquare.services import claude_accounts as accounts_service
 
     env = harness._probe_env()
-    env.update(harness.resolve_profile("manager").env)
+    env.update(selected.profile.env)
     try:
-        choice = accounts_service.choose(role="manager")
-    except accounts_service.NoSuchAccount as exc:
+        choice = accounts_service.choose(
+            role="manager", agent=selected.adapter.id, pick=selected.pick
+        )
+    except accounts_service.NoSuchAccount as exc:  # WrongAgent too
         raise EngineUnavailable(f"manager engine: {exc}") from None
     if choice.account is not None:
         accounts_core.apply_launch_env(env, choice.account, shell=os.environ)
     env["AISQUARE_TEAM"] = "0"
-    return env
+    return env, choice.account.config_dir if choice.account is not None else selected.config_dir
 
 
 def draft_with_manager(
@@ -165,14 +206,19 @@ def draft_with_manager(
     condense: bool,
     timeout: float | None = None,
     feedback: str | None = None,
+    selected: ResolvedAgent | None = None,
     cancel: threading.Event | None = None,
 ) -> PersonaDraft:
-    """One headless ``claude -p`` under the manager role's binding (§3.9).
+    """One headless turn of the manager role's coding agent (§3.9), its argv the
+    adapter's ``headless_call`` and its answer the adapter's ``headless_answer``: Claude
+    Code's ``-p`` with ``--json-schema``, Codex's ``exec --ephemeral … --output-schema``
+    read back from ``-o``. An agent without such a call is a reason for the ladder.
 
     Isolated like ``harness.probe_model``: it runs from the aisquare home (never the
-    caller's checkout), with no tools, no settings, no MCP servers, one turn, no
-    session saved, and a stripped environment. The instructions and the source go on
-    stdin. Anything short of a structured draft is :class:`EngineUnavailable`.
+    caller's checkout), with no session saved, no tool and no MCP server (the source is
+    untrusted), the agent's hooks off where a launch argument can say so, and a stripped
+    environment on the manager's account. The instructions and the source go on stdin.
+    Anything short of a structured draft is :class:`EngineUnavailable`.
 
     It is waited on in :data:`POLL_SECONDS` steps, so ``cancel`` (and a Ctrl-C, a
     ``KeyboardInterrupt`` in this thread) ends it, and the processes it started, within
@@ -185,22 +231,11 @@ def draft_with_manager(
             f"manager engine: the source is {size:,} bytes, over the "
             f"{MANAGER_SOURCE_MAX_BYTES:,}-byte cap for stdin"
         )
-    binary = harness.resolve_binary("manager").binary
-    model = manager_model()
-    schema = json.dumps(PersonaDraft.model_json_schema(), separators=(",", ":"))
-    argv = [
-        # The path PATH gives it, which on Windows is ``claude.cmd`` (PATHEXT): handed the
-        # bare name, CreateProcess looks for ``claude.exe`` alone, and the engine reported a
-        # Claude Code that `claude` in a shell runs as not on PATH (review of #240, "also
-        # confirmed").
-        shutil.which(binary) or binary,
-        "-p",
-        *(["--model", model] if model else []),
-        *_MANAGER_FLAGS_HEAD,
-        "--json-schema",
-        schema,
-        *_MANAGER_FLAGS_TAIL,
-    ]
+    selected = selected or manager()
+    adapter = selected.adapter
+    binary = selected.binary.binary
+    model = manager_model(selected)
+    env, config_dir = _manager_env(selected)
     home = aisquare_home()
     try:
         home.mkdir(parents=True, exist_ok=True)
@@ -209,55 +244,84 @@ def draft_with_manager(
             f"manager engine: cannot use {home} as its working directory ({exc.strerror or exc})"
         ) from None
     stdin = f"{instructions(condense=condense, feedback=feedback)}\n\n{framed(source_text)}\n"
-    if cancel is not None and cancel.is_set():
-        raise ImportCancelled("the import was cancelled before the manager engine started")
-    try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(home),
-            env=_manager_env(),
-            # Its own session: a cancel ends Claude Code and whatever it started, and the
-            # terminal's Ctrl-C reaches this process, which ends it, not the child directly.
-            start_new_session=os.name != "nt",
-        )
-    except FileNotFoundError:
-        raise EngineUnavailable(f"manager engine: {binary!r} is not on PATH") from None
-    except OSError as exc:
-        raise EngineUnavailable(
-            f"manager engine: {binary!r} could not start ({exc.strerror or exc})"
-        ) from None
-    deadline = time.monotonic() + limit
-    pending: str | None = stdin
-    try:
-        while True:
-            if cancel is not None and cancel.is_set():
-                raise ImportCancelled("the import was cancelled while the manager engine ran")
-            try:
-                stdout, stderr = process.communicate(input=pending, timeout=POLL_SECONDS)
-                break
-            except subprocess.TimeoutExpired:
-                pending = None  # sent once: a retried communicate carries on with it
-            if time.monotonic() >= deadline:
-                raise EngineUnavailable(f"manager engine: no answer within {limit:.0f} s")
-    except BaseException:
-        _stop(process)
-        raise
-    if process.returncode != 0:
-        detail = _first_line(stderr) or _envelope_result(stdout)
+    with tempfile.TemporaryDirectory(prefix="persona-import-") as scratch:
+        schema = Path(scratch) / "schema.json"
+        out = Path(scratch) / "answer.json"
+        try:
+            schema.write_text(json.dumps(DRAFT_SCHEMA), encoding="utf-8")
+            call = adapter.headless_call(schema, out, model, home=config_dir, cwd=home)
+        except OSError as exc:
+            raise EngineUnavailable(
+                f"manager engine: cannot write its schema ({exc.strerror or exc})"
+            ) from None
+        except ValueError as exc:
+            raise EngineUnavailable(
+                f"manager engine: {adapter.label}'s tools cannot be switched off ({exc})"
+            ) from None
+        if call is None:
+            raise EngineUnavailable(f"manager engine: {adapter.label} has no headless call")
+        # The path PATH gives it, which on Windows is ``claude.cmd`` (PATHEXT): handed the
+        # bare name, CreateProcess looks for ``claude.exe`` alone, and the engine reported
+        # an agent that its name in a shell runs as not on PATH (review of #240, "also
+        # confirmed").
+        argv = [shutil.which(binary) or binary, *call]
+        if cancel is not None and cancel.is_set():
+            raise ImportCancelled("the import was cancelled before the manager engine started")
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(home),
+                env=env,
+                # Its own session: a cancel ends the agent and whatever it started, and the
+                # terminal's Ctrl-C reaches this process, which ends it, not the child directly.
+                start_new_session=os.name != "nt",
+            )
+        except FileNotFoundError:
+            raise EngineUnavailable(f"manager engine: {binary!r} is not on PATH") from None
+        except OSError as exc:
+            raise EngineUnavailable(
+                f"manager engine: {binary!r} could not start ({exc.strerror or exc})"
+            ) from None
+        deadline = time.monotonic() + limit
+        pending: str | None = stdin
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise ImportCancelled("the import was cancelled while the manager engine ran")
+                try:
+                    stdout, stderr = process.communicate(input=pending, timeout=POLL_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    pending = None  # sent once: a retried communicate carries on with it
+                if time.monotonic() >= deadline:
+                    raise EngineUnavailable(f"manager engine: no answer within {limit:.0f} s")
+        except BaseException:
+            _stop(process)
+            raise
+        if process.returncode != 0:
+            detail = _first_line(stderr) or _envelope_result(stdout)
+            tail = f" — {detail}" if detail else ""
+            raise EngineUnavailable(f"manager engine: {binary} exited {process.returncode}{tail}")
+        answer = adapter.headless_answer(stdout, out)
+    if answer is None:
+        detail = _envelope_result(stdout)
         tail = f" — {detail}" if detail else ""
-        raise EngineUnavailable(f"manager engine: {binary} exited {process.returncode}{tail}")
-    return _draft_from_envelope(stdout)
+        raise EngineUnavailable(f"manager engine: {adapter.label} gave no JSON answer{tail}")
+    try:
+        return PersonaDraft.model_validate(answer)
+    except ValidationError:
+        raise EngineUnavailable("manager engine: the answer carried no persona draft") from None
 
 
 def _stop(process: subprocess.Popen[str]) -> None:
-    """End the engine's ``claude -p`` and what it started: ``SIGTERM`` to the process group
-    it leads (it was started in a session of its own), :data:`STOP_GRACE_SECONDS`, then
+    """End the engine's agent and what it started: ``SIGTERM`` to the process group it
+    leads (it was started in a session of its own), :data:`STOP_GRACE_SECONDS`, then
     ``SIGKILL``; its pipes closed. On Windows, the process alone."""
     _signal(process, kill=False)
     with contextlib.suppress(subprocess.TimeoutExpired):
@@ -286,30 +350,6 @@ def _signal(process: subprocess.Popen[str], *, kill: bool) -> None:
                 process.kill()
             else:
                 process.terminate()
-
-
-def _draft_from_envelope(stdout: str) -> PersonaDraft:
-    """The draft from ``--output-format json``: ``structured_output``, else a JSON
-    ``result`` string."""
-    try:
-        envelope = json.loads(stdout)
-    except json.JSONDecodeError:
-        raise EngineUnavailable("manager engine: the answer was not JSON") from None
-    if not isinstance(envelope, dict):
-        raise EngineUnavailable("manager engine: the answer was not a JSON object")
-    if envelope.get("is_error"):
-        reason = _first_line(str(envelope.get("result") or "")) or "an error"
-        raise EngineUnavailable(f"manager engine: Claude Code reported {reason}")
-    candidate = envelope.get("structured_output")
-    if candidate is None and isinstance(envelope.get("result"), str):
-        try:
-            candidate = json.loads(envelope["result"])
-        except json.JSONDecodeError:
-            candidate = None
-    try:
-        return PersonaDraft.model_validate(candidate)
-    except ValidationError:
-        raise EngineUnavailable("manager engine: the answer carried no persona draft") from None
 
 
 def draft_with_api(
@@ -413,17 +453,22 @@ def draft(
         )
     reasons: list[str] = []
     if engine in ("auto", "manager"):
-        chosen = manager_model()
-        if progress is not None:
-            with_model = f" --model {chosen}" if chosen else ""
-            progress(
-                f"manager engine: {harness.resolve_binary('manager').binary} -p{with_model} "
-                f"(up to {MANAGER_TIMEOUT_SECONDS:.0f} s)"
-            )
         try:
+            selected = manager()
+            chosen = manager_model(selected)
+            if progress is not None:
+                with_model = f", {chosen}" if chosen else ""
+                progress(
+                    f"manager engine: {selected.binary.binary} ({selected.adapter.label} "
+                    f"headless{with_model}, up to {MANAGER_TIMEOUT_SECONDS:.0f} s)"
+                )
             return (
                 draft_with_manager(
-                    source_text, condense=condense, feedback=feedback, cancel=cancel
+                    source_text,
+                    condense=condense,
+                    feedback=feedback,
+                    selected=selected,
+                    cancel=cancel,
                 ),
                 "manager",
                 chosen,
@@ -450,7 +495,7 @@ def draft(
         except EngineUnavailable as exc:
             reasons.append(str(exc))
     fixes = (
-        "start or bind a manager (`claude` on PATH and signed in), or install "
+        "start or bind a manager (its agent on PATH and signed in), or install "
         "aisquare-cli[llm] and provide Anthropic credentials"
     )
     raise ImportRefused(

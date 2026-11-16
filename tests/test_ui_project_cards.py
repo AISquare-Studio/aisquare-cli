@@ -262,7 +262,10 @@ def test_a_double_click_renames_in_place_and_enter_saves_at_once(
     stored = _stored("prj_a")
     assert stored is not None and stored.nickname == "Payments v2"
     assert stored.codename == "payments-v2", "the codename follows the name"
-    assert sessions.renamed == [("asq-amber-otter", "asq-payments-v2")]
+    # The session made by hand above is one no launch record names: #113 renames the
+    # project's sessions by the tmux id its records hold, never one found by a name built
+    # from its codename (review r7, finding 2), so this one is left as it is.
+    assert sessions.renamed == []
     assert (
         "✓ Payments v2 · fleet codename payments-v2 (tmux asq-payments-v2) — was amber-otter, "
         "and --project amber-otter still works"

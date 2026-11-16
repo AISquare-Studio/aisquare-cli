@@ -26,6 +26,11 @@ events of its members up to it:
 - **Briefing**: a parent's manager is told its group in at most :data:`BRIEFING_MAX` chars.
 
 A group without a parent behaves byte for byte as before. Boards stay per project.
+
+A parent manager whose agent sandboxes its tools (Codex) delegates through its store broker
+as any other does here: its broker reads a member's board and adds a task to it, and nothing
+else of it, for the members its board parented when the agent launched and still parents
+(:func:`members_parented_by`; ``services.store_broker.MEMBERS_ENV``).
 """
 
 from __future__ import annotations
@@ -98,6 +103,18 @@ def groups_parented_by(store: ContextStore, project_id: str) -> list[ProjectGrou
         group
         for group in store.project_groups()
         if store.group_settings(group.id).parent_project_id == project_id
+    ]
+
+
+def members_parented_by(store: ContextStore, project_id: str) -> list[ProjectInfo]:
+    """The members of the groups ``project_id`` parents, as the store has them now: the
+    projects each of which :func:`parent_of` answers with ``project_id``, whose boards its
+    manager reads and delegates to (``board --project``, ``task add --project``)."""
+    parented = {group.id for group in groups_parented_by(store, project_id)}
+    return [
+        project
+        for project in store.list_projects(all=True)
+        if project.group_id in parented and project.id != project_id
     ]
 
 

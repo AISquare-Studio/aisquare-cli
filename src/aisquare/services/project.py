@@ -1006,14 +1006,36 @@ def typed_root(path: Path | None) -> Path:
 
 HOME_WARNING = (
     "this folder is aisquare's own home: it holds aisquare's settings, the fleet database "
-    "and every Claude account's login data, so agents working here can read and change them"
+    "and every {accounts} account's login data, so agents working here can read and change them"
 )
-"""What adding the aisquare home as a project says, once (the owner's decision D5)."""
+"""What adding the aisquare home as a project says, once (the owner's decision D5), its
+``{accounts}`` the agents whose accounts it holds (:func:`home_warning`)."""
+
+
+def home_warning() -> str:
+    """:data:`HOME_WARNING` naming each agent with accounts here, as prose calls its accounts
+    (``claude_accounts.agent_noun``), in the order the agents are registered: ``every Claude
+    account's`` on a machine of Claude Code's accounts alone, as 0.9.2 said it, ``every Claude
+    and Codex account's`` with Codex's too (R16-F). A registry that cannot be read names the
+    default agent's."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+
+    try:  # the registry fails open on a store it cannot read; a slots folder may not
+        present = {account.agent for account in accounts_service.list_accounts()}
+    except OSError:
+        present = set()
+    agents = [agent for agent in accounts_core.account_agents() if agent in present]
+    nouns = [accounts_core.agent_noun(agent) for agent in agents] or [
+        accounts_core.agent_noun(None)
+    ]
+    named = nouns[0] if len(nouns) == 1 else f"{', '.join(nouns[:-1])} and {nouns[-1]}"
+    return HOME_WARNING.format(accounts=named)
 
 
 def onboard_on_purpose(store: ContextStore, project: ProjectInfo) -> tuple[ProjectInfo, str | None]:
     """The owner's own "add this folder" (``init``, ``project onboard``): the project, and
-    :data:`HOME_WARNING` when this made the aisquare home a project, else ``None``.
+    :func:`home_warning` when this made the aisquare home a project, else ``None``.
 
     The home stays hidden by default; only this adds it (D5), and it warns rather than
     refuses. Said when the home BECOMES a project, so ``init``, which onboards and then
@@ -1022,7 +1044,7 @@ def onboard_on_purpose(store: ContextStore, project: ProjectInfo) -> tuple[Proje
     before = store.get_project(project.id)
     added = store.onboard_project(project, explicit=True)
     became = is_the_home(project.root) and (before is None or before.onboarded_at is None)
-    return added, HOME_WARNING if became else None
+    return added, home_warning() if became else None
 
 
 def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:

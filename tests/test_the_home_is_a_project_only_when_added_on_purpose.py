@@ -55,10 +55,10 @@ def test_project_onboard_adds_the_home_and_warns_once(home: ProjectInfo) -> None
     again = project_service.onboard(home.root, refresh=False)
 
     assert _listed(home)
-    assert first.warning == project_service.HOME_WARNING
+    assert first.warning == project_service.home_warning()
     assert again.warning is None, "said once, when it becomes a project"
     for words in ("settings", "fleet database", "login data", "read and change"):
-        assert words in project_service.HOME_WARNING
+        assert words in project_service.home_warning()
 
 
 def test_an_ordinary_folder_is_added_without_a_warning(tmp_path: Path) -> None:
@@ -79,7 +79,7 @@ def test_init_in_the_home_adds_it_and_says_so_once(home: ProjectInfo) -> None:
         explainability=False,
     )
     assert _listed(home)
-    said = [note for note in report.notes if project_service.HOME_WARNING in note]
+    said = [note for note in report.notes if project_service.home_warning() in note]
     assert len(said) == 1, report.notes
 
 

@@ -1,4 +1,4 @@
-"""``aisquare accounts`` — the Claude Code accounts this CLI manages.
+"""``aisquare accounts`` — the Claude Code and Codex accounts this CLI manages.
 
 Thin over :mod:`aisquare.services.claude_accounts`: parse, call, render. The
 commands that report (``list``, ``usage``, ``remove``) honour ``--json``; the
@@ -11,6 +11,12 @@ replaces this process with ``claude`` on slot 2, extra arguments forwarded.
 The fleet UI's sign-in window runs exactly this command, so the environment an
 account launches with is decided in one place (``services.claude_accounts.
 session_env``).
+
+Codex accounts are slots on the same ladder (``core.claude_accounts``): ``add
+--agent codex`` makes one and runs ``codex login`` in it, ``run <slot>`` starts
+``codex`` there, and every other command takes a Codex slot as it takes a
+Claude one. The defaults are per agent; ``--agent`` names whose a bare
+``default --clear`` clears.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
@@ -28,8 +35,11 @@ from rich.text import Text
 
 from aisquare.cli.common import expected_config_write_errors, fail, format_reset
 from aisquare.cli.fleet import not_interactive_reason
+from aisquare.cli.native_args import PassthroughCommand
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing
+from aisquare.core.agent_adapters import adapters, default_adapter, get_adapter, stage_mark_of
+from aisquare.core.agent_adapters.types import stage_mark
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import (
@@ -45,7 +55,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
 
 app = typer.Typer(
-    help="Claude Code accounts this CLI manages: list, add, remove, run, usage, "
+    help="Claude Code and Codex accounts this CLI manages: list, add, remove, run, usage, "
     "default, alias, order, move, disable, enable, trust, settings.",
     no_args_is_help=False,
     invoke_without_command=True,
@@ -54,6 +64,9 @@ app = typer.Typer(
 SlotRef = Annotated[
     str, typer.Argument(help="Slot number, alias, or the email the slot is signed in as.")
 ]
+#: A command that takes a slot reads ``-2`` as one: an agent registered after Claude Code and
+#: Codex has a negative plain slot (``core.slot_number``), which click took for an option.
+SLOT_ARGS: dict[str, Any] = {"ignore_unknown_options": True}
 ProjectOpt = Annotated[
     str | None,
     typer.Option(
@@ -62,6 +75,42 @@ ProjectOpt = Annotated[
         help="Act on a PROJECT's default instead of the machine's: a codename, name or id "
         "prefix, or `.` for the project of the current directory.",
         metavar="PROJECT",
+    ),
+]
+
+
+def whose_account_help() -> str:
+    """``--agent``'s help: the default agent, then every other agent with account slots, by
+    their ids, a beta one's with its mark (``types.stage_mark``): ``Whose account:
+    claude-code (the default) or codex (beta).``"""
+    first = default_adapter()
+    named = [f"{first.id}{stage_mark(first)} (the default)"]
+    named += [
+        f"{each.id}{stage_mark(each)}"
+        for each in adapters()
+        if each.accounts is not None and each is not first
+    ]
+    return f"Whose account: {' or '.join(named)}."
+
+
+def _other_agents_choice() -> str:
+    """`` [--agent codex (beta)]``: the other agents with account slots ``accounts add`` takes,
+    a beta one's with its mark (``types.stage_mark``); ``""`` with none."""
+    first = default_adapter()
+    others = [
+        f"{each.id}{stage_mark(each)}"
+        for each in adapters()
+        if each.accounts is not None and each is not first
+    ]
+    return f" [--agent {' | '.join(others)}]" if others else ""
+
+
+AgentOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--agent",
+        help=whose_account_help(),
+        metavar="AGENT",
     ),
 ]
 RoleOpt = Annotated[
@@ -74,16 +123,30 @@ RoleOpt = Annotated[
     ),
 ]
 
+BrowserOpt = Annotated[
+    bool,
+    typer.Option(
+        "--browser",
+        help="Codex: sign in with the browser (`codex login`), not a device code, for a "
+        "ChatGPT login that does not allow device codes.",
+    ),
+]
+
+BROWSER_STEPS = "finish the sign-in in the browser it opens"
+"""What ``accounts add --browser`` asks of the human: the agent's browser sign-in
+(``AgentAccounts.browser_sign_in_args``) opens a browser on this machine."""
+
 _DASH = "—"
 
 
 @app.callback(invoke_without_command=True)
 def _group(ctx: typer.Context) -> None:
-    """Claude Code accounts this CLI manages: list, add, remove, run, usage.
+    """Claude Code and Codex accounts this CLI manages: list, add, remove, run, usage.
 
     Bare ``aisquare accounts`` lists them, offline. Slot 1 is the plain
-    ``claude`` of this machine; every other slot is a directory the CLI created
-    with ``add`` and launches with ``run`` (or ``aisquare launch --account``).
+    ``claude`` of this machine and slot 0 the plain ``codex``; every other slot
+    is a directory the CLI created with ``add`` and launches with ``run`` (or
+    ``aisquare launch --account``), numbered on one ladder across both agents.
     """
     if ctx.invoked_subcommand is None:
         list_(usage=False)
@@ -92,12 +155,38 @@ def _group(ctx: typer.Context) -> None:
 def _resolve(ref: str) -> ClaudeAccount:
     try:
         return accounts_service.resolve(ref)
+    except accounts_service.AmbiguousAccount as exc:
+        # Under --json too, the refusal names both and how to name one (#100's reopen, E).
+        fail(str(exc), error="ambiguous_account", ref=ref, detail=str(exc))
     except accounts_service.NoSuchAccount as exc:
         fail(str(exc), error="unknown_account", ref=ref)
 
 
-def _fail_not_installed(exc: Exception) -> NoReturn:
-    fail(str(exc), error="claude_not_installed", hint=core.INSTALL_COMMAND)
+def _fail_not_installed(exc: Exception, agent: str = core.AGENT) -> NoReturn:
+    """Refused with the agent's install command; Claude Code's error says ``claude`` as it
+    always did (``AgentAccounts.legacy_slots``)."""
+    accounts = core.kind(agent)
+    error = "claude_not_installed" if accounts.legacy_slots else "agent_not_installed"
+    fail(str(exc), error=error, hint=accounts.install_command)
+
+
+def _agent(raw: str | None) -> str:
+    """``--agent``'s value as an adapter id with account slots (``claude-code`` unless given)."""
+    if raw is None:
+        return core.AGENT
+    agents = core.account_agents()
+    if raw not in agents:
+        fail(
+            f"no accounts for agent {raw!r} — choose {', '.join(agents)}",
+            error="usage",
+            ref=raw,
+        )
+    return raw
+
+
+def _usage_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str:
+    """`` · as of 3h ago`` for a reading a session recorded (Codex's), ``""`` when recent."""
+    return core.format_age(usage.fetched_at, now=now)
 
 
 def _percent(value: float | None) -> str:
@@ -107,6 +196,8 @@ def _percent(value: float | None) -> str:
 def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> tuple[str, str]:
     """``(session used, week used)`` as the table shows them; the reason when there is nothing,
     with what to do about it (``explain_usage``: the fix the Accounts page shows on hover).
+    A plan with a week alone (``ClaudeUsage.weekly_only``) reads ``no 5h limit`` in its
+    session cell (``NO_SESSION_LIMIT``).
 
     The columns say USED in their headers: a bare ``40%`` read as the room left
     to an agent on a fresh install, which then rationed a nearly empty account.
@@ -119,7 +210,11 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
         return _DASH, _DASH
     if not usage.available:
         return accounts_service.explain_usage(usage), ""
-    session = _window_cell(usage.session_percent, usage.session_resets_at, now=now)
+    session = (
+        accounts_service.NO_SESSION_LIMIT
+        if usage.weekly_only
+        else _window_cell(usage.session_percent, usage.session_resets_at, now=now)
+    )
     week = _window_cell(usage.week_percent, usage.week_resets_at, now=now)
     # The per-family weeks (#277), each with its own reset: they bind that family alone.
     # One whose reset has passed says so, as a reset session or week does: its figure is
@@ -138,6 +233,24 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
         if resets is not None:
             week += f" resets {format_reset(resets, now=moment)}"
     return session, week
+
+
+def _windows_cell(usage: ClaudeUsage | None, *, now: datetime | None = None) -> str | None:
+    """Each window of a reading whose windows are called otherwise than session and week
+    (``ClaudeUsage.own_windows``: an agent of daily per-model quotas), one a line, as the
+    session and week cells read: ``gemini-2.5-pro daily 70% · resets … · limits`` for the
+    one that limits (``ClaudeUsage.limiting``, the figure the sidebar shows). ``None`` for a
+    reading the two columns show whole."""
+    if usage is None or not usage.available or not usage.own_windows:
+        return None
+    limiting = usage.limiting
+    lines = []
+    for window in usage.own_windows:
+        line = f"{window.name} {_percent(window.used_percent)}"
+        if window.resets_at is not None:
+            line += f" · resets {format_reset(window.resets_at, now=now)}"
+        lines.append(line + (" · limits" if window == limiting else ""))
+    return "\n".join(lines)
 
 
 def _window_cell(percent: float | None, resets_at: datetime | None, *, now: datetime | None) -> str:
@@ -176,15 +289,43 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
     else:
         version = f" {claude.version}" if claude.version else ""
         console.print(Text.assemble(("✓ ", "green"), f"Claude Code{version} · {claude.binary}"))
+    # Another agent's line once it is installed or has a slot: a machine without
+    # Codex reads exactly as it did.
+    agents = {status.account.agent for status in overview.accounts}
+    for agent, found in overview.installs.items():
+        if core.kind(agent).legacy_slots or not (found.installed or agent in agents):
+            continue
+        name = core.agent_label(agent) + stage_mark_of(agent)
+        if found.installed:
+            version = f" {found.version}" if found.version else ""
+            console.print(Text.assemble(("✓ ", "green"), f"{name}{version} · {found.binary}"))
+        else:
+            console.print(
+                Text.assemble(
+                    (f"✗ {name} is not installed", "bold red"),
+                    f" — install it: {core.kind(agent).install_command}",
+                )
+            )
+    several = len(agents) > 1
+    listed = [status.account for status in overview.accounts]
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
     # Rows arrive in PRIORITY order (services.claude_accounts.list_accounts), so
     # the table reads top-down as "the order the fleet would try them": the first
     # enabled, signed-in row is the machine default, and needs no mark of its own.
-    for column in ("slot", "label", "signed in as", "plan", "hooks"):
+    _add_slot_column(table, listed)
+    for column in (*(["agent"] if several else []), "label", "signed in as"):
         table.add_column(column)
+    for column in ("plan", "hooks"):
+        table.add_column(column)
+    # An agent's windows of other names have a column of their own, there only when one has.
+    windowed = with_usage and any(
+        _windows_cell(status.usage) is not None for status in overview.accounts
+    )
     if with_usage:
         table.add_column("session used")
         table.add_column("week used")
+    if windowed:
+        table.add_column("windows used")
     table.add_column("directory", overflow="fold")
     for status in overview.accounts:
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
@@ -194,21 +335,45 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         if status.account.disabled:
             label.append(" (disabled)", style="dim")
         cells: list[Text | str] = [
-            str(status.account.slot),
+            # `codex:5` where two agents' accounts hold 5, as every command names it (#100's
+            # reopen 2); a number of one account's reads as it always did.
+            core.ref_among(status.account, listed),
+            *(
+                [core.agent_label(status.account.agent) + stage_mark_of(status.account.agent)]
+                if several
+                else []
+            ),
             label,
             who,
             status.subscription or _DASH,
             Text("✓", style="green") if status.hooks_installed else Text("✗", style="red"),
         ]
         if with_usage:
-            cells.extend(_usage_cells(status.usage))
+            session, week = _usage_cells(status.usage)
+            windows = _windows_cell(status.usage)
+            if status.usage is not None and status.usage.available:
+                age = (
+                    ""
+                    if core.kind(status.account.agent).network_usage
+                    else _usage_age(status.usage)
+                )
+                if windows is None:
+                    week += age
+                else:
+                    windows += age
+            cells.extend((session, week))
+            if windowed:
+                cells.append(windows or "")
         cells.append(Text(_short(status.account.config_dir), style="dim"))
         table.add_row(*cells)
     console.print(table)
+    for status in overview.accounts:
+        if status.detail:
+            console.print(f"{status.label}: {status.detail}", markup=False, style="yellow")
     console.print(
         Text(
-            "add one: aisquare accounts add · open one: aisquare accounts run <slot> · "
-            "the Accounts page in asq does both",
+            f"add one: aisquare accounts add{_other_agents_choice()} · open one: aisquare "
+            "accounts run <slot> · the Accounts page in asq does both",
             style="dim",
         )
     )
@@ -232,10 +397,14 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
     row that needs a login, or whose token cannot be read, counts in neither half: its own
     cells say why. ``None`` when no row was read or tried.
     """
+    # Only readings taken over the network: a Codex account's is what its sessions recorded,
+    # and its row says how old that is ("as of").
     tried = [
         status.usage
         for status in statuses
-        if status.usage is not None and accounts_service.usage_is_readable(status, status.usage)
+        if status.usage is not None
+        and core.kind(status.account.agent).network_usage
+        and accounts_service.usage_is_readable(status, status.usage)
     ]
     read = [usage.fetched_at for usage in tried if usage.available and usage.fetched_at]
     failed = [
@@ -310,7 +479,9 @@ def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
         )
         if age and usage.recorded_elsewhere:
             age += f", {accounts_service.VIA_THE_MAC}"
-        fix = accounts_service.kept_fix_line(usage, slot=status.account.slot)
+        fix = accounts_service.kept_fix_line(
+            usage, slot=status.account.slot, agent=status.account.agent
+        )
         then = f"; {fix}" if fix is not None else ""
         lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}{then}", style="yellow"))
     return lines
@@ -352,7 +523,7 @@ def list_(
         stdout_console().print(line)
 
 
-@app.command("usage")
+@app.command("usage", context_settings=SLOT_ARGS)
 def usage_(
     slot: Annotated[
         str | None,
@@ -374,9 +545,12 @@ def usage_(
     """Session (5-hour) and weekly usage per signed-in account — percent USED, as /usage shows it.
 
     40% used is 60% left. A reading is shared for five minutes between this
-    command, `list --usage` and asq's Accounts page; `--refresh` fetches now. The
-    last row, `all`, and the line under the table are the fleet's: what is LEFT now
-    and of the week, and the soonest weekly reset.
+    command, `list --usage` and asq's Accounts page; `--refresh` fetches now. A
+    Codex account's is what its newest session recorded, read from its home with
+    no request — "as of" says how old that reading is. An agent whose windows are
+    others (a daily quota per model) shows each by its name under "windows used",
+    and which one limits it. The last row, `all`, and the line under the table are
+    the fleet's: what is LEFT now and of the week, and the soonest weekly reset.
     """
     # The arranged list, like every other account surface: priority order, the
     # alias as the label, disabled marked — and one concurrent read for all of
@@ -407,22 +581,60 @@ def usage_(
         label = Text(status.label)  # `describe` put it there, as `_emit_overview` reads it
         if status.account.disabled:
             label.append(" (disabled)", style="dim")
+        if not core.kind(status.account.agent).legacy_slots:
+            # Another agent's row than Claude Code's says whose it is (Codex's "· codex"), read
+            # or not: before its first session a Codex row, signed in as a Claude account's
+            # email, read as a third Claude account (live F2 of R16-D, seq 11884).
+            label.append(f" · {get_adapter(status.account.agent).binary}", style="dim")
         labels.append(label)
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
-    table.add_column("slot")
+    _add_slot_column(table, [status.account for status in statuses])
     # The label is never squeezed: a narrow terminal shortens the email instead.
     widest = max((len(text.plain) for text in labels), default=5)
     table.add_column("label", no_wrap=True, min_width=widest)
     for column in ("signed in as", "session used", "week used"):
         table.add_column(column)
+    # An agent's windows of other names (daily per-model quotas) have a column of their own.
+    windowed = any(_windows_cell(status.usage) is not None for status in statuses)
+    if windowed:
+        table.add_column("windows used")
     for status, label in zip(statuses, labels, strict=True):
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
         session, week = _usage_cells(status.usage)
-        table.add_row(str(status.account.slot), label, who, session, week)
-    if fleet.session_by_slot:
+        windows = _windows_cell(status.usage)
+        slots = core.kind(status.account.agent)
+        if status.usage and status.usage.available:
+            # A reading its sessions recorded says how old it is.
+            age = "" if slots.network_usage else _usage_age(status.usage)
+            if windows is None:
+                week += age
+            else:
+                windows += age
+        row: list[Text | str] = [
+            core.ref_among(status.account, [each.account for each in statuses]),
+            label,
+            who,
+            session,
+            week,
+        ]
+        table.add_row(*row, *([windows or ""] if windowed else []))
+    if fleet.limit_by_slot:
         # The fleet's row (#287): the mean of the usable accounts, percent USED like the
         # rows above it, so the columns keep one meaning.
-        used_now = sum(fleet.session_by_slot.values()) / len(fleet.session_by_slot)
+        # The five-hour figure the column above is headed by, not the window that limits the
+        # account (``limit_by_slot``, which the headroom line below is worked out from).
+        sessions = [
+            status.usage.session_percent
+            for status in statuses
+            if status.account.slot in fleet.limit_by_slot
+            and status.usage is not None
+            and status.usage.session_percent is not None
+        ]
+        used_now = (
+            sum(sessions) / len(sessions)
+            if sessions
+            else sum(fleet.limit_by_slot.values()) / len(fleet.limit_by_slot)
+        )
         used_week = (
             f"{round(100 - fleet.week_percent_left)}%"
             if fleet.week_percent_left is not None
@@ -613,10 +825,25 @@ def _account_json(account: ClaudeAccount | None) -> dict[str, Any] | None:
     return payload
 
 
+def _add_slot_column(table: Table, accounts: Sequence[ClaudeAccount]) -> None:
+    """The ``slot`` column. Where two agents' accounts hold a number its cells read
+    ``codex:5`` (``core.ref_among``), the name every command takes, which a narrow terminal
+    must never cut to ``claude-code…`` (#100's reopen 2); a table of one account per number
+    gets the column it always had."""
+    refs = [core.ref_among(account, accounts) for account in accounts]
+    if any(":" in ref for ref in refs):
+        table.add_column("slot", no_wrap=True, min_width=max(len(ref) for ref in refs))
+    else:
+        table.add_column("slot")
+
+
 def _who(account: ClaudeAccount) -> str:
     identity = core.identity(account)
     email = f" ({identity.email})" if identity else ""
-    return f"slot {account.slot} · {core.label(account)}{email}"
+    legacy = core.kind(account.agent).legacy_slots
+    agent = "" if legacy else f" · {core.agent_label(account.agent)}"
+    # `codex:5` where two agents' accounts hold 5: the receipt names the one acted on (#100).
+    return f"slot {accounts_service.ref_for(account)} · {core.label(account)}{email}{agent}"
 
 
 def _project_for(ref: str) -> ProjectInfo:
@@ -631,13 +858,27 @@ def _arrangement_failed(exc: Exception) -> NoReturn:
     code = "unknown_account" if isinstance(exc, accounts_service.NoSuchAccount) else "accounts"
     if isinstance(exc, accounts_service.AccountsUnreadable):
         code = "store_unreadable"
+    if isinstance(exc, accounts_service.AmbiguousAccount):
+        fail(str(exc), error="ambiguous_account", detail=str(exc))
     fail(str(exc), error=code)
 
 
 def _show_defaults(project: ProjectInfo | None) -> None:
-    """The ladder as it stands: machine default, a project's default, every role binding."""
+    """The ladder as it stands: machine default, a project's default, every role binding.
+
+    Claude Code's as it always read; another agent's below it once that agent has
+    a default of either kind (``--json`` has them under ``agents``).
+    """
     machine = accounts_service.machine_default()
     per_project = accounts_service.project_default(project) if project is not None else None
+    others = {
+        agent: (
+            accounts_service.machine_default(agent),
+            accounts_service.project_default(project, agent=agent) if project is not None else None,
+        )
+        for agent in core.account_agents()
+        if not core.kind(agent).legacy_slots
+    }
     try:
         bindings = settings_service.role_account_bindings()
     except Exception as exc:  # a broken config.toml: say so, show the rest
@@ -651,15 +892,25 @@ def _show_defaults(project: ProjectInfo | None) -> None:
                     "project": project.id if project is not None else None,
                     "project_default": _account_json(per_project),
                     "role_bindings": bindings,
+                    "agents": {
+                        agent: {
+                            "machine_default": _account_json(theirs),
+                            "project_default": _account_json(their_project),
+                        }
+                        for agent, (theirs, their_project) in others.items()
+                    },
                 }
             )
         )
         return
     console = stdout_console()
     if machine is None:
+        # The binary of the agent a launch with nothing else to say runs (`[agents] default`):
+        # `claude` as it always read, `codex` for a Codex user.
+        shell_has = get_adapter(accounts_service.default_agent()).binary
         console.print(
             "machine default: none — no enabled account is signed in, so launches run on "
-            "whatever claude the shell has",
+            f"whatever {shell_has} the shell has",
             markup=False,
         )
     else:
@@ -670,6 +921,21 @@ def _show_defaults(project: ProjectInfo | None) -> None:
             console.print(f"project {name}: no default of its own", markup=False)
         else:
             console.print(f"project {name}: {_who(per_project)}", markup=False)
+    for agent, (theirs, their_project) in others.items():
+        if theirs is not None and theirs != machine:
+            # The machine default is rank 1, whatever its agent; a launch pinned to this
+            # agent takes its own first account in that order.
+            console.print(
+                f"{core.agent_label(agent)}, when a launch is pinned to it: {_who(theirs)} "
+                f"· rank {theirs.position}",
+                markup=False,
+            )
+        if their_project is not None and project is not None:
+            console.print(
+                f"{core.agent_label(agent)} project {project.root.name or project.id}: "
+                f"{_who(their_project)}",
+                markup=False,
+            )
     if bindings:
         for role in sorted(bindings):
             console.print(f"role {role}: account {bindings[role]}", markup=False)
@@ -683,7 +949,7 @@ def _show_defaults(project: ProjectInfo | None) -> None:
     )
 
 
-@app.command("default")
+@app.command("default", context_settings=SLOT_ARGS)
 def default(
     ref: Annotated[
         str | None,
@@ -699,18 +965,25 @@ def default(
             "--clear", help="Remove a project's default or a role's binding (not the machine's)."
         ),
     ] = False,
+    agent: AgentOpt = None,
 ) -> None:
     """Choose the account a launch runs under — for the machine, a project, or a role.
 
     Without a reference it prints the defaults as they stand. With one it sets a
     PROJECT's default (``--project``) or a ROLE's binding (``--role``, the same
     thing ``team bind <role> --account`` writes). The MACHINE default is rank 1
-    of the priority order — the first enabled, signed-in account — so at machine
-    level this is an alias of ``accounts move <ref> top``. A launch resolves them
-    top-down: ``--account`` on the command line, then the role's binding, then
-    the project's default, then the machine's; with no account signed in it runs
-    on whatever ``claude`` the shell already has.
+    of the one priority order, across agents — the first enabled, signed-in
+    account — so at machine level this is an alias of ``accounts move <ref> top``.
+    A launch resolves them top-down: ``--account`` on the command line, then the
+    role's binding, then the project's default, then the machine's; with no
+    account signed in it runs on whatever binary of the default agent (``claude``, or
+    ``codex`` once ``agents.default`` is codex) the shell already has.
+
+    A project's default is per agent: an account sets its own agent's, and
+    ``--clear --project`` clears Claude Code's unless ``--agent codex`` says
+    otherwise. A role's binding is checked against the agent the role launches.
     """
+    whose = _agent(agent) if agent is not None else None
     if project is not None and role is not None:
         fail("--project and --role are mutually exclusive", error="usage")
     if ref is not None and clear:
@@ -725,14 +998,22 @@ def default(
         _set_role_default(role, ref, clear=clear)
         return
     try:
-        chosen = accounts_service.set_default(None if clear else ref, project=target)
+        chosen = (
+            accounts_service.set_default(None if clear else ref, project=target)
+            if whose is None
+            else accounts_service.set_default(None if clear else ref, project=target, agent=whose)
+        )
     except accounts_service.AccountsError as exc:
         _arrangement_failed(exc)
     level = f"project {target.root.name or target.id}" if target is not None else "machine"
     if get_state().json_output:
         typer.echo(json.dumps({"level": level, "default": _account_json(chosen)}))
         return
-    if chosen is None:
+    if chosen is None and whose is not None and not core.kind(whose).legacy_slots:
+        stdout_console().print(
+            f"✓ {level} default cleared for {core.agent_label(whose or core.AGENT)}", markup=False
+        )
+    elif chosen is None:
         stdout_console().print(f"✓ {level} default cleared", markup=False)
     elif target is None:
         stdout_console().print(
@@ -744,7 +1025,7 @@ def default(
             # of #406, m1): say so, or the line above promises what the next launch skips.
             stdout_console().print(
                 f"  · it is not signed in, so launches skip it until it is: "
-                f"aisquare accounts run {chosen.slot}",
+                f"aisquare accounts run {accounts_service.ref_for(chosen)}",
                 markup=False,
             )
     else:
@@ -760,12 +1041,28 @@ def _has_project() -> bool:
     return True
 
 
+def _role_agent(role: str, account: str | None = None) -> str:
+    """The agent ``role`` launches with ``--account account`` (its binding's, else the
+    account's, else the order's or the default's); Claude Code if unknown."""
+    from aisquare.services import agent_launch
+
+    try:
+        return agent_launch.resolve(role, account=account, measure=False).adapter.id
+    except Exception:
+        return core.AGENT
+
+
 def _set_role_default(role: str, ref: str | None, *, clear: bool) -> None:
     if not clear:
         if ref is None:
             fail("pass an account to bind, or --clear", error="usage")
         try:
-            accounts_service.resolve(ref)  # a bad name is a usage error, not a stored binding
+            # A bad name is a usage error, not a stored binding — and so is an account
+            # of another agent than the one the role launches.
+            # Claude Code's roles take any slot, as they did before Codex had slots.
+            role_agent = _role_agent(role)
+            any_slot = core.kind(role_agent).legacy_slots
+            accounts_service.resolve(ref, agent=None if any_slot else role_agent)
         except accounts_service.AccountsError as exc:
             _arrangement_failed(exc)
     with expected_config_write_errors():
@@ -779,7 +1076,7 @@ def _set_role_default(role: str, ref: str | None, *, clear: bool) -> None:
         stdout_console().print(f"✓ role {role} launches on account {bound.account}", markup=False)
 
 
-@app.command("alias")
+@app.command("alias", context_settings=SLOT_ARGS)
 def alias(
     ref: SlotRef,
     name: Annotated[str | None, typer.Argument(help=f"The name: {core.ALIAS_HINT}")] = None,
@@ -801,10 +1098,11 @@ def alias(
     if get_state().json_output:
         typer.echo(json.dumps({"account": _account_json(account)}))
         return
+    named = accounts_service.ref_for(account)  # `codex:5` where 5 is two accounts' (#100)
     if clear:
-        stdout_console().print(f"✓ slot {account.slot}: alias cleared", markup=False)
+        stdout_console().print(f"✓ slot {named}: alias cleared", markup=False)
     else:
-        stdout_console().print(f"✓ slot {account.slot} is now called {account.alias}", markup=False)
+        stdout_console().print(f"✓ slot {named} is now called {account.alias}", markup=False)
 
 
 def _emit_order(accounts: list[ClaudeAccount]) -> None:
@@ -817,7 +1115,7 @@ def _emit_order(accounts: list[ClaudeAccount]) -> None:
         console.print(f"{account.position}. {_who(account)}{off}", markup=False)
 
 
-@app.command("order")
+@app.command("order", context_settings=SLOT_ARGS)
 def order(
     refs: Annotated[
         list[str],
@@ -832,7 +1130,7 @@ def order(
     _emit_order(arranged)
 
 
-@app.command("move")
+@app.command("move", context_settings=SLOT_ARGS)
 def move(
     ref: SlotRef,
     direction: Annotated[str, typer.Argument(help="up, down, top or bottom")],
@@ -865,21 +1163,35 @@ def _toggle(ref: str, *, disabled: bool) -> None:
         stdout_console().print(f"✓ {_who(account)} is enabled", markup=False)
 
 
-@app.command("disable")
+@app.command("disable", context_settings=SLOT_ARGS)
 def disable(ref: SlotRef) -> None:
     """Keep an account out of automatic selection; naming it with --account still works."""
     _toggle(ref, disabled=True)
 
 
-@app.command("enable")
+@app.command("enable", context_settings=SLOT_ARGS)
 def enable(ref: SlotRef) -> None:
     """Put an account back into automatic selection."""
     _toggle(ref, disabled=False)
 
 
 @app.command("add")
-def add() -> None:
-    """Add a Claude Code account: a fresh slot, signed in through Claude Code's own login."""
+def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
+    """Add an account: a fresh slot, signed in through the agent's own login.
+
+    Claude Code's first session signs in; ``--agent codex`` runs ``codex login``
+    in the slot's own ``CODEX_HOME``. Either way the slot's hooks are connected after.
+    """
+    whose = _agent(agent)
+    slots = core.kind(whose)
+    if browser and not slots.browser_sign_in_args():
+        choosing = [a for a in core.account_agents() if core.kind(a).browser_sign_in_args()]
+        fail(
+            f"--browser is for {' or '.join(f'--agent {a}' for a in choosing)} only: "
+            f"{core.agent_label(whose)} has one sign-in, its own login",
+            error="usage",
+            ref=whose,
+        )
     if get_state().json_output:
         fail(
             "accounts add hands the terminal to Claude Code and has no --json form — "
@@ -895,19 +1207,29 @@ def add() -> None:
             detail=reason,
         )
     try:
-        account = accounts_service.begin_sign_in(None)
+        account = accounts_service.begin_sign_in(None, agent=whose)
     except accounts_service.ClaudeNotInstalled as exc:
-        _fail_not_installed(exc)
+        _fail_not_installed(exc, whose)
     console = stderr_console()
-    console.print(
-        f"Slot {account.slot} is ready. Claude Code opens now with its own login — sign in "
-        "there, then leave it (/exit) and this command records the account."
-    )
+    adapter = get_adapter(whose)
+    sign_in = slots.browser_sign_in_args() if browser else slots.sign_in_args()
+    if not sign_in:  # it signs in from its own TUI (``AgentAccounts.sign_in_args``)
+        console.print(
+            f"Slot {account.slot} is ready. {adapter.label} opens now with its own login — "
+            f"sign in there, then leave it ({adapter.exit_command}) and this command records "
+            "the account."
+        )
+    else:
+        steps = BROWSER_STEPS if browser else slots.sign_in_steps
+        console.print(
+            f"Slot {account.slot} is ready. `{' '.join((adapter.binary, *sign_in))}` runs now "
+            f"in it — {steps}, and this command records the account."
+        )
     try:
-        status = accounts_service.run_session(account)
+        status = accounts_service.run_session(account, sign_in)
     except accounts_service.ClaudeNotInstalled as exc:
         accounts_service.abandon_sign_in(account)
-        _fail_not_installed(exc)
+        _fail_not_installed(exc, whose)
     except KeyboardInterrupt:
         # The session guards itself against Ctrl-C; this is the belt to its
         # braces (Windows, a signal that arrived between the two calls): a slot
@@ -918,29 +1240,40 @@ def add() -> None:
     if landed is None:
         accounts_service.abandon_sign_in(account)
         how = f"status {status}" if status >= 0 else f"signal {-status}"
-        fail(
-            f"no sign-in landed in slot {account.slot} (Claude Code exited with {how}) "
-            "— nothing was added",
-            error="not_signed_in",
+        said = (
+            f"no sign-in landed in slot {account.slot} ({core.agent_label(whose)} exited with "
+            f"{how}) — nothing was added"
         )
+        if not browser and slots.browser_sign_in_args():  # its other way, the browser's
+            browser_add = f"aisquare accounts add --agent {whose} --browser"
+            said += f". {slots.browser_sign_in_hint}: {browser_add}"
+        fail(said, error="not_signed_in")
     described = accounts_service.complete_sign_in(account)
+    name = core.kind(whose).noun
     console.print(
-        Text.assemble(("✓ ", "green"), f"Added Claude account {account.slot}: {landed.email}")
+        Text.assemble(("✓ ", "green"), f"Added {name} account {account.slot}: {landed.email}")
     )
+    if described.detail:
+        console.print(described.detail, markup=False, style="yellow")
     if not described.hooks_installed:
         console.print(
             "  ⚠ aisquare's hooks did not install into it — run: "
-            + agents_service.config_dir_command("connect", "claude-code", account.config_dir),
+            + agents_service.config_dir_command("connect", whose, account.config_dir),
             style="yellow",
         )
+    # No --agent where the role runs the account's agent: naming an account names its
+    # agent unless the role's binding pins another.
+    as_role = (
+        "coder" if _role_agent("coder", str(account.slot)) == whose else f"coder --agent {whose}"
+    )
     console.print(
         f"  open it: aisquare accounts run {account.slot} · "
-        f"as a role: aisquare launch coder --account {account.slot}",
+        f"as a role: aisquare launch {as_role} --account {account.slot}",
         style="dim",
     )
 
 
-@app.command("remove")
+@app.command("remove", context_settings=SLOT_ARGS)
 def remove(slot: SlotRef) -> None:
     """Forget a managed account: its directory is kept beside itself as <n>.removed-<stamp>."""
     account = _resolve(slot)
@@ -989,7 +1322,7 @@ def trust(
         Path | None,
         typer.Argument(
             help="The folder to trust on every account (default: this one). In a git "
-            "checkout its repository is trusted, as Claude Code's own yes there would.",
+            "checkout its repository is trusted, as the agent's own yes there would.",
             show_default=False,
         ),
     ] = None,
@@ -1001,12 +1334,13 @@ def trust(
         ),
     ] = False,
 ) -> None:
-    """Trust a folder on every Claude account at once, so no agent stops at the question.
+    """Trust a folder on every account at once, so no agent stops at the question.
 
-    Claude Code asks "trust this folder?" once per account, and an agent on an account
-    that was never asked waits there for a human. A launch copies the trust from any
-    account that has it (`\\[accounts] share_trust`); this does it now, for every account.
-    Only the folder's trust entry in each account's .claude.json is written.
+    Claude Code and Codex ask "trust this folder?" once per account, and an agent on an
+    account that was never asked waits there for a human. A launch copies the trust from
+    any account of its agent that has it (`\\[accounts] share_trust`); this does it now,
+    for every account. Only the folder's trust entry is written: in a Claude account's
+    .claude.json, as a table appended to a Codex account's config.toml.
     """
     if sync and folder is not None:
         fail("pass a folder, or --sync — not both", error="usage")
@@ -1033,6 +1367,7 @@ def _trust_report(
             "accounts": [
                 {
                     "slot": change.account.slot,
+                    "agent": change.account.agent,
                     "label": core.label(change.account),
                     "outcome": change.outcome,
                     "folders": list(change.folders),
@@ -1050,11 +1385,11 @@ def _trust_report(
     else:
         console = stdout_console()
         if scope is not None:
-            head = f"{scope.key} on every account that has started"
+            head = f"{scope.key} on every account that can hold it"
             if scope.key != claude_sharing.project_key(scope.folder):
                 head += f" (it covers {scope.folder})"
         else:
-            head = "every trusted folder on every account that has started"
+            head = "every trusted folder on every account that can hold it"
         mark, style = ("✗ ", "red") if failed else ("✓ ", "green")
         console.print(Text.assemble((mark, style), head))
         for change in changes:
@@ -1168,22 +1503,24 @@ def settings(
         raise typer.Exit(1)
 
 
-def _parts(value: str | None, flag: str) -> list[claude_sharing.SharePart]:
-    """``memory,skills`` as parts, or a usage error naming the ones that exist."""
+def _parts(value: str | None, flag: str) -> list[str]:
+    """``memory,skills`` as parts, or a usage error naming the ones that exist: every part any
+    agent's accounts share (``AgentAccounts.share_parts``), in the order they are declared."""
+    known = accounts_service.share_part_names()
     if value is None:
         return []
     asked = [part.strip() for part in value.split(",") if part.strip()]
-    unknown = [part for part in asked if part not in claude_sharing.SHARE_PARTS]
+    unknown = [part for part in asked if part not in known]
     if unknown or not asked:
         raise typer.BadParameter(
-            f"{', '.join(unknown) or '(none)'} — parts are {', '.join(claude_sharing.SHARE_PARTS)}",
+            f"{', '.join(unknown) or '(none)'} — parts are {', '.join(known)}",
             param_hint=flag,
         )
-    return [part for part in claude_sharing.SHARE_PARTS if part in asked]
+    return [part for part in known if part in asked]
 
 
 _PART_WORDS = {
-    "linked": "linked to the plain claude's",
+    "linked": "linked to the {plain}'s",
     "already": "already shared",
     "unlinked": "unlinked",
     "restored": "its own restored",
@@ -1197,13 +1534,70 @@ _PART_WORDS = {
 }
 
 
-@app.command("share")
+def _part_word(change: accounts_service.PartChange) -> str:
+    """What ``change`` did, in words; a link is to the plain home of the account's own agent."""
+    plain = core.kind(change.account.agent).plain_label
+    return _PART_WORDS[change.outcome].format(plain=plain)
+
+
+def _share_help() -> str:
+    """The ``share`` command's help, from what each agent's adapter declares
+    (``AgentAccounts.share_parts``): its parts, the merged one's directory and which are
+    experimental."""
+    agents = core.account_agents()
+    declared = [
+        f"{core.agent_label(agent)}: {', '.join(part.name for part in parts)}"
+        for agent in agents
+        if (parts := core.kind(agent).share_parts)
+    ]
+    merged = [
+        (part.name, memory.root_name)
+        for agent in agents
+        for part in core.kind(agent).share_parts
+        if part.how == "merge" and (memory := core.kind(agent).memory) is not None
+    ]
+    experimental = list(
+        dict.fromkeys(
+            part.name
+            for agent in agents
+            for part in core.kind(agent).share_parts
+            if part.experimental
+        )
+    )
+    paragraphs = [
+        "What every account of an agent has in common, by the parts its agent declares.",
+        ". ".join(declared) + ".",
+    ]
+    for name, root in merged:
+        paragraphs.append(
+            f"`{name}` gives every launch one auto-memory directory per project, under "
+            f"~/.aisquare/{root}/memory (merged from every account the first time)."
+        )
+    paragraphs.append(
+        "The others make each managed account's entry a link to the plain home's, its own "
+        "kept beside it as <entry>.own-<stamp> until --disable puts it back. A part an agent "
+        "does not declare is skipped for it; one that is on applies to every agent that "
+        "declares it, and --disable <part> is one switch for all of them."
+    )
+    if experimental:
+        names = ", ".join(f"`{name}`" for name in experimental)
+        paragraphs.append(
+            f"{names} {'is' if len(experimental) == 1 else 'are'} experimental: what it links "
+            "can be one account's alone (a login, a plugin store)."
+        )
+    paragraphs.append(
+        "Transcripts are never shared: a session moved to another account resumes by its path."
+    )
+    return "\n\n".join(paragraphs)
+
+
+@app.command("share", help=_share_help())
 def share(
     enable: Annotated[
         str | None,
         typer.Option(
             "--enable",
-            help=f"Parts to share, comma-separated: {', '.join(claude_sharing.SHARE_PARTS)}.",
+            help="Parts to share, comma-separated (`--status` shows each account's).",
             metavar="PARTS",
         ),
     ] = None,
@@ -1217,15 +1611,6 @@ def share(
         bool, typer.Option("--status", help="What every account holds; change nothing.")
     ] = False,
 ) -> None:
-    """What every Claude account has in common: memory, skills, agents, commands, CLAUDE.md.
-
-    `memory` gives every launch one auto-memory directory per project, under
-    ~/.aisquare/claude-shared/memory (merged from every account the first time). The
-    others make each managed account's entry a link to the plain claude's, its own kept
-    beside it as <entry>.own-<stamp> until --disable puts it back. `plugins` is
-    experimental: MCP logins and the plugin store are per account. Transcripts are
-    never shared: a session moved to another account resumes by its path.
-    """
     on = _parts(enable, "--enable")
     off = _parts(disable, "--disable")
     if set(on) & set(off):
@@ -1239,12 +1624,16 @@ def share(
     held = accounts_service.share_status() if status or not (on or off) else []
     knobs = accounts_service.accounts_settings()
     failed = any(change.outcome == "failed" for change in changes)
+    try:
+        memory_dir: str | None = str(accounts_service.shared_memory_root())
+    except ValueError:  # no agent here has a part that is merged
+        memory_dir = None
     if get_state().json_output:
         typer.echo(
             json.dumps(
                 {
                     "share": list(knobs.share),
-                    "memory_dir": str(accounts_service.shared_memory_root()),
+                    "memory_dir": memory_dir,
                     "changes": [change.as_json() for change in changes],
                     "status": [change.as_json() for change in held],
                 }
@@ -1254,7 +1643,7 @@ def share(
         console = stdout_console()
         console.print(f"shared: {', '.join(knobs.share) or 'nothing'}", markup=False)
         for change in [*changes, *held]:
-            line = f"  · {core.label(change.account)} {change.part}: {_PART_WORDS[change.outcome]}"
+            line = f"  · {core.label(change.account)} {change.part}: {_part_word(change)}"
             if change.detail:
                 line += f" ({change.detail})"
             style = (
@@ -1268,33 +1657,47 @@ def share(
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
-    """Replace this process with Claude Code (indirection so tests can intercept)."""
+    """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
 
 
 def run(ctx: typer.Context, slot: SlotRef) -> None:
-    """Open Claude Code on one account — what a c1/c2 alias did. Extra arguments go to claude."""
+    """Open the agent on one account — what a c1/c2 alias did. Extra arguments go to it.
+
+    ``claude`` on a Claude slot, ``codex`` on a Codex one (``run <n> login --device-auth``
+    is the Codex sign-in the Accounts page opens).
+    """
     if get_state().json_output:
         fail(
             "accounts run hands the terminal to Claude Code and has no --json form",
             error="no_json_form",
         )
     account = _resolve(slot)
-    found = accounts_service.install()
+    found = accounts_service.install(account.agent)
     if not found.installed or found.binary is None:
-        _fail_not_installed(
-            accounts_service.ClaudeNotInstalled(
-                f"Claude Code is not installed — install it first: {core.INSTALL_COMMAND}"
-            )
-        )
+        _fail_not_installed(accounts_service.not_installed(account.agent), account.agent)
     identity = core.identity(account)
-    who = identity.email if identity else "not signed in yet — Claude Code will ask"
+    sign_in = core.kind(account.agent).sign_in_args()
+    unsigned = (
+        f"run it with `{' '.join(sign_in)}`"
+        if sign_in
+        else f"{core.agent_label(account.agent)} will ask"  # its TUI's own sign-in
+    )
+    who = identity.email if identity else f"not signed in yet — {unsigned}"
     stderr_console().print(
-        Text.assemble("Opening claude as ", (core.label(account), "bold"), f" ({who})…"),
+        Text.assemble(
+            f"Opening {get_adapter(account.agent).binary} as ",
+            (core.label(account), "bold"),
+            f" ({who})…",
+        ),
     )
     for note in accounts_service.share_for_launch(account=account):
         stderr_console().print(f"accounts: {note}", style="dim")
     _exec(found.binary, [found.binary, *ctx.args], accounts_service.session_env(account))
 
 
-app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})(run)
+app.command(
+    "run",
+    cls=PassthroughCommand,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)(run)

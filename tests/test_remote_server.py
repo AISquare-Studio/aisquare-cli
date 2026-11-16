@@ -1218,6 +1218,41 @@ def test_remote_on_again_while_the_last_one_still_finishes_a_write_is_refused_un
         remote_server.stop_remote_server()
 
 
+def test_a_start_as_the_last_remote_lets_the_home_go_is_never_told_another_holds_it(
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7 (CI 42113584607): a stop let the home's lock go after it let go of the lock a start
+    claims under, so a start in between found no claim of this process's and the lock file
+    still held, and refused: "another Remote is on … in another shell". The release is held
+    here in its middle (its note being removed); the start waits for it, and comes on."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    monkeypatch.setattr(remote_server, "_server", None)
+    monkeypatch.setattr(remote_server, "_winding_down", [])
+    state = remote_server.runtime()
+    state._state.password = PASSWORD
+    state._save_state()
+    remote_server.start_remote_server(dist, port=_free_port())
+    forget = remote_server._forget_remote_note
+    releasing = threading.Event()
+
+    def slowly(note: Path) -> None:
+        releasing.set()
+        time.sleep(0.5)  # the release, held in its middle: the race made to happen
+        forget(note)
+
+    monkeypatch.setattr(remote_server, "_forget_remote_note", slowly)
+    stopper = threading.Thread(target=remote_server.stop_remote_server)
+    stopper.start()
+    try:
+        assert releasing.wait(timeout=10)
+        remote_server.start_remote_server(dist, port=_free_port())
+        assert remote_server.remote_server_status()["running"] is True
+    finally:
+        stopper.join(10)
+        monkeypatch.setattr(remote_server, "_forget_remote_note", forget)
+        remote_server.stop_remote_server()
+
+
 def test_a_start_refused_for_a_remote_still_stopping_names_no_write_when_none_runs(
     isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

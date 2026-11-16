@@ -4,7 +4,8 @@ docs/plans/spawn-personas.md §4.6 and §4.7 (P7). One filterable list in three
 sections, in the order the intent asks for: **Agents** (this project's live
 agents, each with the persona it runs), **Binds** (the seats ``aisquare team
 bind`` pinned in ``team.profiles``, each with the account its environment points
-at) and **Accounts** (the Claude Code account slots). ``existing`` puts Agents
+at) and **Accounts** (every coding agent's account slots, each naming its agent:
+slots are one ladder). ``existing`` puts Agents
 first and highlights the first agent; ``new`` puts Binds, then Accounts, then
 Agents. Every section stays selectable either way — the owner's "the same
 screen allows both" — and the filter narrows all three at once, because a
@@ -27,7 +28,10 @@ list is drawn again or another screen comes over it.
 Two footer actions make a target without leaving the flow. **+ New bind** is
 :class:`NewBindScreen`, saved through ``services.settings.bind_role`` — the
 writer ``aisquare team bind`` uses — after which the list is read again with the
-new bind selected. **+ New account** dismisses with a ``new-account`` target; its
+new bind selected. Its Agent field picks the coding agent (blank: the binary's), and
+the Binary and Account fields follow it: that agent's binary until one is typed, and
+its slots only, whose environment is the agent's own (``CODEX_HOME`` for a Codex slot,
+``claude_accounts.launch_env``). **+ New account** dismisses with a ``new-account`` target; its
 owner posts :class:`NewAccountRequested` and the app opens the Accounts page's
 own add-account flow, carrying a :class:`ReturnTo` that brings the flow back once the
 sign-in lands: the picker again, its persona, intent and filter as they were, and the
@@ -64,7 +68,16 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.confirm_button import Arming
 from aisquare.core import claude_accounts as accounts_core
+from aisquare.core.agent_adapters import (
+    DEFAULT_AGENT,
+    adapter_for_binary,
+    adapters,
+    get_adapter,
+    mark_of,
+)
+from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.config import RoleLaunchProfile, load_config
+from aisquare.core.names import name_key
 from aisquare.models import AccountsOverview, ClaudeAccountStatus, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
@@ -81,8 +94,23 @@ SECTION_ORDER: dict[Intent, tuple[Section, ...]] = {
 SECTION_TITLES: dict[Section, str] = {
     "agents": "Agents — attach to a running agent",
     "binds": "Binds — spawn as a bound teammate",
-    "accounts": "Accounts — spawn on a Claude account",
+    "accounts": "Accounts — spawn on an account",
 }
+
+
+def accounts_title(statuses: Iterable[ClaudeAccountStatus] | None) -> str:
+    """The accounts section's title: ``Accounts — spawn on a Claude account`` while the list
+    holds one agent's accounts, by that agent's noun (``AgentAccounts.noun``; the default
+    agent's while none is read), as 0.9.2 said it on every machine;
+    :data:`SECTION_TITLES`' ``Accounts — spawn on an account`` where it holds more than one
+    agent's (the R16-C verify, seq 11914: the plain title had reached Claude-only machines)."""
+    agents = {status.account.agent for status in statuses or ()}
+    if len(agents) > 1:
+        return SECTION_TITLES["accounts"]
+    noun = accounts_core.kind(next(iter(agents), DEFAULT_AGENT)).noun
+    article = "an" if noun[:1].lower() in "aeiou" else "a"
+    return f"Accounts — spawn on {article} {noun} account"
+
 
 TARGETS_WORKER = "attach-targets"
 
@@ -91,7 +119,8 @@ SEAT_RULE = (
     "already bound — the names `aisquare launch` accepts"
 )
 ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-DEFAULT_BINARY = "claude"
+BINARYS_AGENT = ""
+"""The New bind form's Agent ``(the binary's)``: no ``--agent``, the binary says which."""
 MASKED = "••••"
 """What an Edit shows for each env value until *Show values*. App settings names a bound
 variable and never shows its value, which may be a token, and the form does the same
@@ -115,10 +144,13 @@ class ReturnTo:
 
 class NewAccountRequested(Message):
     """Open the Accounts page's add-account flow — the picker's *+ New account* — and come
-    back to ``return_to`` once the sign-in lands."""
+    back to ``return_to`` once the sign-in lands. ``agent`` is whose account it adds: the
+    Spawn dialog's agent, so a Codex form signs Codex in (SCOPE #113 091, item 11); ``None``
+    for a caller that follows none (the persona picker's), which adds the default agent's."""
 
-    def __init__(self, return_to: ReturnTo | None = None) -> None:
+    def __init__(self, return_to: ReturnTo | None = None, *, agent: str | None = None) -> None:
         self.return_to = return_to
+        self.agent = agent
         super().__init__()
 
 
@@ -131,6 +163,9 @@ class Target:
     """The agent's label, the bind's seat, or the account's slot; for ``new-account``, what
     the filter held, so the picker that comes back after the sign-in shows it again."""
     role: str | None = None
+    agent: str | None = None
+    """The coding agent: a live agent's, a bind's own ``--agent``, an account's (its slot is
+    that agent's alone); ``None`` leaves it to the role."""
     binary: str | None = None
     account: str | None = None
     persona: str | None = None
@@ -185,36 +220,95 @@ def agent_text(status: FleetAgentStatus) -> str:
     return f"{agent.label} · {agent.role} · {status.state}{badge}"
 
 
-def account_text(status: ClaudeAccountStatus) -> str:
-    """``2 · me@example.com · max · session 12%`` — slot, who, plan, usage when read."""
+def account_text(status: ClaudeAccountStatus, *, agent: bool = False) -> str:
+    """``2 · me@example.com · max · session 12%`` — slot, who, plan, usage when read: its
+    window that limits, by name (``week 90%``, ``gemini-2.5-pro daily 70%``), the figure the
+    sidebar shows beside its agents (``ClaudeUsage.ranked_percent``); with ``agent``, the
+    slot's agent after its number, its mark first (``5 · >_ Codex · …``,
+    :func:`account_prompt`), for a list that holds more than one agent's slots."""
+    return account_prompt(status, agent=agent).plain
+
+
+def account_prompt(status: ClaudeAccountStatus, *, agent: bool = False, dark: bool = True) -> Text:
+    """:func:`account_text` as the picker draws it: with ``agent``, the agent's mark
+    (``AgentAdapter.mark``, the one its own TUI shows) before its name, in the mark's colour,
+    ``2 · ✻ Claude Code · …`` and ``5 · >_ Codex · …``, so the two agents' rows read apart by
+    shape and by colour; an agent that declares no mark by its name alone. ``dark``: the
+    theme's darkness, which of the mark's two colours it takes (``AgentMark.colour``). Every
+    part is appended as data: an email is the user's."""
     who = status.identity.email if status.identity is not None else "not signed in"
-    parts = [str(status.account.slot), who, status.subscription or "plan unknown"]
+    parts = [Text(str(status.account.slot)), Text(who), Text(status.subscription or "plan unknown")]
+    if agent:
+        named = Text(accounts_core.agent_label(status.account.agent))
+        mark = mark_of(status.account.agent)
+        if mark is not None:
+            named = Text.assemble((mark.glyph, mark.colour(dark)), " ", named)
+        parts.insert(1, named)
     usage = status.usage
-    if usage is not None and usage.available and usage.session_percent is not None:
-        parts.append(f"session {usage.session_percent:.0f}%")
-    return " · ".join(parts)
+    limiting = usage.limiting if usage is not None else None
+    if usage is not None and limiting is not None and usage.ranked_percent is not None:
+        parts.append(Text(f"{limiting.name} {usage.ranked_percent:.0f}%"))
+    return Text(" · ").join(parts)
 
 
-def bind_account(env: dict[str, str], statuses: Iterable[ClaudeAccountStatus] | None) -> str:
-    """Which account a bind's environment points at, from its ``CLAUDE_CONFIG_DIR``."""
-    raw = env.get(accounts_core.CONFIG_DIR_VAR, "").strip()
-    if not raw:
-        return "this shell's account"
-    directory = Path(os.path.expandvars(os.path.expanduser(raw)))
-    slot = accounts_core.managed_slot(directory)
-    if slot is None:
-        return directory.name or raw
-    for status in statuses or ():
-        if status.account.slot == slot and status.identity is not None:
-            return f"account {slot} · {status.identity.email}"
+def bind_account(profile: RoleLaunchProfile, statuses: Iterable[ClaudeAccountStatus] | None) -> str:
+    """Which account a bind launches on: its ``account`` (``team bind --account``, which a
+    launch resolves after ``env`` and so runs on), else the home variable of the agent
+    whose slot its environment names (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, …)."""
+    listed = list(statuses or ())
+    if profile.account:
+        return _account_named(profile.account.strip(), profile.agent, listed)
+    for agent in accounts_core.account_agents():
+        raw = profile.env.get(accounts_core.kind(agent).home_env, "").strip()
+        if not raw:
+            continue
+        directory = Path(os.path.expandvars(os.path.expanduser(raw)))
+        slot = accounts_core.managed_slot(directory, agent)
+        if slot is None:
+            return directory.name or raw
+        return _account_text(agent, slot, listed)
+    return "this shell's account"
+
+
+def _account_named(ref: str, agent: str | None, statuses: list[ClaudeAccountStatus]) -> str:
+    """``account 3 · me@example.com`` for a bind's ``account``: a slot, an alias or an
+    email, matched in the accounts already read as ``services.claude_accounts.resolve``
+    matches them (the bind's agent's first); ``account <ref>`` when none is."""
+    ordered = sorted(statuses, key=lambda status: status.account.agent != agent)
+    qualified = accounts_core.qualified_slot(ref)
+    for status in ordered:
+        account, identity = status.account, status.identity
+        if (
+            account.slot == accounts_core.slot_number(ref)
+            or qualified == (account.agent, account.slot)  # `codex:5` (#100's reopen)
+            or (account.alias is not None and name_key(account.alias) == name_key(ref))
+            or (identity is not None and "@" in ref and identity.email.lower() == ref.lower())
+        ):
+            return _account_text(account.agent, account.slot, statuses)
+    return f"account {ref}"
+
+
+def _account_text(agent: str, slot: int, statuses: list[ClaudeAccountStatus]) -> str:
+    """``account 3 · me@example.com``: ``agent``'s account in ``slot``, whose number another
+    agent's account may hold too after a rollback (#100)."""
+    for status in statuses:
+        if (status.account.agent, status.account.slot) == (agent, slot):
+            if status.identity is not None:
+                return f"account {slot} · {status.identity.email}"
+            break
     return f"account {slot}"
+
+
+def bind_binary(profile: RoleLaunchProfile) -> str:
+    """What a bind runs: its own binary, else its agent's, else the default agent's."""
+    return profile.bin or get_adapter(profile.agent or DEFAULT_AGENT).binary
 
 
 def bind_text(
     seat: str, profile: RoleLaunchProfile, statuses: Iterable[ClaudeAccountStatus] | None
 ) -> str:
     """``coder2 · claude2 · account 2 · me@example.com`` — seat, binary, account."""
-    return f"{seat} · {profile.bin or DEFAULT_BINARY} · {bind_account(profile.env, statuses)}"
+    return f"{seat} · {bind_binary(profile)} · {bind_account(profile, statuses)}"
 
 
 _BOX_CSS = """
@@ -263,6 +357,11 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         self._arming: Arming[str] = Arming(self, self._armed_row)
         self._prompts: dict[str, str] = {}
         """Each row's text as :meth:`paint` drew it, to give an armed row back."""
+        self._marked: dict[str, Text] = {}
+        """Each account row :meth:`paint` drew with its agent's mark (:meth:`marked_rows`)."""
+        self._plain_row: str | None = None
+        """The marked row under the highlight, drawn in the bar's own colours
+        (:meth:`_mark_under_highlight`)."""
         self.attach_intent: Intent = intent
         self._accounts = accounts
         self.targets = Targets()
@@ -306,6 +405,19 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         self._say("reading agents, binds and accounts …", "dim")
         self.read(select=self._wanted)
         self.query_one("#picker-list", OptionList).focus()
+        self.app.theme_changed_signal.subscribe(self, lambda _theme: self._recolour())
+
+    def _recolour(self) -> None:
+        """The marked rows in the new theme's colours (``AgentMark.colour``), each in place:
+        the highlight, the filter and the row under the bar, drawn in its colours, stay."""
+        if not self._marked:
+            return
+        self._marked = self.marked_rows()
+        listing = self.query_one("#picker-list", OptionList)
+        for oid, prompt in self._marked.items():
+            with suppress(OptionDoesNotExist):  # filtered out
+                drawn = Text("  " + prompt.plain) if oid == self._plain_row else Text("  ") + prompt
+                listing.replace_option_prompt(oid, drawn)
 
     def read(self, *, select: str | None = None) -> None:
         """Read every section again in a worker; ``select`` is an option id to land on."""
@@ -348,16 +460,46 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                 (f"bind:{seat}", bind_text(seat, profile, targets.accounts))
                 for seat, profile in sorted(targets.binds.items())
             ]
-        return [(f"account:{s.account.slot}", account_text(s)) for s in targets.accounts or []]
+        statuses = targets.accounts or []
+        mixed = len({s.account.agent for s in statuses}) > 1
+        listed = [s.account for s in statuses]
+        return [
+            (f"account:{accounts_core.ref_among(s.account, listed)}", account_text(s, agent=mixed))
+            for s in statuses
+        ]
+
+    def marked_rows(self) -> dict[str, Text]:
+        """Each account row as :meth:`paint` draws it, by option id, where the list holds more
+        than one agent's accounts: its agent's mark in the mark's colour
+        (:func:`account_prompt`). None where it holds one agent's, whose rows are drawn from
+        their text as 0.9.2 drew them."""
+        statuses = self.targets.accounts or []
+        if len({s.account.agent for s in statuses}) <= 1:
+            return {}
+        listed = [s.account for s in statuses]
+        dark = self.app.current_theme.dark
+        return {
+            f"account:{accounts_core.ref_among(s.account, listed)}": account_prompt(
+                s, agent=True, dark=dark
+            )
+            for s in statuses
+        }
 
     def paint(self) -> None:
         self._arming.disarm()  # the rows are drawn again
         query = self.query_one("#picker-filter", Input).value.strip().lower()
+        marked = self._marked = self.marked_rows()
+        self._plain_row = None
         options: list[Option] = []
         for section in SECTION_ORDER[self.attach_intent]:
             options.append(
                 Option(
-                    Text(SECTION_TITLES[section], style="bold"),
+                    Text(
+                        accounts_title(self.targets.accounts)
+                        if section == "accounts"
+                        else SECTION_TITLES[section],
+                        style="bold",
+                    ),
                     id=f"section:{section}",
                     disabled=True,
                 )
@@ -367,7 +509,10 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                 options.append(
                     Option(Text("  (none)", style="dim"), id=f"empty:{section}", disabled=True)
                 )
-            options.extend(Option(f"  {text}", id=oid) for oid, text in rows)
+            options.extend(
+                Option(Text("  ") + marked[oid] if oid in marked else f"  {text}", id=oid)
+                for oid, text in rows
+            )
             self._prompts.update((oid, text) for oid, text in rows)
         listing = self.query_one("#picker-list", OptionList)
         listing.clear_options()
@@ -378,6 +523,8 @@ class AttachTargetScreen(ModalScreen[Target | None]):
             listing.highlighted = ids.index(self._wanted)
         elif enabled:
             listing.highlighted = enabled[0]
+        if listing.highlighted is not None:
+            self._mark_under_highlight(ids[listing.highlighted])
 
     @on(Input.Changed, "#picker-filter")
     def _filtered(self) -> None:
@@ -391,13 +538,30 @@ class AttachTargetScreen(ModalScreen[Target | None]):
                 return None
             agent = status.agent
             return Target(
-                "agent", key, role=agent.role, binary=agent.binary, persona=agent_persona(status)
+                "agent",
+                key,
+                role=agent.role,
+                agent=agent.agent,
+                binary=agent.binary,
+                persona=agent_persona(status),
             )
         if kind == "bind":
             profile = self.targets.binds.get(key)
-            return Target("bind", key, role=key, binary=profile.bin if profile else None)
+            return Target(
+                "bind",
+                key,
+                role=key,
+                agent=profile.agent if profile else None,
+                binary=profile.bin if profile else None,
+            )
         if kind == "account":
-            return Target("account", key, account=key)
+            # By the ref its row was listed under: `codex:5` where two agents' accounts hold 5.
+            statuses = self.targets.accounts or []
+            listed = [s.account for s in statuses]
+            slot = next(
+                (s for s in statuses if accounts_core.ref_among(s.account, listed) == key), None
+            )
+            return Target("account", key, agent=slot.account.agent if slot else None, account=key)
         return None
 
     @on(OptionList.OptionSelected, "#picker-list")
@@ -459,6 +623,24 @@ class AttachTargetScreen(ModalScreen[Target | None]):
     def _moved(self, event: OptionList.OptionHighlighted) -> None:
         if event.option.id != self._arming.armed:
             self._arming.disarm()
+        self._mark_under_highlight(event.option.id)
+
+    def _mark_under_highlight(self, now: str | None) -> None:
+        """Draw the highlighted row's mark in the bar's own colours, as the rest of the row is,
+        and give the row the highlight left its mark's colour back. On the bar a mark in its
+        agent's colour read at 1.1:1 to 2.6:1 on every theme, and Codex's blue one vanished
+        into textual-dark's blue bar. Only rows of :meth:`marked_rows`: a list of one agent's
+        accounts draws none, and its rows stay as 0.9.2 drew them."""
+        was, self._plain_row = self._plain_row, now if now in self._marked else None
+        if was == self._plain_row:
+            return
+        listing = self.query_one("#picker-list", OptionList)
+        if was is not None:
+            with suppress(OptionDoesNotExist):  # drawn again since
+                listing.replace_option_prompt(was, Text("  ") + self._marked[was])
+        if self._plain_row is not None:
+            plain = Text("  " + self._marked[self._plain_row].plain)
+            listing.replace_option_prompt(self._plain_row, plain)
 
     def on_descendant_blur(self, event: events.DescendantBlur) -> None:
         if event.widget.id == "picker-list":
@@ -490,6 +672,24 @@ class AttachTargetScreen(ModalScreen[Target | None]):
             self.dismiss(None)
 
 
+def args_hint(agent: str, *, bare: bool = False) -> str:
+    """An Extra args field's example (the Spawn dialog's, the New bind's), never another
+    agent's: Codex is not shown Claude Code's ``--model opus`` (SMOKE9 N1 and r20 of #113).
+
+    An agent that declares its own (``args_example``: Claude Code's ``--model opus``) is
+    shown it as 0.9.2 showed it, after ``e.g.`` in the Spawn dialog and ``bare`` in the New
+    bind form (C1 reopen, seq 11753); any other, its model flag over ``MODEL``
+    (``model_args``)."""
+    try:
+        adapter = get_adapter(agent)
+        example = getattr(adapter, "args_example", None)
+        if isinstance(example, str) and example:
+            return example if bare else f"e.g. {example}"
+        return "e.g. " + " ".join(adapter.model_args("MODEL", None))
+    except Exception:  # an agent this install does not know, or one that refuses the name
+        return ""
+
+
 class NewBindScreen(ModalScreen[str | None]):
     """``aisquare team bind`` as a form; dismisses with the seat it saved, or ``None``.
 
@@ -510,6 +710,13 @@ class NewBindScreen(ModalScreen[str | None]):
         super().__init__()
         self._statuses = accounts
         self._editing = editing
+        bound = editing[1] if editing is not None else RoleLaunchProfile()
+        self._agent_start = self._known_agent(bound)
+        """The agent the form opens on: the binding's, else its binary's, else the default."""
+        self._binary_shown = bound.bin or get_adapter(DEFAULT_AGENT).binary
+        """The binary the form itself last put in the field; any other is the user's."""
+        self._offered = self._account_options(self._agent_start)
+        """What the Account field offers now (:meth:`_offer_accounts`)."""
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -524,14 +731,26 @@ class NewBindScreen(ModalScreen[str | None]):
                 yield Input(
                     seat, placeholder="coder2", id="bind-seat", disabled=self._editing is not None
                 )
+            with Horizontal(classes="picker-row", id="bind-agent-row"):
+                yield Label("Agent")
+                yield Select(
+                    [
+                        ("(the binary's)", BINARYS_AGENT),
+                        *((staged_label(a), a.id) for a in adapters()),
+                    ],
+                    value=bound.agent
+                    if bound.agent and any(bound.agent == a.id for a in adapters())
+                    else BINARYS_AGENT,
+                    allow_blank=False,
+                    id="bind-agent",
+                )
             with Horizontal(classes="picker-row"):
                 yield Label("Binary")
-                yield Input(value=bound.bin or DEFAULT_BINARY, id="bind-binary")
+                yield Input(value=self._binary_shown, id="bind-binary")
             with Horizontal(classes="picker-row"):
                 yield Label("Account")
                 yield Select(
-                    [("(leave the account alone)", "")]
-                    + [(account_text(s), str(s.account.slot)) for s in self._statuses],
+                    self._offered,
                     value="",
                     allow_blank=False,
                     id="bind-account",
@@ -550,7 +769,11 @@ class NewBindScreen(ModalScreen[str | None]):
                 yield Static(kept, id="bind-env-files", classes="picker-note")
             with Horizontal(classes="picker-row"):
                 yield Label("Extra args")
-                yield Input(shlex.join(bound.args), placeholder="--model opus", id="bind-args")
+                yield Input(
+                    shlex.join(bound.args),
+                    placeholder=args_hint(self._agent_start, bare=True),
+                    id="bind-args",
+                )
             yield Static(id="bind-rule", classes="picker-note")
             yield Static(id="bind-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
@@ -559,8 +782,73 @@ class NewBindScreen(ModalScreen[str | None]):
 
     def on_mount(self) -> None:
         self.query_one("#bind-status", Static).display = False
+        self.query_one("#bind-agent-row").display = self._agent_row_shown()
         self._validate()
         self.query_one("#bind-seat", Input).focus()
+
+    def _agent_row_shown(self) -> bool:
+        """Whether the form offers the *Agent* field: with more than one agent's accounts
+        listed (the accounts section's test, :meth:`AttachTargetScreen.rows`), or on a binding
+        that already runs another agent than a new bind runs. A Claude-only machine's form is
+        0.9.2's, the agent its binary's (C1's audit of #120); ``team bind --agent`` is the
+        same choice by hand."""
+        if len({status.account.agent for status in self._statuses}) > 1:
+            return True
+        bound = self._editing[1] if self._editing is not None else RoleLaunchProfile()
+        return bool(bound.agent) or self._agent_start != self._known_agent(RoleLaunchProfile())
+
+    @staticmethod
+    def _known_agent(bound: RoleLaunchProfile) -> str:
+        """The agent a binding runs, for a form opened on it: the one it names (when this
+        version knows it), else its binary's, else the default."""
+        if bound.agent and any(bound.agent == a.id for a in adapters()):
+            return bound.agent
+        adapter = adapter_for_binary(bound.bin) if bound.bin else None
+        return adapter.id if adapter is not None else DEFAULT_AGENT
+
+    def _agent_value(self) -> str:
+        value = self.query_one("#bind-agent", Select).value
+        return value if isinstance(value, str) else BINARYS_AGENT
+
+    def bind_agent(self) -> str:
+        """The agent the bind runs: the one picked, else the binary's, else the default."""
+        binary = self.query_one("#bind-binary", Input).value.strip()
+        adapter = adapter_for_binary(binary) if binary else None
+        return self._agent_value() or (adapter.id if adapter is not None else DEFAULT_AGENT)
+
+    def _account_options(self, agent: str) -> list[tuple[str, str]]:
+        """``agent``'s slots: a bind's account is set through that agent's home variable."""
+        return [("(leave the account alone)", "")] + [
+            (account_text(s), str(s.account.slot))
+            for s in self._statuses
+            if s.account.agent == agent
+        ]
+
+    @on(Select.Changed, "#bind-agent")
+    def _agent_changed(self) -> None:
+        """The binary follows the agent until one is typed, and the accounts are its own."""
+        picked = self._agent_value()
+        binary = self.query_one("#bind-binary", Input)
+        if picked and binary.value.strip() == self._binary_shown:
+            self._binary_shown = get_adapter(picked).binary
+            binary.value = self._binary_shown
+        self._offer_accounts()
+        self.query_one("#bind-args", Input).placeholder = args_hint(self.bind_agent(), bare=True)
+
+    @on(Input.Changed, "#bind-binary")
+    def _binary_changed(self) -> None:
+        self._offer_accounts()
+        self.query_one("#bind-args", Input).placeholder = args_hint(self.bind_agent(), bare=True)
+
+    def _offer_accounts(self) -> None:
+        select = self.query_one("#bind-account", Select)
+        options = self._account_options(self.bind_agent())
+        if options == self._offered:
+            return
+        self._offered = options
+        current = select.value
+        select.set_options(options)
+        select.value = current if current in {value for _, value in options} else ""
 
     def _stored_env(self) -> dict[str, str]:
         """The env the edited binding holds (none for a new bind)."""
@@ -597,7 +885,7 @@ class NewBindScreen(ModalScreen[str | None]):
         # `role_ok` IS the rule spawn applies, by its public name (P13): ask it, never copy it.
         if not seat or not fleet_service.role_ok(seat):
             found.append(SEAT_RULE)
-        binary = self.query_one("#bind-binary", Input).value.strip() or DEFAULT_BINARY
+        binary = self.query_one("#bind-binary", Input).value.strip() or self._binary_shown
         if shutil.which(binary) is None:
             found.append(
                 f"{binary!r} is not on your PATH — install it or give the executable's path"
@@ -631,7 +919,11 @@ class NewBindScreen(ModalScreen[str | None]):
         """The seat, and exactly what ``bind_role`` is called with."""
         env: dict[str, str] = {}
         slot = self.query_one("#bind-account", Select).value
-        status = next((s for s in self._statuses if str(s.account.slot) == slot), None)
+        agent = self.bind_agent()  # its own: another agent's account may hold the number (#100)
+        status = next(
+            (s for s in self._statuses if (s.account.agent, str(s.account.slot)) == (agent, slot)),
+            None,
+        )
         if status is not None:
             # What `launch --account <slot>` sets — none for the default slot.
             env.update(accounts_core.launch_env(status.account))
@@ -641,11 +933,14 @@ class NewBindScreen(ModalScreen[str | None]):
             if separator and key.strip():
                 name, value = key.strip(), value.strip()
                 env[name] = stored[name] if value == MASKED and name in stored else value
-        return self.query_one("#bind-seat", Input).value.strip(), {
-            "agent_bin": self.query_one("#bind-binary", Input).value.strip() or DEFAULT_BINARY,
+        kwargs: dict[str, Any] = {
+            "agent_bin": self.query_one("#bind-binary", Input).value.strip() or self._binary_shown,
             "env": env,
             "args": shlex.split(self.query_one("#bind-args", Input).value),
         }
+        if self._agent_value():
+            kwargs["agent"] = self._agent_value()  # picked: `team bind --agent`
+        return self.query_one("#bind-seat", Input).value.strip(), kwargs
 
     @on(Button.Pressed, "#bind-save")
     def _save(self) -> None:
@@ -661,7 +956,12 @@ class NewBindScreen(ModalScreen[str | None]):
                 settings_service.replace_role_binding(
                     seat,
                     # A binding that named no binary still names none at the default.
-                    agent_bin=None if was is None and binary == DEFAULT_BINARY else binary,
+                    agent_bin=(
+                        None
+                        if was is None and binary == get_adapter(DEFAULT_AGENT).binary
+                        else binary
+                    ),
+                    agent=kwargs.get("agent"),
                     env=kwargs["env"],
                     args=kwargs["args"],
                 )

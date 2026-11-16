@@ -57,11 +57,11 @@ def test_the_ledger_and_the_servers_own_stamps_are_the_apis(
     ledger = ActionLedger(clock=lambda: east)
     ledger.ledger_finish("dev_00000001", "rq-1", 200, {})
     monkeypatch.setattr(remote_server, "_remote_now", lambda: east)
-    stamps = [ledger.ledger_recent("dev_00000001")[0]["at"], remote_server._stamp()]
+    stamps = [ledger.ledger_recent("dev_00000001")[0]["at"], remote_server._remote_stamp()]
     assert stamps == ["2026-10-07T12:30:15+00:00"] * 2
     monkeypatch.setattr(remote_server, "_iso_seconds", lambda at: "the rule, learned")
     ledger.ledger_finish("dev_00000001", "rq-2", 200, {})
-    stamps = [ledger.ledger_recent("dev_00000001")[0]["at"], remote_server._stamp()]
+    stamps = [ledger.ledger_recent("dev_00000001")[0]["at"], remote_server._remote_stamp()]
     assert stamps == ["the rule, learned"] * 2
 
 

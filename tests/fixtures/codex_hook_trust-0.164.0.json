@@ -1,0 +1,119 @@
+{
+  "codex": "0.164.0",
+  "how": "the startup 'Hooks need review · 11 hooks are new or changed' dialog answered '2. Trust all and continue' (Down, Enter) in tmux, CODEX_HOME set, a loopback provider; config.toml's [hooks.state] as Codex wrote it (SMOKE12 O3 of #113)",
+  "hooks_file": "/private/var/tmp/asq-o3/f164/home/.codex/hooks.json",
+  "hooks": {
+    "hooks": {
+      "SessionStart": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/opt/aisquare/bin/python3 -E -P -m aisquare hook codex --config-dir /private/var/tmp/asq-o3/f164/home/.codex --definition 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # SessionStart",
+              "timeout": 120
+            }
+          ]
+        }
+      ],
+      "UserPromptSubmit": [
+        {
+          "matcher": "ignored-here",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/opt/aisquare/bin/python3 -E -P -m aisquare hook codex --config-dir /private/var/tmp/asq-o3/f164/home/.codex --definition 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # UserPromptSubmit",
+              "timeout": 120
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/usr/bin/true"
+            }
+          ]
+        },
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/usr/bin/true",
+              "timeout": 5
+            },
+            {
+              "type": "command",
+              "command": "/opt/aisquare/bin/python3 -E -P -m aisquare hook codex --config-dir /private/var/tmp/asq-o3/f164/home/.codex --definition 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # Stop",
+              "timeout": 30
+            }
+          ]
+        }
+      ],
+      "SessionEnd": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/opt/aisquare/bin/python3 -E -P -m aisquare hook codex --config-dir /private/var/tmp/asq-o3/f164/home/.codex --definition 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # SessionEnd",
+              "timeout": 30
+            }
+          ]
+        }
+      ],
+      "Interrupt": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/opt/aisquare/bin/python3 -E -P -m aisquare hook codex --config-dir /private/var/tmp/asq-o3/f164/home/.codex --definition 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # Interrupt"
+            }
+          ]
+        }
+      ],
+      "PermissionRequest": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/opt/aisquare/bin/python3 -E -P -m aisquare hook codex --config-dir /private/var/tmp/asq-o3/f164/home/.codex --definition 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # PermissionRequest",
+              "timeout": 3,
+              "statusMessage": "checking ✓"
+            }
+          ]
+        }
+      ],
+      "PreToolUse": [
+        {
+          "matcher": "request_user_input",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/opt/aisquare/bin/python3 -E -P -m aisquare hook codex --config-dir /private/var/tmp/asq-o3/f164/home/.codex --definition 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # PreToolUse",
+              "timeout": 3
+            }
+          ]
+        }
+      ],
+      "PostToolUse": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/opt/aisquare/bin/python3 -E -P -m aisquare hook codex --config-dir /private/var/tmp/asq-o3/f164/home/.codex --definition 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  # PostToolUse",
+              "timeout": 0
+            },
+            {
+              "type": "command",
+              "command": "/usr/bin/true",
+              "async": true,
+              "timeout": 3
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "hooks_state": "[hooks.state]\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:39afc96b3c1a316730c9e798f4630d5d649149ef83b5c20c6bf6fbd728b74eb5\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:permission_request:0:0\"]\ntrusted_hash = \"sha256:b71db0d4f595e1a2472a11745f765bb18bb567599f53ce3a484f80b368f717a8\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:post_tool_use:0:0\"]\ntrusted_hash = \"sha256:6d2994474d368fffd642acdcaee68dd66d89289fd2b9e4c0d6f3b6cde450fce5\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:post_tool_use:0:1\"]\ntrusted_hash = \"sha256:95f9752da889412fdd7db4d74524ef2921e4878a1dac9dbd04e8637e34eea96f\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:session_start:0:0\"]\ntrusted_hash = \"sha256:dca48f81748b0b1b16b586bb86104dfce48dfab8788abdcb482ff44627520532\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:session_end:0:0\"]\ntrusted_hash = \"sha256:c933f5fa9ae4087e460aa039d6f69c89614641e5e8bb239c6301f451e1d98037\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:user_prompt_submit:0:0\"]\ntrusted_hash = \"sha256:d53c0aaf72388f2e61513e366c52fc73f9b107f01711abe5004f883187fe4e00\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:stop:0:0\"]\ntrusted_hash = \"sha256:e2250e1310df8c544c98765af45ec9400886a9f3cf53958a4b1edc99d0dc2d5b\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:stop:1:0\"]\ntrusted_hash = \"sha256:16f52c5d3a34fb782ded821e4ac5b18b8cdef051e176b849d06dbfcec407aa7e\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:stop:1:1\"]\ntrusted_hash = \"sha256:7a53ed2ba24f5e00d749efc3f9ca497bd5ed570de97a02873beacd0156c76d30\"\n\n[hooks.state.\"/private/var/tmp/asq-o3/f164/home/.codex/hooks.json:interrupt:0:0\"]\ntrusted_hash = \"sha256:6cdd2d9095708299b7dd69e2537a76709311cc82072068fbbafccca5f73501ab\"\n"
+}

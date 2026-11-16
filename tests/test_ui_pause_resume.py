@@ -405,3 +405,32 @@ def test_a_resume_that_is_not_the_owners_previews_each_paused_row_as_refused() -
     assert f"coder-1 · coder · ⏯ paused — refused: {why}" in text, text
     assert WILL_RESUME not in text
     assert plan.targets == [] and not plan.acts
+
+
+@pytest.mark.parametrize("action", ["pause", "resume", "restart", "stop"])
+def test_tab_reaches_each_button_of_the_dialog_and_shows_it_focused_as_cancel_is(
+    acting_on_paused: Paused, action: str
+) -> None:
+    """SMOKE12 O2 of #113: in Resume all… a focused Confirm drew its label orange on a dark
+    band, which read as no focus at all, and the list's scroll was a tab stop between the
+    switch and the buttons that drew nothing and took no Enter: a keyboard resume took
+    three tries. Tab now goes switch → Confirm → Cancel, and a focused Confirm shows the
+    band a focused Cancel shows."""
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str | None], list[Any]]:
+        dialog = await _open(pilot, action)
+        app = _app(pilot)
+        chain = [widget.id for widget in dialog.focus_chain]
+        confirm, cancel = _confirm(dialog), dialog.query_one("#bulk-cancel", Button)
+        idle = confirm.rich_style
+        await pilot.press("tab", "tab")  # Cancel → the switch → Confirm
+        assert app.focused is confirm, app.focused
+        focused = confirm.rich_style
+        await pilot.press("tab")
+        assert app.focused is cancel, app.focused
+        return chain, [idle, focused, cancel.rich_style]
+
+    chain, (idle, focused, cancel) = drive(go)
+    assert chain == ["bulk-managers", "bulk-confirm", "bulk-cancel"]
+    assert focused.reverse and cancel.reverse and not idle.reverse
+    assert focused.color == cancel.color, "the band Cancel shows when it is focused"

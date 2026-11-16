@@ -37,6 +37,7 @@ from tests.test_ui_spawn import (
     settle,
     submit,
 )
+from tests.ui_workers import settle_until_held
 
 # The Spawn dialog suite's fixtures, bound here so pytest finds them for this module's tests.
 no_real_tmux = spawn_suite.no_real_tmux
@@ -179,7 +180,13 @@ def test_a_model_that_is_no_model_name_disables_spawn_and_says_why(
 ) -> None:
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         dialog.query_one("#spawn-model", Input).value = "opus --effort max"
-        await pilot.pause()
+        # The note is the field's Input.Changed handler's: read once it is up, not one
+        # pause() after the value, which a loaded Windows runner outran (CI 41840707223).
+        await settle_until_held(
+            pilot.app,
+            lambda: note(dialog, "#spawn-model-error") is not None,
+            what="the Model field's error note",
+        )
         return [note(dialog, "#spawn-model-error"), submit(dialog).disabled, advanced(dialog)]
 
     error, disabled, section = drive(git_project, scenario)
@@ -197,7 +204,11 @@ def test_the_model_field_is_the_family_the_account_label_reads(
     reads: list[tuple[list[str], str | None]] = []
 
     def counted(
-        project: ProjectInfo, role: str, args: list[str], model: str | None = None
+        project: ProjectInfo,
+        role: str,
+        args: list[str],
+        model: str | None = None,
+        agent: str | None = None,
     ) -> accounts_service.LaunchDefault:
         reads.append((list(args), model))
         return accounts_service.LaunchDefault(accounts_service.AccountChoice(None, None))
@@ -230,7 +241,12 @@ def test_the_account_label_reads_the_family_the_spawn_runs(
     families: list[str | None] = []
 
     def launch_default(
-        role: str | None, *, project: ProjectInfo | None = None, family: str | None = None
+        role: str | None,
+        *,
+        project: ProjectInfo | None = None,
+        family: str | None = None,
+        agent: str | None = None,
+        pick: accounts_service.AgentPick | None = None,
     ) -> accounts_service.LaunchDefault:
         families.append(family)
         return accounts_service.LaunchDefault(accounts_service.AccountChoice(None, None))

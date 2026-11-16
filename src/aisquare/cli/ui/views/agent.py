@@ -48,9 +48,10 @@ from aisquare.cli.ui.sidebar import (
     STOP_STATES,
     StopAgent,
     persona_badge,
-    session_percent_text,
+    used_percent_text,
 )
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
 from aisquare.services import claude_accounts as accounts_service
@@ -90,6 +91,8 @@ DETAIL_STYLE = "italic"
 MODEL_STYLE = "dim cyan"
 EFFORT_STYLE = "cyan"
 ACCOUNT_STYLE = "blue"
+AGENT_STYLE = "dim"
+"""The agent's name, shown beside another agent's accounts (``info_line``'s ``named``)."""
 PANE_STYLE = "dim italic"
 """Dim, and italic so it never runs into a dim ``💤`` or ``·`` chip with nothing between."""
 
@@ -105,6 +108,7 @@ def info_line(
     usage: Mapping[int, float] | None = None,
     *,
     width: int | None = None,
+    named: bool = False,
 ) -> Text:
     """``🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4 · skeptic`` — one agent
     at a glance.
@@ -114,7 +118,7 @@ def info_line(
     <pane id>[ · <persona>]``. The role icon and the label; the state chip (``💤 exited(N)`` once it
     ended); the account (:func:`account_text`, its NAME alone — no ``#slot``) with its
     five-hour window percent USED from ``usage`` (slot → percent, the slow headroom read's
-    ``session_by_slot``); the model and the effort the session reported
+    ``limit_by_slot``); the model and the effort the session reported
     (``TeamSession.effort``, left out while unknown); the state's detail; and the pane id.
     No role word, task, working directory or tmux command: the sidebar row says the role,
     and the attach command is the Settings tab's.
@@ -124,6 +128,14 @@ def info_line(
     state — in a 90-column terminal the Agent view's line gets about 38 cells, and a model
     name before them pushed them off. The detail last but the pane id: it has no bound (the
     folder-trust prompt's names a command and a path), so it is what gives way first.
+
+    ``named``: the agent (``claude-code``, ``codex``) follows its account and use, and only
+    while accounts of more than one agent are listed (``views.accounts.marks_shown``, the
+    test the Accounts page marks its rows by: :attr:`FleetApp.agents_named`). A Claude-only
+    machine's line is 0.9.2's, cell for cell: the name before the state cut the label to
+    :data:`LABEL_KEEP` and then the account and its use at 38 and 45 cells (C1 of #120).
+    After the account it is outside what a narrow row keeps whole, so it gives way before
+    the account and its use do.
 
     The persona (``sidebar.persona_badge``, the sidebar row's own) comes last, and is the
     first thing a narrow row drops (the owner's decision D4 on #267's m1): with ``width``, a
@@ -143,7 +155,7 @@ def info_line(
     at a glance; every one is appended as data.
     """
     label = Text(status.agent.label, style=LABEL_STYLE)
-    text, essential = _info_line(status, label, labels, usage)
+    text, essential = _info_line(status, label, labels, usage, named)
     badge = persona_badge(status)
     if width is None or text.cell_len + badge.cell_len <= width:
         text.append_text(badge)
@@ -160,7 +172,7 @@ def info_line(
     room = width - 1 - (essential - label.cell_len)
     if label.cell_len > room:
         label.truncate(max(room, LABEL_KEEP + 1), overflow="ellipsis")
-        text, _ = _info_line(status, label, labels, usage)
+        text, _ = _info_line(status, label, labels, usage, named)
     return text
 
 
@@ -169,9 +181,11 @@ def _info_line(
     label: Text,
     labels: Mapping[int, str] | None,
     usage: Mapping[int, float] | None,
+    named: bool = False,
 ) -> tuple[Text, int]:
     """:func:`info_line` with ``label`` as given, and the cells up to the end of what a narrow
-    row keeps whole: the label, the state, and the account with its use."""
+    row keeps whole: the label, the state, and the account with its use. The agent's name,
+    when ``named``, comes after them and is not counted in them."""
     agent = status.agent
     session = status.session
     chip, chip_style = STATE_CHIP.get(status.state, ("·", "dim"))
@@ -190,8 +204,11 @@ def _info_line(
         percent = (usage or {}).get(slot) if slot is not None else None
         if percent is not None:
             text.append(" · ", style="dim")
-            text.append_text(session_percent_text(percent))
+            text.append_text(used_percent_text(percent))
     essential = text.cell_len
+    if named and agent.agent:
+        text.append(SEPARATOR)
+        text.append(agent.agent, style=AGENT_STYLE)
     if session is not None and session.model:
         text.append(SEPARATOR)
         text.append(session.model, style=MODEL_STYLE)
@@ -217,14 +234,22 @@ class InfoLine(Static):
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
-        self._line: tuple[FleetAgentStatus, Mapping[int, str], Mapping[int, float]] | None = None
+        self._line: tuple[FleetAgentStatus, Mapping[int, str], Mapping[int, float], bool] | None = (
+            None
+        )
         self._painted: tuple[object, ...] | None = None
 
     def show_line(
-        self, status: FleetAgentStatus, labels: Mapping[int, str], usage: Mapping[int, float]
+        self,
+        status: FleetAgentStatus,
+        labels: Mapping[int, str],
+        usage: Mapping[int, float],
+        *,
+        named: bool = False,
     ) -> None:
-        """Paint ``status``'s info line, and keep it fitted to the width from here on."""
-        self._line = (status, labels, usage)
+        """Paint ``status``'s info line, and keep it fitted to the width from here on;
+        ``named`` as :func:`info_line` takes it."""
+        self._line = (status, labels, usage, named)
         self._paint()
 
     def show_text(self, text: Text) -> None:
@@ -242,8 +267,8 @@ class InfoLine(Static):
         wanted = (*self._line, width)
         if wanted != self._painted:
             self._painted = wanted
-            status, labels, usage = self._line
-            self.update(info_line(status, labels, usage, width=width), layout=layout)
+            status, labels, usage, named = self._line
+            self.update(info_line(status, labels, usage, width=width, named=named), layout=layout)
 
 
 class SlotLabels:
@@ -284,6 +309,13 @@ class SlotLabels:
             return False
         self.labels = result
         return True
+
+
+def key_spellings(status: FleetAgentStatus | None) -> Mapping[str, str]:
+    """The key names the agent in ``status``'s pane reads its own way
+    (``AgentAdapter.key_spellings``); none for a row this install has no adapter for."""
+    adapter = recorded_adapter(status.agent.agent) if status is not None else None
+    return adapter.key_spellings if adapter is not None else {}
 
 
 def shown_pane(status: FleetAgentStatus) -> str | None:
@@ -358,6 +390,7 @@ class AgentView(Vertical):
         server: TmuxServer | None = None,
         escape_key: str | None = None,
         usage: Mapping[int, float] | None = None,
+        named: bool = False,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
@@ -370,11 +403,14 @@ class AgentView(Vertical):
         self.labels = SlotLabels()
         self.usage: Mapping[int, float] = usage or {}
         """Slot → session percent USED, as the shell's slow headroom read last handed it."""
+        self.named = named
+        """Whether the header names the agent: :attr:`FleetApp.agents_named`, as the shell's
+        accounts read last handed it."""
 
     def _paint_info(self) -> None:
         if self.is_mounted:
             header = self.query_one("#agent-header", InfoLine)
-            header.show_line(self.status, self.labels.labels, self.usage)
+            header.show_line(self.status, self.labels.labels, self.usage, named=self.named)
 
     @on(Worker.StateChanged)
     def _labels_answered(self, event: Worker.StateChanged) -> None:
@@ -387,10 +423,16 @@ class AgentView(Vertical):
             self.usage = usage
             self._paint_info()
 
+    def show_named(self, named: bool) -> None:
+        """Whether the header names the agent, from the shell's accounts read."""
+        if named != self.named:
+            self.named = named
+            self._paint_info()
+
     def compose(self) -> ComposeResult:
         with Horizontal(id="agent-bar"):
             header = InfoLine(id="agent-header")
-            header.show_line(self.status, self.labels.labels, self.usage)
+            header.show_line(self.status, self.labels.labels, self.usage, named=self.named)
             yield header
             # Guarded (``click_guard``): a click that was aimed at what this view replaced,
             # made before the view was painted, must not stop or restart the agent it shows
@@ -403,6 +445,7 @@ class AgentView(Vertical):
             server=self.server,
             escape_key=self.escape_key,
             placeholder=PANE_GONE,
+            key_spellings=key_spellings(self.status),
             label=self.status.agent.label,
             id="agent-pane",
         )
@@ -431,6 +474,7 @@ class AgentView(Vertical):
             return
         self._paint_info()
         self._paint_actions()
+        self.pane.key_spellings = key_spellings(status)
         self.labels.ask(self)
         self.pane.label = status.agent.label
         if (wanted := shown_pane(status)) != self.pane.pane_id:
@@ -455,8 +499,11 @@ class AgentView(Vertical):
         stop.display = self.status.state in STOP_STATES
         stop.disabled = busy
         paused = self.status.state == "paused"
+        # What the stop types is asked of the service (`exit_command_for`, the call
+        # `fleet stop` types), never spelled here: a future agent's own command (#60).
         stop.tooltip = (
-            "/exit, a grace period, then the window is killed (as `fleet stop` does)"
+            f"{fleet_service.exit_command_for(self.status.agent)}, a grace period, then the "
+            "window is killed (as `fleet stop` does)"
             if self.status.state in _STOPPABLE
             else "End the pause for good: its claims go back to the board, and `fleet resume` "
             "leaves it (as `fleet stop` does)"

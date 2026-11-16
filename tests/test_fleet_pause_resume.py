@@ -22,6 +22,7 @@ from pydantic import TypeAdapter
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths
 from aisquare.core import store as store_core
 from aisquare.core import tmux as tmux_core
@@ -268,7 +269,9 @@ def test_resume_brings_each_paused_agent_back_under_its_label_with_its_session(
     # Same label, role, task, worktree, account; the session resumed from its transcript.
     assert (started.label, started.role, started.task_id) == (coder.label, "coder", coder.task_id)
     assert started.cwd == coder.cwd and started.worktree
-    assert started.account_slot == coder.account_slot
+    # The same account: a row that ran under the plain home comes back on it by name, its
+    # plain slot (#113, SMOKE9 F1: asked of the ladder, a default added since moved it).
+    assert started.account_slot == (coder.account_slot or accounts_core.DEFAULT_SLOT)
     assert restarted.resumed and started.session_id == coder.session_id
     command = next(
         _command(tmux, i)

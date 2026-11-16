@@ -37,24 +37,7 @@ def build_block(entries: list[ContextEntry], project: ProjectInfo) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-#: The memory files Claude Code reads in each directory from the session's cwd up to the
-#: filesystem root, beside the user's own ``CLAUDE.md`` in its config directory.
-_PROJECT_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
-
 _WHITESPACE = re.compile(r"\s+")
-
-
-def claude_md_files(cwd: Path | None) -> list[Path]:
-    """The ``CLAUDE.md`` files Claude Code loads into a session started in ``cwd``: the
-    user's (``CLAUDE_CONFIG_DIR`` or ``~/.claude``) and the project chain, cwd upwards."""
-    from aisquare.core import agents as agent_core  # lazy: injection is imported early
-
-    files = [agent_core.claude_home() / "CLAUDE.md"]
-    if cwd is not None:
-        start = cwd.resolve()
-        for directory in (start, *start.parents):
-            files += [directory / name for name in _PROJECT_MEMORY_FILES]
-    return files
 
 
 def _lines(text: str) -> list[str]:
@@ -75,16 +58,17 @@ def _holds_whole_lines(haystack: list[str], needle: list[str]) -> bool:
 def without_loaded_preferences(
     entries: list[ContextEntry], loaded: Iterable[Path]
 ) -> list[ContextEntry]:
-    """``entries`` less the user-pool ones that duplicate content Claude Code already
-    loads this session from one of the ``loaded`` files (:func:`claude_md_files`).
+    """``entries`` less the user-pool ones that duplicate content the agent already loads
+    this session from one of the ``loaded`` files (its adapter's ``instruction_files``:
+    Claude Code's ``CLAUDE.md`` chain, Codex's ``AGENTS.md`` one).
 
-    ``agents connect`` imports ``~/.claude/CLAUDE.md`` into the user pool section by
-    section, so every session saw those sections twice: once from Claude Code, once
-    under "Your preferences". An entry is dropped only when its lines are the whole
-    file or a contiguous run of WHOLE lines in it (whitespace aside, blank lines
-    ignored): "Use uv" beside a line "Use uv run for every Python command" is a
-    preference of its own, and stays. So does every entry a file no longer holds. A
-    file that cannot be read is simply not loaded.
+    ``agents connect`` imports the agent's own instruction file (``~/.claude/CLAUDE.md``,
+    ``$CODEX_HOME/AGENTS.md``) into the user pool section by section, so every session saw
+    those sections twice: once from the agent, once under "Your preferences". An entry is
+    dropped only when its lines are the whole file or a contiguous run of WHOLE lines in it
+    (whitespace aside, blank lines ignored): "Use uv" beside a line "Use uv run for every
+    Python command" is a preference of its own, and stays. So does every entry a file no
+    longer holds. A file that cannot be read is simply not loaded.
     """
     files: list[list[str]] = []
     for path in loaded:

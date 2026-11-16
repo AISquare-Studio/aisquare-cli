@@ -1,7 +1,7 @@
 """``aisquare metrics`` — what the CI test bed recorded, per turn, what each agent
 session spent in tokens as the hooks recorded it (``metrics tokens``), and the same
 counted live from each transcript with its wakes, deltas and compactions (``metrics
-ledger``); and every Claude Code session on this machine summed by day, repository, account
+ledger``); and every agent session on this machine summed by day, repository, account
 and model (``metrics stats``), with the sweep that reads the transcripts no hook saw
 (``metrics backfill``)."""
 
@@ -35,7 +35,7 @@ from aisquare.services import metrics as metrics_service
 from aisquare.services import token_ledger, usage_share, usage_stats
 
 app = typer.Typer(
-    help="Usage & stats: what Claude Code sessions on this machine spent, anonymous usage "
+    help="Usage & stats: what the agent sessions on this machine spent, anonymous usage "
     "sharing, and per-turn metrics.",
     no_args_is_help=True,
 )
@@ -151,15 +151,15 @@ def stats(
         ),
     ] = True,
 ) -> None:
-    """Usage across every Claude Code session on this machine: tokens, cost at list prices,
-    sessions, repositories, accounts, models and the features you use, for today, 7 or 30 days
-    or all time. The same figures as Settings ▸ Usage & stats."""
+    """Usage across every agent session on this machine (Claude Code's, Codex's): tokens, cost
+    at list prices, sessions, repositories, accounts, models and the features you use, for
+    today, 7 or 30 days or all time. The same figures as Settings ▸ Usage & stats."""
     if range_ not in USAGE_RANGES:
         raise typer.BadParameter(
             f"{range_!r} is not one of {', '.join(USAGE_RANGES)}", param_hint="--range"
         )
     if sweep:
-        # The first sweep on a machine reads every transcript Claude Code kept (about thirty
+        # The first sweep on a machine reads every transcript the agents kept (about thirty
         # seconds for a few hundred): say so on the terminal, as `backfill` does.
         showing = _shows_progress()
         report = usage_stats.maybe_sweep(progress=_progress_line if showing else None)
@@ -167,7 +167,7 @@ def stats(
             typer.echo("", err=True)  # the progress line's end
         if report.sessions_new and not get_state().json_output:
             typer.echo(
-                f"read {report.sessions_new} new session(s) from Claude Code's transcripts",
+                f"read {report.sessions_new} new session(s) from the agents' transcripts",
                 err=True,
             )
     result = usage_stats.stats(range_)
@@ -184,13 +184,14 @@ def _shows_progress() -> bool:
 
 def _progress_line(done: int, total: int) -> None:
     if total:
-        typer.echo(f"\rreading Claude Code's transcripts {done}/{total}", nl=False, err=True)
+        typer.echo(f"\rreading the agents' transcripts {done}/{total}", nl=False, err=True)
 
 
 @app.command("backfill")
 def backfill() -> None:
-    """Read Claude Code's transcripts for every session on this machine — every repository,
-    every account directory, whether or not aisquare launched it — and record what they spent.
+    """Read the transcripts of every agent session on this machine (Claude Code's, Codex's) —
+    every repository, every account home, whether or not aisquare launched it — and record
+    what they spent.
 
     Idempotent and incremental: a session already counted (by its Stop hook or an earlier
     backfill) is read only from where it was left. Claude Code deletes transcripts after

@@ -35,6 +35,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("reports", "show"),
     ("reports", "prune"),
     ("reports", "stats"),
+    ("reports", "seal"),
     ("serve",),
     ("captain", "serve"),
     ("captain",),
@@ -120,6 +121,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),
+    ("hook", "codex"),
+    ("hook", "event"),
     *(
         ("team", command)
         for command in (
@@ -198,7 +201,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     *(("config", command) for command in ("list", "get", "set", "redaction", "reset")),
     *(
         ("agents", command)
-        for command in ("list", "scan", "status", "connect", "disconnect", "refresh-hooks")
+        for command in ("list", "scan", "status", "connect", "disconnect", "use", "refresh-hooks")
     ),
     *(
         ("accounts", command)

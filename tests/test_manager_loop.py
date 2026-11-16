@@ -44,7 +44,7 @@ from aisquare.models import FleetAgent, TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.fleet import FLEET_ROLES
-from tests.cycles import unscoped
+from tests.cycles import MANAGER_MERGE_RULE, unscoped
 from tests.projects import add_project
 
 MANAGER = "aaaa1111-0000-0000-0000-000000000000"
@@ -1082,13 +1082,12 @@ def _cycle(role: str) -> str:
     return " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
 
 
-def test_the_manager_cycle_names_fleet_spawn_and_the_two_prohibitions() -> None:
+def test_the_manager_cycle_names_fleet_spawn_and_when_it_may_merge() -> None:
     text = _cycle("manager")
 
     assert text, "the manager has a briefing"
     assert "fleet spawn" in text
-    assert "never write code" in text.lower()
-    assert "never merge" in text.lower()
+    assert MANAGER_MERGE_RULE in text, "never code, merge only approved and green, never push"
     assert "Stay in your lane (manager)" in text, "the lane rule closes the manager's cycle too"
     assert "fleet spawn coder" in text, "asked to fix, the manager spawns a coder"
     assert "abcd1234" in text, "the commands are pre-filled with the session id"
@@ -1160,7 +1159,37 @@ def test_the_manager_briefing_is_injected_at_session_start(
 
     assert "Your standing cycle (manager)" in result.stdout
     assert "fleet spawn" in result.stdout
-    assert "Never write code. Never merge." in result.stdout
+    assert MANAGER_MERGE_RULE in " ".join(result.stdout.split()), "its lines wrap, words kept"
+    assert "never merge" not in result.stdout.lower()
+
+
+def test_a_codex_manager_reads_the_same_merge_rule_at_session_start(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path, tmp_path: Path
+) -> None:
+    """A Codex manager starts on its start pack (``services.team._start_pack``), not the
+    board, and the pack's cycle is the same ``harness.role_cycle``: it reads the manager's
+    merge rule once and no "Never merge" (PR #499, redone in #113)."""
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("AISQUARE_ROLE", "manager")
+    payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": MANAGER,
+        "cwd": str(work_dir),
+        "source": "startup",
+        "model": "gpt-test",
+    }
+
+    result = runner.invoke(
+        app, ["hook", "codex", "--config-dir", str(home)], input=json.dumps(payload)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "(role: manager)" in result.stdout and "This is your start pack" in result.stdout
+    assert "Your standing cycle (manager)" in result.stdout
+    words = " ".join(result.stdout.split())
+    assert words.count(MANAGER_MERGE_RULE) == 1, result.stdout
+    assert "never merge" not in words.lower()
 
 
 # --- numbered seats ride their role's cycle and ladder --------------------------------

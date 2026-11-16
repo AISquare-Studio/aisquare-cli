@@ -7,6 +7,7 @@ Layout:
     ├── context.db      # SQLite store: context entries and projects (see core.store)
     ├── agents.json     # registry of detected and connected agents
     ├── claude-accounts/# one CLAUDE_CONFIG_DIR per managed account (core.claude_accounts)
+    ├── codex-accounts/ # one CODEX_HOME per managed Codex account (core.codex_accounts)
     ├── cache/          # disposable cached data (incl. each managed account's TMPDIR)
     ├── explainability/ # session→Run join records (see services.explainability)
     └── log/            # capture and diagnostic logs
@@ -22,7 +23,8 @@ import os
 import stat
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -519,8 +521,225 @@ def brief_evidence_dir(project_id: str, brief_id: str) -> Path:
 def manager_state_file(project_id: str) -> Path:
     """Where a project's manager keeps its state (P1 WS-4, #281): goal, decisions, open items
     and next step, rewritten as a plan step completes. Its start pack reads it back after a
-    compaction or a restart, and a quiet compaction waits for a fresh one."""
+    compaction or a restart, and a quiet compaction waits for a fresh one: each through
+    :func:`read_manager_state`, never a plain open, as a sandboxed manager may write its
+    directory (``services.store_broker.own_state_dir``)."""
     return project_data_dir(project_id) / "manager" / "state.md"
+
+
+#: The most of a manager's state file aisquare reads (:func:`read_manager_state`): 16 times
+#: what its cycle asks it to keep (``harness.STATE_FILE_MAX`` characters, 4 bytes each at most).
+MANAGER_STATE_LIMIT = 64 * 1024
+
+
+class NotReadBelow(OSError):
+    """A file :func:`read_below` would not read, and why (``strerror``): never a missing one,
+    which is ``FileNotFoundError``."""
+
+
+@dataclass(frozen=True)
+class ReadBelow:
+    """What :func:`read_below` read: the file's bytes, and its ``fstat`` from the descriptor
+    they were read through."""
+
+    data: bytes
+    info: os.stat_result
+
+
+def read_manager_state(project_id: str) -> ReadBelow:
+    """The state file of ``project_id``'s manager (:func:`manager_state_file`), read below the
+    aisquare home by :func:`read_below` at most :data:`MANAGER_STATE_LIMIT` bytes. Its
+    directory is the one a sandboxed manager's launch lets its sandbox write (SMOKE13 N1),
+    and aisquare reads this file outside any sandbox at every manager's start: a link there
+    to ``/dev/zero`` read without end, a FIFO hung the hook, and a link to a file outside
+    (``~/.ssh/…``) would have put that file in the start pack (#78 reopen). Raises
+    ``FileNotFoundError`` for none, :class:`NotReadBelow` for anything but a regular file
+    there."""
+    return read_below(
+        aisquare_home(),
+        ("projects", project_id, "manager", "state.md"),
+        MANAGER_STATE_LIMIT,
+    )
+
+
+def read_below(root: Path, names: Sequence[str], limit: int) -> ReadBelow:
+    """Read the file ``root``/``names`` when it is a regular file of at most ``limit`` bytes,
+    reached from ``root`` one name at a time with no link followed: what aisquare reads,
+    outside any sandbox, of a directory a sandbox may write.
+
+    Each name is one component, never ``.``, ``..`` or empty (:class:`NotReadBelow`), so the
+    walk cannot climb out of ``root``. On POSIX each directory is opened from the one before
+    with ``O_NOFOLLOW``, and the file too, with ``O_NONBLOCK`` (a FIFO opens at once, with no
+    writer, and is then refused, never read) and ``O_NOCTTY``. Its ``fstat`` decides before a
+    byte is read: a link (``ELOOP``), a directory, a FIFO, a device or a socket is refused,
+    and so is a file over ``limit``, by its size and again by what a read returns (one that
+    grows meanwhile). Windows has no descriptor walk: each name is ``lstat``-ed first, a link
+    or a junction refused, then the file opened, refused unless its ``fstat`` is the file the
+    ``lstat`` found (:func:`_open_below_windows`), and asked as on POSIX.
+
+    Raises ``FileNotFoundError`` when nothing is there, and :class:`NotReadBelow`, saying
+    why, for everything else it refuses; any other ``OSError`` as the system raised it."""
+    _one_name_each(root, names)
+    if sys.platform == "win32":
+        descriptor = _open_below_windows(root, names)
+    else:
+        descriptor = _open_below_posix(root, names)
+    try:
+        info = os.fstat(descriptor)
+        kind = _not_regular(info.st_mode)
+        if kind is not None:
+            raise NotReadBelow(errno.EINVAL, f"it is {kind}, not a regular file")
+        if info.st_size > limit:
+            raise NotReadBelow(errno.EFBIG, f"it is {info.st_size:,} bytes, over {limit:,}")
+        chunks: list[bytes] = []
+        size = 0
+        while size <= limit:
+            chunk = os.read(descriptor, limit + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > limit:
+            raise NotReadBelow(errno.EFBIG, f"it grew over {limit:,} bytes while read")
+        return ReadBelow(b"".join(chunks), info)
+    finally:
+        os.close(descriptor)
+
+
+def stat_manager_state(project_id: str) -> os.stat_result:
+    """The ``lstat`` of ``project_id``'s manager's state file (:func:`stat_below`), for when
+    it was written: a link is not its state file, nor its target's age its age, and a FIFO
+    there is no file at all (#78 reopen). Raises as :func:`read_manager_state` does."""
+    return stat_below(aisquare_home(), ("projects", project_id, "manager", "state.md"))
+
+
+def stat_below(root: Path, names: Sequence[str]) -> os.stat_result:
+    """The ``lstat`` of ``root``/``names`` when it is a regular file, reached as
+    :func:`read_below` reaches it (each directory on the way from the one before, with no
+    link followed), the file itself never opened: a link, a FIFO, a directory or anything but
+    a regular file there is :class:`NotReadBelow`, nothing there ``FileNotFoundError``."""
+    _one_name_each(root, names)
+    if sys.platform == "win32":
+        info = _lstat_below_windows(root, names)
+    else:
+        parent = _dirs_below_posix(root, names[:-1])
+        try:
+            info = os.stat(names[-1], dir_fd=parent, follow_symlinks=False)
+        finally:
+            os.close(parent)
+    kind = _not_regular(info.st_mode)
+    if kind is not None:
+        raise NotReadBelow(errno.EINVAL, f"it is {kind}, not a regular file")
+    return info
+
+
+def _one_name_each(root: Path, names: Sequence[str]) -> None:
+    """Refuse (:class:`NotReadBelow`) no names, or a name that is not one component below
+    ``root``: empty, ``.``, ``..`` or holding a separator, which could climb out of it."""
+    if not names:
+        raise NotReadBelow(errno.EINVAL, f"no file named below {root}")
+    for name in names:
+        if name in ("", ".", "..") or "/" in name or os.sep in name or (os.altsep or "/") in name:
+            raise NotReadBelow(errno.EINVAL, f"{name!r} is not one name below {root}")
+
+
+def _not_regular(mode: int) -> str | None:
+    """What a file of ``mode`` is when it is not a regular file, in words; ``None`` for one."""
+    for test, said in (
+        (stat.S_ISDIR, "a directory"),
+        (stat.S_ISFIFO, "a FIFO"),
+        (stat.S_ISLNK, "a symbolic link"),
+        (stat.S_ISSOCK, "a socket"),
+        (stat.S_ISCHR, "a device"),
+        (stat.S_ISBLK, "a device"),
+    ):
+        if test(mode):
+            return said
+    return None if stat.S_ISREG(mode) else "not a regular file"
+
+
+def _open_below_posix(root: Path, names: Sequence[str]) -> int:
+    """A descriptor on the file ``root``/``names``: its directory by :func:`_dirs_below_posix`,
+    then the file from it with ``O_NOFOLLOW``, ``O_NONBLOCK`` and ``O_NOCTTY``."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    final = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+    parent = _dirs_below_posix(root, names[:-1])
+    try:
+        return os.open(names[-1], final, dir_fd=parent)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise NotReadBelow(exc.errno, f"{names[-1]} is a symbolic link") from None
+        raise
+    finally:
+        os.close(parent)
+
+
+def _dirs_below_posix(root: Path, dirs: Sequence[str]) -> int:
+    """A descriptor on the directory ``root``/``dirs``, each opened from the last with
+    ``O_NOFOLLOW``: a link or a name that is not a directory on the way is
+    :class:`NotReadBelow`."""
+    directory = getattr(os, "O_DIRECTORY", 0)
+    descend = os.O_RDONLY | directory | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(root, os.O_RDONLY | directory)
+    try:
+        for name in dirs:
+            try:
+                deeper = os.open(name, descend, dir_fd=descriptor)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    what = "a symbolic link" if exc.errno == errno.ELOOP else "not a directory"
+                    raise NotReadBelow(exc.errno, f"{name} on the way is {what}") from None
+                raise
+            os.close(descriptor)
+            descriptor = deeper
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _lstat_below_windows(root: Path, names: Sequence[str]) -> os.stat_result:
+    """The ``lstat`` of ``root``/``names``, each name ``lstat``-ed in turn: a link or a
+    junction anywhere refused (Windows has no ``O_NOFOLLOW`` and no descriptor walk)."""
+    here = root
+    found = os.lstat(root)
+    for name in names:
+        here = here / name
+        found = os.lstat(here)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(found.st_mode) or getattr(found, "st_file_attributes", 0) & reparse:
+            raise NotReadBelow(errno.ELOOP, f"{name} on the way is a link or a junction")
+    return found
+
+
+def _open_below_windows(root: Path, names: Sequence[str]) -> int:
+    """A descriptor on ``root``/``names`` once :func:`_lstat_below_windows` found no link
+    or junction on the way and a regular file there: Windows refuses to open a directory
+    (``PermissionError``), so what it is is asked first, as :func:`read_below` asks the
+    descriptor after.
+
+    The file is then opened by its name, which follows a link: one put in its place after
+    the ``lstat`` (Developer Mode lets any process make one) was read, its target's bytes in
+    a manager's start pack (review r39 of #113, finding 4). So the descriptor's ``fstat``
+    must be the file the ``lstat`` found (``st_dev`` and ``st_ino``: its volume and its file
+    id on Windows), else it is refused. Only the file's own name can be swapped so: the
+    directories above it are the store's, which no sandbox writes (the one it may is the
+    file's own, ``services.store_broker.own_state_dir``)."""
+    found = _lstat_below_windows(root, names)
+    kind = _not_regular(found.st_mode)
+    if kind is not None:
+        raise NotReadBelow(errno.EINVAL, f"it is {kind}, not a regular file")
+    descriptor = os.open(root.joinpath(*names), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (found.st_dev, found.st_ino):
+            raise NotReadBelow(
+                errno.ELOOP, f"{names[-1]} was put in another file's place as it was opened"
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def credentials_path() -> Path:
@@ -528,19 +747,25 @@ def credentials_path() -> Path:
     return aisquare_home() / "credentials"
 
 
-def claude_accounts_dir() -> Path:
-    """Where the CLI keeps the Claude Code config directories it owns, one per slot."""
-    return aisquare_home() / "claude-accounts"
-
-
-def claude_accounts_tmp_dir() -> Path:
-    """Where each managed account's ``CLAUDE_CODE_TMPDIR`` lives — disposable, under cache."""
-    return cache_dir() / "claude-accounts"
+def agent_accounts_dir(name: str) -> Path:
+    """Where the CLI keeps an agent's homes, one per slot: its accounts' ``dir_name``
+    (``claude-accounts``, ``codex-accounts``), as ``core.claude_accounts.accounts_root`` asks."""
+    return aisquare_home() / name
 
 
 def agents_registry_path() -> Path:
     """Path of the agents registry (detected and connected agents)."""
     return aisquare_home() / "agents.json"
+
+
+def explainability_key_path() -> Path:
+    """The workspace ingest key (mode 600)."""
+    return aisquare_home() / "explainability-key"
+
+
+def oidc_cache_dir() -> Path:
+    """The sign-in tokens ``services.iam`` caches, one file per server."""
+    return cache_dir() / "oidc"
 
 
 def explainability_dir() -> Path:

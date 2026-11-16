@@ -29,6 +29,7 @@ from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import experimental
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import claude_code
 from aisquare.core.config import load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer
@@ -184,7 +185,7 @@ def test_the_window_finds_the_captain_persona_on_a_server_started_without_the_sw
     assert result.exit_code == 0, result.output
     assert "no persona named" not in result.output
     assert launched["env"]["AISQUARE_PERSONA"] == "captain"
-    assert launch_cli.SYSTEM_PROMPT_FLAG in launched["argv"], "briefed as the captain"
+    assert claude_code.SYSTEM_PROMPT_FLAG in launched["argv"], "briefed as the captain"
     assert launched["env"][ENV] == "1"
 
 

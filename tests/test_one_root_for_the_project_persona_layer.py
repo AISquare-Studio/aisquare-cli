@@ -32,6 +32,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.core import orchestrator, personas
+from aisquare.core.agent_adapters import claude_code
 from aisquare.core.config import FleetRoleSettings
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -223,7 +224,7 @@ def test_launch_asks_the_helper(
     assert result.exit_code == 0, result.output
     argv = captured["argv"]
     # Anywhere on the line: the role's tool policy (P1 WS-1) comes before it.
-    flag = argv.index(launch_cli.SYSTEM_PROMPT_FLAG)
+    flag = argv.index(claude_code.SYSTEM_PROMPT_FLAG)
     assert "You are solo." in Path(argv[flag + 1]).read_text(encoding="utf-8")
 
 

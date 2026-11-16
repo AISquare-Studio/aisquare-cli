@@ -96,8 +96,26 @@ jobs:
             $path, [ref]$null, [ref]$errors) | Out-Null
           if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host $_.Message }; exit 1 }
           # Pinned and configured as in install.yml's powershell job.
-          Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 -Force `
-            -Scope CurrentUser -SkipPublisherCheck
+          # The PowerShell Gallery fails now and then: install.sh's run 42267078402 could not download
+          # the module at all (#107). Tried again with backoff, about 3 minutes in all; a parse error
+          # still fails the Parse step, and a finding still fails this one.
+          $tries = 0
+          while ($true) {
+            try {
+              Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 -Force `
+                -Scope CurrentUser -SkipPublisherCheck -ErrorAction Stop
+              break
+            } catch {
+              $tries++
+              if ($tries -ge 6) {
+                Write-Host "the PowerShell Gallery did not serve PSScriptAnalyzer in $tries tries: $_"
+                exit 1
+              }
+              $wait = [Math]::Min(60, 10 * [Math]::Pow(2, $tries - 1))
+              Write-Host "PSScriptAnalyzer did not download (try $tries): $_; again in $wait s"
+              Start-Sleep -Seconds $wait
+            }
+          }
           Import-Module PSScriptAnalyzer
           $found = Invoke-ScriptAnalyzer -Path $path `
             -Severity Error,Warning -ExcludeRule PSAvoidUsingWriteHost

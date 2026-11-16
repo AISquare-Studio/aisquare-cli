@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -707,22 +708,33 @@ def test_adopt_a_conversation_picks_from_the_list_and_adopts_the_one_chosen(
     no_network["usage"] = lambda account: ClaudeUsage(available=True, fetched_at=clock())
     frame = _signed_in(2, tmp_path, "tok-two")
 
-    async def go(pilot: Pilot[None]) -> tuple[list[bool], str]:
+    async def go(pilot: Pilot[None]) -> tuple[list[bool], list[str], str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         view.query_one("#sessions-adopt", Button).press()
         await settle_until(app, lambda: isinstance(app.screen, AdoptPicker))
         options = app.screen.query_one("#adoptlist", OptionList)
-        disabled = [options.get_option_at_index(i).disabled for i in range(options.option_count)]
+        each = [options.get_option_at_index(i) for i in range(options.option_count)]
+        disabled = [option.disabled for option in each]
+        # Each row as it reads, its age as <age>: that is the picker's own (wall) clock's.
+        rows = [
+            re.sub(r"\d+[mhd] ago", "<age>", str(getattr(option.prompt, "plain", option.prompt)))
+            for option in each
+        ]
         options.highlighted = 1
         await pilot.press("enter")
         await settle_until(
             app, lambda: "adopted" in shown(view.query_one("#accounts-notice", Static))
         )
-        return disabled, shown(view.query_one("#accounts-notice", Static))
+        return disabled, rows, shown(view.query_one("#accounts-notice", Static))
 
-    disabled, notice = drive(go, overview=frame)
+    disabled, rows, notice = drive(go, overview=frame)
     assert disabled == [True, False], "the held one cannot be picked"
+    # One agent's conversations read as 0.9.2's did: no agent named (C1 of #120).
+    assert rows == [
+        "aaaaaaaa  work  /w  <age>\n  fix the login bug\n  a claude still runs it (pid 4242)",
+        "bbbbbbbb  work  /w  <age>\n  fix the login bug",
+    ], rows
     assert adopted == ["bbbbbbbb-2"]
     assert notice.startswith("✓ adopted bbbbbbbb as coder-1"), notice
 
@@ -753,9 +765,11 @@ def test_over_ssh_the_page_shows_the_macs_reading_and_whose_it_is(
             )
         )
     frame = _overview(_status(2, "slot2@example.com", root=tmp_path, token_state="unreadable"))
+    key = accounts_service._seen_key(frame.accounts[0].account)
+    assert key is not None, "a Claude Code slot's login is in the item it names"
     with store_session() as store:  # the login the Mac's asq saw in slot 2's Keychain item
         store.set_ui_state(
-            accounts_service._seen_key(frame.accounts[0].account),
+            key,
             accounts_service.SeenLogin(token="fp-two", expires_at=NOW + timedelta(hours=7)).dump(),
         )
 

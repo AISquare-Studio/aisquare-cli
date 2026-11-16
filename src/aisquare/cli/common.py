@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ import typer
 from rich import box
 from rich.table import Table
 from rich.text import Text
+from typer.models import TyperPath
 
 from aisquare.core import paths
 from aisquare.core.claude_accounts import format_reset as _format_reset
@@ -44,6 +46,7 @@ from aisquare.models import (
 )
 
 if TYPE_CHECKING:  # the ledger's model only, never loaded for another command
+    from aisquare.core.agent_adapters.types import AgentAdapter, HookTrustLeft
     from aisquare.services.token_ledger import SessionLedger
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
@@ -610,22 +613,33 @@ def emit_agents(agents: list[AgentInfo]) -> None:
     if get_state().json_output:
         typer.echo(json.dumps([agent.model_dump(mode="json") for agent in agents]))
         return
+    from aisquare.core.agent_adapters import stage_mark_of
+
     table = Table(show_header=True, header_style="bold")
-    table.add_column("AGENT")
+    # A beta agent's row carries its mark under its id: the column keeps the width the ids
+    # alone give it, so every other row, Claude Code's on a machine with no Codex
+    # included, is drawn as before the mark.
+    table.add_column("AGENT", max_width=max([len("AGENT"), *(len(a.name) for a in agents)]))
     table.add_column("DETECTED")
     table.add_column("CONNECTED")
+    table.add_column("INTEGRATION")
     table.add_column("HOOKS IN")
     table.add_column("CONTEXT")
     for agent in agents:
         context = ", ".join(str(path) for path in agent.config_paths) or "—"
         table.add_row(
-            agent.name,
+            agent.name + stage_mark_of(agent.name),
             "yes" if agent.detected else "no",
             "yes" if agent.connected else "no",
+            agent.readiness.replace("_", " "),
             _hook_sites(agent),
             context,
         )
     stdout_console().print(table)
+    for agent in agents:
+        if agent.detected and agent.detail:
+            named = agent.name + stage_mark_of(agent.name)
+            stdout_console().print(f"{named}: {agent.detail}", markup=False)
 
 
 def _hook_sites(agent: AgentInfo) -> str:
@@ -673,19 +687,28 @@ def emit_connected(connection: AgentConnection) -> None:
     if get_state().json_output:
         typer.echo(connection.model_dump_json())
         return
+    from aisquare.core.agent_adapters import stage_mark_of
+
     # Always installed: `connect` refuses rather than return a connection without hooks.
     noun = "entry" if connection.imported == 1 else "entries"
     imported = f"imported {connection.imported} {noun}"
+    named = connection.name + stage_mark_of(connection.name)  # a beta agent's, with its mark
     if connection.hooks_off is not None:
-        stdout_console().print(
-            f"hooks installed for {connection.name}, but switched off — {imported}"
-        )
+        from aisquare.core import agents as agent_core
+
+        spec = agent_core.spec(connection.name)
+        stdout_console().print(f"hooks installed for {named}, but switched off — {imported}")
         stderr_console().print(
-            f'note: {connection.hooks_off} sets "disableAllHooks": true, so Claude Code runs '
-            "none of its hooks, aisquare's included — remove that key to turn them on"
+            f"note: {connection.hooks_off} sets "
+            f"{agent_core.HOOKS_OFF_SETTINGS.get(connection.name, 'every hook off')}, so "
+            f"{spec.label if spec else connection.name} runs none of its hooks, aisquare's "
+            "included — remove that key to turn them on",
+            markup=False,
         )
-        return
-    stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
+    else:
+        stdout_console().print(f"✓ connected {named} — hooks installed; {imported}")
+    if connection.detail:
+        stdout_console().print(connection.detail, markup=False)
 
 
 def emit_onboard(report: OnboardReport) -> None:
@@ -717,15 +740,39 @@ def emit_onboard(report: OnboardReport) -> None:
         console.print(f"  - {entry.text}")
 
 
+def connect_hint() -> str:
+    """What an empty prompt, turn or token listing tells the user to run: ``agents connect``
+    for each agent whose hooks aisquare installs, never one by name. A stable agent is named
+    always, as 0.9.2 named Claude Code installed or not; a beta one only once it is on this
+    machine (its home, a context file or its binary on PATH), with its mark. One agent named
+    reads as 0.9.2's line, ``Connect Claude Code: aisquare agents connect claude-code``, so a
+    machine without Codex reads as it did (tests/test_release_stage.py)."""
+    from aisquare.core import agents as agent_core
+    from aisquare.core.agent_adapters import adapters
+    from aisquare.core.agent_adapters.types import stage_mark
+
+    def here(adapter: AgentAdapter) -> bool:
+        found = agent_core.spec(adapter.id)
+        if found is not None and agent_core.detected(found):
+            return True
+        return agent_core.on_path(adapter.id) is not None
+
+    hooked = [adapter for adapter in adapters() if adapter.capabilities.hooks]
+    named = [a for a in hooked if a.release_stage == "stable" or here(a)] or hooked
+    if len(named) == 1:
+        return f"Connect {named[0].label}: aisquare agents connect {named[0].id}"
+    return "Connect your coding agent: " + " or ".join(
+        f"aisquare agents connect {agent.id}{stage_mark(agent)}" for agent in named
+    )
+
+
 def emit_prompts(prompts: list[PromptRecord]) -> None:
     """Render captured prompt history — a JSON array under ``--json``, a table otherwise."""
     if get_state().json_output:
         typer.echo(json.dumps([prompt.model_dump(mode="json") for prompt in prompts]))
         return
     if not prompts:
-        stdout_console().print(
-            "No prompts captured yet. Connect Claude Code: aisquare agents connect claude-code"
-        )
+        stdout_console().print(f"No prompts captured yet. {connect_hint()}")
         return
     table = Table(show_header=True, header_style="bold")
     table.add_column("WHEN", no_wrap=True)
@@ -746,9 +793,7 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
         return
     console = stdout_console()
     if not summary.turns:
-        console.print(
-            "No turns recorded yet. Connect Claude Code: aisquare agents connect claude-code"
-        )
+        console.print(f"No turns recorded yet. {connect_hint()}")
         return
 
     table = Table(show_header=True, header_style="bold")
@@ -799,7 +844,7 @@ def emit_token_summary(summary: TokenSummary) -> None:
     if not summary.sessions:
         console.print(
             "No session usage recorded yet — it is read off the transcript at each Stop. "
-            "Connect Claude Code: aisquare agents connect claude-code"
+            + connect_hint()
         )
         return
     table = Table(show_header=True, header_style="bold")
@@ -833,7 +878,11 @@ def emit_token_summary(summary: TokenSummary) -> None:
         "cost-weighted = input + 1.25 x cache write + 0.1 x cache read + output at the "
         "model's output/input price ratio"
     )
-    console.print(f"prices as of {summary.prices_as_of}: {summary.prices_source}")
+    for listed in summary.price_lists or [
+        {"agent": "", "as_of": summary.prices_as_of, "source": summary.prices_source}
+    ]:
+        whose = f"{listed['agent']} " if listed["agent"] else ""
+        console.print(f"{whose}prices as of {listed['as_of']}: {listed['source']}")
     if summary.unpriced_models:
         console.print(
             f"⚠ {summary.unpriced_tokens:,} tokens on unpriced models "
@@ -943,10 +992,17 @@ def _ms(value: int | None) -> str:
     return "—" if value is None else f"{value} ms"
 
 
-def emit_disconnected(name: str) -> None:
-    """Confirm an agent disconnection."""
+def emit_disconnected(name: str, *, trust_left: HookTrustLeft | None = None) -> None:
+    """Confirm an agent disconnection; with ``--json``, the records of aisquare's trust its
+    agent's file still holds, which the text says in a note (r37, finding 8)."""
     if get_state().json_output:
-        typer.echo(json.dumps({"disconnected": name}, separators=(",", ":")))
+        payload: dict[str, Any] = {"disconnected": name}
+        if trust_left is not None:
+            payload["trust_left"] = {
+                "file": str(trust_left.file),
+                "records": list(trust_left.records),
+            }
+        typer.echo(json.dumps(payload, separators=(",", ":")))
     else:
         stdout_console().print(f"✓ disconnected {name}")
 
@@ -1001,9 +1057,14 @@ def emit_doctor(checks: list[DoctorCheck]) -> None:
     if get_state().json_output:
         typer.echo(json.dumps([check.model_dump(mode="json") for check in checks]))
         return
+    from aisquare.core.agent_adapters import stage_mark_of
+
     console = stdout_console()
     for check in checks:
-        console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {check.detail}")
+        # An agent's row is named by its id; a beta agent's carries its mark, here and on
+        # asq's Doctor page, never in the JSON (install.sh reads a row's name and detail).
+        name = check.name + stage_mark_of(check.name)
+        console.print(f"{_CHECK_SYMBOL[check.status]} {name}: {check.detail}")
         if check.fix and check.status is not CheckStatus.ok:
             console.print(f"    → {check.fix}")
 
@@ -1210,3 +1271,21 @@ def fail(
         # values), so this was a class of silent mangling, not one bad string.
         stderr_console().print(f"✗ {message}", markup=False)
     raise typer.Exit(exit_code)
+
+
+class AgentPath(TyperPath):
+    """The type of a path option a sandboxed agent's broker runs a command with (``task add
+    --detail-file``, ``brief evidence|finding --artifact``, ``brief check --source-root``,
+    ``watch show <path>``): there the path is taken as given, and the command judges it, the
+    launch's tree first (``services.store_broker``). Typer's own checks ``stat`` and ``access``
+    the path as the user, outside the sandbox, before that: their "is a directory" and "is not
+    readable" told the sandbox what lies at a path outside its tree, which the command's own
+    refusal says nothing of (review r38 of #113, finding 1). Any other command's path is
+    checked as it always was (a usage error)."""
+
+    def convert(self, value: str | os.PathLike[str], param: Any, ctx: Any) -> Any:
+        from aisquare.services.store_broker import brokered_call
+
+        if brokered_call():
+            return self.coerce_path_result(value)
+        return super().convert(value, param, ctx)

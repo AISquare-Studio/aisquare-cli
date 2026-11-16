@@ -92,9 +92,11 @@ from aisquare.cli.ui.sidebar import (
     HEADROOM_DOT,
     RED,
     SETTINGS_KEY,
+    STATUS_INDENT,
     TIMES,
     AccountsSelected,
     AddProject,
+    AgentHeadroom,
     AgentRow,
     AgentSelected,
     AppSettingsSelected,
@@ -153,6 +155,7 @@ from aisquare.cli.ui.views.accounts import (
     SignInLanded,
     UsageRead,
     WelcomeRequested,
+    marks_shown,
     next_step,
     read_session,
 )
@@ -181,6 +184,7 @@ from aisquare.cli.ui.views.usage_stats import UsageStatsView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import clipboard, experimental, feature_use, instances, paths
 from aisquare.core import sharing as usage_share_core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.console import stderr_console
 from aisquare.core.feature_use import view_feature
 from aisquare.core.store import ContextStore, store_session
@@ -190,6 +194,7 @@ from aisquare.models import (
     AccountsOverview,
     CheckStatus,
     ClaudeAccount,
+    ClaudeAccountStatus,
     DoctorCheck,
     FleetAgent,
     FleetAgentStatus,
@@ -218,8 +223,14 @@ AccountsReader = Callable[[], AccountsOverview]
 """What the Accounts page reads: ``claude_accounts.overview`` in production, a stub in tests."""
 
 HeadroomReader = Callable[[Sequence[ClaudeAccount] | None], HeadroomSummary]
-"""What the status line's Claude dot reads: ``claude_accounts.read_fleet_headroom`` (through
-the five-minute usage cache) in production, a stub in tests."""
+"""What each of the status line's account dots reads, one agent's accounts at a time:
+``claude_accounts.read_fleet_headroom`` (through the five-minute usage cache) in
+production, a stub in tests."""
+
+_AgentHeadroomRead = tuple[str | None, HeadroomSummary, bool]
+"""One agent's accounts as the status line read them: the agent (``None`` before the first
+accounts frame, the reader's own default, Claude Code's), the room left across them, and
+whether every enabled one needs a login."""
 
 ReleaseCheck = Callable[[], updates_service.Offer | None]
 """What the ⬆ row asks whether a newer aisquare is out: ``updates.check_for_release`` in
@@ -259,7 +270,7 @@ HOUSEKEEPING_SECONDS = 30.0
 """How often asq's housekeeping tick runs (:meth:`FleetApp._housekeeping`): Remote's auto-off,
 the release check's hourly ask and the usage sweep, none of which has a timer of its own."""
 USAGE_SWEEP_WORKER = "usage-sweep"
-"""The worker that reads Claude Code's transcripts for the Usage & stats page's numbers
+"""The worker that reads the agents' transcripts for the Usage & stats page's numbers
 (``services.usage_stats.maybe_sweep``), off the UI thread, at most every ten minutes."""
 USAGE_SWEEP_FIRST_SECONDS = 45.0
 """How long after start the first sweep waits: the first frame and the first reads go first."""
@@ -353,6 +364,12 @@ SHOW_CAPTURED_KEY = "fleet.show_captured"
 ACTIVE_ONLY_KEY = "fleet.active_only"
 """``ui_state`` key for the sidebar's active-only filter (the header's ○/●, ``l``): ``"1"``
 while only the projects with a live agent are listed, no row while every project is."""
+
+
+def _binary_of(agent: str | None) -> str:
+    """The word the status line names an agent's accounts by: its binary (``claude``,
+    ``codex``); ``None`` is the headroom reader's default agent, Claude Code."""
+    return get_adapter(agent or accounts_service.AGENT).binary
 
 
 def _ui_state(key: str) -> str | None:
@@ -773,6 +790,10 @@ class HelpScreen(ModalScreen[None]):
         text.append("●", style=RED)
         text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
         text.append("     the dot is red when every enabled account needs one\n")
+        text.append(f"  {STATUS_INDENT}● 1", style="bold cyan")
+        text.append(f"{TIMES} codex", style="bold cyan")
+        text.append("  another agent's accounts (Codex's), read the same way, on a line\n")
+        text.append(f"  {STATUS_INDENT}       of their own under the first\n")
         text.append("\nEsc closes this", style="dim")
         return text
 
@@ -1183,7 +1204,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """When the release check was last asked (``time.monotonic``): the housekeeping tick
         asks again once ``updates.ASK_EVERY_SECONDS`` have passed (:meth:`_housekeeping`)."""
         self._usage_sweep_at = time.monotonic() + USAGE_SWEEP_FIRST_SECONDS
-        """When the housekeeping tick next sweeps Claude Code's transcripts for the Usage & stats
+        """When the housekeeping tick next sweeps the agents' transcripts for the Usage & stats
         page (``time.monotonic``): soon after start, then every ``SWEEP_EVERY``."""
         self._release_off = release_check is not None and not updates_service.check_enabled()
         """``[updates] check`` as App settings last read it, off: the row is taken away at once
@@ -1223,7 +1244,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         answers (:meth:`_paint_fleet`)."""
         self._headroom = headroom
         self.headroom_seconds = headroom_seconds
-        self._headroom_worker: Worker[tuple[HeadroomSummary, bool]] | None = None
+        self._headroom_worker: Worker[list[_AgentHeadroomRead]] | None = None
         """The headroom read in flight, or the last one; only one runs at a time."""
         self._headroom_owed = False
         """A headroom read was asked for while one ran: read once more after it."""
@@ -1231,9 +1252,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Read the headroom once the next accounts frame lands: the first frame at start,
         and the one after the Accounts page changed something (``AccountsChanged``)."""
         self.session_usage: dict[int, float] = {}
-        """Slot → five-hour window percent USED from the last headroom read
-        (``HeadroomSummary.session_by_slot``): what the agent rows and info lines show. It
+        """Slot → its window that limits, percent USED, from the last headroom read
+        (``HeadroomSummary.limit_by_slot``): what the agent rows and info lines show. It
         is the slow read's, handed on when it lands — the two-second tick reads no usage."""
+        self.agents_named = False
+        """Whether the agent info lines name each agent (``views.agent.info_line``'s ``named``):
+        exactly when the Accounts page marks its rows with their agent, accounts of more
+        than one agent listed (``views.accounts.marks_shown`` over the same frame). A
+        Claude-only machine never names one, as 0.9.2 did not (C1 of #120). From the
+        accounts read, handed on when it lands; a read that failed leaves it as it was."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         ui = settings_service.ui_settings()
         self.always_show_project_path = ui.always_show_project_path
@@ -1924,6 +1951,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return  # still running, or cancelled with the app: nothing to paint or owe
         sidebar = self.sidebar
         self.accounts_overview = overview
+        if overview is not None:
+            self._show_agents_named(marks_shown(overview.accounts))
         session_known = True
         try:
             session = read_session()
@@ -1969,21 +1998,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         self._headroom_owed = False
         overview = self.accounts_overview
-        accounts = None if overview is None else [status.account for status in overview.accounts]
-        enabled = (
-            [] if overview is None else [s for s in overview.accounts if not s.account.disabled]
-        )
-        signed_out = sum(1 for s in enabled if not s.signed_in)
+        by_agent: dict[str, list[ClaudeAccountStatus]] = {}
+        for status in overview.accounts if overview is not None else []:
+            by_agent.setdefault(status.account.agent, []).append(status)
         read_headroom = self._headroom
 
-        def read() -> tuple[HeadroomSummary, bool]:
-            summary = read_headroom(accounts)
+        def tally(statuses: list[ClaudeAccountStatus] | None) -> tuple[HeadroomSummary, bool]:
+            if statuses is None:
+                return read_headroom(None), False
+            summary = read_headroom([status.account for status in statuses])
+            enabled = [s for s in statuses if not s.account.disabled]
+            signed_out = sum(1 for s in enabled if not s.signed_in)
             if signed_out:
                 needs = summary.needs_login + signed_out
                 summary = summary.model_copy(update={"needs_login": needs})
             # Every enabled slot needs a login — the one case the dot is red for want of
             # one; an unreadable slot beside a signed-out one is grey with the ⚠ (N2).
             return summary, bool(enabled) and summary.needs_login >= len(enabled)
+
+        def read() -> list[_AgentHeadroomRead]:
+            # One dot per agent, each over its own accounts: a Codex account's room is
+            # nothing to a Claude Code agent, and the frame lists Claude Code's first.
+            if not by_agent:
+                return [(None, *tally(None))]
+            return [(agent, *tally(statuses)) for agent, statuses in by_agent.items()]
 
         self._headroom_worker = self.run_worker(
             read,
@@ -1997,14 +2035,19 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Paint the headroom a read answered (a read that failed leaves the dot as it was),
         then make the read that was owed while it ran, if one was."""
         result = event.worker.result
-        if event.state is WorkerState.SUCCESS and isinstance(result, tuple):
-            summary, every_needs_login = result
-            self.sidebar.show_headroom(summary, every_needs_login=every_needs_login)
-            # The per-slot session use rides this read to every open info line; the views
-            # never read usage themselves, and the two-second tick never asks for it. Asked
-            # of the switcher that holds the views, as `_forget_views` does, whatever screen
-            # is on top (review of #267, 2).
-            self.session_usage = summary.session_by_slot
+        if event.state is WorkerState.SUCCESS and isinstance(result, list) and result:
+            (agent, summary, every_needs_login), *others = result
+            self.sidebar.show_headroom(
+                summary,
+                every_needs_login=every_needs_login,
+                name=_binary_of(agent),
+                more=[AgentHeadroom(_binary_of(a), s, every) for a, s, every in others],
+            )
+            # The per-slot session use rides this read to every open info line, every agent's
+            # slots; the views never read usage themselves, and the two-second tick never asks
+            # for it. Asked of the switcher that holds the views, as `_forget_views` does,
+            # whatever screen is on top (review of #267, 2).
+            self.session_usage = accounts_service.limit_by_slot(s for _, s, _ in result)
             content = self.content
             for view in content.query(AgentView):
                 view.show_usage(self.session_usage)
@@ -2351,12 +2394,24 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
 
+    def _show_agents_named(self, named: bool) -> None:
+        """Hand :attr:`agents_named` to every open Agent view and Manager tab when it changes,
+        through the switcher that holds them, as the headroom read hands the usage."""
+        if named == self.agents_named:
+            return
+        self.agents_named = named
+        content = self.content
+        for view in content.query(AgentView):
+            view.show_named(named)
+        for project_view in content.query(ProjectView):
+            project_view.show_named(named)
+
     def _project_view(self, project: ProjectInfo, view_id: str) -> ProjectView:
         """A new Project view, handed the frame already read: its Settings tab names the
         session to attach to at once, not "no live tmux session" until the next tick
         (review of #267, 7). Not a frame whose fleet read failed open, as
         :meth:`_feed_open_views` does not push one."""
-        view = ProjectView(project, id=view_id, usage=self.session_usage)
+        view = ProjectView(project, id=view_id, usage=self.session_usage, named=self.agents_named)
         snapshot = self.snapshot
         if snapshot is not None and snapshot.notices.get(project.id) is None:
             view.refresh_status(
@@ -2409,8 +2464,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _agent_view(self, status: FleetAgentStatus, view_id: str) -> AgentView:
         """The view for one agent's row: the captain's has its own bar (T4)."""
         if self._is_the_captain(status.agent):
-            return CaptainView(status, usage=self.session_usage, id=view_id)
-        return AgentView(status, usage=self.session_usage, id=view_id)
+            return CaptainView(
+                status, usage=self.session_usage, named=self.agents_named, id=view_id
+            )
+        return AgentView(status, usage=self.session_usage, named=self.agents_named, id=view_id)
 
     def on_captain_requested(self, event: CaptainRequested) -> None:
         """*▶ Start captain*: the captain's view when live, else the Spawn dialog preset to it.
@@ -3254,12 +3311,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _stop_at_once(self, project: ProjectInfo, agent: FleetAgent) -> None:
         """``[ui] confirm_stop`` is off: the stop the dialog's Stop runs, with no dialog.
 
-        Graceful (``/exit``, no Force), every agent alike — the manager and the captain
-        too (the owner's decision, 2026-10-30) — off the UI thread and pinned to the row
-        (:func:`stop.start_stop`). A second press for the same row while it runs does
-        nothing: the first is already doing what it asks, and its ``stopping …`` toast says
-        so until the stop answers. A timeout would say it for less than the grace alone
-        (review of #477, m1), so the toast is held and taken down with the answer.
+        Graceful (its agent's exit command, ``fleet_service.exit_command_for``, no Force),
+        every agent alike — the manager and the captain too (the owner's decision,
+        2026-10-30) — off the UI thread and pinned to the row (:func:`stop.start_stop`). A
+        second press for the same row while it runs does nothing: the first is already doing
+        what it asks, and its ``stopping …`` toast says so until the stop answers. A timeout
+        would say it for less than the grace alone (review of #477, m1), so the toast is held
+        and taken down with the answer.
         """
         if agent.id in {row.id for row, _toast in self._quick_stops.values()}:
             return
@@ -3323,10 +3381,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.spawn_finished(event.receipt)
 
     async def on_new_account_requested(self, event: NewAccountRequested) -> None:
-        """The picker's *+ New account*: the Accounts page, its add-account flow started,
-        and the way back once it lands (``event.return_to``)."""
+        """The picker's *+ New account*: the Accounts page, the add-account flow of the agent
+        it names started (``event.agent``: the Spawn dialog's), and the way back once it lands
+        (``event.return_to``)."""
         await self.on_accounts_selected(AccountsSelected(return_to=event.return_to))
-        self.query_one("#accounts", AccountsView).begin_claude_sign_in(None)
+        self.query_one("#accounts", AccountsView).begin_claude_sign_in(None, agent=event.agent)
 
     def _content_switched(self, current: str | None) -> None:
         """Any other page than Accounts drops the way back: the user went elsewhere first."""
@@ -3343,9 +3402,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             await self.action_welcome()
             self.query_one(WelcomeView).back_from_sign_in()
         elif back.kind == "picker":
-            self._reopen_picker(back, event.slot)
+            self._reopen_picker(back, event.ref)
         else:
-            self._reopen_spawn(back, event.slot)
+            self._reopen_spawn(back, event.ref)
 
     def on_sign_in_abandoned(self, event: SignInAbandoned) -> None:
         """No login landed: nothing is reopened, and the one toast says so."""
@@ -3379,9 +3438,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         }
         self.query_one("#accounts", AccountsView).show_next_step(next_step(projects, managed))
 
-    def _reopen_picker(self, back: ReturnTo, slot: int) -> None:
+    def _reopen_picker(self, back: ReturnTo, slot: str) -> None:
         """The persona picker again, from the Personas tab that opened it, the new slot
-        highlighted (#215): what it is chosen for stays that tab's."""
+        highlighted (#215): what it is chosen for stays that tab's. ``slot`` is its number,
+        or ``codex:5`` where two agents' accounts hold it (``SignInLanded.ref``)."""
         try:
             tab = self.query_one(f"#project-{back.project_id}").query_one(PersonasTab)
         except NoMatches:
@@ -3395,15 +3455,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             filter_text=str(form.get("filter", "")),
         )
 
-    def _reopen_spawn(self, back: ReturnTo, slot: int) -> None:
+    def _reopen_spawn(self, back: ReturnTo, slot: str) -> None:
         """The Spawn dialog again, as it was typed, on the new account (#286)."""
         project = self.snapshot.project(back.project_id or "") if self.snapshot else None
         if project is None:
             self.notify("that project is no longer listed", severity="warning", timeout=6)
             return
-        dialog = SpawnDialog(
-            project, accounts=self._accounts, **{**back.form, "account": str(slot)}
-        )
+        dialog = SpawnDialog(project, accounts=self._accounts, **{**back.form, "account": slot})
         self.push_screen(dialog, callback=self.spawn_finished)
 
     async def on_settings_selected(self, event: SettingsSelected) -> None:
@@ -3781,8 +3839,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.after_sign_in = event.return_to
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("accounts")
+        view = self.query_one("#accounts", AccountsView)
         if self.accounts_overview is not None:
-            self.query_one("#accounts", AccountsView).show(self.accounts_overview)
+            view.show(self.accounts_overview)
+        if event.sign_in is not None:
+            # Welcome's step 2 or a Doctor fix: that slot's sign-in, open in the page's pane.
+            view.begin_claude_sign_in(event.sign_in)
 
     def _sweep_usage(self) -> None:
         """Sweep the transcripts, unless a sweep is already running (and it throttles itself)."""
@@ -4269,6 +4331,8 @@ def _writing_workers() -> dict[str, str]:
         onboard.ONBOARD_WORKER: "a folder's setup",
         welcome.worker_name("onboard"): "a folder's setup",
         welcome.worker_name("connect"): "Connect",
+        welcome.worker_name("choose"): "the default agent's save",
+        welcome.worker_name("sign-in"): "a sign-in's start",
         welcome.worker_name("manager"): "a manager start",
         welcome.worker_name("coders"): "the coders' start",
         project.SPAWN_WORKER: "a manager start",
@@ -4345,6 +4409,7 @@ def _waited_reads() -> dict[str, str]:
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",
         spawn.ACCOUNTS_WORKER: "the Spawn dialog's accounts",
+        spawn.ROLE_AGENT_WORKER: "the Spawn dialog's agent for its Binary",
         spawn.DEFAULT_WORKER: "the Spawn dialog's default account",
         attach.TARGETS_WORKER: "the persona target picker's list",
         persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",

@@ -8,8 +8,9 @@
 **One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
 
-rlx is short for relax: a tool made by a developer, for developers. Type `rlx`
-and you get one full-screen, mouse-driven view of your projects and their agents.
+[rlx](https://aisquare.studio/rlx) is short for relax: a tool made by a developer, for
+developers. Type `rlx` and you get one full-screen, mouse-driven view of your projects
+and their agents.
 
 - **One simple place for your coding agents.** Claude Code and Codex (beta),
   across all your projects. Click any agent and you are inside its *real*

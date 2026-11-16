@@ -13,6 +13,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 keywords = [
   "rlx",
+  "relax",
   "tui",
   "terminal",
   "coding-agents",
@@ -281,7 +282,8 @@ asq = "aisquare.cli.app:main"
 asq-statusline = "aisquare.statusline:main"
 
 [project.urls]
-Homepage = "https://aisquare.studio"
+Homepage = "https://aisquare.studio/rlx"
+Documentation = "https://docs.aisquare.studio/docs/rlx/overview/"
 Repository = "https://github.com/AISquare-Studio/rlx"
 Issues = "https://github.com/AISquare-Studio/rlx/issues"
 Changelog = "https://github.com/AISquare-Studio/rlx/blob/main/CHANGELOG.md"

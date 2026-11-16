@@ -22,6 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installers, the README and docs, `rlx doctor`'s issue link and the plugins' manifests.
   Links to the old name keep working, since GitHub redirects them, and the package, the
   plugin and its marketplace keep their names.
+- The package's page on PyPI links to rlx's site and its docs, and the README links the site.
 
 ## [0.10.0] - 2026-11-16
 

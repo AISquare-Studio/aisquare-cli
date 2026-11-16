@@ -13,7 +13,7 @@ discussion.**
 
 Report it privately, either way:
 
-- **GitHub:** on the [Security tab](https://github.com/AISquare-Studio/aisquare-cli/security),
+- **GitHub:** on the [Security tab](https://github.com/AISquare-Studio/rlx/security),
   choose *Report a vulnerability*. This is GitHub's private vulnerability
   reporting: only you and the maintainers see the report.
 - **Email:** anmol@aisquare.studio.

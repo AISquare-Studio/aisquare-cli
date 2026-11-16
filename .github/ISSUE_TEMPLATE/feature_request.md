@@ -7,7 +7,7 @@ assignees: ""
 ---
 
 <!-- Not sure it is a feature yet? Ideas are welcome in Discussions first:
-https://github.com/AISquare-Studio/aisquare-cli/discussions/categories/ideas -->
+https://github.com/AISquare-Studio/rlx/discussions/categories/ideas -->
 
 **Problem / motivation**
 What are you trying to do, and what's missing or awkward today?

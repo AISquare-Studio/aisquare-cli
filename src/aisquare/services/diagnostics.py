@@ -765,7 +765,7 @@ _MISSING_SHOWN = 6
 
 #: Where the database row sends a schema gap this build cannot close: a copy of
 #: pyproject's ``[project.urls] Issues``, kept in step by the tests.
-_ISSUES_URL = "https://github.com/AISquare-Studio/aisquare-cli/issues"
+_ISSUES_URL = "https://github.com/AISquare-Studio/rlx/issues"
 
 #: What the database row says each missing trigger costs. The ``entry_*`` triggers keep
 #: `aisquare context search` in step with the notes, and each one's absence puts it out

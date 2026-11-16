@@ -8,7 +8,7 @@
 # cannot survive that. PSScriptAnalyzer's PSUseBOMForUnicodeEncodedFile is what
 # pointed it out.
 #
-#   irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.ps1 | iex
 #
 # WHY THIS IS A SHIM AND NOT AN INSTALLER (docs/plans/one-line-install.md section 2).
 # The fleet UI runs every agent in a real tmux pane, and there is no tmux on
@@ -22,7 +22,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'AISquare-Studio/aisquare-cli'
+$Repo = 'AISquare-Studio/rlx'
 # THE RELEASE STAMP. In the repository these two lines name main's install.sh
 # and no version, so this file installs the latest release. The copy attached to
 # a GitHub Release is rewritten by scripts/stamp_installers.py to fetch THAT

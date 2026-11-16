@@ -6,8 +6,8 @@
     "name": "AISquare",
     "email": "anmol@aisquare.studio"
   },
-  "homepage": "https://github.com/AISquare-Studio/aisquare-cli",
-  "repository": "https://github.com/AISquare-Studio/aisquare-cli",
+  "homepage": "https://github.com/AISquare-Studio/rlx",
+  "repository": "https://github.com/AISquare-Studio/rlx",
   "license": "MIT",
   "keywords": ["memory", "context", "hooks"]
 }

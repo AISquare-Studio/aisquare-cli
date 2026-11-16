@@ -37,6 +37,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count
   beside it is as before (`rlx · 3 live`), and nothing else in the sidebar moves, at any
   width.
+- **The repository is now `AISquare-Studio/rlx`**, and every link says so: the one-line
+  installers, the README and docs, `rlx doctor`'s issue link and the plugins' manifests.
+  Links to the old name keep working, since GitHub redirects them, and the package, the
+  plugin and its marketplace keep their names.
 
 ## [0.10.0] - 2026-11-16
 
@@ -7082,18 +7086,18 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.10.0...HEAD
-[0.10.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.2...v0.10.0
-[0.9.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.1...v0.9.2
-[0.9.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...v0.9.0
-[0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2
-[0.8.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0
-[0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
-[0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1
-[0.2.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/AISquare-Studio/aisquare-cli/releases/tag/v0.1.0
+[Unreleased]: https://github.com/AISquare-Studio/rlx/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/AISquare-Studio/rlx/compare/v0.9.2...v0.10.0
+[0.9.2]: https://github.com/AISquare-Studio/rlx/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/AISquare-Studio/rlx/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/AISquare-Studio/rlx/compare/v0.8.2...v0.9.0
+[0.8.2]: https://github.com/AISquare-Studio/rlx/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/AISquare-Studio/rlx/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/AISquare-Studio/rlx/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/AISquare-Studio/rlx/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/AISquare-Studio/rlx/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/AISquare-Studio/rlx/compare/v0.4.0rc2...v0.5.0
+[0.4.0rc2]: https://github.com/AISquare-Studio/rlx/compare/v0.4.0rc1...v0.4.0rc2
+[0.4.0rc1]: https://github.com/AISquare-Studio/rlx/compare/v0.2.0...v0.4.0rc1
+[0.2.0]: https://github.com/AISquare-Studio/rlx/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/AISquare-Studio/rlx/releases/tag/v0.1.0

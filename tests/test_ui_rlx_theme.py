@@ -38,6 +38,7 @@ from aisquare.cli.ui.theme import (
     MARK_VARIABLE,
     RLX_BLUE,
     RLX_THEME,
+    mark_colour,
     theme_variable_defaults,
 )
 from aisquare.cli.ui.views.welcome import WelcomeView
@@ -256,14 +257,59 @@ ALL_THEMES = sorted({*BUILTIN_THEMES, RLX_THEME.name})
 
 
 def _expected_mark(theme: str) -> Color:
+    """The mark's colour, worked out here and not by the code under test: rlx's blue; a
+    terminal theme's ANSI primary; else the primary where it reads as text on the theme's
+    background, and the theme's foreground where it does not (the manager's floor, #139)."""
+    if theme == RLX_THEME.name:
+        return Color.parse(RLX_BLUE)
+    if theme in TERMINALS:
+        return Color.parse(BUILTIN_THEMES[theme].primary)
+    values = variables(BUILTIN_THEMES[theme])
+    primary, ground = Color.parse(values["primary"]), Color.parse(values["background"])
+    if contrast(primary.rgb, ground.rgb) >= TEXT:
+        return primary
+    return Color.parse(values["foreground"])
+
+
+READABLE = sorted(set(ALL_THEMES) - TERMINALS)
+"""Every theme ``t`` offers whose colours are known: 20, Textual's built-ins and rlx."""
+
+
+@pytest.mark.parametrize("theme", READABLE)
+def test_the_mark_reads_as_text_on_every_theme_in_its_primary_where_that_reads(
+    theme: str,
+) -> None:
+    """The floor (manager's ruling on #139): a theme's primary under 4.5:1 on its background
+    gives the mark the theme's foreground. textual-dark's #0178D4 is 4.14:1, and a saved pick
+    keeps a user there, so it is one of them."""
+    values = variables(RLX_THEME if theme == RLX_THEME.name else BUILTIN_THEMES[theme])
+    ground = Color.parse(values["background"])
+    mark = Color.parse(
+        values[MARK_VARIABLE] if theme == RLX_THEME.name else mark_colour(BUILTIN_THEMES[theme])
+    )
+    assert mark == _expected_mark(theme), (theme, mark.hex)
+    assert contrast(mark.rgb, ground.rgb) >= TEXT, (theme, mark.hex, ground.hex)
+
+
+def test_the_floor_takes_the_text_colour_only_where_the_primary_does_not_read() -> None:
+    assert len(READABLE) >= 20 and "textual-dark" in READABLE
+    kept = {theme for theme in READABLE if _expected_mark(theme) == _primary(theme)}
+    assert {"rlx", "textual-light", "nord", "dracula"} <= kept
+    assert "textual-dark" not in kept
+    assert mark_colour(BUILTIN_THEMES["textual-dark"]) == "#E0E0E0"  # its foreground
+    assert set(READABLE) - kept, "a floor that never applies pins nothing"
+
+
+def _primary(theme: str) -> Color:
     return Color.parse(RLX_BLUE if theme == RLX_THEME.name else BUILTIN_THEMES[theme].primary)
 
 
 def test_every_theme_gives_the_mark_a_colour_in_both_apps(
     tmp_path: Path, script: Script, board_dir: Path
 ) -> None:
-    """``$rlx-mark`` resolves under every theme, the built-ins' to their ``primary``: Textual
-    fails a stylesheet that names a variable no theme or default defines."""
+    """``$rlx-mark`` resolves under every theme, the built-ins' to their primary or, under the
+    floor, their foreground: Textual fails a stylesheet that names a variable no theme or
+    default defines."""
 
     async def fleet(pilot: Pilot[None]) -> dict[str, str]:
         app = fleet_app(pilot)
@@ -279,7 +325,7 @@ def test_every_theme_gives_the_mark_a_colour_in_both_apps(
         assert Color.parse(value) == _expected_mark(theme), ("board", theme)
 
 
-def test_the_default_is_the_themes_primary_and_rlxs_own_value_wins() -> None:
+def test_the_default_is_the_themes_mark_colour_and_rlxs_own_value_wins() -> None:
     class Host(App[None]):
         pass
 
@@ -287,6 +333,8 @@ def test_the_default_is_the_themes_primary_and_rlxs_own_value_wins() -> None:
     host.register_theme(RLX_THEME)
     host.theme = "nord"
     assert theme_variable_defaults(host) == {MARK_VARIABLE: BUILTIN_THEMES["nord"].primary}
+    host.theme = "textual-dark"  # #0178D4 is 4.14:1 on its #121212: its text colour instead
+    assert theme_variable_defaults(host) == {MARK_VARIABLE: "#E0E0E0"}
     host.theme = "rlx"
     assert theme_variable_defaults(host) == {MARK_VARIABLE: RLX_BLUE}  # its primary, too
     assert variables()[MARK_VARIABLE] == RLX_BLUE
@@ -484,8 +532,8 @@ async def _marks(pilot: Pilot[None], themes: list[str]) -> Marks:
 def test_the_mark_is_the_brand_blue_under_rlx_and_follows_t_to_textual_dark_and_light(
     tmp_path: Path, script: Script
 ) -> None:
-    """The owner's three looks, as drawn: rlx's #2F74F0, then each theme's own primary as the
-    theme changes under the running app, then rlx again."""
+    """The owner's three looks, as drawn: rlx's #2F74F0, then each theme's own mark colour as
+    the theme changes under the running app, then rlx again."""
     seed(tmp_path, ("prj_a", "alpha", None))
     themes = ["rlx", "textual-dark", "textual-light", "rlx"]
 
@@ -495,7 +543,8 @@ def test_the_mark_is_the_brand_blue_under_rlx_and_follows_t_to_textual_dark_and_
 
     seen, words = drive(body)
     assert "".join(words).strip() == "rlx · 3 live", words
-    expected = {"rlx": "#2F74F0", "textual-dark": "#0178D4", "textual-light": "#004578"}
+    # textual-dark's primary is 4.14:1 on its background: the floor gives its text colour.
+    expected = {"rlx": "#2F74F0", "textual-dark": "#E0E0E0", "textual-light": "#004578"}
     for theme, (text, ink, _, heading, heading_ink, _) in seen.items():
         assert text == "rlx", (theme, text)
         assert ink.hex == expected[theme], (theme, ink.hex)

@@ -20,6 +20,7 @@ import os
 from typing import Any, ClassVar
 
 from textual.app import App, ComposeResult
+from textual.color import Color
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.theme import Theme
@@ -36,9 +37,13 @@ MARK_VARIABLE = "rlx-mark"
 """The theme variable the product mark is drawn in: the sidebar's ``rlx`` and Welcome's heading.
 
 ``rlx`` sets it to :data:`RLX_BLUE`. Every other theme leaves it unset, and
-:func:`theme_variable_defaults` gives it that theme's ``primary``, so the mark changes
-colour with the theme that ``t`` picks.
+:func:`theme_variable_defaults` gives it that theme's ``primary``, or its ``foreground`` where
+the primary does not read as text (:func:`mark_colour`), so the mark changes colour with the
+theme that ``t`` picks.
 """
+
+TEXT_CONTRAST = 4.5
+"""WCAG 2's floor for text (1.4.3): the mark is the product's name, and it must read."""
 
 MARK_STYLE = f"${MARK_VARIABLE}"
 """The mark's style, for a ``textual.content.Content`` span.
@@ -99,13 +104,47 @@ def register_themes(app: App[Any]) -> None:
     app.register_theme(RLX_THEME)
 
 
+def _luminance(colour: Color) -> float:
+    def channel(value: int) -> float:
+        share = value / 255
+        return share / 12.92 if share <= 0.03928 else ((share + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = colour.rgb
+    return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+
+def contrast_ratio(one: Color, other: Color) -> float:
+    """WCAG 2's contrast ratio of two opaque colours, 1 to 21."""
+    light, dark = sorted((_luminance(one), _luminance(other)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def mark_colour(theme: Theme) -> str:
+    """The mark's colour under ``theme`` when it sets none: its ``primary``, read as text.
+
+    Where the primary is under :data:`TEXT_CONTRAST` on the theme's own background (6 of
+    Textual's built-ins, textual-dark's #0178D4 at 4.14:1 among them), the mark takes the
+    theme's ``foreground``, the colour its text is drawn in, which reads. A theme of the
+    terminal's own ANSI colours keeps its primary: its real colours are the terminal's, and
+    no ratio can be known.
+    """
+    colours = theme.to_color_system().generate()
+    primary = Color.parse(colours["primary"])
+    if theme.ansi or primary.ansi is not None:
+        return theme.primary
+    background = Color.parse(colours["background"])
+    if contrast_ratio(primary, background) >= TEXT_CONTRAST:
+        return colours["primary"]
+    return colours["foreground"]
+
+
 def theme_variable_defaults(app: App[Any]) -> dict[str, str]:
-    """The variables our apps add to every theme: :data:`MARK_VARIABLE`, as its ``primary``.
+    """The variables our apps add to every theme: :data:`MARK_VARIABLE`, as :func:`mark_colour`.
 
     Merge it into the app's ``get_theme_variable_defaults``, Textual's place for an app's
     own variables. A theme that sets one (``rlx`` sets the mark) overrides it there.
     """
-    return {MARK_VARIABLE: app.current_theme.primary}
+    return {MARK_VARIABLE: mark_colour(app.current_theme)}
 
 
 class ThemePicker(ModalScreen[None]):

@@ -47,8 +47,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set in `TEXTUAL_THEME`. Every theme asq offered is still there. `rlx board -w`
   shares your pick, so it opens in rlx too.
 - **The `rlx` at asq's top-left, and Welcome's heading, take their colour from the
-  theme.** Under rlx they are #2F74F0, and under any other theme they take its main
-  colour, so they change when you press `t`. Only colours change: nothing moves, at any
+  theme.** Under rlx they are #2F74F0. Under any other theme they take its main colour,
+  or its text colour where the main colour is too faint to read as text (textual-dark's
+  is), so they change when you press `t`. Only colours change: nothing moves, at any
   width. asq cannot set your terminal's font. JetBrains Mono, the font on rlx's web page,
   is the one we recommend.
 

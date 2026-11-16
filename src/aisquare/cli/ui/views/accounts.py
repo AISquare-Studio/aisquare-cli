@@ -779,11 +779,15 @@ def account_cells(
             if awaits_first_reading(status, usage)
             else Text(PROBLEM_MARK, style="bold yellow")
         )
-    elif not tokened and usage is not None and usage.available:
+    elif (
+        not tokened
+        and usage is not None
+        and usage.available
+        and (age := reading_age(usage, now=now).removeprefix(" · as of ").removesuffix(" ago"))
+    ):
         # A reading a session recorded, as old as its last turn: said beside its bar, as a
         # kept reading's age is (the full line is the cell's tooltip).
-        if age := reading_age(usage, now=now).removeprefix(" · as of ").removesuffix(" ago"):
-            cells["session"].append(f" · {age}", style="dim")
+        cells["session"].append(f" · {age}", style="dim")
     for text in cells.values():
         text.no_wrap = True
         text.overflow = "ellipsis"

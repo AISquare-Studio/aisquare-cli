@@ -71,7 +71,7 @@ from urllib.parse import parse_qsl, unquote, urlparse, urlsplit, urlunsplit
 from aisquare.core import agents as agent_core
 from aisquare.core.shell_line import command_line as command_line  # pasted lines, everywhere
 from aisquare.core.shell_line import split_line as split_line  # a fix line read back
-from aisquare.core.version import DISTRIBUTION, __version__
+from aisquare.core.version import DISTRIBUTION, DISTRIBUTIONS, __version__
 
 UV_TOOL = "uv-tool"
 EDITABLE = "editable"
@@ -91,7 +91,14 @@ ROUTES = (UV_TOOL, EDITABLE, LOCAL_SOURCE, UVX, PIPX, HOMEBREW, VENV, SYSTEM)
 #: (:func:`_uv_cache_environment`).
 _UV_CACHE_ENVIRONMENTS = re.compile(r"(?:archive|environments)-v\d+")
 
-PYPI_JSON_URL = f"https://pypi.org/pypi/{DISTRIBUTION}/json"
+
+def pypi_json_url(name: str) -> str:
+    """PyPI's JSON page for ``name``, one of :data:`DISTRIBUTIONS` (#137)."""
+    return f"https://pypi.org/pypi/{name}/json"
+
+
+PYPI_JSON_URL = pypi_json_url(DISTRIBUTION)
+"""This install's own name's page: every release is published under both names alike."""
 LOOKUP_TIMEOUT_SECONDS = 5.0
 
 INSTALLER_ONE_LINER = (
@@ -336,8 +343,11 @@ def fetch_latest(
     uploaded_before: datetime | None = None,
     python: str | None = None,
     pin: str | None = None,
+    name: str = DISTRIBUTION,
 ) -> LatestRelease:
-    """The newest ``aisquare-cli`` on PyPI. Never raises; an unreachable PyPI is an answer.
+    """The newest release of ``name`` on PyPI: the install's own name (``InstallRoute.
+    distribution``, #137), as every release is published under both. Never raises; an
+    unreachable PyPI is an answer.
 
     Called only when ``aisquare upgrade`` runs — never by ``doctor``, which stays
     offline unless ``--live``. PyPI's number decides only whether there is
@@ -365,7 +375,7 @@ def fetch_latest(
     from urllib.request import Request
 
     request = Request(
-        PYPI_JSON_URL,
+        pypi_json_url(name),
         headers={"Accept": "application/json", "User-Agent": f"{DISTRIBUTION}/{__version__}"},
     )
     try:
@@ -552,6 +562,9 @@ class UvReceipt:
     """``(kind, where)`` when the package came from somewhere other than an index."""
     subdirectory: str | None = None
     """The project's directory inside a ``url`` or ``git`` source, when uv recorded one."""
+    name: str | None = None
+    """Which of :data:`DISTRIBUTIONS` the receipt requires: the name the tool was installed
+    under, which its reinstall and its removal use again (#137)."""
     bin_dir: Path | None = None
     """Where uv put the ``aisquare`` executable — so a reinstall puts it there again."""
     entrypoints: tuple[Path, ...] = ()
@@ -568,7 +581,7 @@ class UvReceipt:
 
 
 def canonical_name(name: object) -> str:
-    """A distribution name as PEP 503 normalises it, to compare with :data:`DISTRIBUTION`."""
+    """A distribution name as PEP 503 normalises it, to compare with :data:`DISTRIBUTIONS`."""
     return re.sub(r"[-_.]+", "-", str(name)).lower()
 
 
@@ -698,7 +711,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         if not isinstance(requirement, dict):
             refused.append("a requirement uv wrote in a shape this CLI does not know")
             continue
-        if ours is None and canonical_name(requirement.get("name")) == DISTRIBUTION:
+        if ours is None and canonical_name(requirement.get("name")) in DISTRIBUTIONS:
             ours = requirement
             continue
         text = _requirement_string(requirement)
@@ -715,14 +728,15 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
     extras: tuple[str, ...] = ()
     source: tuple[str, str] | None = None
     subdirectory: str | None = None
+    name = canonical_name(ours.get("name")) if ours is not None else DISTRIBUTION
     if ours is None:
-        refused.append(f"no {DISTRIBUTION} requirement")
+        refused.append(f"no {' or '.join(DISTRIBUTIONS)} requirement")
     else:
         raw_extras = ours.get("extras") or []
         if isinstance(raw_extras, list) and all(isinstance(extra, str) for extra in raw_extras):
             extras = tuple(sorted(set(raw_extras)))
         else:
-            refused.append(f"{DISTRIBUTION} extras in a shape this CLI does not know")
+            refused.append(f"{name} extras in a shape this CLI does not know")
         for key in _SOURCE_KEYS:
             if key in ours:
                 source = (key, str(ours[key]))
@@ -731,7 +745,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
             subdirectory = ours["subdirectory"]
         unknown = set(ours) - _REQUIREMENT_KEYS - set(_SOURCE_KEYS) - {"subdirectory"}
         if unknown:
-            refused.append(f"{DISTRIBUTION} requirement keys {', '.join(sorted(unknown))}")
+            refused.append(f"{name} requirement keys {', '.join(sorted(unknown))}")
     for key in _FILE_ONLY_LISTS:
         if tool.get(key):
             refused.append(f"{key} (uv takes those only as files)")
@@ -749,6 +763,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         )
     python = tool.get("python")
     return UvReceipt(
+        name=name if ours is not None else None,
         extras=extras,
         withs=tuple(withs),
         python=python if isinstance(python, str) and python else None,
@@ -847,6 +862,19 @@ class InstallRoute:
     """The checkout, file or URL an editable or local-source install came from."""
     formula: str | None = None
     """The Homebrew formula, read from the ``Cellar/<formula>/…`` prefix."""
+
+    @property
+    def distribution(self) -> str:
+        """The name this install was made under, one of :data:`DISTRIBUTIONS` (#137): what
+        its upgrade, its removal and its PyPI lookup name, so each install acts on its own
+        name and none ever puts the other beside it. A uv tool's receipt says it, a pipx
+        install's venv is named for it, and anything else is the dist-info here
+        (:data:`DISTRIBUTION`)."""
+        if self.receipt is not None and self.receipt.name is not None:
+            return self.receipt.name
+        if self.kind == PIPX and canonical_name(self.facts.prefix.name) in DISTRIBUTIONS:
+            return canonical_name(self.facts.prefix.name)
+        return DISTRIBUTION
 
     @property
     def manager(self) -> str:
@@ -1098,6 +1126,7 @@ def _uv_spec(route: InstallRoute, target: str | None, current: str) -> list[str]
     """The package argument(s) for ``uv tool install``: ``name[extras]@target``, the latest
     release no older than ``current`` (``name[extras]>=current``), or a source."""
     receipt = route.receipt or UvReceipt()
+    name = route.distribution
     extras = f"[{','.join(receipt.extras)}]" if receipt.extras else ""
     if receipt.source is None:
         floor = _floor(current) if target is None else None
@@ -1108,17 +1137,17 @@ def _uv_spec(route: InstallRoute, target: str | None, current: str) -> list[str]
             # (sweep of #257). A floor fails to resolve instead, before uv touches the
             # environment (measured, uv 0.12.19). The refresh is the one `@latest` implied,
             # so a release published minutes ago is seen.
-            return ["--refresh-package", DISTRIBUTION, f"{DISTRIBUTION}{extras}>={floor}"]
-        return [f"{DISTRIBUTION}{extras}@{target or 'latest'}"]
+            return ["--refresh-package", name, f"{name}{extras}>={floor}"]
+        return [f"{name}{extras}@{target or 'latest'}"]
     kind, where = receipt.source
     if kind == "editable":
         return ["-e", f"{where}{extras}"]
     if kind in ("directory", "path"):
         return [f"{where}{extras}"]
     if kind == "git":
-        return [f"{DISTRIBUTION}{extras} @ {_git_reference(where, receipt.subdirectory)}"]
+        return [f"{name}{extras} @ {_git_reference(where, receipt.subdirectory)}"]
     subdirectory = f"#subdirectory={receipt.subdirectory}" if receipt.subdirectory else ""
-    return [f"{DISTRIBUTION}{extras} @ {where}{subdirectory}"]
+    return [f"{name}{extras} @ {where}{subdirectory}"]
 
 
 def _git_reference(recorded: str, subdirectory: str | None) -> str:
@@ -1191,7 +1220,8 @@ def upgrade_argv(
     """The command that moves this install to ``target``; with ``None``, to the latest
     release, and for a uv tool never to one older than ``current`` (the running version
     unless given): a move back is only made by asking for it with ``--version``."""
-    pinned = f"{DISTRIBUTION}=={target}" if target else DISTRIBUTION
+    name = route.distribution
+    pinned = f"{name}=={target}" if target else name
     if target and route.kind in (EDITABLE, LOCAL_SOURCE):
         # Its reinstall installs what its source holds, not ``target`` (pin_refusal); a uv
         # tool installed from a checkout, a directory or git too (review of #257).
@@ -1208,16 +1238,16 @@ def upgrade_argv(
     if route.kind == PIPX:
         if target:
             return ["pipx", "install", "--force", pinned]
-        return ["pipx", "upgrade", DISTRIBUTION]
+        return ["pipx", "upgrade", name]
     if route.kind == HOMEBREW:
         # No pin: brew installs its formula's version, and `brew upgrade` the newest of it.
-        return [] if target else ["brew", "upgrade", route.formula or DISTRIBUTION]
+        return [] if target else ["brew", "upgrade", route.formula or name]
     if route.kind == UVX:
         return ["uv", "tool", "install", pinned]  # an install to keep, as uvx keeps none
     user = ["--user"] if route.kind == SYSTEM and route.facts.user_install else []
     if target:
         return _pip_argv(route, "install", *user, pinned)
-    return _pip_argv(route, "install", "--upgrade", *user, DISTRIBUTION)
+    return _pip_argv(route, "install", "--upgrade", *user, name)
 
 
 #: When a reinstall a person runs by hand must wait, on Windows: one wording for every route.
@@ -1310,8 +1340,10 @@ def _uv_tool_blocker(route: InstallRoute) -> str | None:
     ``uv tool … aisquare-cli`` acts on ``tools/aisquare-cli``, and from an
     environment with any other name it would act on a different one.
     """
-    if route.facts.prefix.name != DISTRIBUTION:
-        return f"the tool environment is named {route.facts.prefix.name!r}, not {DISTRIBUTION!r}"
+    if route.facts.prefix.name != route.distribution:
+        return (
+            f"the tool environment is named {route.facts.prefix.name!r}, not {route.distribution!r}"
+        )
     if find_uv() is None:
         return "uv is not on PATH"
     return None
@@ -1419,7 +1451,7 @@ def _our_command(path: Path, receipt: UvReceipt, *, windows: bool) -> bool:
         return (
             target.name == path.name
             and target.parent.name == "bin"
-            and target.parent.parent.name == DISTRIBUTION
+            and canonical_name(target.parent.parent.name) in DISTRIBUTIONS
         )
     return windows and path in receipt.entrypoints
 
@@ -1430,14 +1462,14 @@ def _our_command(path: Path, receipt: UvReceipt, *, windows: bool) -> bool:
 def remove_argv(route: InstallRoute) -> list[str]:
     """The command that removes this install's package — and nothing else of ours."""
     if route.receipt is not None:
-        return ["uv", "tool", "uninstall", DISTRIBUTION]
+        return ["uv", "tool", "uninstall", route.distribution]
     if route.kind == PIPX:
-        return ["pipx", "uninstall", DISTRIBUTION]
+        return ["pipx", "uninstall", route.distribution]
     if route.kind == HOMEBREW:
-        return ["brew", "uninstall", route.formula or DISTRIBUTION]
+        return ["brew", "uninstall", route.formula or route.distribution]
     if route.kind == UVX:
-        return ["uv", "cache", "clean", DISTRIBUTION]
-    return _pip_argv(route, "uninstall", DISTRIBUTION)
+        return ["uv", "cache", "clean", route.distribution]
+    return _pip_argv(route, "uninstall", route.distribution)
 
 
 def not_removable(route: InstallRoute) -> str | None:

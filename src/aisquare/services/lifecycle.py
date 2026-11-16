@@ -48,7 +48,7 @@ from aisquare.core.tmux import (
     asking_server,
     server_may_run,
 )
-from aisquare.core.version import DISTRIBUTION, __version__
+from aisquare.core.version import __version__
 from aisquare.core.workspace import project_id_for
 from aisquare.models import ProjectInfo, SetupReport
 from aisquare.services import agents as agents_service
@@ -758,7 +758,7 @@ def _pin_unmet(
 ) -> str | None:
     """Why uv would refuse ``--version``'s ``target`` here, from the lookup, or ``None``."""
     if latest.pin_unlisted:
-        return f"PyPI lists no {DISTRIBUTION} {target}"
+        return f"PyPI lists no {route.distribution} {target}"
     if latest.pin_after_cutoff:
         held = install_route.cutoff(route) or "--exclude-newer"
         return f"your uv cutoff ({held}) excludes {target}, uploaded after it"
@@ -950,7 +950,11 @@ def _latest_for(
             return install_route.LatestRelease(None, f"PyPI was not asked: {why}")
     # The Python the reinstall runs on, which uv reads each Requires-Python for; the rest
     # only when asked for.
-    asked: dict[str, Any] = {"python": install_route.reinstall_python(route)}
+    asked: dict[str, Any] = {
+        "python": install_route.reinstall_python(route),
+        # The install's own name: each upgrades under the name it was made with (#137).
+        "name": route.distribution,
+    }
     if install_route.takes_prereleases(route, __version__):
         asked["prereleases"] = True
     if before is not None:

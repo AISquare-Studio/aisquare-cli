@@ -35,6 +35,7 @@ from aisquare.core import paths, selfcli, spawn
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import WriteScope, store_dir
 from aisquare.core.store import store_session
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import ProjectInfo, TeamSession
 from aisquare.services import agent_launch, store_broker
 from aisquare.services import team as team_service
@@ -1078,18 +1079,18 @@ def test_a_sandboxed_launch_is_refused_where_its_sandbox_may_write_aisquare(
     _installed_at(monkeypatch, venv)
     codex = get_adapter("codex")
     argv = ["codex", *_profile()]
-    with pytest.raises(store_broker.LaunchRefused, match="uv tool install aisquare-cli"):
+    with pytest.raises(store_broker.LaunchRefused, match=f"uv tool install {DISTRIBUTION}"):
         store_broker.refuse_inside(argv, project, codex)
     monkeypatch.chdir(project)
     execute = Mock()
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: selected.binary.binary)
     refused = runner.invoke(app, ["launch", "tester", "--agent", "codex", "--", *_profile()])
-    assert refused.exit_code == 1 and "uv tool install aisquare-cli" in refused.output
+    assert refused.exit_code == 1 and f"uv tool install {DISTRIBUTION}" in refused.output
     assert not execute.called
     row = diagnostics._sandboxed_install_check(project)
     assert row is not None and row.status.value == "warn" and ".venv" in row.detail
-    assert "aisquare-cli" in str(row.fix)
+    assert DISTRIBUTION in str(row.fix)
     assert onboarding.fix_commands([row]) == [], "no button runs connect from this install"
     _installed_at(monkeypatch, Path("/opt/elsewhere"))
     assert diagnostics._sandboxed_install_check(project) is None

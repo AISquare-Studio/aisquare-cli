@@ -36,7 +36,7 @@ make install          # editable install + dev tools (ruff, mypy, pytest)
 another way takes the same file: `uv pip install -c ci/constraints.txt -e ".[dev]"`.
 
 > **Do not install the explainability extra into this checkout.**
-> `pip install 'aisquare-cli[explainability]'` puts a second `aisquare` package
+> `pip install 'rlx[explainability]'` puts a second `aisquare` package
 > ahead of your editable one, and from then on every command — including the
 > ones that would have explained it — dies with
 > `No module named 'aisquare.cli'`. Install the extra in a separate,

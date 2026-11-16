@@ -36,7 +36,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents
-from aisquare.core.version import __version__
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.models import CheckStatus
 from aisquare.services import diagnostics
 from tests.fsperms import can_symlink
@@ -646,10 +646,11 @@ def test_this_install_is_the_script_its_distribution_installed_not_one_beside_it
     user = tmp_path / "home" / ".local"
     ours = _fake_aisquare(user / "bin" / "aisquare", prints=f"aisquare {__version__}")
     site = user / "lib" / "python3.12" / "site-packages"
-    record = site / f"aisquare_cli-{__version__}.dist-info"
+    # Named as the install that runs is (#137): this install's own distribution.
+    record = site / f"{DISTRIBUTION.replace('-', '_')}-{__version__}.dist-info"
     record.mkdir(parents=True)
     (record / "METADATA").write_text(
-        f"Metadata-Version: 2.1\nName: aisquare-cli\nVersion: {__version__}\n", encoding="utf-8"
+        f"Metadata-Version: 2.1\nName: {DISTRIBUTION}\nVersion: {__version__}\n", encoding="utf-8"
     )
     (record / "RECORD").write_text(
         "../../../bin/aisquare,,\n../../../bin/asq,,\n", encoding="utf-8"

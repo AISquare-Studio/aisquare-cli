@@ -9,6 +9,7 @@ rest of the suite runs with the gate off, as Phase 1 had none.
 from __future__ import annotations
 
 import json
+import re
 import stat
 import sys
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.store import store_session
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services.captain import actions, gate
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Refused
@@ -85,7 +87,7 @@ def test_unenrolled_the_gate_fails_closed_and_says_how() -> None:
 def test_without_pyotp_the_gate_names_its_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     gate.enroll()
     monkeypatch.setitem(sys.modules, "pyotp", None)  # an import now raises ImportError
-    with pytest.raises(Refused, match=r"pip install 'aisquare-cli\[gate\]'"):
+    with pytest.raises(Refused, match=re.escape(f"pip install '{DISTRIBUTION}[gate]'")):
         gate.admit("press")
 
 

@@ -42,6 +42,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services import explainability_ops as ops
 
 _ROW = "explainability sdk"
@@ -168,7 +169,7 @@ def test_shadowing_reaches_doctor_with_a_symptom_and_a_fix(
     row = _rows(runner)[_ROW]
 
     assert row["status"] == "warn", row
-    assert "not aisquare-cli's" in row["detail"], row["detail"]
+    assert f"not {DISTRIBUTION}'s" in row["detail"], row["detail"]
     assert row["fix"], "a warn with no remediation is a dead end for the operator"
     assert "pip install" in row["fix"], row["fix"]
 

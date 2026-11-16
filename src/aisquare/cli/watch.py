@@ -36,6 +36,7 @@ from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state_file import read_state
 from aisquare.core.store import unmet_needs
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import model_memory
@@ -527,7 +528,7 @@ def run_watch(interval: float, project: ProjectInfo | None = None) -> None:
         import textual  # noqa: F401
     except ImportError:
         stderr_console().print(
-            "tip: pip install 'aisquare-cli[tui]' for the interactive board "
+            f"tip: pip install '{DISTRIBUTION}[tui]' for the interactive board "
             "(clickable tasks/feed, scrolling, detail bar)"
         )
         _run_fallback(interval, project)

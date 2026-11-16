@@ -43,8 +43,20 @@ AISQUARE_INSTALL_VERSION_SELF="1.0.0"
 
 # --- what the script installs, and the floors it holds them to ---------------
 
-PYPI_PACKAGE="aisquare-cli"
-PYPI_JSON_URL="https://pypi.org/pypi/aisquare-cli/json"
+#: What this run installs from PyPI (#137). Every release is published twice, as
+#: rlx and, the same build, as aisquare-cli: a fresh machine takes rlx, and an
+#: install made before the move keeps its own name (`choose_package`), so nothing
+#: this script runs ever puts the other name beside it. core/version.py
+#: DISTRIBUTIONS holds the same two.
+PYPI_PACKAGE="rlx"
+PYPI_JSON_URL="https://pypi.org/pypi/rlx/json"
+#: The first release published as rlx. A version asked for that is older was
+#: published as aisquare-cli alone, so a fresh machine pinned to it takes that.
+#: aisquare-cli is published at every version, so this only ever errs safe.
+FIRST_RLX_VERSION="0.11.0"
+#: How `choose_package` chose: fresh (rlx), kept (an existing install's own name),
+#: pinned (a version from before rlx) or fallback (rlx not on PyPI yet).
+PACKAGE_CHOICE=""
 
 #: What `uv tool install` is actually pointed at. Overridable so CI can test
 #: THIS TREE rather than the last release: the container matrix (§8.3) asserts a
@@ -52,7 +64,8 @@ PYPI_JSON_URL="https://pypi.org/pypi/aisquare-cli/json"
 #: review would otherwise be graded by the version already on PyPI. A path
 #: (wheel, sdist or project directory) has no PyPI version to compare against,
 #: so setting this also turns the version comparison off — see `resolve`.
-INSTALL_TARGET=${AISQUARE_INSTALL_PACKAGE:-$PYPI_PACKAGE}
+INSTALL_LOCAL=${AISQUARE_INSTALL_PACKAGE:-}
+INSTALL_TARGET=${INSTALL_LOCAL:-$PYPI_PACKAGE}
 UV_INSTALLER_URL="https://astral.sh/uv/install.sh"
 #: A newline. The doctor's amber row names are listed one per line, because a
 #: name can hold spaces (`manager board context`): see `doctor_amber`.
@@ -251,7 +264,7 @@ warn() {
 die() {
     printf '%serror%s %s\n' "$C_RED" "$C_RESET" "$*" >&2
     printf '%s\n' "Nothing was left half-installed on purpose: rerun this script, or" >&2
-    printf '%s\n' "install by hand with: uv tool install --with tiktoken aisquare-cli" >&2
+    printf '%s\n' "install by hand with: uv tool install --with tiktoken $PYPI_PACKAGE" >&2
     exit 1
 }
 
@@ -599,6 +612,10 @@ hand_off() {
     # guard is, and taken only from a hand-off to this very script, and as a version.
     _ho_latest=${AISQUARE_INSTALL_PYPI_LATEST:-}
     unset AISQUARE_INSTALL_PYPI_LATEST
+    # The name main's copy fell back to on a fresh machine, rlx not on PyPI yet
+    # (`ask_pypi`): its latest is that name's, so this script installs that name too.
+    _ho_name=${AISQUARE_INSTALL_PYPI_NAME:-}
+    unset AISQUARE_INSTALL_PYPI_NAME
     if [ -n "$_ho_from" ] && [ "$_ho_from" = "$0" ]; then
         case "$_ho_latest" in
             "" | [!0-9]* | *[!0-9A-Za-z.]*) ;;
@@ -607,6 +624,10 @@ hand_off() {
                 PYPI_ASKED=1
                 ;;
         esac
+        if [ "$_ho_name" = aisquare-cli ] && [ "$PACKAGE_CHOICE" = fresh ]; then
+            use_package aisquare-cli
+            PACKAGE_CHOICE=fallback
+        fi
     fi
     [ -z "$STAMPED_VERSION" ] || return 0
     if [ -n "$_ho_from" ] && [ "$_ho_from" = "$0" ]; then
@@ -650,6 +671,10 @@ hand_off() {
             # Unpinned, it needs PyPI's latest: the answer this copy already read.
             AISQUARE_INSTALL_PYPI_LATEST=$PYPI_LATEST
             export AISQUARE_INSTALL_PYPI_LATEST
+        fi
+        if [ "$PACKAGE_CHOICE" = fallback ]; then
+            AISQUARE_INSTALL_PYPI_NAME=$PYPI_PACKAGE
+            export AISQUARE_INSTALL_PYPI_NAME
         fi
         # From here a signal is the release's script's to handle, and the run
         # ends with its status, whether it died of the signal or survived it.
@@ -1012,7 +1037,7 @@ _report() {
 #  5  resolve — decide per dependency: current | behind | absent (§3.9)
 # ---------------------------------------------------------------------------
 
-# The latest published aisquare-cli, or "" when it cannot be determined.
+# The latest published $PYPI_PACKAGE, or "" when it cannot be determined.
 #
 # The extraction is anchored rather than the greedy `sed` the plan sketched in
 # §3.9.2, and the difference is not cosmetic. PyPI's payload embeds the whole
@@ -1043,8 +1068,10 @@ except Exception:
         head -1
 }
 
-# PyPI's latest aisquare-cli, asked at most once a run: `release_checked` asks
-# before `resolve` does, and a run that falls back must not ask twice.
+# PyPI's latest $PYPI_PACKAGE, asked at most once a run: `release_checked` asks
+# before `resolve` does, and a run that falls back must not ask twice. A fresh
+# machine whose rlx PyPI does not list yet (before its first release there) takes
+# aisquare-cli, the same package, every release of which is published under both.
 PYPI_LATEST=""
 PYPI_ASKED=0
 
@@ -1052,6 +1079,16 @@ ask_pypi() {
     [ "$PYPI_ASKED" = 0 ] || return 0
     PYPI_ASKED=1
     PYPI_LATEST=$(latest_version 2>/dev/null || true)
+    if [ -z "$PYPI_LATEST" ] && [ "$PACKAGE_CHOICE" = fresh ]; then
+        use_package aisquare-cli
+        PYPI_LATEST=$(latest_version 2>/dev/null || true)
+        if [ -n "$PYPI_LATEST" ]; then
+            PACKAGE_CHOICE=fallback
+            note "rlx is not on PyPI yet: installing aisquare-cli, the same package"
+        else
+            use_package rlx
+        fi
+    fi
 }
 
 resolve() {
@@ -3189,14 +3226,14 @@ Options
                        no; --yes asks nothing.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
       --no-project     Machine setup only; register nothing.
-      --version V      Pin aisquare-cli to V, or `latest` (default: latest, or
+      --version V      Pin rlx to V, or `latest` (default: latest, or
                        the release a release asset was downloaded from).
       --python V       Interpreter uv resolves for the tool env (default: 3.13).
       --offline        Do not ask PyPI what the latest version is (and do not
                        hand off, below).
       --no-handoff     Run this copy of the script, not the release's own.
       --upgrade-all    Also move uv itself and the system packages.
-      --force          Reinstall aisquare-cli even when the version matches.
+      --force          Reinstall rlx even when the version matches.
       --dry-run        Print every command; run none.
   -v, --verbose        Stream the sub-installers' output.
   -h, --help           This.
@@ -3205,7 +3242,7 @@ Environment
   AISQUARE_INSTALL_YES=1        same as --yes
   AISQUARE_INSTALL_VERSION=V    same as --version V
   AISQUARE_INSTALL_ALLOW_ROOT=1 permit a root install (containers do this anyway)
-  AISQUARE_INSTALL_PACKAGE=P     install P instead of aisquare-cli — a wheel,
+  AISQUARE_INSTALL_PACKAGE=P     install P instead of rlx — a wheel,
                                 sdist or project directory. For testing this
                                 script against a local build; turns the PyPI
                                 version comparison and the hand-off off.
@@ -3220,9 +3257,15 @@ Which installer runs
   AISQUARE_INSTALL_PACKAGE, and says which in one line. A release's own copy
   never hands off.
 
+Which package
+  Every release is on PyPI twice: as rlx, and as aisquare-cli, the same package.
+  A fresh machine gets rlx. An install made as aisquare-cli keeps that name and
+  keeps getting every release, with nothing to do, and this script never puts
+  the other name beside it.
+
 Exit codes
   0  installed (or nothing to do), with nothing unexpected
-  1  a fatal step failed — uv, or aisquare-cli itself
+  1  a fatal step failed — uv, or rlx itself
   2  installed, but a check is amber for a reason this script did not expect,
      or an optional extra you chose did not install: Node or npx for
      --with chrome-devtools. Its registration with an agent only warns.
@@ -3352,6 +3395,84 @@ choose_project() {
 }
 
 # ---------------------------------------------------------------------------
+# which of the package's two names (#137)
+# ---------------------------------------------------------------------------
+
+# PYPI_PACKAGE, and what follows from it: PyPI's page and, unless a local build
+# is given (AISQUARE_INSTALL_PACKAGE), what `uv tool install` is pointed at.
+use_package() {
+    PYPI_PACKAGE=$1
+    PYPI_JSON_URL="https://pypi.org/pypi/$1/json"
+    [ -n "$INSTALL_LOCAL" ] || INSTALL_TARGET=$1
+}
+
+# uv's tool directory, decided as uv decides it: UV_TOOL_DIR, then
+# XDG_DATA_HOME/uv/tools, then ~/.local/share/uv/tools. Worked out rather than
+# asked of `uv tool dir`, as `uv_bin_dir` is, and for the same reasons.
+uv_tool_dir() {
+    if [ -n "${UV_TOOL_DIR:-}" ]; then
+        printf '%s' "${UV_TOOL_DIR%/}"
+    elif [ -n "${XDG_DATA_HOME:-}" ]; then
+        printf '%s' "${XDG_DATA_HOME%/}/uv/tools"
+    else
+        printf '%s' "$HOME/.local/share/uv/tools"
+    fi
+}
+
+# Which name this run installs, from what is on the machine, before anything
+# asks PyPI. An existing install keeps its own name: the uv tool's, else what the
+# path of the aisquare a shell finds says, else aisquare-cli, which every install
+# before the move was. A fresh machine takes rlx, or aisquare-cli for a version
+# from before rlx. Measured (uv 0.11.6): uv refuses a second tool with the same
+# commands, and forced, the first one's uninstall later deletes the second's
+# links. So both names side by side stop the run, and a local build of the other
+# name never goes beside an install.
+choose_package() {
+    _cp_tools=$(uv_tool_dir)
+    _cp_rlx=""
+    _cp_old=""
+    [ -f "$_cp_tools/rlx/uv-receipt.toml" ] && _cp_rlx=1
+    [ -f "$_cp_tools/aisquare-cli/uv-receipt.toml" ] && _cp_old=1
+    if [ -n "$_cp_rlx" ] && [ -n "$_cp_old" ]; then
+        printf '%serror%s %s\n' "$C_RED" "$C_RESET" \
+            "$(shown_path "$_cp_tools") holds both rlx and aisquare-cli, one program under two names: keep one with \`uv tool uninstall aisquare-cli && uv tool install --force rlx\`, then run this again. Nothing was changed." >&2
+        exit 1
+    fi
+    if [ -n "$_cp_old" ]; then
+        use_package aisquare-cli
+        PACKAGE_CHOICE=kept
+    elif [ -n "$_cp_rlx" ]; then
+        use_package rlx
+        PACKAGE_CHOICE=kept
+    elif _cp_found=$(command -v aisquare 2>/dev/null) && [ -n "$_cp_found" ]; then
+        _cp_link=$(readlink "$_cp_found" 2>/dev/null || true)
+        case "$_cp_found $_cp_link" in
+            */rlx/*) use_package rlx ;;
+            *) use_package aisquare-cli ;;
+        esac
+        PACKAGE_CHOICE=kept
+    else
+        use_package rlx
+        PACKAGE_CHOICE=fresh
+        if [ -n "$PIN_VERSION" ] && [ "$PIN_VERSION" != latest ] &&
+            version_lt "$PIN_VERSION" "$FIRST_RLX_VERSION"; then
+            use_package aisquare-cli
+            PACKAGE_CHOICE=pinned
+        fi
+    fi
+    [ -n "$INSTALL_LOCAL" ] && [ "$PACKAGE_CHOICE" = kept ] || return 0
+    case "${INSTALL_LOCAL##*/}" in
+        rlx-*) _cp_local=rlx ;;
+        aisquare_cli-* | aisquare-cli-*) _cp_local=aisquare-cli ;;
+        *) return 0 ;;
+    esac
+    [ "$_cp_local" = "$PYPI_PACKAGE" ] && return 0
+    printf '%serror%s %s\n' "$C_RED" "$C_RESET" \
+        "$INSTALL_LOCAL is a $_cp_local build, and this machine's install is $PYPI_PACKAGE, the same program: use a $PYPI_PACKAGE build, or remove the install first. Nothing was changed." >&2
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
 # the commands another program may already have
 # ---------------------------------------------------------------------------
 
@@ -3377,7 +3498,8 @@ uv_bin_dir() {
 }
 
 # Each of NEW_COMMANDS in uv's executable directory that is another program's, one
-# per line: anything there but uv's link to aisquare-cli's own script. Measured with
+# per line: anything there but uv's link to this package's own script (under either
+# of its names, rlx or aisquare-cli, #137). Measured with
 # uv 0.11.6: a plain `uv tool install` refuses the whole package over one
 # ("Executables already exist"), and over an installed aisquare-cli it takes that
 # install away too; `uv tool install --force`, which the upgrade runs, replaces it
@@ -3389,7 +3511,7 @@ taken_commands() {
         [ -e "$_tc_path" ] || [ -L "$_tc_path" ] || continue
         if [ -L "$_tc_path" ]; then
             case $(readlink "$_tc_path") in
-                */"$PYPI_PACKAGE"/bin/"$_tc_name") continue ;;
+                */rlx/bin/"$_tc_name" | */aisquare-cli/bin/"$_tc_name") continue ;;
             esac
         fi
         printf '%s\n' "$_tc_path"
@@ -3434,6 +3556,7 @@ EOF_TAKEN
 
 main() {
     parse_args "$@"
+    choose_package
     hand_off "$@"
     preflight
     detect_os

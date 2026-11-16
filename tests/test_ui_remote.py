@@ -44,6 +44,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import read_state, update_state
 from aisquare.core.tmux import Completed
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import remote_page, remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, Tunnel, build_public_url
@@ -432,7 +433,7 @@ def test_with_no_page_to_serve_the_modal_says_to_reinstall_and_remote_stays_off(
 
         status = shown(modal.query_one("#remote-status", Static))
         assert "the bundled remote page is missing" in status
-        assert "reinstall aisquare-cli" in status
+        assert f"reinstall {DISTRIBUTION}" in status
         assert not app.remote.running
         assert app.remote.info is None
         assert remote_server.remote_server_status()["running"] is False

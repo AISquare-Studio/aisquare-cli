@@ -87,6 +87,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.store import store_session
 from aisquare.core.tls import urlopen
+from aisquare.core.version import DISTRIBUTION
 
 #: Vars the wiring wants to set. If the user's environment already defines one
 #: they are routing Anthropic traffic deliberately (custom gateway, another
@@ -1113,7 +1114,7 @@ SDK_MODULE = "aisquare.explainability"
 #: aisquare/core/version.py), but an operator following a copy-pasted line into
 #: a broken shell state is a bad morning, so the advice names the CLI first and
 #: lets pip resolve both in one transaction.
-INSTALL_HINT = 'pip install --upgrade "aisquare-cli[explainability]"'
+INSTALL_HINT = f'pip install --upgrade "{DISTRIBUTION}[explainability]"'
 
 #: ...and what to say instead on an EDITABLE install, where that command does
 #: not merge the two packages, it SHADOWS ours: the SDK's real `aisquare/`

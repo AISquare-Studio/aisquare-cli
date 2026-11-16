@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import captain_voice
 from aisquare.cli.app import app
+from aisquare.core.version import DISTRIBUTION
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import speaker as speaker_mod
@@ -125,7 +126,7 @@ def test_a_missing_extra_is_the_install_line_and_show_token_still_answers(
     )
     result = runner.invoke(app, ["captain", "voice"])
     assert result.exit_code == 1
-    assert "missing websockets" in result.output and "aisquare-cli[voice]" in result.output
+    assert "missing websockets" in result.output and f"{DISTRIBUTION}[voice]" in result.output
     result = runner.invoke(app, ["captain", "voice", "--show-token"])
     assert result.exit_code == 0 and "note: the voice extra is not installed" in result.output
 

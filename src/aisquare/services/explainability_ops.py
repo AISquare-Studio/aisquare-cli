@@ -1650,7 +1650,7 @@ def _check_sdk(*, on: bool, live: bool, deployable: bool) -> DoctorCheck:
     if presence.shadowing:
         return _warn(
             name,
-            "the 'aisquare' package root in this environment is not aisquare-cli's — "
+            f"the 'aisquare' package root in this environment is not {DISTRIBUTION}'s — "
             "the SDK ships a package of the same name and overwrote it",
             "Harmless for the CLI (it reads its version from dist metadata), but "
             "repair the root if you use the SDK's own facade: "

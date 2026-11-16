@@ -664,15 +664,17 @@ def test_a_broken_install_is_reinstalled_with_force_as_an_upgrade_is(
     assert f"would run: uv tool install --force --python 3.13 --with tiktoken {spec}\n" in out, out
 
 
-_FRESH = "uv tool install --python 3.13 --with tiktoken aisquare-cli"
+_FRESH = "uv tool install --python 3.13 --with tiktoken"
 _UP = "uv tool install --force --python 3.13 --with tiktoken aisquare-cli@0.10.0"
 
 
 @pytest.mark.parametrize(
     ("installed", "pin", "action", "command"),
     [
-        (_ABSENT, "", "install", _FRESH),
-        (_ABSENT, "0.10.0", "install", f"{_FRESH}==0.10.0"),
+        # A fresh machine takes rlx (#137); pinned to a release from before rlx, the name
+        # that release was published under. A working install keeps its own.
+        (_ABSENT, "", "install", f"{_FRESH} rlx"),
+        (_ABSENT, "0.10.0", "install", f"{_FRESH} aisquare-cli==0.10.0"),
         ("0.9.2", "", "current", None),
         ("0.9.2", "0.10.0", "upgrade", _UP),
         ("0.10.0", "0.10.0", "current", None),
@@ -714,11 +716,12 @@ def test_a_repair_is_verified_like_an_upgrade(
     tmp_path: Path, now: str | None, refused: str | None
 ) -> None:
     """uv's success over an install that still fails is an error, not "aisquare ", and so
-    is one over an install that now runs but says another version than it went for."""
+    is one over an install that now runs but says another version than it went for. The
+    install there keeps its own name, aisquare-cli (`choose_package`, #137)."""
     home = tmp_path / "home"
     home.mkdir()
     result = sh(
-        "INSTALL_TARGET=$PYPI_PACKAGE; CLI_ACTION=repair; CLI_BROKEN=1; PIN_VERSION=; "
+        "choose_package; CLI_ACTION=repair; CLI_BROKEN=1; PIN_VERSION=; "
         'LATEST_VERSION=0.10.0; install_cli; printf "NOW=%s\\n" "$CLI_VERSION"',
         env={"HOME": str(home)},
         path=f"{_machine(tmp_path, now)}:{base_path(tmp_path)}",
@@ -4451,7 +4454,7 @@ def test_a_run_that_installs_the_cli_stops_on_another_programs_command_in_one_li
     assert result.returncode == 1, result.stdout + result.stderr
     assert "went-on" not in result.stdout
     assert result.stderr == (
-        "error ~/.local/bin/relax is another program's, and aisquare-cli now installs its own "
+        "error ~/.local/bin/relax is another program's, and rlx now installs its own "
         "relax command there: rename or move it, then run this again. Nothing was changed.\n"
     )
 
@@ -4466,7 +4469,7 @@ def test_two_taken_commands_are_named_in_the_one_line(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert result.stderr == (
-        "error ~/.local/bin/rlx and ~/.local/bin/relax are another program's, and aisquare-cli "
+        "error ~/.local/bin/rlx and ~/.local/bin/relax are another program's, and rlx "
         "now installs its own rlx and relax commands there: rename or move them, then run this "
         "again. Nothing was changed.\n"
     )
@@ -4532,3 +4535,281 @@ def test_main_stops_on_a_taken_command_before_uv_or_anything_runs(tmp_path: Path
     mutations = [call for call in calls if call.split()[1:2] not in ([], ["--version"], ["-V"])]
     assert not mutations, f"the refusal still ran something: {calls}"
     assert taken.read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
+
+
+# ---------------------------------------------------------------------------
+# rlx and aisquare-cli: one package under two names (#137)
+# ---------------------------------------------------------------------------
+#
+# Every release is published as rlx and, the same build, as aisquare-cli. A fresh
+# machine takes rlx; an install made before the move keeps its own name. Measured
+# (uv 0.11.6): uv refuses a second tool with the same commands, and forced, the
+# first one's uninstall later deletes the second's links, so nothing here may ever
+# put the other name beside an existing install.
+
+
+def _tool(home: Path, name: str) -> None:
+    """A uv tool environment as uv leaves one: its receipt in ~/.local/share/uv/tools/<name>."""
+    tool = home / ".local" / "share" / "uv" / "tools" / name
+    tool.mkdir(parents=True)
+    (tool / "uv-receipt.toml").write_text(f'[tool]\nrequirements = [{{ name = "{name}" }}]\n')
+
+
+def _choice(
+    tmp_path: Path, home: Path, *, path: str | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return sh(
+        'choose_package; printf "%s %s %s\\n" "$PYPI_PACKAGE" "$PACKAGE_CHOICE" "$INSTALL_TARGET"; '
+        'printf "%s\\n" "$PYPI_JSON_URL"',
+        env={"HOME": str(home), "UV_TOOL_DIR": "", "XDG_DATA_HOME": "", **(env or {})},
+        path=path or base_path(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    ("variables", "expected"),
+    [
+        ({"UV_TOOL_DIR": "/t/", "XDG_DATA_HOME": "/d"}, "/t"),
+        ({"XDG_DATA_HOME": "/d/"}, "/d/uv/tools"),
+        ({}, "{home}/.local/share/uv/tools"),
+    ],
+    ids=["uv-tool-dir", "xdg-data-home", "default"],
+)
+def test_uv_tool_dir_is_where_uv_keeps_its_tools(
+    tmp_path: Path, variables: dict[str, str], expected: str
+) -> None:
+    unset = {"UV_TOOL_DIR": "", "XDG_DATA_HOME": ""}
+    result = sh(
+        "uv_tool_dir", env={**unset, **variables, "HOME": str(tmp_path)}, path=base_path(tmp_path)
+    )
+    assert result.stdout == expected.format(home=tmp_path), result.stderr
+
+
+@pytest.mark.parametrize(
+    ("tools", "pin", "expected"),
+    [
+        ((), "", "rlx fresh rlx"),
+        ((), "0.11.0", "rlx fresh rlx"),
+        ((), "0.10.0", "aisquare-cli pinned aisquare-cli"),
+        ((), "latest", "rlx fresh rlx"),
+        (("aisquare-cli",), "", "aisquare-cli kept aisquare-cli"),
+        (("aisquare-cli",), "0.12.0", "aisquare-cli kept aisquare-cli"),
+        (("rlx",), "", "rlx kept rlx"),
+    ],
+    ids=["fresh", "fresh-pinned-rlx", "fresh-pinned-before-rlx", "latest", "old-tool",
+         "old-tool-pinned", "rlx-tool"],
+)  # fmt: skip
+def test_a_fresh_machine_takes_rlx_and_an_install_keeps_its_own_name(
+    tmp_path: Path, tools: tuple[str, ...], pin: str, expected: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    for name in tools:
+        _tool(home, name)
+
+    result = _choice(tmp_path, home, env={"AISQUARE_INSTALL_VERSION": pin})
+
+    package = expected.split()[0]
+    assert result.stdout == f"{expected}\nhttps://pypi.org/pypi/{package}/json\n", result.stderr
+
+
+@pytest.mark.parametrize(
+    ("link", "expected"),
+    [
+        ("{home}/.local/pipx/venvs/aisquare-cli/bin/aisquare", "aisquare-cli"),
+        ("{home}/Library/Application Support/pipx/venvs/rlx/bin/aisquare", "rlx"),
+        (None, "aisquare-cli"),
+    ],
+    ids=["pipx-aisquare-cli", "pipx-rlx", "a-venv-script"],
+)
+def test_an_aisquare_that_is_no_uv_tool_keeps_the_name_its_path_says(
+    tmp_path: Path, link: str | None, expected: str
+) -> None:
+    """pipx's link names its venv; a script in a venv names nothing, and every install made
+    before the move was aisquare-cli."""
+    home = tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    if link is None:
+        stub_dir(tmp_path, "venv-bin", "aisquare", body='echo "aisquare 0.10.0"')
+        path = f"{tmp_path / 'venv-bin'}:{base_path(tmp_path)}"
+    else:
+        target = Path(link.format(home=home))
+        target.parent.mkdir(parents=True)
+        target.write_text("#!/bin/sh\necho aisquare 0.10.0\n")
+        target.chmod(0o755)
+        (bin_dir / "aisquare").symlink_to(target)
+        path = f"{bin_dir}:{base_path(tmp_path)}"
+
+    result = _choice(tmp_path, home, path=path)
+
+    assert result.stdout.split()[:2] == [expected, "kept"], result.stdout + result.stderr
+
+
+def test_both_names_side_by_side_stop_the_run_in_one_line(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _tool(home, "rlx")
+    _tool(home, "aisquare-cli")
+
+    result = _choice(tmp_path, home)
+
+    assert result.returncode == 1 and result.stdout == "", result.stdout
+    assert result.stderr == (
+        "error ~/.local/share/uv/tools holds both rlx and aisquare-cli, one program under two "
+        "names: keep one with `uv tool uninstall aisquare-cli && uv tool install --force rlx`, "
+        "then run this again. Nothing was changed.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tools", "wheel", "refused"),
+    [
+        (("aisquare-cli",), "/w/rlx-0.11.0-py3-none-any.whl", True),
+        (("rlx",), "/w/aisquare_cli-0.11.0-py3-none-any.whl", True),
+        (("aisquare-cli",), "/w/aisquare_cli-0.11.0-py3-none-any.whl", False),
+        ((), "/w/rlx-0.11.0-py3-none-any.whl", False),
+        (("aisquare-cli",), "/w/checkout", False),
+    ],
+    ids=["rlx-over-old", "old-over-rlx", "same-name", "fresh", "a-directory"],
+)
+def test_a_local_build_of_the_other_name_never_goes_beside_an_install(
+    tmp_path: Path, tools: tuple[str, ...], wheel: str, refused: bool
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    for name in tools:
+        _tool(home, name)
+
+    result = _choice(tmp_path, home, env={"AISQUARE_INSTALL_PACKAGE": wheel})
+
+    if refused:
+        assert result.returncode == 1 and result.stdout == "", result.stdout
+        assert f"error {wheel} is a " in result.stderr, result.stderr
+        assert "Nothing was changed." in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split()[2] == wheel, "a local build stays the target"
+
+
+def _pypi(tmp_path: Path, answers: dict[str, str]) -> str:
+    """A curl that answers PyPI's JSON for the names given, and fails for any other URL. The
+    name before the version, as PyPI orders them: the sed reader splits on the comma."""
+    cases = "".join(
+        f"    *pypi/{name}/json) printf '%s' "
+        f'\'{{"info":{{"name":"{name}","version":"{version}"}}}}\' ;;\n'
+        for name, version in answers.items()
+    )
+    body = f'for last; do :; done\ncase "$last" in\n{cases}    *) exit 22 ;;\nesac'
+    return str(stub_dir(tmp_path, "pypi-bin", "curl", body=body))
+
+
+@pytest.mark.parametrize(
+    ("tools", "answers", "expected"),
+    [
+        ((), {"rlx": "0.11.0", "aisquare-cli": "0.11.0"}, "rlx fresh 0.11.0"),
+        ((), {"aisquare-cli": "0.11.0"}, "aisquare-cli fallback 0.11.0"),
+        ((), {}, "rlx fresh "),
+        (("aisquare-cli",), {"aisquare-cli": "0.11.0"}, "aisquare-cli kept 0.11.0"),
+        (("rlx",), {"aisquare-cli": "0.11.0"}, "rlx kept "),
+    ],
+    ids=["rlx-listed", "rlx-not-yet", "pypi-down", "old-tool", "rlx-tool-never-falls-back"],
+)
+def test_a_fresh_machine_takes_aisquare_cli_while_pypi_lists_no_rlx(
+    tmp_path: Path, tools: tuple[str, ...], answers: dict[str, str], expected: str
+) -> None:
+    """Before rlx's first release on PyPI, a fresh machine installs aisquare-cli, the same
+    package; an install keeps its own name whatever PyPI says."""
+    home = tmp_path / "home"
+    home.mkdir()
+    for name in tools:
+        _tool(home, name)
+
+    result = sh(
+        'HAVE_CURL=1; choose_package; ask_pypi; printf "%s %s %s\\n" "$PYPI_PACKAGE" '
+        '"$PACKAGE_CHOICE" "$PYPI_LATEST"',
+        env={
+            "HOME": str(home),
+            "UV_TOOL_DIR": "",
+            "XDG_DATA_HOME": "",
+            "AISQUARE_INSTALL_VERSION": "",
+        },
+        path=f"{_pypi(tmp_path, answers)}:{base_path(tmp_path)}",
+    )
+
+    assert result.stdout.splitlines()[-1] == expected, result.stdout + result.stderr
+    said = "rlx is not on PyPI yet: installing aisquare-cli, the same package"
+    assert (said in result.stdout) is ("fallback" in expected), result.stdout
+
+
+@pytest.mark.parametrize(
+    ("given", "choice", "expected"),
+    [
+        ("aisquare-cli", "fresh", "aisquare-cli fallback"),
+        ("aisquare-cli", "kept", "rlx kept"),
+        ("", "fresh", "rlx fresh"),
+        ("other", "fresh", "rlx fresh"),
+    ],
+    ids=["fresh-takes-it", "an-install-keeps-its-own", "none-given", "not-a-name-of-ours"],
+)
+def test_the_release_s_script_installs_the_name_main_s_copy_fell_back_to(
+    tmp_path: Path, given: str, choice: str, expected: str
+) -> None:
+    """The hand-off passes PyPI's latest of aisquare-cli when it fell back, so the release's
+    script must install that name too, or it asks for an rlx PyPI does not list. Run as the
+    handed-off file itself, the one place the variables are read."""
+    script = tmp_path / "release.sh"
+    script.write_text(
+        f'. "{SCRIPT}"\nuse_package rlx; PACKAGE_CHOICE={choice}; STAMPED_VERSION=0.11.0\n'
+        'hand_off; printf "%s %s\\n" "$PYPI_PACKAGE" "$PACKAGE_CHOICE"\n',
+        encoding="utf-8",
+    )
+    ran = subprocess.run(
+        [SH, str(script)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "AISQUARE_INSTALL_LIB": "1",
+            "NO_COLOR": "1",
+            "AISQUARE_INSTALL_HANDED_OFF": str(script),
+            "AISQUARE_INSTALL_PYPI_LATEST": "0.11.0",
+            "AISQUARE_INSTALL_PYPI_NAME": given,
+            "PATH": base_path(tmp_path),
+        },
+        timeout=60,
+        check=False,
+    )
+
+    assert ran.stdout.splitlines()[-1] == expected, ran.stdout + ran.stderr
+
+
+def test_main_over_an_aisquare_cli_tool_upgrades_aisquare_cli_and_never_installs_rlx(
+    tmp_path: Path,
+) -> None:
+    """Condition 1 of the ruling, from `main` as a person runs it: an existing install's
+    upgrade, repair or reinstall names aisquare-cli in every command; rlx is never asked for."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _tool(home, "aisquare-cli")
+    for pin, force in (("0.11.0", []), ("", ["--force"]), ("0.9.0", [])):
+        result = sh(
+            " ".join(
+                ["main --dry-run --yes --no-project --offline --no-agent --no-system-deps", *force]
+            ),
+            env={"HOME": str(home), "AISQUARE_HOME": "", "UV_TOOL_DIR": "", "XDG_DATA_HOME": "",
+                 "AISQUARE_INSTALL_VERSION": pin},
+            path=f"{_machine(tmp_path, '0.10.0')}:{base_path(tmp_path)}",
+        )  # fmt: skip
+        runs = [line for line in result.stdout.splitlines() if "would run: uv tool install" in line]
+        assert runs, result.stdout + result.stderr
+        assert all("aisquare-cli" in line and "rlx" not in line for line in runs), runs
+
+
+def test_main_on_a_fresh_machine_installs_rlx(tmp_path: Path) -> None:
+    result = _dry_run(tmp_path, _machine(tmp_path, _ABSENT), "")
+
+    assert "would run: uv tool install --python 3.13 --with tiktoken rlx\n" in result.stdout, (
+        result.stdout + result.stderr
+    )
+    assert "aisquare-cli" not in result.stdout.split("Written to:")[0].split("this will:")[1]

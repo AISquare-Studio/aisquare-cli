@@ -26,6 +26,7 @@ from aisquare.cli.app import app
 from aisquare.core import insights, outbox
 from aisquare.core.config import AppConfig, save_config
 from aisquare.core.store import store_session
+from aisquare.core.version import DISTRIBUTION
 from aisquare.core.workspace import active_project
 from aisquare.models import TeamSession
 from aisquare.services import explainability as service
@@ -366,7 +367,7 @@ def test_missing_extra_buffers_with_the_safe_install_line(monkeypatch: pytest.Mo
     # test_editable_install_hint). Both shapes are asserted through the same
     # seam so neither can regress into recommending the bare form.
     assert "pip install aisquare[explainability]" not in report.reason
-    assert "aisquare-cli[explainability]" in service.install_hint(editable=False)
+    assert f"{DISTRIBUTION}[explainability]" in service.install_hint(editable=False)
     assert "editable" in service.install_hint(editable=True).lower()
     assert len(outbox.pending()) == 1
 

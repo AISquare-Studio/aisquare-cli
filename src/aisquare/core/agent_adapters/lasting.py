@@ -12,11 +12,11 @@ from __future__ import annotations
 import re
 from pathlib import PureWindowsPath
 
-from aisquare.core.version import DISTRIBUTION
+from aisquare.core.version import DISTRIBUTIONS
 
 
 def _canonical_name(name: str) -> str:
-    """A distribution name as PEP 503 normalises it, to compare with :data:`DISTRIBUTION`."""
+    """A distribution name as PEP 503 normalises it, to compare with :data:`DISTRIBUTIONS`."""
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
@@ -44,7 +44,7 @@ def _names_aisquare(tokens: list[str], index: int) -> bool:
     if name not in _SHARED_NAMES:
         return True
     return any(
-        _canonical_name(match.group(1)) == DISTRIBUTION
+        _canonical_name(match.group(1)) in DISTRIBUTIONS
         for earlier in tokens[:index]
         for item in _requirement_items(earlier)
         if (match := _NAMED_REQUIREMENT.match(item)) is not None
@@ -113,7 +113,7 @@ def _may_install_aisquare(value: str) -> bool:
         named = _NAMED_REQUIREMENT.match(item)
         if named is None or item.lower().endswith(_ARCHIVES):
             return True
-        if _canonical_name(named.group(1)) == DISTRIBUTION:
+        if _canonical_name(named.group(1)) in DISTRIBUTIONS:
             return True
     return False
 

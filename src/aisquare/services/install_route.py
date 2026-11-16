@@ -94,10 +94,10 @@ _UV_CACHE_ENVIRONMENTS = re.compile(r"(?:archive|environments)-v\d+")
 PYPI_JSON_URL = f"https://pypi.org/pypi/{DISTRIBUTION}/json"
 LOOKUP_TIMEOUT_SECONDS = 5.0
 
-INSTALLER_ONE_LINER = (
-    "curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh | sh"
-)
-"""The last resort every failure names: it repairs a broken install from nothing."""
+INSTALLER_ONE_LINER = "curl -fsSL https://aisquare.studio/rlx/install.sh | sh"
+"""The last resort every failure names: it repairs a broken install from nothing. The short URL
+redirects (307) to main's install.sh on GitHub, which is what it runs; a person types it, so it
+is the short one (scripts/stamp_installers.py ``SH_ONE_LINER``, held equal by the tests)."""
 
 RECEIPT_NAME = "uv-receipt.toml"
 PIPX_METADATA_NAME = "pipx_metadata.json"

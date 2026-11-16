@@ -1,7 +1,7 @@
 #!/bin/sh
 # aisquare one-line installer — curl … | sh to a green doctor and the fleet UI.
 #
-#   curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh | sh
+#   curl -fsSL https://aisquare.studio/rlx/install.sh | sh
 #
 # Design, measurements and the rejected alternatives: docs/plans/one-line-install.md.
 # Section marks below (§) point into it. Four things about this file are
@@ -3164,7 +3164,7 @@ usage() {
     cat <<'USAGE'
 aisquare installer — one command to a working install and the fleet UI.
 
-  curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh | sh
+  curl -fsSL https://aisquare.studio/rlx/install.sh | sh
 
 With options, note the `-s --` (sh reads the script on stdin, so the options
 have to be handed to sh explicitly):

@@ -11,7 +11,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Iterator
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1873,6 +1873,89 @@ def test_a_day_with_keys_outside_the_contracts_shape_still_ships_whole(machine: 
     assert today["features"]["cli.fleet.spawn"] == 3, "the rest of the day went"
     assert today["fleet"]["agents_spawned"].get("other") == 1, "the invented role went too"
     assert set(sharing.read().acked) == {day["date"] for day in call.body["days"]}
+
+
+# --- a backlog the last release could not deliver goes to the new endpoint (RLX R9) ---------------
+
+_OLD_PATH = "/api/v1/cli/metrics/"
+_NEW_PATH = usage_share.ENDPOINT_PATH
+
+
+def _left_by_0_10_0(m: Machine, monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, str], datetime]:
+    """The state 0.10.0 leaves on a machine whose backlog it could not deliver, as production
+    answers it: a 404 for every batch on its path (the endpoint is not deployed), then, once the
+    server is, a 503 with Retry-After while the ingest's kill switch is off. 0.10.0 is this code
+    posting to its path: the state, the days and the shipper are the same, and the path is read
+    at send time (``endpoint``). Returns each day 0.10.0 asked to send, with its digest, and when
+    the next shipment is due."""
+    _backlog(m)  # 70 days: batches of 31, 31 and 8
+    monkeypatch.setattr(usage_share, "ENDPOINT_PATH", _OLD_PATH)
+    prod = Server(*[status(404, {"detail": "Not Found"})] * 3)
+    first = usage_share.ship(now=NOW, tz=IST, transport=prod)
+    assert not first.sent and len(prod.calls) == 3, "every batch asked, every one refused"
+    assert all(call.url.endswith(_OLD_PATH) for call in prod.calls)
+    tried = {
+        day["date"]: usage_share._digest(day) for call in prod.calls for day in call.body["days"]
+    }
+    dark = Server(status(503, {"detail": "ingest is off"}, **{"Retry-After": "3600"}))
+    due = sharing.parse_time(sharing.read().next_due_at)
+    assert due is not None
+    second = usage_share.ship(now=due + timedelta(minutes=1), tz=IST, transport=dark)
+    assert not second.sent and dark.calls[0].url.endswith(_OLD_PATH)
+    state = sharing.read()
+    assert state.acked == {} and state.settled_through is None, "0.10.0 delivered nothing"
+    monkeypatch.setattr(usage_share, "ENDPOINT_PATH", _NEW_PATH)  # the update
+    after = sharing.parse_time(state.next_due_at)
+    assert after is not None
+    return tried, after + timedelta(minutes=1)
+
+
+def test_a_backlog_0_10_0_could_not_deliver_goes_whole_to_the_new_endpoint(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's requirement: what was waiting before the update goes to the NEW endpoint after
+    it, never dropped. On the new path's 200 every day 0.10.0 held is sent, with the same
+    digests, none skipped or refused, and each is acknowledged (or settled, past the keep
+    window, as any delivered day is)."""
+    tried, later = _left_by_0_10_0(machine, monkeypatch)
+    server = Server()
+
+    report = usage_share.ship(now=later, tz=IST, transport=server)
+
+    assert report.sent and report.error is None and report.rejected_days == 0
+    assert server.calls and all(call.url.endswith(_NEW_PATH) for call in server.calls)
+    sent = {
+        day["date"]: usage_share._digest(day) for call in server.calls for day in call.body["days"]
+    }
+    assert sent == tried, "every held day, with the same digest, and nothing else"
+    state = sharing.read()
+    settled = state.settled_through or ""
+    unacked = [day for day in tried if day > settled and state.acked.get(day) != tried[day][:12]]
+    assert not unacked, f"sent but not acknowledged: {unacked}"
+
+
+def test_a_404_on_the_new_endpoint_too_keeps_the_whole_backlog_for_next_time(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Until the server's new route is deployed it answers 404 there too: a refusal, which
+    keeps every day (none acknowledged, none settled past) for the next shipment, and that
+    one, once the route answers, sends them all."""
+    tried, later = _left_by_0_10_0(machine, monkeypatch)
+    undeployed = Server(*[status(404, {"detail": "Not Found"})] * 3)
+
+    report = usage_share.ship(now=later, tz=IST, transport=undeployed)
+
+    assert not report.sent and report.rejected_days == len(tried)
+    assert all(call.url.endswith(_NEW_PATH) for call in undeployed.calls)
+    state = sharing.read()
+    assert state.acked == {} and state.settled_through is None, "nothing taken, nothing settled"
+
+    due = sharing.parse_time(state.next_due_at)
+    assert due is not None
+    deployed = Server()
+    usage_share.ship(now=due + timedelta(minutes=1), tz=IST, transport=deployed)
+
+    assert {day["date"] for call in deployed.calls for day in call.body["days"]} == set(tried)
 
 
 # --- a batch the server refuses for good does not block the newer ones (review of #444, 3) ----

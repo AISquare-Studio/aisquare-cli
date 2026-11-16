@@ -1,7 +1,7 @@
-# Contributing to aisquare
+# Contributing to rlx
 
-Thanks for your interest in aisquare! This is an early-stage, open-source
-project and contributions are welcome.
+Thanks for your interest in rlx! It is an open-source project, and
+contributions are welcome.
 
 ## Where to start
 
@@ -513,8 +513,8 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   real home in a test or example.
 - Keep CLI modules thin and services free of CLI concerns.
 - New shared plumbing goes in `core/`; new domain shapes go in `models.py`.
-- A change that makes the CLI keep something new on disk, change Claude Code's
-  settings, or reach the network updates SECURITY.md's "What the CLI stores,
+- A change that makes rlx keep something new on disk, change Claude Code's
+  settings, or reach the network updates SECURITY.md's "What rlx stores,
   changes and sends" (its Stored, Changed or Sent list) in the same PR.
 
 ## Reporting bugs / proposing features

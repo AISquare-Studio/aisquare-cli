@@ -26,6 +26,9 @@ and you get one full-screen, mouse-driven view of your projects and their agents
 - **Memory that carries across sessions.** Your preferences and each project's
   conventions reach every new session, so it starts oriented instead of cold.
 - **Everything is also a command**, for your scripts and for the agents.
+- **Local-first.** Your memory, boards and fleet live on your machine, in a
+  SQLite store under `~/.aisquare`. rlx runs no daemon (the agents run in a tmux
+  server) and needs no cloud service of its own.
 
 ## Install
 
@@ -36,10 +39,11 @@ curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/i
 On macOS, Linux and WSL2, that one line works out what your machine already
 has and installs only what is missing: uv, a Python 3.13 of its own, rlx, tmux,
 gh, git and Claude Code, and Node for browser tools if you want them. It
-registers the git repo you ran it from and ends by offering to open rlx. Running
-it again is a no-op. For Codex too, end the line with `sh -s -- --agent both`
-(`--agent codex` for Codex alone). To read it before you run it, it is
-`install.sh` at the root of this repository.
+registers the git repo you ran it from, wires your agent's hooks so every
+session gets its memory, and ends by offering to open rlx. Running it again is a
+no-op. For Codex too, end the line with `| sh -s -- --agent both` instead of
+`| sh` (`| sh -s -- --agent codex` for Codex alone). To read it before you run
+it, it is `install.sh` at the root of this repository.
 
 That installs the latest release. To pin one, every release from 0.9.0 on
 carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.10.0/install.sh | sh`.
@@ -92,12 +96,13 @@ start fresh on the other agent's, with a brief of the work.
 ## Over SSH
 
 You can open `rlx` over SSH into the same Mac while the Mac's own is open: both
-show the same fleet, and a line in the sidebar says where each one runs. Start
-the first agent at the Mac, since on macOS an SSH login can't start the fleet's
-tmux server (agents in it couldn't read the Keychain). A Codex account signs in
-with a device code, so `rlx accounts add --agent codex` works over SSH too: open
-the link it prints on any device and enter the code (`--browser` signs in with
-this machine's browser instead).
+show the same fleet, and a line in the sidebar says where each one runs. If your
+fleet runs Claude Code, start its first agent at the Mac: on macOS Claude Code's
+login is in the Keychain, which no agent in a tmux server started over SSH can
+read. Codex's login is a file, so a fleet of Codex agents can start over SSH.
+A Codex account signs in with a device code, so `rlx accounts add --agent codex`
+works over SSH too: open the link it prints on any device and enter the code
+(`--browser` signs in with this machine's browser instead).
 [Running more than one rlx](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/multi-instance.md)
 has the rest, including what happens when the two run different releases.
 

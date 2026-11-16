@@ -62,11 +62,11 @@ Some things can only have one holder. Whichever asq takes it first keeps it unti
 - The transcript sweep for *Usage & stats*, and `rlx watch`, each run in one process at a
   time, as before.
 
-## SSH can't start the fleet's tmux server (macOS)
+## SSH and the fleet's tmux server (macOS)
 
 On macOS a tmux server belongs to the login that started it, and so does every pane it opens.
 Agents in a server started from an SSH login can't read their Claude Code login from the Keychain.
-So asq refuses to start the fleet's tmux server from an SSH login:
+So asq refuses to start the fleet's tmux server from an SSH login for a Claude Code agent:
 
 ```text
 not started: start asq on the Mac first: agents started from an SSH login can't read the Keychain
@@ -75,6 +75,10 @@ not started: start asq on the Mac first: agents started from an SSH login can't 
 Start the first agent in asq at the Mac. After that, a fleet server is running and agents spawn
 into it from SSH as usual. Only starting the server is refused. A server that the Mac started
 stays the Mac's, whoever attaches to it later.
+
+A Codex agent keeps its login in a file in its home (`auth.json`), so it can start the server from
+SSH. asq marks a server started that way, and opens no Claude Code agent in it, from SSH or at the
+Mac: `rlx fleet shutdown --all` ends it, and the Mac starts the next one.
 
 ## One release per home: the version gate and the quit offer
 

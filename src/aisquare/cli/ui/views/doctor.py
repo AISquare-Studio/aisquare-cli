@@ -23,8 +23,9 @@ UI it replaces, and asq comes back after it.
 
 from __future__ import annotations
 
+import os
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
 from rich.text import Text
@@ -35,8 +36,9 @@ from textual.message import Message
 from textual.widgets import Button, Static
 
 from aisquare.cli.ui.sidebar import AccountsSelected
-from aisquare.core import selfcli
+from aisquare.core import program, selfcli
 from aisquare.core.agent_adapters import stage_mark_of
+from aisquare.core.selfcli import CliResult
 from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import install_route, onboarding
 from aisquare.services.onboarding import FixCommand, FixResult, Runner
@@ -156,9 +158,23 @@ def ask_text(check: DoctorCheck) -> str:
     )
 
 
+def _shown_here(run: Runner) -> Runner:
+    """``run`` for the report asq shows: ``selfcli.run``'s child is told so
+    (``program.IN_APP_ENV``), and its rows' details leave out their commands; every fix stays
+    the shell's (R13b). A stand-in is left as it is, and the fixes run as they always did:
+    a fix may start what lasts, and nothing that lasts carries the variable."""
+    if run is not selfcli.run:
+        return run
+
+    def shown(args: Sequence[str], *, cwd: Path | None = None) -> CliResult:
+        return selfcli.run(args, cwd=cwd, env={**os.environ, program.IN_APP_ENV: "1"})
+
+    return shown
+
+
 def _doctor_via_cli(run: Runner) -> Refresh:
     def refresh(cwd: Path | None) -> list[DoctorCheck]:
-        checks, error = onboarding.run_doctor(cwd, run=run)
+        checks, error = onboarding.run_doctor(cwd, run=_shown_here(run))
         if error is not None:
             raise RuntimeError(error)
         return checks

@@ -81,9 +81,8 @@ def enroll_command() -> str:
 
 def unlock_hint() -> str:
     """How a locked gate is unlocked: said to the captain, or typed."""
-    return (
-        "say your authenticator's code to the captain, or run: "
-        f"{prog.word()} captain gate unlock <code>"
+    return "say your authenticator's code to the captain" + prog.shell_advice(
+        f", or run: {prog.word()} captain gate unlock <code>"
     )
 
 

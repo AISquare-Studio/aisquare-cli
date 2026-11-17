@@ -793,8 +793,10 @@ def hints_print_rlx(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     ``ours_on_path`` back."""
     program.word.cache_clear()
     monkeypatch.setattr(program, "ours_on_path", lambda name: True)
+    monkeypatch.delenv(program.IN_APP_ENV, raising=False)
     yield
     program.word.cache_clear()
+    program.leave_app()  # an app a test left up, or one that crashed, is not the next test's
 
 
 @pytest.fixture(autouse=True)

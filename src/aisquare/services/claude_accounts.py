@@ -445,14 +445,17 @@ def _refuse_a_shared_numbers_rank(store: ContextStore, accounts: Sequence[Claude
         ]
         if not others or (account.agent, account.slot) not in unranked:
             continue
-        add = f"{prog.word()} accounts add" + (
-            "" if core.kind(account.agent).legacy_slots else f" --agent {account.agent}"
-        )
+        agent_flag = "" if core.kind(account.agent).legacy_slots else f" --agent {account.agent}"
         raise AccountsError(
             f"{core.agent_label(account.agent)}'s account {account.slot} shares its number with "
             f"{core.agent_label(others[0].agent)}'s, whose place in the order it is: it is listed "
-            "last and cannot be moved or made the default. To give it a number of its own: "
-            f"{prog.word()} accounts remove {core.qualified_ref(account)}, then {add}"
+            "last and cannot be moved or made the default."
+            + prog.shell_advice(
+                " To give it a number of its own: "
+                f"{prog.word()} accounts remove {core.qualified_ref(account)}, then "
+                f"{prog.word()} accounts add{agent_flag}",
+                app=" To give it a number of its own: Remove it, then add it again.",
+            )
         )
 
 
@@ -688,8 +691,8 @@ def _resolve_in(
             account=account,
             message=f"{core.label(account)} (slot {account.slot}) is a "
             f"{core.agent_label(account.agent)} account, and this launch runs "
-            f"{core.agent_label(agent)} — name a {core.agent_label(agent)} account "
-            f"(see: {prog.word()} accounts)",
+            f"{core.agent_label(agent)} — name a {core.agent_label(agent)} account"
+            + prog.shell_advice(f" (see: {prog.word()} accounts)"),
         )
     return account
 
@@ -737,7 +740,7 @@ def _signed_in_as(
             message=reason
             + " — name one as "
             + " or ".join(core.qualified_ref(a) for a in first.values())
-            + f"; see: {prog.word()} accounts",
+            + prog.shell_advice(f"; see: {prog.word()} accounts"),
             accounts=list(first.values()),
             reason=reason,
         )
@@ -763,7 +766,8 @@ def _find_in(
             if plain is not None and not plain.managed and plain.agent == owner:
                 return plain
             raise NoSuchAccount(
-                f"no {core.kind(owner).noun} account in slot {slot} — see: {prog.word()} accounts"
+                f"no {core.kind(owner).noun} account in slot {slot}"
+                + prog.shell_advice(f" — see: {prog.word()} accounts")
             )
         return account
     number = core.slot_number(text)
@@ -780,7 +784,10 @@ def _find_in(
             plain = core.find_account(number)
             if plain is not None and not plain.managed and agent in (None, plain.agent):
                 return plain
-            raise NoSuchAccount(f"no {whose} account in slot {text} — see: {prog.word()} accounts")
+            raise NoSuchAccount(
+                f"no {whose} account in slot {text}"
+                + prog.shell_advice(f" — see: {prog.word()} accounts")
+            )
         return account
     wanted = text.lower()
     if "@" not in wanted:
@@ -790,8 +797,8 @@ def _find_in(
                 ref=text,
                 message=f"{text!r} names "
                 + " and ".join(core.qualified_ref(a) for a in by_alias)
-                + " — name one as such, and give one another alias; see: "
-                + f"{prog.word()} accounts",
+                + " — name one as such, and give one another alias"
+                + prog.shell_advice(f"; see: {prog.word()} accounts"),
             )
         if by_alias:
             return by_alias[0]
@@ -800,12 +807,13 @@ def _find_in(
         return found
     if "@" in wanted:
         raise NoSuchAccount(
-            f"no {whose} account is signed in as {text!r} — see: {prog.word()} accounts"
+            f"no {whose} account is signed in as {text!r}"
+            + prog.shell_advice(f" — see: {prog.word()} accounts")
         )
     detail = f" ({note})" if note else ""
     raise NoSuchAccount(
         f"no {whose} account is called {text!r} — not a slot, an alias or a signed-in email"
-        f"{detail}; see: {prog.word()} accounts"
+        f"{detail}" + prog.shell_advice(f"; see: {prog.word()} accounts")
     )
 
 
@@ -825,7 +833,7 @@ def _two_in_one_number(number: str, accounts: Sequence[ClaudeAccount]) -> Ambigu
         "own accounts by Claude Code's alone"
     )
     return AmbiguousAccount(
-        f"{reason}. Name one as {names}; see: {prog.word()} accounts",
+        f"{reason}. Name one as {names}" + prog.shell_advice(f"; see: {prog.word()} accounts"),
         ref=number,
         accounts=accounts,
         reason=reason,
@@ -1016,7 +1024,8 @@ def choose(
             if preferred is None:
                 raise NoSuchAccount(
                     f"the default account of {project.root.name or project.id} is slot {slot}, "
-                    f"which no longer exists — see: {prog.word()} accounts default --project"
+                    "which no longer exists"
+                    + prog.shell_advice(f" — see: {prog.word()} accounts default --project")
                 )
             if preferred.disabled:
                 notes.append(f"{core.label(preferred)} (project default) is disabled — skipped")
@@ -1195,7 +1204,8 @@ def set_default(
     if project is None and ref is None:
         raise AccountsError(
             "the machine default is rank 1 of the priority order and cannot be cleared — "
-            f"reorder instead: {prog.word()} accounts move <slot|alias|email> top"
+            "reorder instead"
+            + prog.shell_advice(f": {prog.word()} accounts move <slot|alias|email> top")
         )
     account = resolve(ref, agent=agent) if ref is not None else None
     if account is not None:
@@ -1206,7 +1216,8 @@ def set_default(
         # launch, and only doctor said so (review of #205, third round).
         raise AccountsError(
             f"{core.label(account)} (slot {account.slot}) is disabled, so no launch would "
-            f"pick it — enable it first: {prog.word()} accounts enable {ref_for(account)}"
+            "pick it — enable it first"
+            + prog.shell_advice(f": {prog.word()} accounts enable {ref_for(account)}")
         )
     try:
         with store_session() as store:
@@ -1245,9 +1256,8 @@ def _vanished(account: ClaudeAccount | None, agent: str = AGENT) -> str:
     slot = account.slot if account is not None else "?"
     noun = core.kind(account.agent if account is not None else agent).noun
     return (
-        f"no {noun} account in slot {slot} any more — it was removed meanwhile; "
-        f"see: {prog.word()} accounts"
-    )
+        f"no {noun} account in slot {slot} any more — it was removed meanwhile"
+    ) + prog.shell_advice(f"; see: {prog.word()} accounts")
 
 
 def project_default(project: ProjectInfo, *, agent: str = AGENT) -> ClaudeAccount | None:
@@ -1298,7 +1308,8 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
             ):
                 # Every agent's slots are arranged here: one name, one account, across all.
                 raise AccountsError(
-                    f"the alias {normalised!r} is already taken — see: {prog.word()} accounts"
+                    f"the alias {normalised!r} is already taken"
+                    + prog.shell_advice(f" — see: {prog.word()} accounts")
                 )
             try:
                 if core.kind(account.agent).legacy_slots:
@@ -1307,7 +1318,8 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
                     store.set_agent_account_alias(account.agent, account.slot, normalised)
             except sqlite3.IntegrityError as exc:
                 raise AccountsError(
-                    f"the alias {normalised!r} is already taken — see: {prog.word()} accounts"
+                    f"the alias {normalised!r} is already taken"
+                    + prog.shell_advice(f" — see: {prog.word()} accounts")
                 ) from exc
             except KeyError as exc:
                 raise NoSuchAccount(_vanished(account)) from exc
@@ -1552,7 +1564,8 @@ _SIGN_IN_FIXES: dict[UsageCause, Callable[[str | None], str]] = {
     UsageCause.token_refreshing: _refreshing,
 }
 """The causes whose fix names the agent: its sign-in, its token refresh (:func:`usage_fix`)."""
-_THEN_REFRESH = "then ↻ Refresh usage (or --refresh)"
+_THEN_REFRESH_IN_APP = "then ↻ Refresh usage"
+_THEN_REFRESH = f"{_THEN_REFRESH_IN_APP} (or --refresh)"
 
 USAGE_FIXES: dict[UsageCause, str | None] = {
     UsageCause.not_signed_in: _LOG_IN,
@@ -1612,7 +1625,41 @@ def usage_fix(
     if fix is None:
         return None
     at = f"at {until.astimezone().strftime('%H:%M')} " if until is not None else ""
-    return fix.format(slot="<slot>" if slot is None else slot, at=at, program=prog.word())
+    filled = {"slot": "<slot>" if slot is None else slot, "at": at}
+    return prog.shell_advice(
+        fix.format(**filled, program=prog.word()), app=_app_fix(cause, agent, fix).format(**filled)
+    )
+
+
+def _app_fix(cause: UsageCause, agent: str | None, fix: str) -> str:
+    """What asq says to do about ``cause``: the shell's ``fix`` without the terminal's way, as
+    the Accounts row has Log in and ↻ Refresh usage (R13b)."""
+    if cause in (UsageCause.not_signed_in, UsageCause.token_missing):
+        return "press Log in"
+    if cause in (UsageCause.token_expired, UsageCause.token_rejected):
+        return (
+            "press Log in, or open a session on this account: "
+            f"{core.agent_label(agent or core.AGENT)} refreshes the token"
+        )
+    return _APP_FIXES.get(cause, fix)
+
+
+_APP_FIXES: dict[UsageCause, str] = {
+    UsageCause.keychain_locked: (
+        "unlock the login keychain (Keychain Access, or log out and back in), "
+        f"{_THEN_REFRESH_IN_APP}"
+    ),
+    UsageCause.keychain_locked_ssh: (
+        "open rlx on the Mac itself, which records usage for this session too"
+    ),
+    UsageCause.keychain_refused: f"allow rlx in Keychain Access, {_THEN_REFRESH_IN_APP}",
+    UsageCause.keychain_timeout: (
+        f"answer the Keychain's prompt if one is waiting, {_THEN_REFRESH_IN_APP}"
+    ),
+    UsageCause.keychain_failed: "↻ Refresh usage asks the Keychain again",
+    UsageCause.tls_cert: tls.CERT_FIX,
+}
+"""asq's words for the causes whose shell fix (:data:`USAGE_FIXES`) names a command or a flag."""
 
 
 def unreadable_usage(
@@ -5120,8 +5167,8 @@ def begin_sign_in(slot: int | str | None, *, agent: str = AGENT) -> ClaudeAccoun
         return core.create_account(agent)
     if found is None:
         raise NoSuchAccount(
-            f"no {_whose(agent, core.list_accounts())} account in slot {slot} — "
-            f"see: {prog.word()} accounts"
+            f"no {_whose(agent, core.list_accounts())} account in slot {slot}"
+            + prog.shell_advice(f" — see: {prog.word()} accounts")
         )
     return found
 
@@ -5721,9 +5768,8 @@ def trust_command(folder: Path | None) -> str:
 def _trust_not_shared(target: ClaudeAccount, scope: sharing.TrustScope, exc: Exception) -> str:
     return (
         f"folder trust could not be shared into {core.label(target)}: {exc} — approve "
-        f"{core.agent_label(target.agent)}'s question there once, or "
-        f"`{trust_command(scope.folder)}`"
-    )
+        f"{core.agent_label(target.agent)}'s question there once"
+    ) + prog.shell_advice(f", or `{trust_command(scope.folder)}`")
 
 
 def _trusting_agents() -> list[tuple[str, FolderTrust]]:

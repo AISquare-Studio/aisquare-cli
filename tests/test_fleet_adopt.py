@@ -523,7 +523,7 @@ def test_codexs_daemon_holding_a_thread_after_its_tui_quit_is_named_and_says_how
     assert "13100" not in said
     assert "Codex's background app-server" in said and "lets go of it by itself" in said
     [listed] = adopt_service.recent()
-    stop = f"`aisquare accounts run {listed.slot} app-server daemon stop`"
+    stop = f"`rlx accounts run {listed.slot} app-server daemon stop`"
     assert stop in said, "Codex's own stop, on the thread's account"
     assert "quit it first" not in said
 
@@ -570,7 +570,7 @@ def _says_the_daemon(said: str) -> None:
     go and Codex's own stop on the thread's account, never "quit it"."""
     [listed] = adopt_service.recent()
     assert "Codex's background app-server" in said and "lets go of it by itself" in said
-    assert f"`aisquare accounts run {listed.slot} app-server daemon stop`" in said
+    assert f"`rlx accounts run {listed.slot} app-server daemon stop`" in said
     assert "quit it first" not in said
 
 

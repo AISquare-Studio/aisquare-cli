@@ -75,6 +75,7 @@ from urllib.error import URLError
 from urllib.parse import SplitResult, urlsplit
 
 from aisquare.core import insights, outbox, paths, spawn
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapter_for_binary, adapters, default_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, SessionFlags
 from aisquare.core.atomic import write_replacing
@@ -927,8 +928,8 @@ def wire_session(
         return SessionWiring(
             traced=False,
             reason="explainability.proxy_url is empty: no proxy is known for the deployment "
-            "this project's traces go to — launching untraced (aisquare explainability "
-            "status says where to set one)",
+            "this project's traces go to — launching untraced"
+            + prog.shell_advice(" (aisquare explainability status says where to set one)"),
         )
 
     # The one value here that can cost a LAUNCH rather than a trace. The agent
@@ -1031,8 +1032,12 @@ def wire_session(
             traced=False,
             reason=(
                 f"{settings.proxy_url} is not a local proxy and no workspace key resolved, "
-                f"so every model call would be denied — launching untraced. Set the key: "
-                f"{where}; or attach this project's own: aisquare explainability key set"
+                "so every model call would be denied — launching untraced."
+                + prog.shell_advice(
+                    f" Set the key: {where}; or attach this project's own: aisquare "
+                    "explainability key set",
+                    app=" Set its key on the Explainability page.",
+                )
             ),
         )
 
@@ -1573,7 +1578,9 @@ def shipping_state(target_name: str | None = None) -> ShippingState:
     # mid-cutover, which is exactly when the sub-state is "buffering" rather
     # than the happy one.
     if not settings.ship:
-        reason = "off — nothing is captured (aisquare init --explainability to turn it on)"
+        reason = "off — nothing is captured" + prog.detail_advice(
+            " (aisquare init --explainability to turn it on)"
+        )
     elif not gateway_url:
         reason = f"on, but no gateway URL is configured ({GATEWAY_ENV_VAR})"
     else:
@@ -1587,12 +1594,12 @@ def shipping_state(target_name: str | None = None) -> ShippingState:
             reason = f"{destination} — but no workspace key: {where}"
         elif not sdk:
             reason = (
-                f"{destination} — buffering, the explainability extra is missing: {install_hint()}"
+                f"{destination} — buffering, the explainability extra is missing"
+                + prog.detail_advice(f": {install_hint()}")
             )
         elif counts.queued:
-            reason = (
-                f"{destination} — {counts.queued} buffered, "
-                "run 'aisquare explainability ship' to drain"
+            reason = f"{destination} — {counts.queued} buffered" + prog.detail_advice(
+                ", run 'aisquare explainability ship' to drain"
             )
         else:
             reason = f"{destination} — nothing buffered"

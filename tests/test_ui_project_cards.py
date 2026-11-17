@@ -836,7 +836,8 @@ def test_remove_is_refused_while_the_project_has_live_agents(
         return toasts, [card.project.id for card in app.sidebar.query(ProjectCard)]
 
     toasts, cards = drive(go, notifications=True)
-    assert "coder-auth" in toasts and "fleet shutdown" in toasts, toasts
+    assert "coder-auth" in toasts and "stop them first" in toasts, toasts
+    assert "fleet shutdown" not in toasts, "asq names no command (R13b)"
     assert cards == ["prj_a"] and _stored("prj_a") is not None
 
 

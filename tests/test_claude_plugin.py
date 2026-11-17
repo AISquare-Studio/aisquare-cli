@@ -38,6 +38,7 @@ from typing import Any
 import pytest
 
 from aisquare.core import agents as agent_core
+from aisquare.core.agent_adapters import get_adapter
 from tests.fsperms import can_deny_reads
 
 REPO = Path(__file__).resolve().parents[1]
@@ -159,8 +160,9 @@ def hook_problems(hooks_json: Mapping[str, Any]) -> list[str]:
     """How a hooks.json differs from the hooks ``agents connect`` installs; empty if it does not.
 
     The same six events as ``core.agents._HOOKS``, each one hook that runs the launcher
-    with that event's ``aisquare hook`` subcommand, and the two context hooks allowed
-    ``CONTEXT_HOOK_TIMEOUT_SECONDS``, as settings.json gives them.
+    with that event's ``aisquare hook`` subcommand, and every hook the time
+    ``agents connect`` gives it (``required_hook_timeout``): the two context hooks
+    ``CONTEXT_HOOK_TIMEOUT_SECONDS``, the session end its own (R20), as settings.json does.
     """
     events = hooks_json.get("hooks")
     if not isinstance(events, dict):
@@ -184,13 +186,13 @@ def hook_problems(hooks_json: Mapping[str, Any]) -> list[str]:
         ):
             problems.append(f"{event}: does not run the launcher with {subcommand}")
         timeout = item.get("timeout")
-        if event in agent_core._CONTEXT_HOOKS and not (
-            isinstance(timeout, int) and timeout >= agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
-        ):
-            problems.append(
-                f"{event}: timeout {timeout!r} is under {agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS}"
-            )
+        needs = agent_core.required_hook_timeout(_SPECS[event])
+        if needs is not None and not (isinstance(timeout, int) and timeout >= needs):
+            problems.append(f"{event}: timeout {timeout!r} is under {needs}")
     return problems
+
+
+_SPECS = {hook.event: hook for hook in get_adapter("claude-code").capabilities.hooks}
 
 
 def test_hooks_json_runs_every_lifecycle_event_through_the_launcher() -> None:
@@ -232,8 +234,20 @@ def _unwrapped(hooks: dict[str, Any]) -> None:
             "PreToolUse: not an event agents connect installs",
         ),
         (_unwrapped, "no top-level `hooks` object"),
+        (
+            lambda hooks: hooks["hooks"]["SessionEnd"][0]["hooks"][0].pop("timeout"),
+            "SessionEnd: timeout None is under 10",
+        ),
     ],
-    ids=["missing-event", "wrong-subcommand", "short-timeout", "no-timeout", "extra", "unwrapped"],
+    ids=[
+        "missing-event",
+        "wrong-subcommand",
+        "short-timeout",
+        "no-timeout",
+        "extra",
+        "unwrapped",
+        "session-end-no-timeout",
+    ],
 )
 def test_the_hooks_guard_names_each_way_hooks_json_can_drift(
     mutate: Callable[[dict[str, Any]], None], expected: str

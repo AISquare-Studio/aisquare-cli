@@ -28,7 +28,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/aisquare-hook\" session-end"
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/aisquare-hook\" session-end",
+            "timeout": 10
           }
         ]
       }

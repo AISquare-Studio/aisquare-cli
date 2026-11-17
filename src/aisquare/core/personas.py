@@ -542,8 +542,11 @@ def warnings(persona: Persona) -> list[str]:
         layer = " --project" if persona.layer == "project" else ""
         found.append(
             f"the body is {len(persona.body):,} characters, over the {BODY_SOFT_CAP:,} soft "
-            f"cap — it is always-injected context; `{prog.word()} persona import {persona.path} "
-            f"--condense --force{layer}` rewrites it shorter"
+            "cap — it is always-injected context"
+            + prog.shell_advice(
+                f"; `{prog.word()} persona import {persona.path} --condense --force{layer}` "
+                "rewrites it shorter"
+            )
         )
     label = persona.frontmatter.get("name")
     if label is not None and label != persona.name:

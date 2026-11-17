@@ -535,7 +535,7 @@ def test_the_line_names_the_folder_the_agent_ran_in_and_how_to_forget_it(
 
     assert "this project" not in said
     assert f"a Codex agent ran in {parent} (2" in said, said
-    forget = shlex.join(["aisquare", "agents", "disconnect", "codex", "--forget-root", str(parent)])
+    forget = shlex.join(["rlx", "agents", "disconnect", "codex", "--forget-root", str(parent)])
     assert said.endswith(f"`{forget}` forgets it"), said
 
 
@@ -665,7 +665,7 @@ def test_forgetting_a_root_under_another_agents_name_is_refused_naming_the_comma
 
     assert other.exit_code == 1
     # Quoted as this OS's shell reads it (`shell_line`), as the refusal prints it.
-    forget = command_line(["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)])
+    forget = command_line(["rlx", "agents", "disconnect", "codex", "--forget-root", str(root)])
     assert " ".join(other.output.split()) == (
         f"✗ {root} was recorded by a Codex agent, not claude-code: forget it with {forget}"
     )
@@ -691,7 +691,7 @@ def test_the_command_printed_for_a_root_no_agent_of_this_release_recorded_works_
     root = _root(project.root.parent, agent=agent)
     # What the shell reads the printed line as: these words, quoted as this OS's shell reads
     # them (`shell_line`), so the pasted command is this argv.
-    argv = ["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)]
+    argv = ["rlx", "agents", "disconnect", "codex", "--forget-root", str(root)]
     forget = command_line(argv)
 
     [said] = _said(fleet_service.spawn(project, "coder", worktree=True))
@@ -847,7 +847,7 @@ def test_the_json_forget_key_is_the_command_that_forgets_the_root(
     from aisquare.core.shell_line import command_line
 
     root = _root(tmp_path / "work", agent=agent)
-    argv = ["aisquare", "agents", "disconnect", "codex", "--forget-root", str(root)]
+    argv = ["rlx", "agents", "disconnect", "codex", "--forget-root", str(root)]
 
     [entry] = json.loads(_cli("--json", "agents", "status", "--roots").stdout)
     pasted = _cli(*argv[1:], "--yes")
@@ -875,7 +875,7 @@ def test_a_wrong_name_on_a_root_no_agent_of_this_release_recorded_is_refused(
     )
 
     said = " ".join(text.output.split())
-    assert text.exit_code == 1 and "forget it with aisquare agents disconnect codex" in said, said
+    assert text.exit_code == 1 and "forget it with rlx agents disconnect codex" in said, said
     assert json.loads(as_json.stdout)["error"] == "wrong_agent", as_json.stdout
     with store_session() as store:
         assert root in sandbox_roots.recorded(store), "nothing forgotten"

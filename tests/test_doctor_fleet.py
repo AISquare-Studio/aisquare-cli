@@ -1296,6 +1296,30 @@ def test_the_fleet_terminal_row_names_the_outer_terminal_tmux_and_the_server() -
     assert "server prefix None" in check.detail and "stale" not in check.detail
 
 
+def test_the_fleet_terminal_row_says_the_agent_s_keys_in_asq_s_words_in_asq() -> None:
+    """R13b's nit (tester 12783): in asq the row said "every key reaches the agent in fleet
+    attach; F12 detaches", the attach view's words. asq's are its pane and F12's way back."""
+    from aisquare.core import program
+
+    server = FakeServer(version=(3, 7), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "None\n",
+        ("show-environment", "-g"): "",
+    }
+
+    shell = _terminal_row(server, {}).detail
+    program.enter_app()
+    try:
+        shown = _terminal_row(server, {}).detail
+    finally:
+        program.leave_app()
+
+    assert "(every key reaches the agent in fleet attach; F12 detaches)" in shell
+    assert shown == shell.replace(
+        "in fleet attach; F12 detaches)", "in its pane; F12 returns to the sidebar)"
+    )
+
+
 def test_the_fleet_terminal_row_names_the_running_servers_tmux_not_the_binary_on_path() -> None:
     """Final review of #203, F2. The keys cross the running server, which parses them,
     and after an in-place upgrade it still runs the binary it started with. The row
@@ -1538,6 +1562,58 @@ def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_
     assert diagnostics._check_resumable_agents() == [], "no transcript, nothing to resume"
 
 
+@pytest.mark.parametrize("how", ["in asq's own process", "run by asq as doctor --json"])
+def test_asq_s_doctor_names_the_agents_to_resume_and_their_restart_never_a_command(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """R13b (tester 12783): asq's Doctor showed the fleet-resume row whole, its DETAIL naming
+    `rlx fleet restart --project … coder-1`, whenever an agent had exited with its transcript
+    kept — a paused or stopped one, so in normal use. asq names the agents and the Restart
+    each has; at a shell the row keeps its commands."""
+    from aisquare.core import program
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t1.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+    resumable = _agent(project.id, "coder-1", "%1", ended=True).model_copy(
+        update={"session_id": "ses_resumable"}
+    )
+    _seed(tmp_path / "repo", resumable)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id="ses_resumable",
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=str(on_disk),
+            )
+        )
+    _hooked(resumable, project, str(on_disk))
+    shell = _by_name(diagnostics.doctor())["fleet-resume"]
+    if how.startswith("run"):
+        monkeypatch.setenv(program.IN_APP_ENV, "1")
+    else:
+        program.enter_app()
+    try:
+        shown = _by_name(diagnostics.doctor())["fleet-resume"]
+    finally:
+        program.leave_app()
+
+    named = project.codename or project.root.name or project.id
+    assert shown.detail == (
+        "1 exited agent can be resumed — the transcript is on disk, so Restart on the agent "
+        f"continues the session instead of starting over: coder-1 in {named}"
+    )
+    assert shell.detail.endswith(
+        f"starting over: `rlx fleet restart --project {project.codename or project.id} coder-1`"
+    ), "at a shell, its own command"
+    assert (shown.status, shown.fix) == (shell.status, shell.fix)
+
+
 def test_the_resume_line_reads_only_the_newest_row_under_each_label(
     home: Path, tmp_path: Path
 ) -> None:
@@ -1716,7 +1792,7 @@ def test_doctor_warns_on_a_binding_whose_claude_dir_has_no_hooks(tmp_path: Path)
     assert "coder" in row.detail and str(bare) in row.detail and "no rlx hooks" in row.detail
     assert "reviewer" not in row.detail, "a connected binding is not a problem"
     assert row.fix is not None and "rlx team bind coder" in row.fix
-    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir", str(bare)]
+    connect = ["rlx", "agents", "connect", "claude-code", "--config-dir", str(bare)]
     assert install_route.command_line(connect) in row.fix, "a fix any shell can paste"
 
 
@@ -1747,7 +1823,7 @@ def test_doctor_warns_on_a_binding_whose_codex_home_has_no_hooks(tmp_path: Path)
     assert row.status == CheckStatus.warn
     assert "coder: CODEX_HOME" in row.detail and str(bare) in row.detail
     assert "no rlx hooks" in row.detail and "reviewer" not in row.detail
-    connect = ["aisquare", "agents", "connect", "codex", "--config-dir", str(bare)]
+    connect = ["rlx", "agents", "connect", "codex", "--config-dir", str(bare)]
     assert row.fix is not None and install_route.command_line(connect) in row.fix
     assert "rlx team bind coder --unset CODEX_HOME" in row.fix
     assert "claude-code" not in row.fix, "Codex's home is connected as Codex's"

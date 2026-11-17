@@ -16,6 +16,7 @@ import asyncio
 import itertools
 import math
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
@@ -23,9 +24,11 @@ import pytest
 from textual import events
 from textual.app import ComposeResult
 from textual.geometry import Region
+from textual.notifications import Notification
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import Static
-from textual.widgets._toast import Toast, ToastRack
+from textual.widgets._toast import Toast, ToastHolder, ToastRack
 
 from aisquare.cli.ui import toasts
 from aisquare.cli.ui.clipboard import ClipboardApp
@@ -35,11 +38,13 @@ from aisquare.cli.ui.toasts import (
     MAX_SHOWN,
     RESUME_AT_LEAST,
     WIDTH,
+    CalmHolder,
     CalmToast,
     ClickGuard,
     MoreToasts,
 )
 from aisquare.core import clipboard
+from tests.toast_clock import ToastClock, toast_clock  # noqa: F401 - the fixture
 
 T = TypeVar("T")
 WIDTHS = (38, 45, 60, 90, 200)
@@ -86,6 +91,14 @@ def first_row(toast: CalmToast) -> str:
 async def settle(pilot: Pilot[None]) -> None:
     await pilot.pause(0.05)
     await pilot.pause()
+
+
+async def until(pilot: Pilot[None], done: Callable[[], bool], seconds: float = 5.0) -> None:
+    """Wait for ``done``, at most ``seconds``: a bound on a slow runner, never a window."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while not done() and loop.time() < deadline:
+        await pilot.pause(0.02)
 
 
 # --- where they are -------------------------------------------------------------------------
@@ -210,16 +223,20 @@ def test_a_fourth_makes_the_oldest_wait_its_time_stopped_under_more_and_nothing_
     assert MAX_SHOWN == 3
 
 
-def test_a_toast_that_waited_longer_than_its_time_still_gets_its_time_when_it_comes_back() -> None:
+def test_a_toast_that_waited_longer_than_its_time_still_gets_its_time_when_it_comes_back(
+    toast_clock: ToastClock,  # noqa: F811
+) -> None:
     """Its time stopped while it waited: a 1 s toast that waited 1.5 s is shown for its 1 s,
-    not reaped the moment it comes back."""
+    not reaped the moment it comes back. On the test's clock (``tests.toast_clock``): on
+    wall time a busy runner could end its 1 s before the others made it wait, or spend half
+    of it between its return and the read."""
 
     async def go(app: Host, pilot: Pilot[None]) -> tuple[list[str], float]:
         app.notify("brief, and waiting", timeout=1.0)
         for n in range(3):
             app.notify(f"toast {n}", timeout=30)
         await settle(pilot)
-        await pilot.pause(1.5)
+        toast_clock.advance(1.5)  # it waits longer than its time
         await pilot.click(offset=(app.size.width - 2, 1))
         await settle(pilot)
         back = [n for n in app._notifications if n.message == "brief, and waiting"]
@@ -227,7 +244,7 @@ def test_a_toast_that_waited_longer_than_its_time_still_gets_its_time_when_it_co
 
     texts, left = drive(90, go)
     assert texts[-1] == "brief, and waiting", "it came back, at the bottom"
-    assert 0.5 < left <= 1.0
+    assert left == pytest.approx(1.0), "with the 1 s it had when it began to wait"
 
 
 def test_more_dismisses_those_that_wait() -> None:
@@ -247,32 +264,46 @@ def test_more_dismisses_those_that_wait() -> None:
 # --- time -----------------------------------------------------------------------------------
 
 
-def test_time_stops_while_the_pointer_is_over_a_toast_and_resumes_with_at_least_two_seconds() -> (
-    None
-):
-    async def go(app: Host, pilot: Pilot[None]) -> tuple[bool, float, int]:
+def test_time_stops_while_the_pointer_is_over_a_toast_and_resumes_with_at_least_two_seconds(
+    toast_clock: ToastClock,  # noqa: F811
+) -> None:
+    """On the test's clock (``tests.toast_clock``). On wall time the 0.4 s toast, read after
+    a settle, had closed by its own time on a busy runner: ``IndexError`` at ``shown(app)[0]``
+    (#524's matrix, py3.12-captain-off shard 4/4)."""
+
+    async def go(app: Host, pilot: Pilot[None]) -> tuple[bool, int, float, bool, int]:
         app.notify("hover me", timeout=0.4)
         await settle(pilot)
         toast = shown(app)[0]
         await pilot.hover(offset=(toast.region.x + 2, toast.region.y))
-        await pilot.pause(0.8)  # twice its timeout, under the pointer
-        stopped = math.isinf(toast._notification.time_left)
-        still = len(shown(app))
+        toast_clock.advance(0.8)  # twice its timeout, under the pointer
+        toast._expire()  # what its timer would do, had it kept one
+        await settle(pilot)
+        stopped, still = math.isinf(toast._notification.time_left), len(shown(app))
         await pilot.hover(offset=(0, 20))
         await settle(pilot)
-        return stopped and still == 1, toast._notification.time_left, still
+        left, running = toast._notification.time_left, toast._timer is not None
+        toast_clock.advance(left)
+        toast._expire()  # its timer, once that time has passed
+        await settle(pilot)
+        return stopped, still, left, running, len(shown(app))
 
-    stopped, left, _ = drive(90, go)
-    assert stopped, "it outlived its time under the pointer"
-    assert RESUME_AT_LEAST - 0.5 < left <= RESUME_AT_LEAST
+    stopped, still, left, running, after = drive(90, go)
+    assert stopped and still == 1, "it outlived its time under the pointer"
+    assert left == pytest.approx(RESUME_AT_LEAST) and running, "it runs again, with 2 s"
+    assert after == 0, "and goes when they have passed"
 
 
-def test_a_toast_goes_by_itself_when_its_time_is_up() -> None:
+def test_a_toast_goes_by_itself_when_its_time_is_up(toast_clock: ToastClock) -> None:  # noqa: F811
+    """Its own timer ends it once its time has passed, on the test's clock: on wall time a
+    0.3 s toast could be gone before the settle that counted it was over."""
+
     async def go(app: Host, pilot: Pilot[None]) -> tuple[int, int]:
         app.notify("brief", timeout=0.3)
         await settle(pilot)
         before = len(shown(app))
-        await pilot.pause(0.8)
+        toast_clock.advance(0.3)
+        await until(pilot, lambda: not shown(app))  # its timer fires within its 0.3 s
         return before, len(shown(app))
 
     assert drive(90, go) == (1, 0)
@@ -318,7 +349,7 @@ def test_the_cue_gives_way_to_the_dismiss_glyph(monkeypatch: pytest.MonkeyPatch)
         toast = shown(app)[0]
         toast.cue(clipboard.CopyResult("copied", "osc52"))
         cued = first_row(toast)
-        await pilot.pause(0.5)
+        await until(pilot, lambda: first_row(toast).rstrip().endswith("✕"))
         return cued, first_row(toast)
 
     cued, later = drive(90, go)
@@ -344,7 +375,6 @@ def test_the_hooks_it_reads_are_there_on_the_textual_installed() -> None:
     """A Textual that moves them falls back to its own toasts (:data:`toasts.CALM`); this
     says so here, before a user's asq quietly shows the old ones."""
     assert toasts.CALM
-    assert hasattr(ToastRack, "_toast_id")
 
 
 def test_every_colour_is_the_theme_s() -> None:
@@ -646,3 +676,164 @@ def test_no_toast_keeps_a_timer_past_its_own_time() -> None:
     sleeping = drive(90, go)
     assert sleeping, "the toasts that show keep their time"
     assert [(interval, left) for interval, left in sleeping if interval > left + 1] == []
+
+
+# --- a holder that leaves as one comes in its place ------------------------------------------
+#
+# Textual frees a removed widget's id only once the removal is over, a few ticks after
+# ``remove()``. A holder mounted in its place in those ticks with the same id raised
+# ``DuplicateIds``, from a timer or a click, and asq went down (windows-py3.12, run
+# 44041622532: ``_expire`` -> ``close_now`` mounted the click guard as the last one went).
+# Each test below runs the moves in ONE tick, as late timers fire on a busy loop and as a
+# spam-click meets a burst of news: no pause between them, so no removal is over.
+
+
+def _holders(app: ClipboardApp[None], kind: type[Widget]) -> list[ToastHolder]:
+    """The rack's holders of a ``kind``, those still going included: by what each holds, which
+    is not mounted in it yet in the tick the holder is."""
+    rack = app.screen.query_one(ToastRack)
+    return [holder for holder in rack.query_children(CalmHolder) if isinstance(holder.inner, kind)]
+
+
+def _staying(holders: list[ToastHolder]) -> list[ToastHolder]:
+    return [holder for holder in holders if not getattr(holder, "_calm_removed", False)]
+
+
+def _toast(app: ClipboardApp[None], text: str) -> CalmToast:
+    return next(toast for toast in app.screen.query(CalmToast) if toast.render().plain == text)
+
+
+def _expire_now(toast: CalmToast) -> None:
+    """``toast``'s timer firing with its time up."""
+    toast._notification.timeout = 0
+    toast._expire()
+
+
+def _notify_now(app: ClipboardApp[None], text: str) -> None:
+    """A notification and the refresh it asks for, now: Textual's ``notify`` posts both."""
+    app._notifications.add(Notification(text, "", "information", 30))
+    _refresh_now(app)
+
+
+def _refresh_now(app: ClipboardApp[None]) -> None:
+    """The rack's refresh that a notify or a close asks for (``call_later``), run now."""
+    toasts.show_calm(app.screen.query_one(ToastRack), app._notifications)
+
+
+async def _gone(pilot: Pilot[None]) -> None:
+    """Every removal begun is over; no time passes."""
+    for _ in range(3):
+        await pilot.pause()
+
+
+def test_a_refresh_leaves_a_toast_that_stays_as_it_is() -> None:
+    """A holder is found by the notification it shows, never by an id: a new toast, or one
+    closed, leaves each toast that stays the same widget, so a drag over its text or its
+    copy cue lives through the refresh."""
+
+    async def go(app: Host, pilot: Pilot[None]) -> tuple[bool, bool]:
+        app.notify("stays", timeout=30)
+        app.notify("goes", timeout=30)
+        await _gone(pilot)
+        stays = _toast(app, "stays")
+        app.notify("comes", timeout=30)
+        await _gone(pilot)
+        after_one_came = stays.is_attached and _toast(app, "stays") is stays
+        _toast(app, "goes").close_now()
+        await _gone(pilot)
+        return after_one_came, stays.is_attached and _toast(app, "stays") is stays
+
+    assert drive(90, go) == (True, True)
+
+
+@pytest.mark.parametrize("second", ["expires", "is clicked closed"])
+def test_the_last_toasts_closing_in_the_tick_the_guard_goes_mount_one_guard(
+    second: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard's timer takes it out; in that tick the last two toasts close, both by their
+    timers or one by its timer and one by a click. One guard comes in its place, and it still
+    swallows the hand's next click."""
+    monkeypatch.setattr(toasts, "GUARD_SECONDS", 60.0)  # its timer is the test's, below
+    spot = (90 - 1 - DISMISS // 2, 1)
+
+    async def go(app: Host, pilot: Pilot[None]) -> tuple[int, int, list[str], int]:
+        app.notify("before", timeout=30)
+        await _gone(pilot)
+        _toast(app, "before").close_now()  # the last one: the guard comes
+        await _gone(pilot)
+        [guard] = _staying(_holders(app, ClickGuard))
+        app.notify("a", timeout=30)
+        app.notify("b", timeout=30)
+        await _gone(pilot)
+        a, b = _toast(app, "a"), _toast(app, "b")
+
+        toasts._drop_guard(app.screen.query_one(ToastRack), guard)  # the guard's timer
+        _expire_now(a)
+        if second == "expires":
+            _expire_now(b)
+        else:
+            b.close_now()  # what a click in its dismiss column does
+        guards_then = len(_staying(_holders(app, ClickGuard)))
+
+        await _gone(pilot)
+        guards = len(_holders(app, ClickGuard))
+        texts = [toast.render().plain for toast in shown(app)]
+        await pilot.click(offset=spot)  # the hand clicks once more
+        return guards_then, guards, texts, app.query_one(Pane).clicks
+
+    guards_then, guards, texts, reached = drive(90, go)
+    assert (guards_then, guards) == (1, 1), "one guard, never two"
+    assert texts == [] and reached == 0, "both closed, and the click after them was swallowed"
+
+
+@pytest.mark.parametrize("close", ["expires", "is clicked closed"])
+def test_a_toast_back_from_waiting_in_the_tick_its_old_holder_goes_is_shown_once(
+    close: str,
+) -> None:
+    """A fourth toast makes the oldest shown one wait, and its holder goes; one shown closes
+    in that tick, by its timer or a click, and the one that waited comes back, in a holder
+    mounted while its old one is still leaving."""
+
+    async def go(app: Host, pilot: Pilot[None]) -> tuple[list[str], list[int], int]:
+        for n in range(3):
+            app.notify(f"toast {n}", timeout=30)
+        await _gone(pilot)
+        one = _toast(app, "toast 1")
+
+        _notify_now(app, "toast 3")  # toast 0 waits: its holder goes
+        if close == "expires":
+            _expire_now(one)
+        else:
+            one.close_now()
+        _refresh_now(app)  # a slot is free: toast 0 comes back
+
+        await _gone(pilot)
+        each = Counter(toast._notification.identity for toast in app.screen.query(CalmToast))
+        texts = [toast.render().plain for toast in shown(app)]
+        return texts, sorted(each.values()), len(app.screen.query(MoreToasts))
+
+    texts, each, mores = drive(90, go)
+    assert texts == ["toast 3", "toast 2", "toast 0"], "the one that waited is back, at the bottom"
+    assert each == [1, 1, 1] and mores == 0, "each shown once, and nothing waits"
+
+
+def test_more_back_in_the_tick_its_old_line_goes_is_shown_once() -> None:
+    """``+1 more`` goes as a close frees a slot for the one that waits; a new toast in that
+    tick makes one wait again, and ``+1 more`` comes back while its old line is leaving."""
+
+    async def go(app: Host, pilot: Pilot[None]) -> tuple[list[str], list[str]]:
+        for n in range(4):
+            app.notify(f"toast {n}", timeout=30)
+        await _gone(pilot)
+
+        _toast(app, "toast 3").close_now()
+        _refresh_now(app)  # nothing waits: +1 more goes, toast 0 comes back
+        _notify_now(app, "toast 4")  # toast 0 waits again: +1 more is back
+
+        await _gone(pilot)
+        texts = [toast.render().plain for toast in shown(app)]
+        return texts, [str(more.render()) for more in app.screen.query(MoreToasts)]
+
+    texts, mores = drive(90, go)
+    assert texts == ["toast 4", "toast 2", "toast 1"]
+    assert mores == ["+1 more"], "one line, once"

@@ -153,8 +153,8 @@ class NotAdded(RuntimeError):
 
     def __init__(self, project: ProjectInfo) -> None:
         super().__init__(
-            f"{display_name(project)} is not one of your projects — add it first: "
-            f"{onboard_command(project.root)}"
+            f"{display_name(project)} is not one of your projects — add it first"
+            + prog.shell_advice(f": {onboard_command(project.root)}")
         )
         self.project = project
 
@@ -363,19 +363,24 @@ def _of(
     if frees is not None and frees.onboard is not None:
         # No fleet command finds a forgotten project (`find_projects`), so its stop would say
         # "no project matches" (review of #259, round 35, 2/8).
-        ways.append(f"{display_name(owner)} is forgotten: {frees.onboard} adds it back first")
+        ways.append(
+            f"{display_name(owner)} is forgotten"
+            + prog.shell_advice(f": {frees.onboard} adds it back first", app=": add it back first")
+        )
     if frees is None or frees.stop is not None:
         # `reap` is named for rows whose SERVER still answers — it refuses to end a
         # row on a server it cannot reach, and an operator following that advice
         # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
         # `fleet shutdown` is the command that can, on their word.
-        shutdown = fleet_command("shutdown", owner)
-        stop = fleet_command("stop", owner) + " <label>" if frees is None else frees.stop
-        reap = fleet_command("reap", owner)
+        them = "the live ones" if stopped else "them"
         ways.append(
-            f"stop {'the live ones' if stopped else 'them'} first ({stop}), or run "
-            f"{reap} if they are already gone; if their tmux server is gone too, "
-            f"{shutdown} records them"
+            prog.shell_advice(
+                f"stop {them} first "
+                f"({fleet_command('stop', owner) + ' <label>' if frees is None else frees.stop}), "
+                f"or run {fleet_command('reap', owner)} if they are already gone; if their tmux "
+                f"server is gone too, {fleet_command('shutdown', owner)} records them",
+                app=f"stop {them} first",
+            )
         )
     if frees is not None:
         # Stopped, a live one is the newest of its label still, a restart away from this
@@ -384,8 +389,9 @@ def _of(
         then = "" if frees.stop is None else "then "
         ways.append(
             f"{then}forget {display_name(owner)} {'' if then else 'first '}if you are done "
-            f"with its agents ({frees.forget}): a stopped one starts on this board again at a "
-            "restart"
+            "with its agents"
+            + prog.shell_advice(f" ({frees.forget})")
+            + ": a stopped one starts on this board again at a restart"
         )
     return f"{labels} — " + "; ".join(ways)
 
@@ -1111,5 +1117,9 @@ def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
     try:
         hooks_service.start_code_index(project, full=refresh)
     except Exception as exc:  # an index is optional; the onboard is not
-        return f"not started ({exc}) — build it with `{prog.word()} code index`"
-    return f"building in the background — `{prog.word()} code index --status` says when it is ready"
+        return f"not started ({exc})" + prog.shell_advice(
+            f" — build it with `{prog.word()} code index`"
+        )
+    return "building in the background" + prog.shell_advice(
+        f" — `{prog.word()} code index --status` says when it is ready"
+    )

@@ -2133,7 +2133,7 @@ class AccountsView(Vertical):
                 said, tone = f"{said}, but {iam.unrestricted_warning(signed_out=True)}", "warn"
             owed = worker.result.keys.revocations.owed
             if owed:
-                said = f"{said}; {destinations.describe_owed(owed)} — {destinations.REVOKE_RETRY}"
+                said = f"{said}; {destinations.describe_owed(owed)} — {destinations.revoke_retry()}"
                 tone = "warn"
             self._notice(said, tone)
             self.post_message(AccountsChanged())

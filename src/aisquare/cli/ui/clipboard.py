@@ -36,7 +36,7 @@ from textual.notifications import SeverityLevel
 from textual.widgets._toast import ToastRack
 
 from aisquare.cli.ui import timers, toasts
-from aisquare.core import clipboard
+from aisquare.core import clipboard, program
 
 ReturnType = TypeVar("ReturnType")
 
@@ -126,6 +126,9 @@ class ClipboardApp(App[ReturnType]):
 
     Its notifications are asq's (``cli.ui.toasts``): top-right, three at a time, each
     with a dismiss column and text that copies on a drag (R13, #146).
+
+    While it is up, the shared messages it shows leave out the commands they tell a shell
+    to type (``core.program.shell_advice``, R13b): from its first event to its last.
     """
 
     DEFAULT_CSS = toasts.CSS
@@ -134,6 +137,14 @@ class ClipboardApp(App[ReturnType]):
         # Before any timer: on Windows, none of them waits in a thread (``cli.ui.timers``).
         timers.install()
         super().__init__(*args, **kwargs)
+
+    def _on_load(self) -> None:
+        """The app's first event, under ``run()`` and ``run_test()`` alike."""
+        program.enter_app()
+
+    def _on_unmount(self) -> None:
+        """Its last: what the process prints after asq quits is read at a shell."""
+        program.leave_app()
 
     async def on_event(self, event: events.Event) -> None:
         """Every event the driver hands in, on every screen, modal ones included: a press on

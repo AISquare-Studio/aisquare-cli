@@ -256,6 +256,33 @@ def test_the_coders_note_names_the_connect_for_its_own_config_dir(
 
 
 @posix_route
+def test_the_coders_note_in_asq_points_at_connect_on_welcome_never_a_command(
+    runner: CliRunner, claude: Path, tmp_path: Path
+) -> None:
+    """R13b: the note's clause named `rlx agents connect …` in asq's Doctor too; asq names
+    the Connect its Welcome offers for the same case (step 2's ``manager_only``)."""
+    from aisquare.core import program
+
+    _connect(runner)
+    other = claude.parent / ".claude-c2"
+    other.mkdir()
+    _connect(runner, other)
+    (other / "settings.json").write_text("{}", encoding="utf-8")
+    repo = _repo_plugin(other, tmp_path / "repo", "project")
+    shell = diagnostics._check_claude_code(cwd=repo)
+    program.enter_app()
+    try:
+        row = diagnostics._check_claude_code(cwd=repo)
+    finally:
+        program.leave_app()
+
+    assert "may run without rlx: Connect, on Welcome, runs it in every folder" in row.detail
+    assert "agents connect" not in row.detail, row.detail
+    assert "may run without rlx: rlx agents connect claude-code --config-dir" in shell.detail
+    assert (row.status, row.fix) == (shell.status, shell.fix)
+
+
+@posix_route
 def test_the_coders_note_never_names_a_connect_that_refuses(
     runner: CliRunner, claude: Path, tmp_path: Path
 ) -> None:

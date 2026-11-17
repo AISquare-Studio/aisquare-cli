@@ -493,8 +493,8 @@ def _import_with_llm(
     )
     if not confirm(view):
         raise DraftKept(
-            f"not saved — the draft is kept at {kept}; `{prog.word()} persona import {kept}` "
-            "saves it",
+            f"not saved — the draft is kept at {kept}"
+            + prog.shell_advice(f"; `{prog.word()} persona import {kept}` saves it"),
             draft_path=kept,
             code="not_confirmed",
         )
@@ -656,8 +656,8 @@ def _read_source(source: str, root: Path | None, *, stdin: bytes | None = None) 
         if ref.name == source:
             return _read_source(str(ref.path), root)
     raise PersonaError(
-        f"no such file, directory or agent skill: {source} "
-        f"(`{prog.word()} persona import --list` shows the skills)",
+        f"no such file, directory or agent skill: {source}"
+        + prog.shell_advice(f" (`{prog.word()} persona import --list` shows the skills)"),
         code="source_not_found",
     )
 
@@ -1179,8 +1179,11 @@ def _bundled_refusal(name: str, verb: Literal["edited", "removed"]) -> PersonaEr
     else:
         rule = (
             f"'{name}' is a bundled persona and cannot be edited in place — copy it into a "
-            f"layer you own first: `{prog.word()} persona export {name} --to DIR`, then "
-            f"`{prog.word()} persona import DIR/{name} --user` (or `persona new NAME`)"
+            "layer you own first"
+            + prog.shell_advice(
+                f": `{prog.word()} persona export {name} --to DIR`, then "
+                f"`{prog.word()} persona import DIR/{name} --user` (or `persona new NAME`)"
+            )
         )
     return PersonaError(rule, code="bundled_read_only")
 

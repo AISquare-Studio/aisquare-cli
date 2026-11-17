@@ -65,12 +65,15 @@ class UnknownWrapperError(ValueError):
 
         # A line to paste, quoted for this shell (cmd.exe or PowerShell on Windows).
         self.fix = command_line(
-            ["aisquare", "team", "bind", role, "--agent", DEFAULT_AGENT, "--bin", binary]
+            [prog.word(), "team", "bind", role, "--agent", DEFAULT_AGENT, "--bin", binary]
         )
         super().__init__(
-            f"The agent family of {binary!r} is unknown. For a Claude wrapper, run: {self.fix}. "
-            "For a Codex wrapper use --agent codex instead; for a Claude wrapper use "
-            "--agent claude-code. "
+            f"The agent family of {binary!r} is unknown."
+            + prog.shell_advice(
+                f" For a Claude wrapper, run: {self.fix}. For a Codex wrapper use --agent codex "
+                "instead; for a Claude wrapper use --agent claude-code."
+            )
+            + " "
             "Non-Claude user defaults, project defaults and operator preferences "
             "do not identify a wrapper's family."
         )
@@ -150,7 +153,7 @@ def start_broker(
         raise store_broker.LaunchRefused(
             f"{selected.adapter.label}: its launch could not work out what its sandbox may "
             f"write ({type(exc).__name__}: {exc}), so it is not started without the store's "
-            f"protection; run `{prog.word()} doctor`"
+            "protection" + prog.shell_advice(f"; run `{prog.word()} doctor`")
         ) from exc
 
 
@@ -401,14 +404,18 @@ def _undeclared_binding(
         "env": harness._bin_env_var(role),
         "env:global": harness._BIN_ENV_GLOBAL,
     }.get(chosen.source, f"team.profiles.{role}.bin")
-    declare = command_line(
-        ["aisquare", "team", "bind", role, "--agent", adapter.id, "--bin", chosen.binary]
-    )
     return ValueError(
         f"--agent {adapter.id} cannot vouch for {chosen.binary!r}: it comes from {where}, "
         f"not from this command, and its agent family is unknown. To run {adapter.label} "
         f"itself, pass its executable ({adapter.binary}) on this command; to run "
-        f"{chosen.binary!r} as {adapter.label}, declare it: {declare}."
+        f"{chosen.binary!r} as {adapter.label}, declare it"
+        + prog.shell_advice(
+            ": "
+            + command_line(
+                [prog.word(), "team", "bind", role, "--agent", adapter.id, "--bin", chosen.binary]
+            )
+        )
+        + "."
     )
 
 

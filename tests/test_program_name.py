@@ -421,6 +421,19 @@ _KEEP_TEXTS: dict[tuple[str, str], str] = {
 }
 
 
+#: ... and argv lists or tuples that start with the word aisquare (brief 215), by function. A
+#: command shown to a person takes the word hints print (``prog.word()``); these are not that:
+_KEEP_ARGVS: dict[tuple[str, str], str] = {
+    # (c) data the program reads, not a command it shows:
+    ("core/agent_adapters/lasting.py", "_names_aisquare"): "a process's argv, compared",
+    ("core/instance_scan.py", "ui_command"): "a process's argv, compared",
+    ("services/diagnostics.py", "_check_commands"): "the program's names, each one",
+    # a command another program runs: the release a move back installs predates the rename
+    # (it lacks refresh-hooks), and answers only to aisquare.
+    ("services/lifecycle.py", "_left_by_move_back"): "run by the older release moved back to",
+}
+
+
 def _subcommands() -> list[str]:
     import typer.main
 
@@ -492,6 +505,19 @@ def _scan() -> set[tuple[str, int, str, str]]:
         for node in ast.walk(tree):
             if id(node) in parts:
                 continue
+            if (
+                isinstance(node, ast.List | ast.Tuple)
+                and node.elts
+                and isinstance(node.elts[0], ast.Constant)
+                and node.elts[0].value == "aisquare"
+            ):
+                # An argv that hard-codes the word: the literal sweep below reads strings alone,
+                # and missed every hint built from a list (brief 215).
+                where = (rel, scope.get(id(node), "<module>"))
+                if where not in _KEEP_FUNCS and where not in _KEEP_ARGVS:
+                    words = [e.value if isinstance(e, ast.Constant) else "…" for e in node.elts]
+                    found.add((rel, node.lineno, "argv", " ".join(map(str, words))[:120]))
+                continue
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 text = node.value
             elif isinstance(node, ast.JoinedStr):
@@ -535,6 +561,8 @@ def test_every_kept_entry_is_still_in_the_source() -> None:
         assert (_SRC / rel).is_file(), rel
     for rel, text in _KEEP_TEXTS:
         assert text in (_SRC / rel).read_text(encoding="utf-8"), (rel, text)
+    for rel, name in _KEEP_ARGVS:
+        assert f"def {name.split('.')[-1]}(" in (_SRC / rel).read_text(encoding="utf-8"), rel
 
 
 def test_the_guard_finds_what_it_should_and_passes_what_it_should(
@@ -549,6 +577,9 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
         'E = "keys the CLI minted"\n'
         'F = "each running `aisquare hook stop`"\n'
         'G = "pip install aisquare-cli[voice]"\n'
+        'H = ["aisquare", "accounts", "add"]\n'
+        'I = (prog.word(), "accounts", "add")\n'
+        'J = ["aisquare-cli", "x"]\n'
     )
     root = tmp_path / "aisquare"
     (root / "cli").mkdir(parents=True)
@@ -556,6 +587,7 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
     monkeypatch.setattr(sys.modules[__name__], "_SRC", root)
     found = sorted((kind, text) for _rel, _line, kind, text in _scan())
     assert found == [
+        ("argv", "aisquare accounts add"),
         ("hard-coded rlx", "`rlx accounts add` makes one"),
         ("old word", "run aisquare doctor to see"),
         ("the CLI", "keys the CLI minted"),

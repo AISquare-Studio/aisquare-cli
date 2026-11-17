@@ -281,10 +281,12 @@ def test_welcome_offers_its_own_installers_on_each_platform(third: AgentAdapter)
     assert mac == third.install_routes
     [windows] = first_run.install_routes("win32", agent=third.id)
     assert (windows.how, windows.command) == ("inside WSL2", third.install_routes[0].command)
-    # Step 2 with nothing installed names every registered agent's routes, this one's too.
+    # Step 2 with nothing installed links every registered agent's own install page, this
+    # one's too; asq names no command to type (R13, ruled Q1), the shell keeps the routes.
     state = first_run.probe_fleet(which=on_path(), sign_in=False)
     shown = claude_text(state, platform="linux").plain
-    assert f"{staged_label(third)}:" in shown and third.install_routes[0].command in shown
+    assert f"{staged_label(third)}:" in shown and third.install_page in shown
+    assert third.install_routes[0].command not in shown
 
 
 def test_its_release_stage_marks_its_name_wherever_an_agent_is_chosen_or_seen(

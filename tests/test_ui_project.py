@@ -956,8 +956,7 @@ def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
     header, button, pane, without = drive(project, scenario)
     assert "manager exited (130)" in header and "Restart on its sidebar row" in header
     # Naming the project: alone, it restarted the active project's manager (#259, round 21).
-    restart = f"rlx fleet restart --project {project.codename or project.id} manager"
-    assert restart in " ".join(header.split()) and "no manager yet" not in header
+    assert "fleet restart" not in header and "no manager yet" not in header  # no command (R13)
     assert button is True and pane is False  # the way to a NEW session is right there
     assert "has no manager yet" in without and "exited" not in without  # the control
 

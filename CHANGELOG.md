@@ -49,6 +49,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps answering until May 2027. A server that answers 503 with `Retry-After` is asked
   again after that wait, as a 429 already was, not after the first five-minute retry; either
   waits a day at most.
+- The one-line install is shorter: `curl -fsSL https://aisquare.studio/rlx/install.sh | sh`,
+  and on Windows `irm https://aisquare.studio/rlx/install.ps1 | iex`. Both lead to the same
+  installers on GitHub, and a release's own pinned URL is unchanged.
+- The package's page on PyPI links to rlx's site and its docs, and the README links the site.
 
 ## [0.10.0] - 2026-11-16
 

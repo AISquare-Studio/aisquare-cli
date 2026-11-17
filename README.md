@@ -8,8 +8,9 @@
 **One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
 
-rlx is short for relax: a tool made by a developer, for developers. Type `rlx`
-and you get one full-screen, mouse-driven view of your projects and their agents.
+[rlx](https://aisquare.studio/rlx) is short for relax: a tool made by a developer, for
+developers. Type `rlx` and you get one full-screen, mouse-driven view of your projects
+and their agents.
 
 - **One simple place for your coding agents.** Claude Code and Codex (beta),
   across all your projects. Click any agent and you are inside its *real*
@@ -33,7 +34,7 @@ and you get one full-screen, mouse-driven view of your projects and their agents
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh | sh
+curl -fsSL https://aisquare.studio/rlx/install.sh | sh
 ```
 
 On macOS, Linux and WSL2, that one line works out what your machine already
@@ -48,7 +49,7 @@ it, it is `install.sh` at the root of this repository.
 That installs the latest release. To pin one, every release from 0.9.0 on
 carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/rlx/releases/download/v0.10.0/install.sh | sh`.
 
-On Windows, run `irm https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.ps1 | iex`
+On Windows, run `irm https://aisquare.studio/rlx/install.ps1 | iex`
 in PowerShell: it runs that installer inside your WSL2 distribution, or prints the
 one command that installs WSL2 if there is none.
 

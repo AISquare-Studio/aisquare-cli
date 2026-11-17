@@ -8,7 +8,7 @@
 # cannot survive that. PSScriptAnalyzer's PSUseBOMForUnicodeEncodedFile is what
 # pointed it out.
 #
-#   irm https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.ps1 | iex
+#   irm https://aisquare.studio/rlx/install.ps1 | iex
 #
 # WHY THIS IS A SHIM AND NOT AN INSTALLER (docs/plans/one-line-install.md section 2).
 # The fleet UI runs every agent in a real tmux pane, and there is no tmux on

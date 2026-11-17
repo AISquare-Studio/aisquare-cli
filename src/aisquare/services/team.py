@@ -318,6 +318,11 @@ IN_FLIGHT: frozenset[TaskStatus] = frozenset({"doing", "review"})
 STANDBY_META = "standby:"
 """``team_meta`` key prefix, then a manager's session id: its standby (:func:`standby_of`)."""
 
+STANDBY_OFF_META = "standby-off:"
+"""``team_meta`` key prefix, then a manager's session id: its ``team standby --off``. Until its
+next turn begins, the question its last turn ended on does not put it back in standby
+(:func:`standby_on_its_question`, :func:`standby_turn_began`)."""
+
 WORK_RETURNS_KINDS: frozenset[str] = frozenset({"task_claimed", "task_reopened", "task_review"})
 """A task going back into flight after a standby began: work is back, and standby ends."""
 
@@ -332,10 +337,11 @@ def is_echo(store: ContextStore, event: TeamEvent, me: TeamSession) -> bool:
 
     The word must be the author's LAST board act before the move (its notes and task
     writes), within :data:`ECHO_WINDOW`: a note or decision ``--to manager``, or a result
-    (:data:`_TOLD_MANAGER_KINDS`), that the manager has read and that names no other task.
-    And nothing may come between them: no word addressed to the author, no reopen of the
-    task (:func:`answered_since`). A second round's review after a reopen, a second task's
-    review, and a verdict after an answered question all wake (#145's reopen, F1)."""
+    (:data:`_TOLD_MANAGER_KINDS`), that the manager has read, about the SAME task
+    (:func:`_about_the_task`). And nothing may come between them: no word addressed to the
+    author, no reopen of the task (:func:`answered_since`). A second round's review after a
+    reopen, a second task's review, and a verdict after an answered question all wake
+    (#145's reopen, F1)."""
     if event.kind not in ECHO_KINDS or event.session_id is None or event.session_id == me.id:
         return False
     since = (event.created_at - ECHO_WINDOW).isoformat()
@@ -353,7 +359,7 @@ def is_echo(store: ContextStore, event: TeamEvent, me: TeamSession) -> bool:
         said.seq <= me.cursor
         and said.kind in _TOLD_MANAGER_KINDS
         and (said.kind == "result" or _addressed_to_manager(said.to_role))
-        and said.task_id in (None, event.task_id)
+        and _about_the_task(store, said, event)
         and not answered_since(
             store,
             event.project_id,
@@ -363,6 +369,25 @@ def is_echo(store: ContextStore, event: TeamEvent, me: TeamSession) -> bool:
             before=event.seq,
         )
     )
+
+
+_TASK_NUMBER = re.compile(r"#(\d+)\b")
+"""A task's number as agents write it in a note: ``DONE #134 …``."""
+
+
+def _about_the_task(store: ContextStore, said: TeamEvent, move: TeamEvent) -> bool:
+    """Whether the word ``said`` is about the task ``move`` moved: filed with that task
+    (``--task``), or filed with none and naming its number (``#N``). Agents write "DONE #134
+    …" far more often than they pass ``--task``: of the 70 such pairs on cli-next-release's
+    board, 20 were filed with the task and 49 named it (#145's reopen, F1)."""
+    if move.task_id is None:
+        return False
+    if said.task_id is not None:
+        return said.task_id == move.task_id
+    task = store.get_task(move.task_id, project_ids=(move.project_id,))
+    if task is None or task.number is None:
+        return False
+    return str(task.number) in _TASK_NUMBER.findall(said.text or "")
 
 
 def _board_act(event: TeamEvent) -> bool:
@@ -435,7 +460,8 @@ def standby_of(store: ContextStore, me: TeamSession) -> Standby | None:
 
     It holds while nothing is in flight on its board (:func:`work_in_flight`), and ends for
     good when work comes back after it began (:data:`WORK_RETURNS_KINDS`): a fleet at work
-    always reaches its manager. The person's next prompt ends it too (:func:`end_standby`)."""
+    always reaches its manager. The person's next prompt ends it too
+    (:func:`standby_turn_began`)."""
     raw = store.get_meta(STANDBY_META + me.id)
     if not raw:
         return None
@@ -473,19 +499,25 @@ def standby_on_its_question(store: ContextStore, me: TeamSession) -> Standby | N
     standby = standby_of(store, me)
     if standby is not None:
         return standby
+    if store.get_meta(STANDBY_OFF_META + me.id):
+        return None  # turned off since that turn ended: it holds until the next one
     if work_in_flight(store, me.project_id):
         return None
     return begin_standby(store, me, why="asked")
 
 
-def end_standby(session_id: str) -> bool:
-    """End a session's standby: its person spoke (``UserPromptSubmit`` of a ``human`` prompt),
-    or ``team standby --off``. Whether there was one. Never raises."""
+def standby_turn_began(session_id: str, *, by_person: bool) -> None:
+    """A turn of ``session_id`` began (``UserPromptSubmit``): a ``team standby --off`` held
+    only until now, and a prompt its person typed (``by_person``) ends its standby. A fleet
+    wake or a teammate's ``fleet tell`` does not: standby holds watch's routine lines until
+    its person speaks. Never raises."""
     try:
         with store_session() as store:
-            return store.delete_meta(STANDBY_META + session_id)
+            store.delete_meta(STANDBY_OFF_META + session_id)
+            if by_person:
+                store.delete_meta(STANDBY_META + session_id)
     except Exception:
-        return False
+        return
 
 
 def held_in_standby(event: TeamEvent) -> bool:
@@ -1996,7 +2028,11 @@ def set_standby(session_ref: str, *, on: bool) -> StandbyChange:
         was = store.get_meta(STANDBY_META + session.id) is not None
         if not on:
             store.delete_meta(STANDBY_META + session.id)
+            # Its last turn may have ended on a question to its person: watch would put it back
+            # at its next look. Off holds until its next turn (#145's reopen).
+            store.set_meta(STANDBY_OFF_META + session.id, _now().isoformat())
             return StandbyChange(session, None, was)
+        store.delete_meta(STANDBY_OFF_META + session.id)
         if session.role != MANAGER_ROLE:
             raise StandbyRefused(
                 f"standby is a manager's: {short_id(session.id)} is a {session.role}, and "

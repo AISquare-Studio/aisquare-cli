@@ -39,7 +39,7 @@ from aisquare.core import harness
 from aisquare.core.config import WatchSettings
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, TeamEvent, TeamSession
+from aisquare.models import FleetAgent, TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services import watch as watch_service
@@ -193,10 +193,12 @@ def test_each_replayed_turn_wakes_the_manager_exactly_when_it_was_needed(
     turn: dict[str, Any], board: str
 ) -> None:
     turn = copy.deepcopy(turn)
-    history: list[tuple[str, dict[str, Any]]] = []
+    history: list[tuple[int, dict[str, Any]]] = []
+    echoed: dict[int, TeamTask] = {}
     for n, event in enumerate(turn["events"]):
         if event.get("echo"):
-            history.append(("told", event))
+            echoed[n] = _real_task(board, f"echoed {n}")
+            history.append((n, event))
         for item in event.get("watch", []):
             if item["kind"] == "stale" and item.get("last_act"):
                 label = f"coder-quiet{n}"
@@ -204,11 +206,14 @@ def test_each_replayed_turn_wakes_the_manager_exactly_when_it_was_needed(
                 _agent(board, label, sid)
                 _write(board, item["last_act"]["kind"], author=sid, to=item["last_act"]["to"])
                 item["agent_id"] = f"agt_{label}"
-    for _, event in history:
-        _write(board, "note", author=event["author"], to="manager")
+    for n, event in history:
+        # As the day's notes were written: "DONE #N …", the task named in the text and filed
+        # with no --task (49 of the 70 such pairs on that board; 20 more carried --task).
+        text = f"DONE #{echoed[n].number}, moving to review"
+        _say(board, "note", by=event["author"], to="manager", text=text)
     _read_all(board)  # what came before the turn's window, the manager has read
 
-    for event in turn["events"]:
+    for n, event in enumerate(turn["events"]):
         if event["kind"] == "watch":
             items = []
             for item in event["watch"]:
@@ -222,6 +227,8 @@ def test_each_replayed_turn_wakes_the_manager_exactly_when_it_was_needed(
                 else:
                     items.append(_item(item["kind"], agent="tester-x"))
             _watch_line(board, items)
+        elif n in echoed:
+            _say(board, event["kind"], by=event["author"], task=echoed[n].id)
         else:
             _write(
                 board, event["kind"], author=event["author"], to=event["to"], meta=event.get("meta")
@@ -301,10 +308,11 @@ def test_the_managers_own_result_and_question_do_not_wake_it(board: str) -> None
 def test_a_task_move_after_its_authors_note_already_read_is_no_second_wake(
     kind: str, board: str
 ) -> None:
-    _write(board, "note", author="coder", to="manager")
+    task = _real_task(board)
+    _say(board, "note", by="coder", to="manager", text=f"DONE #{task.number}, to review")
     assert _wakes(), "the note wakes it"
     _read_all(board)
-    _write(board, kind, author="coder")
+    _say(board, kind, by="coder", task=task.id)
     assert not _wakes(), "the review repeats the note it read"
 
 
@@ -488,6 +496,7 @@ def _say(
     by: str | None,
     to: str | None = None,
     task: str | None = None,
+    text: str | None = None,
 ) -> TeamEvent:
     """One board write by session ``by`` (a role of :data:`SESSIONS`, or a session id), addressed
     to ``to`` as typed and about ``task``: the event."""
@@ -496,11 +505,29 @@ def _say(
             store,
             board_id,
             kind,
-            f"{kind} (#145 reopen)",
+            text or f"{kind} (#145 reopen)",
             session_id=None if by is None else SESSIONS.get(by, by),
             to_role=to,
             task_id=task,
         )
+
+
+def _real_task(board_id: str, title: str = "the work") -> TeamTask:
+    """A task on the board, with the number the store gives it."""
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        task, _ = store.upsert_task(
+            TeamTask(
+                id=f"tsk_{len(store.team_tasks(board_id)) + 1:026d}",
+                project_id=board_id,
+                key="-".join(title.split()),
+                title=title,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    assert task.number is not None
+    return task
 
 
 def _echo(event: TeamEvent) -> bool:
@@ -520,7 +547,7 @@ def test_the_echo_still_holds_for_a_done_note_then_its_review(board: str) -> Non
 def test_each_word_to_the_manager_makes_its_authors_next_move_an_echo(
     kind: str, board: str
 ) -> None:
-    _say(board, kind, by="tester", to="manager" if kind != "result" else None)
+    _say(board, kind, by="tester", to="manager" if kind != "result" else None, task="tsk_a")
     _read_all(board)
     assert _echo(_say(board, "task_done", by="tester", task="tsk_a"))
 
@@ -577,7 +604,7 @@ def test_a_word_to_the_author_between_its_note_and_its_move_makes_the_move_news(
     """Told "also do X" after its DONE note, the coder's review says X is done: news. Its role,
     any case, or its fleet row's label, as turn-end delivery reads an address."""
     _agent(board, "coder-auth", SESSIONS["coder"])
-    _say(board, "note", by="coder", to="manager")
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
     _read_all(board)
     _say(board, "note", by=MANAGER, to=to)
     _read_all(board)
@@ -585,7 +612,7 @@ def test_a_word_to_the_author_between_its_note_and_its_move_makes_the_move_news(
 
 
 def test_a_word_to_someone_else_between_them_keeps_the_echo(board: str) -> None:
-    _say(board, "note", by="coder", to="manager")
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
     _say(board, "note", by=MANAGER, to="tester")
     _say(board, "task_reopened", by="tester", task="tsk_other")
     _read_all(board)
@@ -594,21 +621,21 @@ def test_a_word_to_someone_else_between_them_keeps_the_echo(board: str) -> None:
 
 def test_a_note_to_another_role_is_no_echo(board: str) -> None:
     """Told the tester, not the manager: the review is the manager's first word of it."""
-    _say(board, "note", by="coder", to="tester")
+    _say(board, "note", by="coder", to="tester", task="tsk_a")
     _read_all(board)
     assert not _echo(_say(board, "task_review", by="coder", task="tsk_a"))
     assert _wakes()
 
 
 def test_an_unread_note_makes_no_echo(board: str) -> None:
-    _say(board, "note", by="coder", to="manager")
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
     assert not _echo(_say(board, "task_review", by="coder", task="tsk_a"))
 
 
 def test_what_hooks_file_under_the_author_does_not_break_the_echo(board: str) -> None:
     """Its last BOARD act counts: an attention line or an exit filed under its session is not
     something it said."""
-    _say(board, "note", by="coder", to="manager")
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
     _say(board, "attention", by="coder")
     _read_all(board)
     assert _echo(_say(board, "task_review", by="coder", task="tsk_a"))
@@ -621,7 +648,7 @@ def test_the_echo_looks_back_thirty_minutes(
     assert timedelta(minutes=30) == team_service.ECHO_WINDOW
     now = datetime.now(tz=UTC)
     monkeypatch.setattr(team_service, "_now", lambda: now - timedelta(minutes=minutes))
-    _say(board, "note", by="coder", to="manager")
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
     _read_all(board)
     monkeypatch.setattr(team_service, "_now", lambda: now)
     assert _echo(_say(board, "task_review", by="coder", task="tsk_a")) is echo
@@ -635,11 +662,14 @@ def test_a_re_review_after_a_reopen_wakes_through_the_cli(runner: CliRunner, boa
         assert done.exit_code == 0, done.output
         return done.output
 
-    task_id = json.loads(run("task", "add", "the work", "--as", MANAGER[:8]))["id"]
+    added = json.loads(run("task", "add", "the work", "--as", MANAGER[:8]))
+    task_id, number = added["id"], added["number"]
     coder, tester = SESSIONS["coder"][:8], SESSIONS["tester"][:8]
     run("task", "claim", task_id, "--as", coder)
-    run("note", "DONE, moving to review", "--to", "manager", "--as", coder)
+    run("note", f"DONE #{number}, moving to review", "--to", "manager", "--as", coder)
+    _read_all(board)
     run("task", "review", task_id, "--as", coder)
+    assert not _wakes(), "round 1's review repeats the DONE note it read"
     _read_all(board)
     run("task", "reopen", task_id, "--reason", "the state check is missing", "--as", tester)
     _read_all(board)
@@ -758,3 +788,158 @@ def test_standby_holds_nothing_while_work_is_in_flight(runner: CliRunner, board:
         assert team_service.work_in_flight(store, board)
         assert team_service.standby_of(store, _manager()) is None
         assert team_service.standby_on_its_question(store, _manager()) is None
+
+
+# the manager's rulings on the reopen (seq 12616)
+
+
+def test_a_note_filed_with_no_task_is_about_the_task_it_names(board: str) -> None:
+    """How agents write it: "DONE #134 …", no ``--task``. Its number makes it the same task."""
+    task, other = _real_task(board, "the work"), _real_task(board, "other work")
+    _say(board, "note", by="coder", to="manager", text=f"DONE #{task.number}, PR #507 is up")
+    _read_all(board)
+    assert _echo(_say(board, "task_review", by="coder", task=task.id))
+    _say(board, "note", by="coder", to="manager", text=f"DONE #{other.number}")
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder", task=task.id)), "another number"
+
+
+@pytest.mark.parametrize(
+    ("filed", "names"),
+    [
+        pytest.param(None, None, id="no task, no number"),
+        pytest.param("other", "own", id="filed with another task, naming this one"),
+    ],
+)
+def test_a_note_not_about_the_moved_task_is_no_echo(
+    filed: str | None, names: str | None, board: str
+) -> None:
+    task, other = _real_task(board, "the work"), _real_task(board, "other work")
+    text = "DONE, moving to review" if names is None else f"DONE #{task.number}"
+    _say(board, "note", by="coder", to="manager", task=other.id if filed else None, text=text)
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder", task=task.id))
+    assert _wakes()
+
+
+def test_a_move_with_no_task_is_no_echo(board: str) -> None:
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder"))
+
+
+def test_the_stop_door_blocks_for_a_review_after_a_result_about_something_else(
+    runner: CliRunner, board: str, work_dir: Path
+) -> None:
+    """The tester's Stop-door case: a coder's result one step earlier, read mid-turn, made its
+    review no block. Not about that task, the review keeps the manager going."""
+    task = _real_task(board)
+    _say(board, "result", by="coder", text="PUSHED the fix for the flaky test")
+    _read_all(board)
+    _say(board, "task_review", by="coder", task=task.id)
+    payload = {"cwd": str(work_dir), "session_id": MANAGER, "stop_hook_active": False}
+    done = runner.invoke(app, ["hook", "stop"], input=json.dumps(payload))
+    assert done.exit_code == 0, done.output
+    assert json.loads(done.stdout)["decision"] == "block"
+
+
+def test_an_agent_holding_a_task_in_doing_is_never_idle_by_design(
+    runner: CliRunner, board: str
+) -> None:
+    """Mid-task, its quiet is news whatever it said last, answered or not."""
+    agent = _agent(board, "coder-quiet", SESSIONS["coder"])
+    _say(board, "note", by="coder", to="manager", text="PUSHED; may I have the suite slot?")
+    assert watch_service._idle_by_design(agent.id) is True, "no task in doing: waiting on it"
+    _task(runner, "doing")  # the coder claims one
+    _say(board, "note", by="coder", to="manager", text="PUSHED; may I have the suite slot?")
+    assert watch_service._idle_by_design(agent.id) is False
+
+
+def test_ce2_a_coder_answered_then_quiet_for_40_min_wakes_the_manager(
+    board: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CE2: coder-20 asks for the suite slot, the manager answers ``note --to coder-20 GO``
+    (a note to a waiting agent waits for a turn end that never comes), and coder-20 stays
+    quiet for 40 minutes. Watch's stale line is on the manager's line, and wakes it."""
+    from aisquare.services.captain import queue
+
+    agent = _agent(board, "coder-20", "c20-r12-0000-0000-0000-000000000020")
+    _say(board, "note", by=agent.session_id, to="manager", text="PUSHED; may I have the slot?")
+    _say(board, "note", by=MANAGER, to="coder-20", text="GO")
+    _read_all(board)
+    quiet = f"coder-20 {queue.QUIET} for 40 min"
+    summaries = _stale_look(board, [quiet], agent.id, monkeypatch)
+    assert summaries == [quiet]
+    _watch_line(board, [_item("stale", agent="coder-20", quiet=True)])
+    assert _wakes(), "a working fleet stalled: the manager must hear it"
+
+
+def test_ce3_a_re_review_and_a_quiet_coder_mid_task_both_reach_the_manager(
+    runner: CliRunner, board: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CE3: F1 and F2 together. Round 2's review wakes the manager; and the coder, back on a
+    task in doing and quiet for 40 minutes, is a stale line that wakes it too."""
+    from aisquare.services.captain import queue
+
+    agent = _agent(board, "coder-quiet", SESSIONS["coder"])
+    task = _real_task(board)
+    _say(board, "note", by="coder", to="manager", text=f"DONE #{task.number}")
+    _say(board, "task_review", by="coder", task=task.id)
+    _say(board, "task_reopened", by="tester", task=task.id)
+    _read_all(board)
+    _say(board, "task_review", by="coder", task=task.id)
+    assert _wakes(), "round 2's review"
+    _read_all(board)
+    _task(runner, "doing")
+    quiet = f"coder-quiet {queue.QUIET} for 40 min"
+    assert _stale_look(board, [quiet], agent.id, monkeypatch) == [quiet]
+    _watch_line(board, [_item("stale", agent="coder-quiet", quiet=True)])
+    assert _wakes()
+
+
+def test_team_standby_off_holds_against_the_same_question_until_a_new_turn(
+    runner: CliRunner, board: str, work_dir: Path
+) -> None:
+    """The ruling's minor: after ``--off``, the question the manager's turn ended on does not
+    put it back in standby at watch's next look; a new turn of its, fleet wake or not, ends
+    that, and ``team standby`` turns it on whenever asked."""
+    from aisquare.core import prompt_origin
+
+    _agent(board, "manager", MANAGER)
+    _asked(board, "manager")
+    assert _standby() is not None
+    off = runner.invoke(app, ["team", "standby", "--off", "--as", MANAGER[:8]])
+    assert off.exit_code == 0, off.output
+    _asked(board, "manager")
+    assert _standby() is None, "off holds while its last words are that question"
+    assert runner.invoke(app, ["team", "standby", "--as", MANAGER[:8]]).exit_code == 0
+    assert _standby() is not None, "turned on by hand, it is on"
+    assert runner.invoke(app, ["team", "standby", "--off", "--as", MANAGER[:8]]).exit_code == 0
+    payload = {"cwd": str(work_dir), "session_id": MANAGER, "prompt": prompt_origin.WAKE_TEXT}
+    hooked = runner.invoke(app, ["hook", "user-prompt-submit"], input=json.dumps(payload))
+    assert hooked.exit_code == 0, hooked.output
+    _asked(board, "manager")
+    assert _standby() is not None, "a new turn ended on a question: standby again"
+
+
+def test_only_the_authors_last_act_can_be_the_word_a_move_echoes(board: str) -> None:
+    """The ruling's "last act before the move": after its note about the task and its review,
+    the same author's done of that task is news. The note is no longer its last word."""
+    task = _real_task(board)
+    _say(board, "note", by="coder", to="manager", text=f"DONE #{task.number}")
+    _read_all(board)
+    assert _echo(_say(board, "task_review", by="coder", task=task.id))
+    _read_all(board)
+    assert not _echo(_say(board, "task_done", by="coder", task=task.id))
+    assert _wakes()
+
+
+def test_a_word_to_the_author_after_its_move_leaves_the_echo(board: str) -> None:
+    """Between means between: the manager's own reply after the review is no news in it."""
+    task = _real_task(board)
+    _say(board, "note", by="coder", to="manager", text=f"DONE #{task.number}")
+    _read_all(board)
+    review = _say(board, "task_review", by="coder", task=task.id)
+    _say(board, "note", by=MANAGER, to="coder", text="thanks, a tester is on it")
+    _say(board, "task_reopened", by="tester", task=task.id)
+    assert _echo(review)

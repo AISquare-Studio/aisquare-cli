@@ -428,17 +428,17 @@ class Watcher:
 IDLE_BY_DESIGN_KINDS: frozenset[str] = frozenset({"result", "question", "task_review", "task_done"})
 """An agent whose last board act was one of these, or a note to the manager, is waiting by
 design: on its manager, a tester or its person. Its own act already woke the manager, until
-someone answers it (``team.answered_since``)."""
+someone answers it (``team.answered_since``), and never while it holds a task in doing."""
 
 
 def _idle_by_design(agent_id: str | None) -> bool:
-    """Whether a waiting agent gone quiet is waiting by design (R12): its last act on its
-    board was addressed to the manager, or handed its task on (:data:`IDLE_BY_DESIGN_KINDS`),
-    and nothing has answered it since: no note addressed to it, no reopen of that act's task
-    (``team.answered_since``). Then it is no stale news for the manager: the act woke it
-    already. Answered and still quiet, it is stale again: a note to a waiting agent waits for
-    a turn end that never comes, and the manager must hear of it (#145's reopen, F2). Never
-    raises; an agent this cannot place is stale news, as before."""
+    """Whether a waiting agent gone quiet is waiting by design (R12): it holds no task in
+    doing, its last act on its board was addressed to the manager or handed its task on
+    (:data:`IDLE_BY_DESIGN_KINDS`), and nothing has answered it since: no note addressed to
+    it, no reopen of that act's task (``team.answered_since``). Then it is no stale news for
+    the manager: the act woke it already. Answered and still quiet, it is stale again: a note
+    to a waiting agent waits for a turn end that never comes, and the manager must hear of it
+    (#145's reopen, F2). Never raises; an agent this cannot place is stale news, as before."""
     if agent_id is None:
         return False
     from aisquare.services import fleet as fleet_service
@@ -450,6 +450,11 @@ def _idle_by_design(agent_id: str | None) -> bool:
             if agent is None or agent.session_id is None:
                 return False
             board = fleet_service.board_of_row(agent)
+            if any(
+                task.claimed_by == agent.session_id
+                for task in store.team_tasks(board, status="doing")
+            ):
+                return False  # mid-task: its quiet is news, whatever it said last
             last = store.filtered_events(board, session_id=agent.session_id, limit=1)
             if not last:
                 return False

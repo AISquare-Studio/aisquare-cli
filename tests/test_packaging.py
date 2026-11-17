@@ -1,4 +1,5 @@
-"""Both console scripts point at the same CLI entry point."""
+"""Every console script of the CLI points at the same entry point: aisquare, asq, and since
+#133 rlx and relax."""
 
 from __future__ import annotations
 
@@ -12,8 +13,8 @@ import aisquare
 
 def test_console_scripts_registered() -> None:
     scripts = {ep.name: ep.value for ep in entry_points(group="console_scripts")}
-    assert scripts.get("aisquare") == "aisquare.cli.app:main"
-    assert scripts.get("asq") == "aisquare.cli.app:main"
+    for name in ("aisquare", "asq", "rlx", "relax"):
+        assert scripts.get(name) == "aisquare.cli.app:main", name
 
 
 def test_the_suite_imports_this_tree_not_an_installed_copy() -> None:

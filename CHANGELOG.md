@@ -6,19 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`rlx` and `relax` start aisquare, as `asq` and `aisquare` do.** All four commands run
+  the same thing: bare `rlx` opens the fleet UI, `rlx --help` names itself, and
+  `rlx --install-completion` sets up completion for `rlx`. The one-line installer, `aisquare upgrade` and asq's *Update* put the two new
+  commands in `~/.local/bin` beside the others. Hooks still call `aisquare`, whichever
+  command connected them.
+- **Another program's `rlx` or `relax` is never replaced or deleted.** When `~/.local/bin`
+  already holds one (PyPI's `relax` is another project), the installer, `aisquare upgrade`,
+  asq's *Update* and `aisquare uninstall` stop before they change anything, and say in one
+  line which file it is and what to do: rename or move it, then run again. Left to itself,
+  uv replaces such a file without a word on an upgrade, refuses the whole install on a fresh
+  machine, and deletes it on an uninstall. `aisquare doctor` names an `rlx` or `relax`
+  earlier on your PATH that runs another program.
+  The move to this release is made by the release you have, and on 0.10.0
+  `aisquare upgrade`, asq's *Update* and `uv tool upgrade aisquare-cli` replace such a file
+  without asking: move yours aside first, or upgrade with the one-line installer, which
+  checks.
+
 ### Changed
 
 - **The product is named rlx, short for relax.** The README is titled rlx and opens with
   what it does for you: one place for your Claude Code and Codex agents across your
   projects, a manager you talk to in plain words, account usage managed for you, memory
-  that carries across sessions, and a command for everything. It writes its commands as
-  `rlx …` and names only what is live. The Codex plugin's page, CONTRIBUTING, SECURITY and
-  the two pages the README links say rlx too. The package is still `aisquare-cli` on PyPI,
-  and its keywords there name rlx.
+  that carries across sessions, a command for everything, and all of it local-first. It
+  writes its commands as `rlx …` and names only what is live. Five of the seven pages it
+  links say rlx too: the Codex plugin's page, CONTRIBUTING, SECURITY, and the pages on
+  running more than one rlx and on usage sharing. The package is still `aisquare-cli` on
+  PyPI, and its keywords there name rlx.
+- The AISquare sign-in keeps its name: `aisquare login`, `logout` and `whoami`, `aisquare
+  init --api-key` and `aisquare explainability` are AISquare's, and every page writes them so.
+- **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count
+  beside it is as before (`rlx · 3 live`), and nothing else in the sidebar moves, at any
+  width.
 - **The repository is now `AISquare-Studio/rlx`**, and every link says so: the one-line
   installers, the README and docs, `rlx doctor`'s issue link and the plugins' manifests.
   Links to the old name keep working, since GitHub redirects them, and the package, the
   plugin and its marketplace keep their names.
+- Usage sharing, once you turn it on, posts to `/api/v1/rlx/metrics/`, and sends the same
+  counts as before. Releases up to 0.10.0 post to `/api/v1/cli/metrics/`, which AISquare
+  keeps answering until May 2027. A server that answers 503 with `Retry-After` is asked
+  again after that wait, as a 429 already was, not after the first five-minute retry.
 - **The board names each agent as the left pane does, where it showed `role·<id>`.** In
   asq's board, `board -w` and `aisquare board`, a line's author, the sessions block, a
   task's claim and the done archive read the agent's name, such as `coder-auth`. A session
@@ -29,10 +58,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lines as they were. When two sessions share a name, such as an agent you restarted and
   its earlier session, the live one keeps the name and the earlier one adds the time it
   started: `coder-auth (14:02)`. Two that started in the same minute add their short ids
-  instead. A long name is cut short with `…`, and the
-  sessions block no longer wraps a row onto a second line. The short id is still in a
-  line's or a task's detail, and `o` still opens the right transcript. Agents still see
-  ids, as they address each other by them, and every `--json` is unchanged.
+  instead. A long name is cut short with `…`, and the sessions block no longer wraps a row
+  onto a second line. The short id is still in a line's or a task's detail, and `o` still
+  opens the right transcript. Agents still see ids, as they address each other by them,
+  and every `--json` is unchanged.
 
 ## [0.10.0] - 2026-11-16
 

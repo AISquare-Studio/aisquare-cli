@@ -803,6 +803,8 @@ jobs:
           for argv in (
               [f"aisquare{suffix}", "--version"],
               [f"asq{suffix}", "--version"],
+              [f"rlx{suffix}", "--version"],
+              [f"relax{suffix}", "--version"],
               [f"aisquare{suffix}", "--help"],
           ):
               subprocess.run([str(bindir / argv[0]), *argv[1:]], check=True)

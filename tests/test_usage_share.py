@@ -642,6 +642,61 @@ def test_a_server_error_that_names_no_wait_keeps_the_backoff(machine: Machine, c
     assert sharing.backoff(1) == timedelta(minutes=5), "the backoff's first step, for the record"
 
 
+@pytest.mark.parametrize("code", [429, 503])
+def test_a_retry_after_of_a_year_waits_a_day_not_a_year(machine: Machine, code: int) -> None:
+    """Tester 12360, F1: a Retry-After is honoured up to a day (RETRY_AFTER_CAP_S). A year's
+    would park sharing for a year; the kill switch's hour is still waited in full (above)."""
+    _history(machine)
+    _on()
+    year = Server(status(code, "later", **{"Retry-After": "31536000"}))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=year)
+    state = sharing.read()
+
+    assert not report.sent and report.error == f"HTTP {code}" and report.rejected_days == 0
+    assert state.acked == {} and state.failures == 1
+    assert sharing.parse_time(state.next_due_at) == NOW + timedelta(hours=24)
+    assert usage_share.RETRY_AFTER_CAP_S == 24 * 60 * 60
+
+
+@pytest.mark.parametrize("seconds", [10**12, 10**20])
+def test_an_absurd_retry_after_is_capped_before_the_date_math_and_recorded(
+    machine: Machine, seconds: int
+) -> None:
+    """Tester 12360, F2: 10^12 s overflowed the next-due date, the state's writer swallowed
+    the error, and the failure went unrecorded (failures stayed 0). Capped in whole seconds
+    first, it is a day like any long wait, and recorded. 10^20 s does not even make a
+    timedelta: the cap must come before one is built."""
+    _history(machine)
+    _on()
+    broken = Server(status(503, "later", **{"Retry-After": str(seconds)}))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=broken)
+    state = sharing.read()
+
+    assert not report.sent and report.error == "HTTP 503"
+    assert state.failures == 1 and state.last_error == "HTTP 503", "the failure is recorded"
+    assert state.acked == {}
+    assert sharing.parse_time(state.next_due_at) == NOW + timedelta(hours=24)
+
+
+@pytest.mark.parametrize("code", [500, 502])
+def test_a_server_error_s_retry_after_is_not_honoured_only_a_429_s_and_a_503_s(
+    machine: Machine, code: int
+) -> None:
+    """Tester 12360, G1: Retry-After is the server's word on a 429 and a 503 alone
+    (_SAYS_WHEN). On a 500 or a 502 it is not read, and the backoff decides."""
+    _history(machine)
+    _on()
+    server = Server(status(code, "later", **{"Retry-After": "3600"}))
+
+    usage_share.ship(now=NOW, tz=IST, transport=server)
+    state = sharing.read()
+
+    assert state.acked == {} and state.failures == 1
+    assert sharing.parse_time(state.next_due_at) == NOW + sharing.backoff(1)
+
+
 def test_two_shippers_at_once_send_one(machine: Machine) -> None:
     _history(machine)
     _on()

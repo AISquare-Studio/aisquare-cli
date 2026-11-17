@@ -53,6 +53,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and on Windows `irm https://aisquare.studio/rlx/install.ps1 | iex`. Both lead to the same
   installers on GitHub, and a release's own pinned URL is unchanged.
 - The package's page on PyPI links to rlx's site and its docs, and the README links the site.
+- **The board names each agent as the left pane does, where it showed `role·<id>`.** In
+  asq's board, `board -w` and `aisquare board`, a line's author, the sessions block, a
+  task's claim and the done archive read the agent's name, such as `coder-auth`. A session
+  the left pane has no name for reads as its role, such as `manager`. A note you wrote from
+  the command line reads `you` in asq's board and `board -w`, and `owner` in
+  `aisquare board`, which agents run too (it read `cli`). A renamed agent shows its new name.
+  An agent keeps its name after it stops, and so does the session it leaves when its
+  conversation is cleared or handed to another account, so the board never renames an
+  agent's lines to `coder`. When two sessions share a name, such as an agent you restarted
+  or cleared and its earlier session, the live one keeps the name and the earlier one adds
+  the time it started: `coder-auth (14:02)`. Two that started in the same minute add their
+  short ids instead. A long name is cut short with `…`, and the sessions block no longer
+  wraps a row onto a second line. The short id is still in a line's or a task's detail, and
+  `o` still opens the right transcript. Agents still see ids, as they address each other by
+  them, and every `--json` is unchanged.
 
 ## [0.10.0] - 2026-11-16
 

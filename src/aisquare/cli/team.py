@@ -16,6 +16,7 @@ from typing import Annotated, Any, NoReturn
 
 import typer
 
+from aisquare.cli import board_names
 from aisquare.cli.common import expected_config_write_errors, fail, local_time, parse_since
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, selfcli
@@ -1749,7 +1750,10 @@ def board(
         )
         return
     stdout_console().print(
-        team_service.render_board(project, sessions, tasks, events), markup=False
+        team_service.render_board(
+            project, sessions, tasks, events, names=board_names.read_board_names(sessions)
+        ),
+        markup=False,
     )
 
 

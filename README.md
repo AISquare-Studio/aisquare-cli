@@ -5,14 +5,16 @@
 [![CI](https://github.com/AISquare-Studio/rlx/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/rlx/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AISquare-Studio/rlx/blob/main/LICENSE)
 
-**One terminal over your projects and your coding agents: task a manager in
-plain words, and it runs the coders, testers and reviewers for you.**
+**Tell the manager the goal. Then relax.**
 
-[rlx](https://aisquare.studio/rlx) is made by a developer, for developers. Type `rlx`
-for one full-screen, mouse-driven view of your projects and their agents.
+[rlx](https://aisquare.studio/rlx) is a manager for your AI coding agents: Claude Code and Codex.
 
-- **One place for your coding agents.** Claude Code and Codex (beta), across
-  all your projects. Click an agent and you are in its *real* session, typing
+```sh
+curl -fsSL https://aisquare.studio/rlx/install.sh | sh
+```
+
+- **One place for your coding agents.** Claude Code and Codex, across all your
+  projects. Click an agent and you are in its *real* session, typing
   at it directly; nothing is relayed or re-rendered as a chat.
 - **Talk to the manager; it does the rest.** Tell it the goal in plain words.
   It plans the work, starts the coders, testers and reviewers, and keeps going
@@ -30,15 +32,11 @@ for one full-screen, mouse-driven view of your projects and their agents.
 
 ## Install
 
-```sh
-curl -fsSL https://aisquare.studio/rlx/install.sh | sh
-```
-
-On macOS, Linux and WSL2, it installs only what your machine is missing: uv, a
-Python of its own, rlx, tmux, gh, git and Claude Code, and Node for browser tools
-if you want them. It registers the git repo you run it from, wires your agent's
-hooks so every session gets its memory, and offers to open rlx. Running it again
-is a no-op. For Codex too, end the line with `| sh -s -- --agent both` instead of
+On macOS, Linux and WSL2, the line above installs only what your machine is
+missing: uv, a Python of its own, rlx, tmux, gh, git and Claude Code, and Node for
+browser tools if you want them. It registers the git repo you run it from, wires
+your agent's hooks so every session gets its memory, and offers to open rlx.
+Running it again is a no-op. For Codex too, end the line with `| sh -s -- --agent both` instead of
 `| sh` (`| sh -s -- --agent codex` for Codex alone). To read it first, it is
 `install.sh` at the root of this repository.
 

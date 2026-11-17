@@ -23,7 +23,9 @@ Seven rules, each a callable the controls below reach with known input (CONTRIBU
   ``aisquare-cli`` are taken out of the line first: the package and the repository keep that
   name until the owner renames them, and their links must keep working.
 - ``_banned`` — no line says what else the ruling took out: "free", pricing ("costs nothing",
-  "paid plan"), "experimental", the captain, "off by default" or "no account".
+  "paid plan"), "experimental", the captain, "off by default" or "no account". Nor "beta":
+  the owner dropped it from all marketing copy (RLX R14b; Codex support is built into rlx).
+  asq's own Codex label is product state, and stays.
 - ``_commands_not_written_rlx`` — every command is written ``rlx …``. Read in every fenced
   line, whatever the fence's language, and every inline code span, each split at ``&&``,
   ``||``, ``;`` and ``|``, with a console prompt (``$``, ``%``, ``>``), ``VAR=value``s,
@@ -88,6 +90,7 @@ _BANNED = (
     ("the captain, which ships off", re.compile(r"\bcaptain\b", re.IGNORECASE)),
     ("a feature that is off by default", re.compile(r"\boff by default\b", re.IGNORECASE)),
     ("defensive messaging", re.compile(r"\bno account\b", re.IGNORECASE)),
+    ("beta, which the owner dropped from marketing copy", re.compile(r"\bbeta\b", re.IGNORECASE)),
 )
 
 #: What the AISquare integration's commands run, after the program's name: they keep
@@ -348,6 +351,8 @@ def test_each_banned_shape_is_caught_and_plain_words_are_not() -> None:
         "Ask the Captain.": "captain",
         "It ships off by default.": "off by default",
         "Needs no account.": "defensive",
+        "Claude Code and Codex (beta), across all your projects.": "beta",
+        "Codex support is in Beta.": "beta",
     }
     for line, why in accused.items():
         found = _banned(line)
@@ -360,6 +365,7 @@ def test_each_banned_shape_is_caught_and_plain_words_are_not() -> None:
         "Sign in several accounts per agent.",
         "Opt-in, anonymous daily counts of how rlx is used.",
         "Sign in to your AISquare account with `aisquare login`.",
+        "An alphabet, a betamax tape.",
     )
     for line in innocent:
         assert not _banned(line), line

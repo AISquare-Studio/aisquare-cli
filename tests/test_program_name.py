@@ -233,3 +233,22 @@ def test_the_doctors_own_hints_make_the_same_buttons_whichever_word_they_print(
     assert [(check, argv[:4]) for check, argv in then["rlx"]] == [
         ("codex", ("agents", "connect", "codex", "--config-dir"))
     ]
+
+
+def test_the_window_title_is_the_products_name_the_sidebar_reads() -> None:
+    """asq's window title and its sidebar's header read one constant (#133's PRODUCT_NAME), so
+    the two cannot drift (#135, Q11)."""
+    from aisquare.cli.ui.app import FleetApp
+    from aisquare.cli.ui.sidebar import fleet_title
+    from aisquare.core.version import PRODUCT_NAME
+
+    assert FleetApp.TITLE == PRODUCT_NAME == "rlx"
+    assert fleet_title(0).plain == PRODUCT_NAME
+
+
+def test_the_command_hints_print_is_one_the_install_writes() -> None:
+    """``program.COMMAND`` is one of the commands this install writes beside ``aisquare`` and
+    ``asq`` (#133's ``install_route.NEW_COMMANDS``), so ``ours_on_path`` can find it there."""
+    from aisquare.services import install_route
+
+    assert program.COMMAND in install_route.NEW_COMMANDS

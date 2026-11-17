@@ -190,6 +190,7 @@ from aisquare.core.console import stderr_console
 from aisquare.core.feature_use import view_feature
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.terminal import mac_keyboard
+from aisquare.core.version import PRODUCT_NAME
 from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     AccountsOverview,
@@ -1121,7 +1122,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     of #135, findings 7 and 10).
     """
 
-    TITLE = "aisquare"
+    TITLE = PRODUCT_NAME
+    """The window's title: the product's name, the word the sidebar's header reads
+    (``core.version.PRODUCT_NAME``, #133), so the two cannot drift (#135)."""
     COMMAND_PALETTE_BINDING = "f1"
     CSS = """
     #main { height: 1fr; }

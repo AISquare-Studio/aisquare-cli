@@ -60,7 +60,13 @@ SHORT = pytest.mark.parametrize(
 def _with_session_end(runner: CliRunner, claude: Path, timeout: int | None) -> Path:
     """``claude``'s settings.json as ``agents connect`` writes it, our session end's
     ``timeout`` then ``timeout`` (``None``: none, 0.10.0's), and an operator's key and two
-    other tools' hooks beside ours."""
+    other tools' hooks beside ours.
+
+    Claude Code installed, as ``fake_home`` makes it: its config dir is there. The suite's
+    stand-in ``claude`` alone does not make it so on Windows, where ``shutil.which`` does not
+    see it (no ``PATHEXT`` extension), and connect then refused "claude-code is not installed
+    on this machine" (#521's Windows shards, tester 12781)."""
+    claude.mkdir(parents=True, exist_ok=True)
     connected = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert connected.exit_code == 0, connected.output
     path = claude / "settings.json"
@@ -102,12 +108,15 @@ def test_a_short_session_end_reads_as_short_and_the_upgrades_rewrite_gives_it_it
     assert agent_core.hook_timeout_shortfall("claude-code") == ["SessionEnd"]
     row = diagnostics._check_claude_code()
     assert row.status is CheckStatus.warn, row
-    assert f"the session-end hook has too little time in: {claude} (SessionEnd)" in row.detail
+    # The sentence, not the directory's spelling, which Windows may give otherwise.
+    assert "connected, but the session-end hook has too little time in: " in row.detail, row
+    assert "(SessionEnd)" in row.detail and "(SessionStart" not in row.detail, row
     assert "context hooks" not in row.detail, "the context hooks are not short"
     assert "agents connect claude-code" in (row.fix or ""), row.fix
 
     # The upgrade rewrites every site this home connected, by the new install's command.
-    assert claude in lifecycle._refresh_candidates("claude-code")
+    candidates = {site.resolve() for site in lifecycle._refresh_candidates("claude-code")}
+    assert claude.resolve() in candidates
     argv = [*lifecycle.refresh_hooks_argv("claude-code"), "--config-dir", str(claude)]
     refreshed = runner.invoke(app, argv)
     assert refreshed.exit_code == 0, refreshed.output

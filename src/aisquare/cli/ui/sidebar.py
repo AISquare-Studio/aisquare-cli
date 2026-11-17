@@ -1162,6 +1162,18 @@ class AgentLabelInput(InPlaceField, Input):
 
 
 RENAME_TIP = "double-click or F2 to rename"
+
+
+def rename_refusal_words(agent: FleetAgent) -> str | None:
+    """Why asq offers no rename for ``agent``, said with no command (R13): the service's rule
+    (``fleet_service.relabel_refusal``) and its words, but for a paused agent's, which name
+    the command that resumes it (R17's agent menu put them on screen)."""
+    refusal = fleet_service.relabel_refusal(agent)
+    if refusal is not None and agent.ended_at is not None and agent.paused_at is not None:
+        return f"{agent.label} is paused; once it is resumed it can be renamed"
+    return refusal
+
+
 MENU_TIP = "right-click, ⋯ or . for its menu"
 """How an agent row's menu opens (R17): every row offers one, its ⋯ shown while the row is
 hovered or highlighted."""
@@ -2578,7 +2590,7 @@ class Sidebar(Vertical):
         row = self._agent_row(agent_id)
         if row is None or not self._on_screen(row):
             return None
-        refusal = fleet_service.relabel_refusal(row.status.agent)
+        refusal = rename_refusal_words(row.status.agent)
         if refusal is not None:
             return refusal
         for card in self.query(ProjectCard):

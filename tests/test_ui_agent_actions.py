@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.geometry import Region
 from textual.notifications import Notification, Notifications
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import Button, Checkbox, OptionList, Static
 
 from aisquare.cli.ui.agent_menu import AgentMenu
@@ -35,6 +38,7 @@ from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.views.agent import AgentView, pause_question, restart_question
 from aisquare.cli.ui.views.app_settings import UiSettingsChanged
 from aisquare.cli.ui.views.doctor import COMMAND
+from aisquare.cli.ui.views.fleet_bulk import BulkAsked
 from aisquare.core.config import load_config
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -83,6 +87,13 @@ def posted(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Notification]]:
 
 def messages() -> list[str]:
     return [str(n.message) for n in POSTED]
+
+
+def drawn_line(widget: Widget) -> str:
+    """The rows ``widget`` composites, as the eye gets them, one after another: a button's
+    label, cut or whole (a box's buttons are three rows, the label on the middle one)."""
+    lines = widget.render_lines(Region(0, 0, widget.region.width, widget.region.height))
+    return "\n".join(strip.text for strip in lines)
 
 
 def drawn(widget: Static) -> str:
@@ -213,6 +224,64 @@ def test_the_header_offers_pause_before_stop_and_resume_in_its_place_on_a_paused
         return shown_buttons(await open_view(pilot, fleet_app(pilot), CODER))
 
     assert drive(go) == buttons
+
+
+@pytest.mark.parametrize(("size", "tight"), [((45, 30), True), ((120, 40), False)])
+@pytest.mark.parametrize("state", ["working", "exited", "paused"])
+def test_every_header_button_is_whole_in_a_45_column_terminal(
+    tmp_path: Path, script: Script, size: tuple[int, int], tight: bool, state: str
+) -> None:
+    """Beside a 45-column terminal's sidebar the bar has 21 cells: three padded buttons took 22
+    and Restart read ``Rest``. Tight there, each label whole inside the bar; padded at 120."""
+    one_coder(tmp_path, script, state)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, list[tuple[str, bool]]]:
+        app = fleet_app(pilot)
+        view = await open_view(pilot, app, CODER)
+        await settle(app)
+        bar = view.query_one("#agent-bar")
+        right = bar.region.x + bar.region.width
+        whole = [
+            (str(b.label), b.region.right <= right and str(b.label) in drawn_line(b))
+            for b in bar.query(Button)
+            if b.display
+        ]
+        return bar.has_class("-tight"), whole
+
+    is_tight, buttons = drive(go, size=size)
+    assert is_tight is tight
+    assert buttons and all(inside for _, inside in buttons), buttons
+
+
+@pytest.mark.parametrize("box", ["stop", "pause", "bulk"])
+def test_every_box_shows_all_its_buttons_whole_in_a_45_column_terminal(
+    tmp_path: Path, script: Script, box: str
+) -> None:
+    """At 45 columns the Stop box's Stop, Force and Cancel (16 cells each) put Cancel past the
+    box, and the bulk box stayed 72 wide past the screen: every button of every box is on
+    screen, whole, and so is the box."""
+    one_coder(tmp_path, script)
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, bool]]:
+        app = fleet_app(pilot)
+        view = await open_view(pilot, app, CODER)
+        if box == "bulk":
+            app.post_message(BulkAsked("pause", "prj_a"))
+        else:
+            view.query_one(f"#agent-{box}", Button).press()
+        await pilot.pause()
+        await settle(app)
+        screen = app.screen
+        assert type(screen).__name__ != "PaneScreen", "a box is up"
+        width = app.size.width
+        return [
+            (str(b.label), b.region.right <= width and str(b.label) in drawn_line(b))
+            for b in screen.query(Button)
+            if b.display and b.region.width
+        ]
+
+    buttons = drive(go, size=(45, 30))
+    assert len(buttons) >= 2 and all(whole for _, whole in buttons), buttons
 
 
 def test_the_captains_row_offers_no_pause(
@@ -499,6 +568,31 @@ def test_the_managers_menu_greys_rename_and_says_why(tmp_path: Path, script: Scr
     assert dict(got)["✎ Rename"] is True
     refusal = fleet_service.relabel_refusal(status("prj_a", "manager", "manager", "waiting").agent)
     assert refusal is not None and note == f"Rename: {refusal}"
+
+
+def test_a_paused_agents_menu_says_why_rename_waits_and_names_no_command(
+    tmp_path: Path, script: Script
+) -> None:
+    """R13 in the menu's note: the service's refusal for a paused agent names the command that
+    resumes it, which asq never shows; asq says it in words."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    row = status("prj_a", "coder-auth", "coder", "paused")
+    now = datetime.now(tz=UTC)
+    paused = row.model_copy(
+        update={"agent": row.agent.model_copy(update={"ended_at": now, "paused_at": now})}
+    )
+    script["prj_a"] = [paused]
+    assert "fleet resume" in (fleet_service.relabel_refusal(paused.agent) or ""), "the CLI's"
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await settle(app)
+        menu = await right_click(pilot, app, CODER)
+        return str(menu.query_one("#agent-menu-note", Static).render())
+
+    note = drive(go)
+    assert note == "Rename: coder-auth is paused; once it is resumed it can be renamed"
+    assert not COMMAND.search(note), note
 
 
 def test_dot_on_a_highlighted_agent_opens_its_menu_and_on_a_card_the_cards(

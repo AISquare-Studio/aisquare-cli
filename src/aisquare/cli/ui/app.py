@@ -126,6 +126,7 @@ from aisquare.cli.ui.sidebar import (
     UsageStatsSelected,
     ViewSelected,
     agent_name,
+    rename_refusal_words,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.cli.ui.stop import (
@@ -2977,7 +2978,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return
         project_id, agent_id = event.project_id, event.agent_id
-        refusal = fleet_service.relabel_refusal(status.agent)
+        refusal = rename_refusal_words(status.agent)
 
         def chosen(choice: str | None) -> None:
             if choice == AGENT_RENAME:

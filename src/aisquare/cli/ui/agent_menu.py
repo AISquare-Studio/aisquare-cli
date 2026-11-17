@@ -9,8 +9,9 @@ already offers in place:
   a paused row;
 - *Stop* where the header's Stop shows (``STOP_STATES``);
 - *Restart* on every row but a paused one (restarting a paused row IS its resume);
-- *Rename*, always listed, and greyed with ``relabel_refusal``'s reason under it when the row
-  offers none (the manager, the captain, a paused or an ended agent).
+- *Rename*, always listed, and greyed with why under it when the row offers none (the manager,
+  the captain, a paused or an ended agent): ``sidebar.rename_refusal_words``, the service's
+  rule in words that name no command.
 
 The menu answers what was chosen and does nothing itself, as a project card's menu does: the
 shell (``FleetApp.on_open_agent_menu``) runs the header's own press when the agent's view is

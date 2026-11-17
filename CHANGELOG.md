@@ -24,6 +24,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aisquare upgrade`, asq's *Update* and `uv tool upgrade aisquare-cli` replace such a file
   without asking: move yours aside first, or upgrade with the one-line installer, which
   checks.
+- **Pause sits beside Stop and Restart in an agent's view.** A paused agent shows Resume in
+  its place, which brings it back where it was. Pause, Stop and Restart each ask first in one
+  small box, which says what happens and offers *Don't ask again*: tick it and that action
+  acts on one click from then on, for every agent. *Ask again before every action*, under
+  ⚙ Settings ▸ App settings ▸ User preferences ▸ Advanced, brings every box back. Resume
+  never asks.
+- **Each agent in the sidebar has a ⋯ menu:** Pause or Resume, Stop, Restart and Rename. It
+  shows on the agent you point at or have selected; a right-click or `.` opens it too.
+  Rename is greyed, with why, where an agent keeps its name.
+- **The Pause, Resume, Stop and Restart boxes for many agents list each one with a tick**,
+  and a *Select all* at the top, so you choose which ones they act on. Pausing only some of a
+  project's agents leaves its manager free to start new ones; picking them all pauses the
+  project as before.
+- **App settings has a Display tab:** on/off switches for the account usage after each
+  agent, the agent marks in a mixed fleet, the live count in the sidebar's title, the fade
+  of the side without the keyboard, the bell when an agent needs you, the board following
+  its live feed, and the project directory under each name. Each applies as you tick it.
 
 ### Changed
 

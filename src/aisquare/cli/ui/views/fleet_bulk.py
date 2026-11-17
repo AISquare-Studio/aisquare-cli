@@ -298,8 +298,8 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     CSS = """
     ConfirmBulk { align: center middle; }
     ConfirmBulk #bulk-box {
-        width: 72; height: auto; max-height: 90%; border: heavy $error; background: $surface;
-        padding: 1 2;
+        width: 72; max-width: 92%; height: auto; max-height: 90%; border: heavy $error;
+        background: $surface; padding: 1 2;
     }
     ConfirmBulk #bulk-box.restart, ConfirmBulk #bulk-box.pause, ConfirmBulk #bulk-box.resume {
         border: heavy $warning;

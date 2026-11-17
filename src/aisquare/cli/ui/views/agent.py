@@ -40,6 +40,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
@@ -361,6 +362,9 @@ PAUSE_WORKER = "agent-pause"
 #: service's own set, which `fleet restart|stop --all` acts on.
 _STOPPABLE: frozenset[str] = fleet_service.PROCESS_STATES
 
+INFO_ROOM = 16
+"""The info line's cells the header keeps beside padded buttons; with less, the buttons go tight
+(:meth:`AgentView._fit_actions`)."""
 KEPT = "its task, worktree and session are kept"
 """What a pause keeps, in its box and its toast."""
 SESSION_PICKED_UP = (
@@ -490,6 +494,7 @@ class AgentView(Vertical):
         width: 1fr; height: 1; padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis;
     }
     AgentView #agent-bar Button { min-width: 0; margin: 0; }
+    AgentView #agent-bar.-tight Button { padding: 0; height: 1; }
     AgentView #agent-pane { height: 1fr; }
     """
 
@@ -630,11 +635,52 @@ class AgentView(Vertical):
         restart = self.query_one("#agent-restart", Button)
         restart.display = not paused
         restart.disabled = busy
-        restart.label = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
+        self._restart_words = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
+        restart.label = self._restart_words
         restart.tooltip = (
             "Start it again under this label — same role, task, worktree, account and "
             "persona; its session is resumed from the transcript when that is on disk"
         )
+        self._fit_actions()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._fit_actions)  # the bar is laid out after the view
+
+    def _fit_actions(self) -> None:
+        """The buttons whole in a narrow bar: below the room their padded labels and
+        :data:`INFO_ROOM` cells of info line take, they lose their padding and stand one cell
+        apart (``-tight``). Three padded buttons needed 22 cells beside a 45-column terminal's
+        sidebar, which leaves 21, and Restart was cut to ``Rest``."""
+        if not self.is_mounted:
+            return
+        bar = self.query_one("#agent-bar", Horizontal)
+        width = bar.size.width
+        if not width:
+            return
+        shown = [button for button in bar.query(Button) if button.display]
+        restart = self.query_one("#agent-restart", Button)
+        words = {button: str(button.label) for button in shown}
+        words[restart] = self._restart_words
+        roomy = sum(cell_len(said) + 2 for said in words.values()) + INFO_ROOM
+        tight = width < roomy
+        bar.set_class(tight, "-tight")
+        # ``Restart (resume)`` beside Stop is 21 cells alone: tight, it is ``Restart``, which
+        # its tooltip says resumes the session.
+        if restart.display and str(restart.label) != (
+            short := "Restart" if tight else words[restart]
+        ):
+            restart.label = short
+        for index, button in enumerate(shown):
+            # Textual sizes a button at its label and its 2 cells of ``line-pad``: tight, it
+            # is the label's own width, the cell before it the gap (the first one's is the
+            # header's own padding).
+            button.styles.width = cell_len(str(button.label)) if tight else None
+            button.styles.margin = (0, 0, 0, 1 if index else 0) if tight else None
+            # Inline: Textual's CSS refuses a ``line-pad`` of 0, which only a style set here holds.
+            button.styles.line_pad = 0 if tight else None
+
+    _restart_words = "Restart"
+    """Restart's label as the row's state words it, before a tight bar shortens it."""
 
     _captains: tuple[str, bool] | None = None
     """The row :meth:`_pausable` last asked ``is_the_captains_row`` of, and its answer: a path

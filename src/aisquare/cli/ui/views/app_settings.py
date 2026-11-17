@@ -660,11 +660,10 @@ class AppSettingsView(Vertical):
     AppSettingsView .row.preference { margin-bottom: 0; }
     AppSettingsView .display-choice { border: none; height: 1; padding: 0 1; }
     AppSettingsView .display-choice:focus { text-style: bold reverse; }
-    AppSettingsView #ui-confirmations { height: 1; }
     AppSettingsView #ui-not-asking {
-        width: 1fr; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
+        height: 1; padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis;
     }
-    AppSettingsView #ui-ask-again { min-width: 0; }
+    AppSettingsView #ui-ask-again { min-width: 0; margin: 0 0 1 1; }
     AppSettingsView .row .preference-label { width: 32; max-width: 32; }
     AppSettingsView .about { color: $text-muted; height: auto; margin-bottom: 1; }
     AppSettingsView .advanced { margin-top: 1; padding: 0; border: none; }
@@ -1180,14 +1179,15 @@ class AppSettingsView(Vertical):
         ):
             # Folded: a box's toast names the way here when Don't ask again is saved.
             yield Static(section_title(*self.CONFIRMATIONS_SECTION), classes="section")
-            with Horizontal(id="ui-confirmations"):
-                yield Static(Text(said_not_asking(self.ui.dont_ask)), id=NOT_ASKING_LINE)
-                yield Button(
-                    ASK_AGAIN,
-                    id=ASK_AGAIN_BUTTON,
-                    compact=True,
-                    disabled=not self.ui.dont_ask,
-                )
+            # The line on its own row, the button under it: beside each other in a narrow pane
+            # the line gave its every cell to the button and read "…".
+            yield Static(Text(said_not_asking(self.ui.dont_ask)), id=NOT_ASKING_LINE)
+            yield Button(
+                ASK_AGAIN,
+                id=ASK_AGAIN_BUTTON,
+                compact=True,
+                disabled=not self.ui.dont_ask,
+            )
             yield Static(
                 Text(self.PREFERENCES_FROM_OUTSIDE),
                 id="preferences-from-a-shell",

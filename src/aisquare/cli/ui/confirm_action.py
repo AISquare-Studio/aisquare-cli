@@ -67,7 +67,7 @@ ConfirmActionScreen > Vertical { width: 72; max-width: 92%; height: auto; border
 ConfirmActionScreen .picker-header { height: auto; padding: 1 0; }
 ConfirmActionScreen .picker-note { height: auto; }
 ConfirmActionScreen .picker-buttons { height: auto; align-horizontal: right; padding-bottom: 1; }
-ConfirmActionScreen .picker-buttons Button { margin-left: 2; }
+ConfirmActionScreen .picker-buttons Button { margin-left: 2; min-width: 10; }
 ConfirmActionScreen .dont-ask { border: none; height: 1; padding: 0 1; margin-bottom: 1; }
 ConfirmActionScreen .dont-ask:focus { text-style: bold reverse; }
 """

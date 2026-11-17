@@ -5755,10 +5755,11 @@ def _share_trust_into(
 
 
 def trust_command(folder: Path | None) -> str:
-    """``rlx accounts trust <folder>`` (the word hints print), quoted for this shell
+    """``rlx accounts trust <folder>``, its first word the program's and quoted for this shell
     (``core.program.words``): ``shlex.quote`` wrapped a Windows path in single quotes, which
     cmd.exe passes on as part of the path (review of #259, round 20). ``<dir>`` for a folder
-    not known."""
+    not known. The word was a literal ``aisquare`` with a folder, so one row read
+    ``aisquare`` or ``rlx`` by whether its folder was found (R19)."""
     if folder is None:
         return f"{prog.word()} accounts trust <dir>"
     return prog.words("accounts", "trust", str(folder))

@@ -10,11 +10,12 @@ and the rules are the ones measured on Claude Code 2.1.299 (the module docstring
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import shutil
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -24,9 +25,11 @@ from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
+from aisquare.core.agent_adapters import claude_screen
 from aisquare.core.config import load_config, save_config
 from aisquare.models import ClaudeAccount
 from aisquare.services import claude_accounts as service
+from tests import added_folder_screens as folder_screens
 from tests.fsperms import can_symlink
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude_code"
@@ -568,6 +571,312 @@ def test_the_trust_question_in_any_layout_is_the_question_until_an_input_box_is_
     for prompt in (f"{CURSOR} ", f'{CURSOR} Try "fix the lint errors"', "│ > │"):
         assert not sharing.shows_trust_prompt([*screen, "─" * 40, prompt, "─" * 40]), prompt
     assert not sharing.shows_trust_prompt([*boxed, "╭────╮", "│ > │", "╰────╯"])
+
+
+def _rows(name: str) -> list[str]:
+    return (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+
+
+ADDED = _rows("added_folder_trust_2.1.326.txt")
+"""Claude Code 2.1.326 at its start, asking about an ``--add-dir`` folder no trust covers, as
+``capture-pane -e`` showed a fleet window of it at 120 columns (R19); its temp path masked."""
+ADDED_48 = _rows("added_folder_trust_2.1.326_48_columns.txt")
+"""The same question at 48 columns, about a folder whose name has spaces and a word wider than
+the pane: its rows wrap at the spaces, which they drop, and inside that word."""
+COMPACT = _rows("added_folder_trust_2.1.326_compact_50x22.txt")
+"""The same on a pane under 30 rows tall, which draws it with no blank row: at 50x22, about
+the agent pane asq gives on an 80x24 terminal (review of #520). Its folder, its name with
+spaces, wraps onto a second row, right over the question's first."""
+COMPACT_ONE_ROW = _rows("added_folder_trust_2.1.326_compact_120x12.txt")
+"""The same at 120x12: the folder on one row, the question's first row right under it."""
+CUT_OFF = _rows("added_folder_trust_2.1.326_cut_off_50x14.txt")
+"""The same on a pane too short for even that, 50x14: its top cut off, title and folder
+and all, and the folder named under its key hint, wrapped (``Adding: …``)."""
+CUT_OFF_SHORT = _rows("added_folder_trust_2.1.326_cut_off_50x8.txt")
+"""And at 50x8: neither the question's words nor "Yes, add it" left; its "No, exit", the
+key hint and the folder under it."""
+REPOSITORY = _rows("added_folder_trust_2.1.326_repository.txt")
+"""The same about a folder in a git repository, at 120 columns: a note under the folder,
+over the question, says that trusting it trusts that whole repository."""
+REPOSITORY_COMPACT = _rows("added_folder_trust_2.1.326_repository_compact_50x22.txt")
+"""And at 50x22, the note right under the folder."""
+HELD = _rows("added_folder_trust_2.1.326_held_50x22.txt")
+"""The question at 50x22 once it refused a key (text typed into it, an Enter right after):
+its key hint is ``Esc to exit \u00b7 To add it, press \u2193 to Yes, then Enter (your text is
+kept)``, wrapped onto two rows."""
+HELD_CUT_OFF = _rows("added_folder_trust_2.1.326_held_cut_off_50x8.txt")
+"""And so at 50x8, cut off: that key hint over the folder."""
+CUT_OFF_ALONE = _rows("added_folder_trust_2.1.326_cut_off_alone_50x8.txt")
+"""Cut off at 50x8 about a folder 45 characters long with no space in it, which fits on no
+row with ``Adding:`` but does on the next: ``Adding:`` alone, the folder under it (brief
+217). Masked at the temp folder's own length, so its rows break where they did."""
+ALONE = "/private/var/tmp/asq-native00/fffffffffffffff"
+"""The folder that capture names."""
+MASKED = "/private/var/tmp/asq-native"
+SPACES = f"{MASKED}/extra dir with spaces"
+"""The folder the compact, cut-off and held captures name, masked."""
+IN_A_REPOSITORY = f"{MASKED}/other repo/sub dir"
+"""The folder the repository captures name, masked."""
+LAYOUTS = {
+    "120 columns": ADDED,
+    "48 columns": ADDED_48,
+    "50x22": COMPACT,
+    "120x12": COMPACT_ONE_ROW,
+    "50x14": CUT_OFF,
+    "50x8": CUT_OFF_SHORT,
+    "in a repository, 120 columns": REPOSITORY,
+    "in a repository, 50x22": REPOSITORY_COMPACT,
+    "held, 50x22": HELD,
+    "held, cut off, 50x8": HELD_CUT_OFF,
+    "cut off, the folder on a row of its own, 50x8": CUT_OFF_ALONE,
+}
+"""Each layout of 2.1.326's question captured: measured from 40 rows down to 4, at 30, 48, 50,
+80 and 120 columns. Under 30 rows it draws no blank row; where even that does not fit, it
+cuts the top off and names the folder under its key hint, down to 4 rows, at which only the
+key hint and the folder are left. A folder in a git repository has a note under it; a
+question that refused a key says so in its key hint."""
+
+
+@pytest.mark.parametrize("size", list(LAYOUTS))
+def test_claude_code_2_1_326s_question_about_an_added_folder_is_its_folder_trust_question(
+    size: str,
+) -> None:
+    """R19: 2.1.326 asks at its start about each ``--add-dir`` folder no trust covers, over a
+    highlighted "No, exit". It was read as no question, so the fleet listed the agent a
+    healthy ``working``. Read as the question now, fail-closed as the other one is: not with
+    an input box under it. In each of its layouts: cut off on a pane too short for it, at
+    50x8, it was read as no question (review of #520)."""
+    screen = LAYOUTS[size]
+    assert "\x1b[" in "".join(screen)  # as `capture-pane -e` gives it, escapes and all
+    assert sharing.shows_trust_prompt(screen)
+    assert sharing.shows_trust_prompt([*screen, "", "", ""])
+    assert not sharing.shows_trust_prompt([*screen, "─" * 40, f"{CURSOR} ", "─" * 40])
+    # Neither its words, its "Yes, add it", nor the folder under its key hint: no question.
+    told = ("one you trust", "Yes, add it", "Adding:")
+    assert not sharing.shows_trust_prompt([r for r in screen if not any(w in r for w in told)])
+
+
+def test_the_question_s_words_or_the_folder_under_its_key_hint_make_it_the_question() -> None:
+    """Its "No, exit" alone is not the question; with its words, or its "Yes, add it" (all a
+    pane may show of it, as the screen reader reads it), it is. Cut off, the folder under its
+    key hint is the question with no "No, exit" left, as at 4 rows."""
+    assert not sharing.shows_trust_prompt([r for r in ADDED if "No, exit" not in r])
+    assert sharing.shows_trust_prompt(ADDED[-8:])  # "No, exit", "Yes, add it", the key hint
+    assert not sharing.shows_trust_prompt([r for r in ADDED[-8:] if "Yes, add it" not in r])
+    assert sharing.shows_trust_prompt(CUT_OFF_SHORT[-3:])  # the key hint, the folder: 50x4
+    # The folder line is the question only under its key hint, and above no input box.
+    assert not sharing.shows_trust_prompt([f" Adding: {SPACES}", "with spaces"])
+    folder_line = [r for r in CUT_OFF_SHORT if "No, exit" not in r]
+    assert not sharing.shows_trust_prompt([*folder_line, "─" * 40, f"{CURSOR} ", "─" * 40])
+
+
+def test_the_fleets_reader_and_the_screen_reader_agree_on_each_foot_of_the_question() -> None:
+    """Review of #520: with only the foot of a question on the screen, the fleet's reader
+    said no question where the screen reader (``agent_adapters.claude_screen``, ``say`` and
+    ``press``) read it; and on a pane too short for it, the screen reader read nothing at
+    all, while 2.1.326 had cut the question off and named the folder under its key hint.
+    They agree on every foot of each capture now, but one: "Yes, …" under the key hint with
+    the highlighted "No, exit" over it gone, which the screen reader refuses and the fleet's
+    reader does not read. Claude Code never draws it: its "No, exit" stays down to a pane 5
+    rows tall, and at 4 the folder under its key hint is left, which both read."""
+    workspace = _rows("trust_prompt_2.1.299.txt")
+    for size, screen in {"2.1.299": workspace, **LAYOUTS}.items():
+        for count in range(1, len(screen) + 1):
+            foot = screen[-count:]
+            shown = [row.strip() for row in claude_screen.strip_escapes(foot) if row.strip()]
+            read = claude_screen.prompt_showing(foot)
+            screen_reader = read is not None and read.shape == "trust"
+            fleet_reader = sharing.shows_trust_prompt(foot)
+            asked = any("No, exit" in row or row.startswith("Adding: ") for row in shown)
+            if not asked and any(row.startswith("Yes, ") for row in shown):
+                assert (screen_reader, fleet_reader) == (True, False), (size, count)
+            else:
+                assert fleet_reader == screen_reader, (size, count, shown)
+
+
+def test_the_screen_reader_names_the_question_by_its_title_or_cut_off_by_its_folder() -> None:
+    """The question the screen reader names (``ScreenPrompt.question``): 2.1.326's title,
+    "Adding a new directory:", or cut off, the folder under its key hint; the other one's
+    "Quick safety check". Unpinned, the title read "the trust dialog" (review of #520)."""
+    for screen in (ADDED, COMPACT, COMPACT_ONE_ROW):
+        read = claude_screen.prompt_showing(screen)
+        assert read is not None and read.question == "Adding a new directory:"
+    read = claude_screen.prompt_showing(CUT_OFF)
+    assert read is not None and read.question == f"Adding: {MASKED}/extra dir"
+    read = claude_screen.prompt_showing(_rows("trust_prompt_2.1.299.txt"))
+    assert read is not None and read.question.startswith("Quick safety check: Is this a project")
+
+
+def test_the_folder_trust_question_names_the_added_folder_it_asks_about(tmp_path: Path) -> None:
+    """The folder ``accounts trust`` must be told: the ``--add-dir`` folder 2.1.326's question
+    names, not the one the agent starts in, which is trusted already; the question about
+    that one asks about it. A folder wrapped across rows is the one way of joining them
+    that is a directory here: the wrap drops a space, and breaks a word wider than the pane
+    inside it."""
+    start = tmp_path / "w"
+    assert sharing.trust_prompt_folder(ADDED, start) == Path(f"{MASKED}/extra-dir")
+    workspace = (FIXTURES / "trust_prompt_2.1.299.txt").read_text(encoding="utf-8").splitlines()
+    assert sharing.trust_prompt_folder(workspace, start) == start
+    assert sharing.trust_prompt_folder(workspace, None) is None
+
+    long = f"{MASKED}/a long folder name {'x' * 50}/{'y' * 40}"
+    asked: list[str] = []
+
+    def is_dir(spelling: str) -> bool:
+        asked.append(spelling)
+        return spelling == long
+
+    assert sharing.trust_prompt_folder(ADDED_48, start, is_dir=is_dir) == Path(long)
+    assert long in asked and len(asked) <= 2 ** (4 - 1), "its four rows, joined every way"
+    # A folder that is not on this machine is not guessed at: a command names `<dir>`.
+    assert sharing.trust_prompt_folder(ADDED_48, start, is_dir=lambda _: False) is None
+    # On disk, by default: a folder of the test's own, wrapped as Claude Code wraps it at 48
+    # columns, wherever the test's temp folder is (one with spaces in it too; brief 217).
+    folder = tmp_path / "two words" / "x"
+    folder.mkdir(parents=True)
+    rows = [f" \x1b[1m{row}\x1b[0m" for row in folder_screens.wrapped(str(folder), 48 - 2)]
+    screen = [" Adding a new directory:", "", *rows]
+    assert sharing.trust_prompt_folder([*screen, "", " This session…"], start) == folder
+
+
+def test_the_question_names_its_folder_in_its_compact_and_cut_off_layouts(tmp_path: Path) -> None:
+    """Review of #520: on a pane under 30 rows tall, 2.1.326 draws the question with no blank
+    row, so the folder's rows ran on into the question's and no folder was named, even one
+    on a single row that is a directory; cut off, the folder was the one the agent starts
+    in. Its rows end at the question's first row now, or the note over it for a folder in a
+    git repository, and cut off, the folder is the one named under its key hint."""
+    start = tmp_path / "w"
+
+    def never(spelling: str) -> bool:
+        raise AssertionError(f"one row is the folder as it reads, not looked up: {spelling}")
+
+    assert sharing.trust_prompt_folder(COMPACT_ONE_ROW, start, is_dir=never) == Path(SPACES)
+    # In a git repository: its rows end at the note under them, over the question.
+    for screen in (REPOSITORY, REPOSITORY_COMPACT):
+        assert sharing.trust_prompt_folder(screen, start, is_dir=never) == Path(IN_A_REPOSITORY)
+    # Wrapped: the one way of joining its rows that is a directory, under the title, under
+    # the key hint cut off, and under the key hint that says a key was refused.
+    for screen in (COMPACT, CUT_OFF, CUT_OFF_SHORT, HELD, HELD_CUT_OFF):
+        asked: list[str] = []
+
+        def is_dir(spelling: str, asked: list[str] = asked) -> bool:
+            asked.append(spelling)
+            return spelling == SPACES
+
+        assert sharing.trust_prompt_folder(screen, start, is_dir=is_dir) == Path(SPACES)
+        assert len(asked) <= 2, f"its two rows, joined both ways, and no more: {asked}"
+        assert sharing.trust_prompt_folder(screen, start, is_dir=lambda _: False) is None
+
+
+def test_the_question_names_no_folder_it_cannot_see_and_reads_rows_it_cannot_end() -> None:
+    """Neither its title nor the folder under its key hint on a screen of 2.1.326's question
+    (its foot alone): no folder, so a command names ``<dir>``, never the folder the agent
+    starts in, which is trusted. Rows whose end is not seen, as when a build to come words
+    the question's first row otherwise: the most of the first of them that is a directory."""
+    start = Path("/w")
+    assert sharing.shows_trust_prompt(ADDED[-8:])
+    assert sharing.trust_prompt_folder(ADDED[-8:], start) is None
+    reworded = [row.replace("This session hasn", "Its session hasn") for row in COMPACT]
+    assert reworded != COMPACT
+    first = f"{MASKED}/extra dir with"
+    both = {SPACES, first}
+    assert sharing.trust_prompt_folder(reworded, start, is_dir=both.__contains__) == Path(SPACES)
+    assert sharing.trust_prompt_folder(reworded, start, is_dir={first}.__contains__) == Path(first)
+    assert sharing.trust_prompt_folder(reworded, start, is_dir=lambda _: False) is None
+
+
+DRAWN = {
+    "120 columns": (ADDED, f"{MASKED}/extra-dir", 120),
+    "50x22": (COMPACT, SPACES, 50),
+    "120x12": (COMPACT_ONE_ROW, SPACES, 120),
+    "50x14": (CUT_OFF, SPACES, 50),
+    "50x8": (CUT_OFF_SHORT, SPACES, 50),
+    "in a repository, 120 columns": (REPOSITORY, IN_A_REPOSITORY, 120),
+    "in a repository, 50x22": (REPOSITORY_COMPACT, IN_A_REPOSITORY, 50),
+    "held, 50x22": (HELD, SPACES, 50),
+    "held, cut off, 50x8": (HELD_CUT_OFF, SPACES, 50),
+    "the folder on a row of its own, 50x8": (CUT_OFF_ALONE, ALONE, 50),
+}
+"""Each capture, the folder it names and its width: what ``tests.added_folder_screens.drawn``
+draws another folder into."""
+
+
+@pytest.mark.parametrize("size", list(DRAWN))
+def test_a_folder_drawn_into_a_capture_is_drawn_as_claude_code_draws_it(size: str) -> None:
+    """Brief 217: the tests that read the folder off the disk draw a real one into a capture
+    (``tests.added_folder_screens``), wrapped as Claude Code's renderer wraps it (Bun's
+    ``wrap-ansi``: at a space, and a word wider than the pane broken inside it). That model
+    finds each capture's own folder where Claude Code drew it, row for row."""
+    screen, masked, columns = DRAWN[size]
+    again = folder_screens.drawn(screen, masked, masked, columns)
+    assert folder_screens.plain(again) == folder_screens.plain(screen)
+    # The 48-column capture's temp folder was masked 2 characters short, which moves a break
+    # that fell at a full row; at its own length the model breaks it as Claude Code did.
+    real = f"/private/var/tmp/asq-abcdefgh/a long folder name {'x' * 50}/{'y' * 40}"
+    rows = [row.strip() for row in folder_screens.wrapped(real, 48 - 2)]
+    shown = [row.strip() for row in folder_screens.plain(ADDED_48)[4:8]]
+    assert rows[1:] == shown[1:] and rows[0] == shown[0].replace("asq-native", "asq-abcdefgh")
+
+
+def test_a_folder_on_a_row_of_its_own_under_adding_is_the_folder_cut_off() -> None:
+    """Brief 217, measured on 2.1.326: cut off at 50 columns, a folder 45 characters long with
+    no space in it starts a row of its own, under ``Adding:`` alone. Both readers read the
+    question there now, and the folder; before, it was no question, its folder the one the
+    agent starts in, and the row read a healthy ``working``."""
+
+    def never(spelling: str) -> bool:
+        raise AssertionError(f"one row is the folder as it reads, not looked up: {spelling}")
+
+    assert sharing.shows_trust_prompt(CUT_OFF_ALONE)
+    assert sharing.trust_prompt_folder(CUT_OFF_ALONE, Path("/w"), is_dir=never) == Path(ALONE)
+    read = claude_screen.prompt_showing(CUT_OFF_ALONE)
+    assert read is not None and read.shape == "trust"
+    assert read.question == f"Adding: {ALONE}", "named by the folder, as the other cut-off ones"
+    assert claude_screen.modal_showing(CUT_OFF_ALONE) == "the trust dialog"
+    # Wrapped under it, as a longer one breaks: still the one way that is a directory.
+    longer = f"/private/var/tmp/asq-native00/{'f' * 60}/x y"
+    screen = folder_screens.drawn(CUT_OFF_ALONE, ALONE, longer, 50)
+    assert sharing.shows_trust_prompt(screen)
+    assert sharing.trust_prompt_folder(screen, Path("/w"), is_dir={longer}.__contains__) == Path(
+        longer
+    )
+
+
+WINDOWS_FOLDERS = [
+    str(PureWindowsPath(r"C:\Users\me\Work\extra dir with spaces")),
+    str(PureWindowsPath(r"C:\Users\RUNNER~1\AppData\Local\Temp\pytest-of-me\pytest-0") / "w x"),
+    str(PureWindowsPath(r"D:\work\rlx\abcdefghijklmnopqrstuvwxyz0123456789")),
+]
+"""Folders as Windows spells them (``PureWindowsPath``): with spaces; long enough to break
+inside a word and to wrap onto rows; and 48 characters with no space, which starts a row of
+its own under ``Adding:``."""
+
+
+@pytest.mark.parametrize("folder", WINDOWS_FOLDERS)
+@pytest.mark.parametrize("size", list(DRAWN))
+def test_a_windows_folder_on_the_question_is_read_or_named_dir_never_misnamed(
+    size: str, folder: str
+) -> None:
+    """Brief 217: the fleet runs where tmux does (on Windows, under WSL, with POSIX paths),
+    but a folder Windows spells (``C:\\…``) drawn on the question must not be misread: the
+    screen is the question, so nothing is typed into it; its folder is the one drawn, found
+    with the disk's own case rules (``ntpath``), or none (``<dir>``) where it is not one;
+    never the folder the agent starts in."""
+    screen, masked, columns = DRAWN[size]
+    drawn = folder_screens.drawn(screen, masked, folder, columns)
+    start = Path("/the/folder/it/starts/in")
+    assert sharing.shows_trust_prompt(drawn)
+    read = claude_screen.prompt_showing(drawn)
+    assert read is not None and read.shape == "trust" and read.yes_key is None
+
+    def is_dir(spelling: str) -> bool:
+        return ntpath.normcase(spelling) == ntpath.normcase(folder)
+
+    found = sharing.trust_prompt_folder(drawn, start, is_dir=is_dir)
+    assert found is not None and str(found) == str(Path(folder)), found
+    missing = sharing.trust_prompt_folder(drawn, start, is_dir=lambda _: False)
+    assert missing in (None, Path(folder)), "the one drawn, or none"
+    assert missing != start
 
 
 # --- aisquare accounts trust ---------------------------------------------------------------------

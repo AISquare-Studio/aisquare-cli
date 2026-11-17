@@ -104,6 +104,7 @@ from aisquare.services.fleet import (
     FleetUnavailable,
     NoSuchAgent,
 )
+from tests import added_folder_screens as folder_screens
 from tests import bundled_personas, captain_screens, fakebin
 from tests.captain_screens import INPUT_BOX, MARK
 from tests.cycles import unscoped
@@ -23494,6 +23495,186 @@ def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
     # Answered, the screen moves on and so does the state.
     tmux.screens[agent.pane_id] = ["╭─ Claude Code ─╮", "\u276f "]
     assert fleet_service.list_agents(project)[0].state == "waiting"
+
+
+def _added(name: str) -> list[str]:
+    path = Path(__file__).parent / "fixtures" / "claude_code" / f"added_folder_trust_2.1.326{name}"
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+EXTRA = "/private/var/tmp/asq-native/extra-dir"
+"""The ``--add-dir`` folder of the 120-column capture, its temp path masked: the text the
+capture shows, never a ``Path``, which Windows spells with backslashes (review of #520)."""
+SPACES = "/private/var/tmp/asq-native/extra dir with spaces"
+"""The one the compact, cut-off and held captures name, masked."""
+ADDED_SCREENS = [
+    pytest.param(".txt", EXTRA, 120, id="a fleet window, 120 columns"),
+    pytest.param("_compact_50x22.txt", SPACES, 50, id="asq's agent pane, 50x22"),
+    pytest.param("_compact_120x12.txt", SPACES, 120, id="compact, 120x12"),
+    pytest.param("_cut_off_50x14.txt", SPACES, 50, id="cut off, 50x14"),
+    pytest.param("_cut_off_50x8.txt", SPACES, 50, id="cut off, 50x8"),
+    pytest.param(
+        "_repository_compact_50x22.txt",
+        "/private/var/tmp/asq-native/other repo/sub dir",
+        50,
+        id="in a repository, 50x22",
+    ),
+    pytest.param("_held_cut_off_50x8.txt", SPACES, 50, id="held at a refused key, cut off"),
+    pytest.param(
+        "_cut_off_alone_50x8.txt",
+        "/private/var/tmp/asq-native00/fffffffffffffff",
+        50,
+        id="cut off, the folder on a row of its own",
+    ),
+]
+"""Claude Code 2.1.326 at its start, asking about an ``--add-dir`` folder no trust covers, as
+``capture-pane -e`` showed it (R19): in a fleet window; on a pane under 30 rows tall, which
+draws it with no blank row (asq's agent pane on an 80x24 terminal is about 50x22); and on
+one too short for that, which cuts it off and names the folder under its key hint. About a
+folder in a git repository, a note under it; once it refused a key typed into it, its key
+hint says so. Each with the masked folder it names and its width, for :func:`_at_the_question`."""
+
+
+def _at_the_question(
+    tmp_path: Path, capture: str, masked: str, columns: int
+) -> tuple[list[str], Path]:
+    """A capture asking about a real folder of the test's own, its name with spaces, in its
+    place, as Claude Code draws it on this platform (``tests.added_folder_screens``), and that
+    folder. The captures' masked macOS folder is a directory on no machine, and as a ``Path``
+    not even the same text on Windows, where all four wrapped cases named ``<dir>`` (brief
+    217): the folder is read off this disk."""
+    folder = tmp_path / "extra dir with spaces"
+    folder.mkdir()
+    return folder_screens.drawn(_added(capture), masked, str(folder), columns), folder
+
+
+def _trust(folder: Path) -> str:
+    """``rlx accounts trust <folder>``, as a test's hints spell it (``core.program.word``)."""
+    return install_route.command_line(["rlx", "accounts", "trust", str(folder)])
+
+
+@pytest.mark.parametrize(("capture", "masked", "columns"), ADDED_SCREENS)
+def test_an_agent_at_the_question_about_an_added_folder_needs_the_human_for_that_folder(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    capture: str,
+    masked: str,
+    columns: int,
+) -> None:
+    """R19: Claude Code 2.1.326 asks at its start about each ``--add-dir`` folder no trust
+    covers, and fires no hook there, so the row read a healthy ``working`` with no reason, as
+    long as nobody looked. It reads as at the folder-trust question now, and names the added
+    folder, the one ``accounts trust`` must be told: the folder it starts in is trusted. In
+    each layout of the question: it named no folder on a pane under 30 rows tall, and on one
+    too short for the question it read no question at its foot (review of #520)."""
+    screen, folder = _at_the_question(tmp_path, capture, masked, columns)
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = screen
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state == "attention"
+    assert status.detail == fleet_service.trust_prompt_detail(folder)
+    assert _trust(folder) in status.detail and str(agent.cwd) not in status.detail
+    assert fleet_service.status_of(agent).detail == status.detail
+    told = fleet_service.tell(project, agent.label, "start on the task")
+    assert not told.delivered and "has not started" in told.how and tmux.typed == []
+
+
+def test_the_trust_command_says_the_programs_word_whether_or_not_its_folder_is_known(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``accounts trust`` with a folder said ``aisquare``, and without one (``<dir>``) the
+    program's word, ``rlx``: one row read either by whether the folder was found (review of
+    #520). Both say the program's word now (``core.program.word``)."""
+    assert accounts_service.trust_command(Path(EXTRA)) == _trust(Path(EXTRA))
+    assert accounts_service.trust_command(None) == "rlx accounts trust <dir>"
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = _added("_compact_50x22.txt")  # wrapped, not a folder here
+    (status,) = fleet_service.list_agents(project)
+    assert status.detail == fleet_service.trust_prompt_detail(None)
+    assert status.detail.endswith("`rlx accounts trust <dir>`"), status.detail
+
+
+@pytest.mark.parametrize(("capture", "masked", "columns"), ADDED_SCREENS)
+def test_spawn_never_types_its_prompt_into_the_question_about_an_added_folder(
+    tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capture: str,
+    masked: str,
+    columns: int,
+) -> None:
+    """A typed first message waits for a human to answer 2.1.326's question about an
+    ``--add-dir`` folder, as for the one about the folder it starts in, and the note's
+    ``accounts trust`` names the added folder (R19), in each layout of the question."""
+    screen, folder = _at_the_question(tmp_path, capture, masked, columns)
+    original = tmux.pane_facts
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = screen
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == [] and receipt.prompt_typed == "no"
+    note = next(n for n in receipt.notes if "folder-trust question" in n)
+    assert "NOT typed" in note and _trust(folder) in note
+    assert _trust(receipt.agent.cwd) not in note, "not the folder it starts in"
+    assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
+
+
+@pytest.mark.parametrize(("capture", "masked", "columns"), ADDED_SCREENS)
+def test_a_start_the_board_waits_for_names_the_added_folder_its_question_is_about(
+    tmux: FakeTmux,
+    session_start_for_real: None,
+    typed_first_lines: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capture: str,
+    masked: str,
+    columns: int,
+) -> None:
+    """The typed first message waits for the agent's SessionStart, which never comes at
+    2.1.326's question about an ``--add-dir`` folder: past the wait, the note's ``accounts
+    trust`` names that folder, not the one the agent starts in (R19). Cut off on a pane too
+    short for it, the question ends on the folder's name, not its key hint: the start
+    waited out ``START_TIMEOUT`` there, and its note said nothing of the question (review of
+    #520)."""
+    screen, folder = _at_the_question(tmp_path, capture, masked, columns)
+    original, text = tmux.pane_facts, tmux.screen_text
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = screen
+        return original(pane_id)
+
+    def plain(pane_id: str) -> list[str]:  # `capture-pane -p`, as the real one runs it
+        return [screen_reader.PANE_ESCAPES.sub("", row) for row in text(pane_id)]
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    monkeypatch.setattr(tmux, "screen_text", plain)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == [] and receipt.prompt_typed == "no"
+    said = next(n for n in [*receipt.failures, *receipt.notes] if "folder-trust question" in n)
+    assert "session did not start" in said and "NOT typed" in said, said
+    assert _trust(folder) in said, said
+    assert _trust(receipt.agent.cwd) not in said, "not the folder it starts in"
+    assert clock.now < fleet_service.START_TIMEOUT, (
+        "said at the question, not at the start's ceiling"
+    )
 
 
 def test_an_agent_whose_hooks_have_run_is_never_asked_for_its_screen(

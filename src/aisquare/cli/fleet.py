@@ -2154,7 +2154,7 @@ def ui(
         ),
     ] = None,
 ) -> None:
-    """Open the rlx UI — every project, agent and session in one view."""
+    """Open the rlx UI: every project, agent and session in one view."""
     if get_state().json_output:
         fail(
             "the rlx UI has no --json form — for machine-readable fleet state use "

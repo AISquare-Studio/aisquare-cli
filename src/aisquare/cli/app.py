@@ -270,7 +270,9 @@ app.add_typer(fleet.app, name="fleet")
 app.add_typer(watcher.app, name="watch")
 app.add_typer(code.app, name="code")
 app.add_typer(persona.app, name="persona")
-app.add_typer(captain.app, name="captain")
+# Experimental, and off until turned on: not in the top-level --help (owner, 2026-11-17).
+# `rlx captain …` runs, and `rlx captain --help` prints, as before.
+app.add_typer(captain.app, name="captain", hidden=True)
 app.command("ui")(fleet.ui)
 app.command("instances")(instances_cli.instances)
 app.add_typer(hook.app, name="hook", hidden=True)

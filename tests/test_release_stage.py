@@ -19,6 +19,10 @@ destinations (GATE #110's F1, seq 11514). The ``HEAD_`` goldens below were rende
 from __future__ import annotations
 
 import io
+import os
+import shutil
+import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -375,6 +379,31 @@ def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_browser() -
     assert now == head, result.output  # --agent's row too: no mark (0.10.0 drew one)
     root = CliRunner().invoke(app, ["--help"])
     assert root.exit_code == 0 and MARK not in root.output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh is a POSIX shell script")
+def test_install_sh_help_offers_codex_with_no_mark(tmp_path: Path) -> None:
+    """``install.sh --help``'s ``--agent`` row is the one place Codex's mark was written by
+    hand, not drawn from ``release_stage``: it said ``codex (beta)`` in 0.10.0. The
+    repository's copy, run as a person runs it; ``--help`` prints and exits before the
+    hand-off, so it reaches no network."""
+    script = Path(__file__).resolve().parents[1] / "install.sh"
+    result = subprocess.run(
+        [shutil.which("sh") or "/bin/sh", str(script), "--help"],
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "beta" not in result.stdout.lower(), result.stdout
+    said = " ".join(result.stdout.split())
+    assert (
+        "--agent NAME Coding agent to install and connect: claude-code (the default), codex, "
+        "or both. Repeat it to name both." in said
+    ), result.stdout
 
 
 #: ``aisquare metrics show`` with no turns, as 0.9.2 printed it (6a77e650's cli/common.py),

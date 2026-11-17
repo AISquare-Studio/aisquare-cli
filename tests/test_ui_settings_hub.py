@@ -27,7 +27,7 @@ from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Button, Static, TabbedContent
 
-from aisquare.cli.ui.app import FleetApp
+from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.sidebar import (
     GREEN,
     ORANGE_RED,
@@ -584,6 +584,21 @@ def test_the_sidebar_names_no_aisquare_and_the_accounts_page_has_the_sign_in(
         "unreadable": "Not signed in",
     }
     assert page.startswith(said[aisquare]), page
+
+
+def test_the_help_legend_of_the_line_names_no_aisquare_and_starts_codex_unindented() -> None:
+    """R21: the ``?`` help's legend of the line under *⚙ Settings* reads as the line does. Its
+    ``● aisquare  green signed in · red signed out · grey not known`` row went with the dot, and
+    the other agents' row starts in the claude row's column, as their line does in the sidebar
+    (it was indented to sit under the AISquare dot)."""
+    text = HelpScreen("f12").keys_text().plain
+    legend = text[text.index("The line under ⚙ Settings") : text.index("Esc closes this")]
+    assert "aisquare" not in legend.lower(), legend
+    agents = [row for row in legend.splitlines() if row.lstrip().startswith("● ") and TIMES in row]
+    assert agents == [
+        f"  ● 3{TIMES} claude  usable Claude accounts; the dot is the room LEFT across them:",
+        f"  ● 1{TIMES} codex  another agent's accounts (Codex's), read the same way, on a line",
+    ], legend
 
 
 def test_a_login_due_puts_a_warning_on_the_line() -> None:

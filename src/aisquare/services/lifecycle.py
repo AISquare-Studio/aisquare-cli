@@ -882,6 +882,8 @@ def _env_file_bindings() -> tuple[str, ...]:
 def _left_by_move_back(site: HookSite, target: str) -> HookSite:
     """``site`` left as it is by a move back to ``target``, a release that
     :func:`lacks_refresh_hooks`, with the command that rewrites its hooks for that release."""
+    # Run after the move, by ``target``: a release that predates refresh-hooks predates the rlx
+    # rename too, and answers only to aisquare (tests/test_program_name.py keeps it).
     rewrite = install_route.command_line(
         ["aisquare", "agents", "connect", site.agent, "--config-dir", str(site.config_dir)]
     )
@@ -896,8 +898,9 @@ def _left_without_agent_hooks(site: HookSite, target: str) -> HookSite:
     """``site`` left as it is by a move back to ``target``, which has no hooks for its agent
     (:func:`lacks_agent_hooks`): they then run a program that does not know them, so the
     command that takes them out is named, to run before the move."""
+    # Run before the move, by this install: the word hints print.
     remove = install_route.command_line(
-        ["aisquare", "agents", "disconnect", site.agent, "--config-dir", str(site.config_dir)]
+        [prog.word(), "agents", "disconnect", site.agent, "--config-dir", str(site.config_dir)]
     )
     why = (
         f"{target} has no {agent_label(site.agent)} hooks: the move back leaves them as they "

@@ -21,13 +21,16 @@ The guard: every call in ``services/**`` and ``core/**`` that spells a command s
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+import asyncio
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
 
 from aisquare.cli.ui.views.doctor import COMMAND
 from aisquare.core import program
+from aisquare.core.selfcli import CliResult
+from aisquare.models import TeamEvent
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "aisquare"
 
@@ -56,6 +59,11 @@ DOCTOR_ROWS = frozenset({"_warn", "_fail", "degrade", "DoctorCheck"})
 """Their row builders: the ``fix`` (third, or ``fix=``) is the doctor's fix, the shell's."""
 
 ALLOWED: dict[str, str] = {
+    "core/sandbox_roots.py::forget_argv": "data: returns the argv; its callers wrap it",
+    "services/adopt.py::adopt": (
+        "data: the argv that runs an agent in its account, which server_note wraps"
+    ),
+    "services/diagnostics.py::_check_role_bindings": "doctor-fix: the connect its fix names",
     "core/agent_adapters/claude_code.py::<module>": (
         "data: a third party's install line; asq links the install page instead (R13a)"
     ),
@@ -259,10 +267,6 @@ ALLOWED: dict[str, str] = {
         "data: 'uv tool' names the manager, not a command"
     ),
     "services/install_route.py::cutoff": "data: returns the flag's command-line form",
-    "services/install_route.py::not_automated": (
-        "data: the upgrade plan's reason; asq's Update dialog shows none that names a command "
-        "(R13a)"
-    ),
     "services/lifecycle.py::UninstallPlan.package_command": "data: returns the command line",
     "services/lifecycle.py::UpgradePlan.command": "data: returns the command line",
     "services/lifecycle.py::UpgradePlan.config_warning": (
@@ -312,9 +316,6 @@ ALLOWED: dict[str, str] = {
     "services/remote_server.py::_unlock_lockout_alert": "data: a log line",
     "services/remote_server.py::locked_out": "phone: a 403 the Remote page shows (B.6)",
     "services/remote_server.py::lockout_alert": "phone: the alert pushed to the phones (B.6)",
-    "services/remote_server.py::read_only_reason": (
-        "phone: every 403 read_only the Remote page and its modal show (B.6)"
-    ),
     "services/remote_server.py::remote_install_hint": (
         "data: returns the install line; its callers wrap it"
     ),
@@ -493,3 +494,310 @@ def test_the_doctor_asq_runs_drops_its_details_commands_and_keeps_every_fix_whol
     assert program.detail_advice(" — `rlx init` sets it up") == ""
     assert program.shell_advice("; `rlx accounts` lists them") == "; `rlx accounts` lists them"
     assert program.in_app() is False
+
+
+# --- the switch, up with asq ----------------------------------------------------------------
+
+
+def test_the_switch_is_on_while_an_asq_app_is_up_and_off_after() -> None:
+    from aisquare.cli.ui.clipboard import ClipboardApp
+
+    seen: list[tuple[str, bool]] = []
+
+    async def run() -> None:
+        app: ClipboardApp[None] = ClipboardApp()
+        seen.append(("before", program.in_app()))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            seen.append(("up", program.in_app()))
+        seen.append(("after", program.in_app()))
+
+    asyncio.run(run())
+    assert seen == [("before", False), ("up", True), ("after", False)]
+
+
+def test_at_a_shell_keeps_the_shell_s_advice_and_still_drops_a_detail_s_in_asq() -> None:
+    """The doctor asq runs in its own process builds every fix at a shell; its details'
+    commands go all the same."""
+    program.enter_app()
+    try:
+        with program.at_a_shell():
+            assert program.shell_advice("x") == "x" and program.detail_advice("y") == ""
+        assert program.shell_advice("x") == ""
+    finally:
+        program.leave_app()
+    assert program.detail_advice("y") == "y"
+
+
+# --- the shared messages, both ways ---------------------------------------------------------
+
+
+def _builders() -> dict[str, Callable[[], str]]:
+    from aisquare.models import UsageCause
+    from aisquare.services import agents, destinations, fleet, lifecycle, remote_server
+    from aisquare.services import claude_accounts as accounts
+    from aisquare.services.captain import gate
+
+    return {
+        "a vanished account": lambda: accounts._vanished(None),
+        "a sign-in's usage fix": lambda: accounts.usage_fix(UsageCause.not_signed_in, slot=2) or "",
+        "a stale token's usage fix": lambda: (
+            accounts.usage_fix(UsageCause.token_expired, slot=3) or ""
+        ),
+        "a key owed its revoke": destinations.revoke_retry,
+        "another Remote on": remote_server.remote_already_on,
+        "Remote on elsewhere": lifecycle.remote_off,
+        "the captain's gate": gate.unlock_hint,
+        "the captain's row in a pause": fleet.the_captain_reason,
+        "the folder-trust question": lambda: fleet.trust_prompt_detail(Path("/srv/app")),
+        "this shell's hook directory": agents._repoint,
+    }
+
+
+SHELL = {
+    "a vanished account": "no Claude account in slot ? any more — it was removed meanwhile; "
+    "see: rlx accounts",
+    "a sign-in's usage fix": "press Log in (in a terminal: rlx accounts run 2, then /login)",
+    "another Remote on": "another Remote is on for this ~/.aisquare (the rlx UI's R panel, or "
+    "`rlx remote serve` in another shell) — turn it off first: two would share one link, one "
+    "passphrase, one auto-off and one list of phones",
+    "Remote on elsewhere": "press Ctrl-C where `rlx remote serve` runs, or turn Remote off in "
+    "that rlx's R panel",
+    "the captain's gate": "say your authenticator's code to the captain, or run: rlx captain "
+    "gate unlock <code>",
+    "the captain's row in a pause": "the captain — `rlx captain` runs it",
+}
+"""The shell's text, byte for byte as before R13b, for those whose words are fixed."""
+
+
+@pytest.mark.parametrize("name", sorted(_builders()))
+def test_a_shared_message_says_its_command_at_a_shell_and_none_in_asq(name: str) -> None:
+    build = _builders()[name]
+    shell = build()
+    program.enter_app()
+    try:
+        shown = build()
+    finally:
+        program.leave_app()
+
+    assert COMMAND.search(shell) or f"{program.word()} " in shell, "the shell is told it"
+    assert COMMAND.search(shown) is None, shown
+    assert shown and shown != shell
+    if name in SHELL:
+        assert shell == SHELL[name]
+
+
+def test_in_asq_a_usage_fix_says_asq_s_buttons() -> None:
+    from aisquare.models import UsageCause
+    from aisquare.services import claude_accounts as accounts
+
+    program.enter_app()
+    try:
+        assert accounts.usage_fix(UsageCause.not_signed_in, slot=2) == "press Log in"
+        assert accounts.usage_fix(UsageCause.keychain_failed) == (
+            "↻ Refresh usage asks the Keychain again"
+        )
+    finally:
+        program.leave_app()
+
+
+def test_the_agent_header_says_the_trust_question_s_way_in_asq() -> None:
+    """asq's agent header showed ``approve it once, or `rlx accounts trust <folder>``` (the
+    tester of #520, note 12700)."""
+    from aisquare.services import fleet
+
+    program.enter_app()
+    try:
+        said = fleet.trust_prompt_detail(Path("/srv/app"))
+    finally:
+        program.leave_app()
+    assert said == "waiting for folder trust — approve it once in the agent's pane"
+
+
+def test_an_agent_s_text_keeps_its_command_in_asq_s_process() -> None:
+    """What asq's process answers an agent with (its ui receiver, the captain's refusal) is
+    the agent's to act on: never shell advice."""
+    from aisquare.core import experimental
+
+    program.enter_app()
+    try:
+        assert "config set experimental.captain" in experimental.captain_off()
+    finally:
+        program.leave_app()
+
+
+# --- the doctor asq runs --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("how", ["in asq's own process", "run by asq as doctor --json"])
+def test_the_doctor_asq_shows_keeps_every_fix_whole_and_names_no_command_in_a_detail(
+    how: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """asq's Doctor page runs the doctor in its own process, and its view again as
+    ``doctor --json`` (``IN_APP_ENV``): either way every fix is the shell's, whole — asq hands
+    it to the manager and reads its buttons from it — and no detail names a command."""
+    from aisquare.services import diagnostics
+
+    shell = diagnostics.doctor()
+    if how.startswith("run"):
+        monkeypatch.setenv(program.IN_APP_ENV, "1")
+    else:
+        program.enter_app()
+    try:
+        shown = diagnostics.doctor()
+    finally:
+        program.leave_app()
+
+    assert [(row.name, row.fix) for row in shown] == [(row.name, row.fix) for row in shell]
+    assert [row.detail for row in shown if COMMAND.search(row.detail)] == []
+    assert any(COMMAND.search(row.detail) for row in shell), "a detail the switch changed"
+
+
+def test_the_doctor_view_runs_the_report_it_shows_as_shown_in_asq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.cli.ui.views import doctor as view
+    from aisquare.core import selfcli
+
+    told: list[str | None] = []
+
+    def run(args: object, *, cwd: object = None, env: dict[str, str] | None = None) -> object:
+        told.append((env or {}).get(program.IN_APP_ENV))
+        raise OSError("not run")
+
+    monkeypatch.setattr(selfcli, "run", run)
+    with pytest.raises(OSError):
+        view._shown_here(selfcli.run)(["--json", "doctor"])
+    assert told == ["1"]
+
+    def stand_in(args: Sequence[str], *, cwd: Path | None = None) -> CliResult:
+        raise AssertionError("not run")
+
+    assert view._shown_here(stand_in) is stand_in
+
+
+# --- the board -----------------------------------------------------------------------------
+
+
+def _event(kind: str, text: str) -> TeamEvent:
+    from datetime import UTC, datetime
+
+    return TeamEvent(id="e", project_id="p", kind=kind, text=text, created_at=datetime.now(UTC))
+
+
+STORED = {
+    "limited": (
+        "coder-1 hit its 5h limit · resets 14:00 — `rlx fleet switch --project api coder-1` "
+        "moves it to the account with the most headroom (or wait for the reset)",
+        "coder-1 hit its 5h limit · resets 14:00",
+    ),
+    "before_limit": (
+        "coder-1: 91% used — over the 90%-used line; work has room — "
+        '`rlx fleet switch --project api coder-1` moves it (`before_limit = "warn"`)',
+        "coder-1: 91% used — over the 90%-used line; work has room",
+    ),
+    "handover_failed": (
+        "coder-1: not switched — moved 3 min ago; waiting for the reset instead — "
+        "`rlx fleet switch --project api coder-1 --force` moves it again; its own limit "
+        "resets in 2h",
+        "coder-1: not switched — moved 3 min ago; waiting for the reset instead; its own "
+        "limit resets in 2h",
+    ),
+    "agent_paused": (
+        "coder-1 paused — its claims, worktree and session are kept; "
+        "`rlx fleet resume --project api` brings it back",
+        "coder-1 paused — its claims, worktree and session are kept",
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(STORED))
+def test_asq_s_board_leaves_out_the_command_a_stored_line_names(kind: str) -> None:
+    """Agents act on the stored text, which keeps its command; asq's board and ``board -w``
+    show the line without it (R13 design A.3), and a shell's board whole."""
+    from aisquare.cli import watch
+
+    stored, shown = STORED[kind]
+    event = _event(kind, stored)
+    assert watch.shown_text(event) == stored
+    program.enter_app()
+    try:
+        assert watch.shown_text(event) == shown
+        assert watch.shown_text(_event("note", stored)) == stored, "a note is the author's"
+    finally:
+        program.leave_app()
+
+
+def test_asq_s_board_shows_a_limited_session_without_its_switch() -> None:
+    from datetime import UTC, datetime
+
+    from aisquare.cli import watch
+    from aisquare.models import TeamSession
+
+    now = datetime.now(UTC)
+    session = TeamSession(
+        id="s1", project_id="p", role="coder", state="limited", started_at=now, last_seen_at=now
+    )
+    switches = {"s1": "rlx fleet switch --project api coder-1"}
+    shell = watch._session_lines([session], labels={}, switches=switches).plain
+    program.enter_app()
+    try:
+        shown = watch._session_lines([session], labels={}, switches=switches).plain
+    finally:
+        program.leave_app()
+    assert "`rlx fleet switch --project api coder-1`" in shell
+    assert "fleet switch" not in shown and "limited" in shown
+
+
+def test_a_session_told_apart_by_its_short_id_says_it_once_in_the_detail() -> None:
+    """``note by login-fix (cd505d7a) (cd505d7a)``: the name carried the id already (the
+    tester's nit on #140)."""
+    from aisquare.cli import watch
+
+    session = "cd505d7a-0000-4000-8000-000000000000"
+    assert watch._named(session, {session: "login-fix (cd505d7a)"}) == "login-fix (cd505d7a)"
+    assert watch._named(session, {session: "login-fix"}) == "login-fix (cd505d7a)"
+    assert watch._named(session, None) == "cd505d7a"
+
+
+def test_asq_s_explainability_page_shows_a_probe_fix_only_when_it_names_no_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe's remediation is the explainability doctor's fix, the shell's whole: asq's
+    page shows it under the probe only when it names no command, as its Doctor does."""
+    from aisquare.cli.ui.views import explainability as view
+    from aisquare.models import CheckStatus
+    from aisquare.services import explainability_ops as ops
+
+    for remediation, shown in (
+        ("Point it at a deployment: aisquare explainability enable --proxy-url <url>", False),
+        ("Start the SDK's claude_code proxy", True),
+    ):
+        state = ops.ProxyState(summary="down", severity=CheckStatus.warn, remediation=remediation)
+        monkeypatch.setattr(ops, "proxy_state", lambda target, on, state=state: state)
+        probe = dict(view.status_report().rows)["probe"]
+        assert (remediation in probe) is shown, probe
+
+
+def test_the_doctor_builds_every_row_at_a_shell_in_asq_s_own_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """asq's Doctor page runs the doctor in its own process: a fix built there from a shared
+    message (the remedies a refused connect names) kept its command only because the whole
+    report is built at a shell (``program.at_a_shell``); its details' commands still go."""
+    from aisquare.services import diagnostics
+
+    seen: list[tuple[str, str]] = []
+    real = diagnostics._check_python
+
+    def check_python() -> object:
+        seen.append((program.shell_advice("a fix"), program.detail_advice("a detail")))
+        return real()
+
+    monkeypatch.setattr(diagnostics, "_check_python", check_python)
+    program.enter_app()
+    try:
+        diagnostics.doctor()
+    finally:
+        program.leave_app()
+    assert seen == [("a fix", "")]

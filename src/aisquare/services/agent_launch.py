@@ -65,7 +65,7 @@ class UnknownWrapperError(ValueError):
 
         # A line to paste, quoted for this shell (cmd.exe or PowerShell on Windows).
         self.fix = command_line(
-            ["aisquare", "team", "bind", role, "--agent", DEFAULT_AGENT, "--bin", binary]
+            [prog.word(), "team", "bind", role, "--agent", DEFAULT_AGENT, "--bin", binary]
         )
         super().__init__(
             f"The agent family of {binary!r} is unknown."
@@ -412,7 +412,7 @@ def _undeclared_binding(
         + prog.shell_advice(
             ": "
             + command_line(
-                ["aisquare", "team", "bind", role, "--agent", adapter.id, "--bin", chosen.binary]
+                [prog.word(), "team", "bind", role, "--agent", adapter.id, "--bin", chosen.binary]
             )
         )
         + "."

@@ -147,7 +147,14 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
     """
     from aisquare.services import agent_launch
 
-    with agent_launch.selection_snapshot(cwd), agent_core.inspection_snapshot():
+    # Every fix as a shell has it, though asq runs this in its own process: asq hands a fix
+    # whole to the manager and reads its buttons from it. A detail's command still goes in
+    # asq (``program.detail_advice``, R13b).
+    with (
+        prog.at_a_shell(),
+        agent_launch.selection_snapshot(cwd),
+        agent_core.inspection_snapshot(),
+    ):
         return [
             _check_python(),
             _check_install(),
@@ -1414,9 +1421,8 @@ def _refused_fix(
     directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
 ) -> str:
     """The remedies for ``refusal``, as every surface gives them (``agents_service.remedies``):
-    the doctor's fix, whole, though asq runs the doctor to show it (``program.at_a_shell``)."""
-    with prog.at_a_shell():
-        return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
+    the doctor's fix, whole (:func:`doctor` builds every fix at a shell)."""
+    return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
 
 
 def _disconnect_fix(directory: Path, lead: str, agent: str = claude_accounts_core.AGENT) -> str:
@@ -2741,7 +2747,7 @@ def _check_role_bindings() -> list[DoctorCheck]:
                         f"{role}: {variable} {path} has no rlx hooks, so its "
                         "sessions never reach the board"
                     )
-                    connect = ["aisquare", "agents", "connect", adapter.id, "--config-dir"]
+                    connect = [prog.word(), "agents", "connect", adapter.id, "--config-dir"]
                     fixes.append(f"{line([*connect, str(config_dir)])} (or {unset(variable)})")
                 else:
                     fine.append(f"{role} → {path}")

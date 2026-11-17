@@ -1716,7 +1716,7 @@ def test_doctor_warns_on_a_binding_whose_claude_dir_has_no_hooks(tmp_path: Path)
     assert "coder" in row.detail and str(bare) in row.detail and "no rlx hooks" in row.detail
     assert "reviewer" not in row.detail, "a connected binding is not a problem"
     assert row.fix is not None and "rlx team bind coder" in row.fix
-    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir", str(bare)]
+    connect = ["rlx", "agents", "connect", "claude-code", "--config-dir", str(bare)]
     assert install_route.command_line(connect) in row.fix, "a fix any shell can paste"
 
 
@@ -1747,7 +1747,7 @@ def test_doctor_warns_on_a_binding_whose_codex_home_has_no_hooks(tmp_path: Path)
     assert row.status == CheckStatus.warn
     assert "coder: CODEX_HOME" in row.detail and str(bare) in row.detail
     assert "no rlx hooks" in row.detail and "reviewer" not in row.detail
-    connect = ["aisquare", "agents", "connect", "codex", "--config-dir", str(bare)]
+    connect = ["rlx", "agents", "connect", "codex", "--config-dir", str(bare)]
     assert row.fix is not None and install_route.command_line(connect) in row.fix
     assert "rlx team bind coder --unset CODEX_HOME" in row.fix
     assert "claude-code" not in row.fix, "Codex's home is connected as Codex's"

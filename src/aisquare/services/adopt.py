@@ -500,7 +500,7 @@ def adopt(ref: str, *, role: str = "coder", label: str | None = None) -> fleet_s
     holders = _Holders(accounts, None)
     if (pid := holders.of(found.native, found.path, found.adapter)) is not None:
         why = (
-            found.reader.server_note(["aisquare", "accounts", "run", str(found.account.slot)])
+            found.reader.server_note([prog.word(), "accounts", "run", str(found.account.slot)])
             if holders.serving(pid)
             else "quit it first, then adopt — two processes would write one conversation"
         )

@@ -104,9 +104,10 @@ def in_app() -> bool:
 
 @contextlib.contextmanager
 def at_a_shell() -> Iterator[None]:
-    """What this thread builds inside is read at a shell, though asq is up: the doctor's fix,
-    which asq hands whole to the manager (R13's "Ask the manager") and reads its buttons
-    from."""
+    """What this thread builds inside keeps its shell advice, though asq is up: the doctor's
+    report, whose every fix asq hands whole to the manager (R13's "Ask the manager") and reads
+    its buttons from. Its details' commands (:func:`detail_advice`) still go where asq shows
+    them."""
     before = getattr(_here, "shell", False)
     _here.shell = True
     try:
@@ -126,10 +127,11 @@ def shell_advice(text: str, app: str = "") -> str:
 
 
 def detail_advice(text: str, app: str = "") -> str:
-    """:func:`shell_advice` for a clause of a doctor row's DETAIL: also dropped in the
-    ``doctor --json`` asq runs to show its report (:data:`IN_APP_ENV`). Never for a fix."""
-    shown = os.environ.get(IN_APP_ENV) == "1" and not getattr(_here, "shell", False)
-    return app if shown or in_app() else text
+    """:func:`shell_advice` for a clause of a doctor row's DETAIL, dropped wherever asq shows
+    the report: built in asq's process, at a shell (``diagnostics.doctor`` builds every fix
+    there) or not, and in the ``doctor --json`` asq runs to show it (:data:`IN_APP_ENV`). Never
+    for a fix."""
+    return app if _in_app or os.environ.get(IN_APP_ENV) == "1" else text
 
 
 def words(*args: str) -> str:

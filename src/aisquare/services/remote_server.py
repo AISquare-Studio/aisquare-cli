@@ -257,8 +257,9 @@ def read_only_reason() -> str:
     """Every 403 ``read_only`` says this, and so do the page and the modal: the two ways to
     turn writes on, both of which write the one switch in ``remote.json``."""
     return (
-        f"writes are off — on the machine run `{prog.word()} remote allow-write on`, "
-        "or switch Allow write actions in the R panel"
+        "writes are off — "
+        + prog.shell_advice(f"on the machine run `{prog.word()} remote allow-write on`, or ")
+        + "switch Allow write actions in the R panel"
     )
 
 

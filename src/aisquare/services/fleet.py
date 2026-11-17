@@ -4431,7 +4431,7 @@ directory · fork``): ``attention``, its detail this and the dialog's words
 def trust_prompt_detail(folder: Path) -> str:
     """The detail of an agent at the folder-trust question in ``folder``: what unblocks it."""
     return f"{TRUST_PROMPT} — approve it once" + prog.shell_advice(
-        f", or `{claude_accounts_service.trust_command(folder)}`"
+        f", or `{claude_accounts_service.trust_command(folder)}`", app=" in the agent's pane"
     )
 
 

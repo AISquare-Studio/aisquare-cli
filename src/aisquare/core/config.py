@@ -1162,7 +1162,7 @@ class UiSettings(BaseModel):
     The Display tab's switches, each on by default and applied as it is toggled:
     ``show_usage`` (an account's use after each agent: the sidebar's ``#1·42%``, the
     header's ``· 87%``), ``show_agent_marks`` (``✻`` and ``>_`` before the names in a fleet
-    of more than one agent), ``show_live_count`` (``rlx · 3 live`` in the sidebar's title),
+    of more than one agent), ``show_live_count`` (``r\\x · 3 live`` in the sidebar's title),
     ``fade_unfocused`` (the side without the keyboard drawn faded), ``bell`` (the terminal
     bell when an agent needs its person) and ``board_autoscroll`` (the board follows its
     live feed when it opens; ``a`` still toggles it).

@@ -20,12 +20,17 @@ from importlib.metadata import PackageNotFoundError, version
 DISTRIBUTION = "aisquare-cli"
 
 PRODUCT_NAME = "rlx"
-"""The product's name, as its command is spelled (#133): what asq's sidebar header reads.
-The package, the ``aisquare`` and ``asq`` commands and every other name are unchanged."""
+"""The product's name, as its command is spelled (#133): the app window's title. The package,
+the ``aisquare`` and ``asq`` commands and every other name are unchanged."""
+
+PRODUCT_LOGO = r"r\x"
+"""The product's logo, ``r\\x``: r, a backslash, x, in the terminal's own font (the owner,
+2026-11-17, R23). Only the app's top-left corner draws it, where :data:`PRODUCT_NAME` was
+(``cli.ui.sidebar.fleet_title``); everything else says rlx. Plain text, never markup."""
 
 try:
     __version__ = version(DISTRIBUTION)
 except PackageNotFoundError:  # pragma: no cover - only when running from a raw checkout
     __version__ = "0.0.0+uninstalled"
 
-__all__ = ["DISTRIBUTION", "PRODUCT_NAME", "__version__"]
+__all__ = ["DISTRIBUTION", "PRODUCT_LOGO", "PRODUCT_NAME", "__version__"]

@@ -71,7 +71,7 @@ from aisquare.cli.ui.theme import MARK_STYLE, MarkStatic
 from aisquare.cli.ui.views.accounts import agent_mark
 from aisquare.core import codenames
 from aisquare.core.agent_adapters import default_binary, recorded_adapter
-from aisquare.core.version import PRODUCT_NAME
+from aisquare.core.version import PRODUCT_LOGO
 from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
@@ -2049,18 +2049,20 @@ class OthersSection(Vertical):
 
 
 def fleet_title(live_total: int, *, dim: str | None = None) -> Content:
-    """The header: the product's name, ``rlx`` (:data:`PRODUCT_NAME`, ``Fleet`` before #133),
-    then ``· N live`` while any agent is live across the fleet — every project's, the captain
-    excluded: ``aisquare fleet capacity``'s ``live_total``.
+    """The header: the product's logo, ``r\\x`` (:data:`PRODUCT_LOGO`: ``Fleet`` before #133,
+    ``rlx`` before R23), then ``· N live`` while any agent is live across the fleet — every
+    project's, the captain excluded: ``aisquare fleet capacity``'s ``live_total``.
 
-    The name is the product mark, drawn in the theme's mark colour (``MARK_STYLE``, #2F74F0
-    under ``rlx``) on either side: a ``Content`` span, whose variable is read as it is drawn,
-    so ``t`` repaints it. The count keeps the header's text colour, or ``dim``, that colour as
-    the fade draws it, while the sidebar is faded (``theme.MarkStatic``)."""
+    The logo is plain text: no markup reads its backslash. Its three cells are the name's,
+    so the header is cut where it was. It is the product mark, drawn in the theme's mark
+    colour (``MARK_STYLE``, #2F74F0 under ``rlx``) on either side: a ``Content`` span, whose
+    variable is read as it is drawn, so ``t`` repaints it. The count keeps the header's text
+    colour, or ``dim``, that colour as the fade draws it, while the sidebar is faded
+    (``theme.MarkStatic``)."""
     if live_total <= 0:
-        return Content.styled(PRODUCT_NAME, MARK_STYLE)
+        return Content.styled(PRODUCT_LOGO, MARK_STYLE)
     count = "not bold" if dim is None else f"not bold {dim}"
-    return Content.assemble((PRODUCT_NAME, MARK_STYLE), (f" · {live_total} live", count))
+    return Content.assemble((PRODUCT_LOGO, MARK_STYLE), (f" · {live_total} live", count))
 
 
 def fleet_title_tooltip(live_total: int) -> str | None:
@@ -2177,7 +2179,7 @@ class Sidebar(Vertical):
         highlight (the Welcome page, onboarding) leaves the place it was."""
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
         self.live_total = 0
-        """The header's "rlx · N live", from the last frame read (:func:`fleet_title`)."""
+        """The header's "r\\x · N live", from the last frame read (:func:`fleet_title`)."""
         self.arrangement: Arrangement | None = None
         """The order the last frame was painted in (groups, pins, loose) — #140."""
         self._marked: list[str] = []

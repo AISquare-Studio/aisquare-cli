@@ -1,10 +1,11 @@
-"""The sidebar's header says how many agents are live: ``rlx · 19 live`` (``Fleet`` before #133).
+"""The sidebar's header says how many agents are live: ``r\\x · 19 live`` (``Fleet`` before
+#133, ``rlx`` before R23).
 
 The owner wanted the count at a glance (tsk_01m67vf4mpsgdcvt6kq6znsrwc). It is every live agent
 of every project, the captain excluded — ``live_total`` of ``aisquare fleet capacity``, read
 from the same rows — so a folded group's members, a hidden directory's and a forgotten
 project's agents count although no card shows them. It follows the next frame after a spawn or
-a stop, and with none live the header is ``rlx`` alone. Driven with the UI suite's harness:
+a stop, and with none live the header is the logo alone. Driven with the UI suite's harness:
 the real store in the isolated home, every tmux call held to a private socket; and, for an
 agent whose pane dies, the tick budget's fake tmux server, read through the real listing.
 """
@@ -39,6 +40,10 @@ from tests.test_ui_shell import (
     status,
 )
 from tests.test_ui_tick_budget import AGENTS_EACH, TMUX_ONLY, WITH_AGENTS, Panes
+
+#: The owner's logo, the sidebar's top-left since R23: r, a backslash, x. Written out, not
+#: read from ``core.version.PRODUCT_LOGO``, so a pin of it fails if the logo changes.
+LOGO = r"r\x"
 
 no_real_tmux = ui_suite.no_real_tmux
 script = ui_suite.script
@@ -77,12 +82,12 @@ def _capacity_live_total() -> int:
 @pytest.mark.parametrize(
     ("live", "text", "tip"),
     [
-        (0, "rlx", None),
-        (1, "rlx · 1 live", "1 agent live across every project"),
-        (19, "rlx · 19 live", "19 agents live across every project"),
+        (0, LOGO, None),
+        (1, f"{LOGO} · 1 live", "1 agent live across every project"),
+        (19, f"{LOGO} · 19 live", "19 agents live across every project"),
     ],
 )
-def test_the_header_says_rlx_then_how_many_are_live_and_nothing_with_none(
+def test_the_header_says_the_logo_then_how_many_are_live_and_nothing_with_none(
     live: int, text: str, tip: str | None
 ) -> None:
     assert fleet_title(live).plain == text
@@ -93,8 +98,9 @@ def test_the_header_says_rlx_then_how_many_are_live_and_nothing_with_none(
 def test_the_title_is_the_product_s_name_in_bold_and_its_count_is_not(
     tmp_path: Path, script: Script
 ) -> None:
-    """#133: ``rlx``, as its command is spelled, in the header's bold (the sidebar's CSS), and
-    ``· N live`` beside it in the plain weight, as rc/0.9.2 drew the count."""
+    """#133: the product's mark (``rlx``, the owner's ``r\\x`` logo since R23) in the header's
+    bold (the sidebar's CSS), and ``· N live`` beside it in the plain weight, as rc/0.9.2 drew
+    the count."""
     seed(tmp_path, *THREE)
 
     async def body(pilot: Pilot[None]) -> list[tuple[str, bool]]:
@@ -108,8 +114,8 @@ def test_the_title_is_the_product_s_name_in_bold_and_its_count_is_not(
     segments = drive(body)
 
     words = [(text.strip(), bold) for text, bold in segments if text.strip()]
-    assert "".join(text for text, _ in segments).strip() == "rlx · 3 live", segments
-    assert words[0] == ("rlx", True), segments
+    assert "".join(text for text, _ in segments).strip() == f"{LOGO} · 3 live", segments
+    assert words[0] == (LOGO, True), segments
     assert all(not bold for text, bold in words[1:]), "the count is not bold"
 
 
@@ -159,11 +165,11 @@ def test_a_frame_paints_its_count_and_one_that_failed_keeps_the_last(
 
     seen = drive(body)
     assert [text for text, _ in seen] == [
-        "rlx",
-        "rlx · 1 live",
-        "rlx · 19 live",
-        "rlx · 19 live",  # the store unreadable: the frame on screen, and its count, are kept
-        "rlx",
+        LOGO,
+        f"{LOGO} · 1 live",
+        f"{LOGO} · 19 live",
+        f"{LOGO} · 19 live",  # the store unreadable: the frame on screen, and its count, are kept
+        LOGO,
     ]
     assert seen[0][1] is None and seen[-1][1] is None
     assert seen[2][1] == "19 agents live across every project, the captain excluded"
@@ -200,10 +206,10 @@ def test_the_header_follows_a_spawn_and_a_stop_on_the_next_frame(
         return seen
 
     assert drive(body) == [
-        ("rlx", 0),
-        ("rlx · 1 live", 1),
-        ("rlx · 4 live", 4),
-        ("rlx", 0),
+        (LOGO, 0),
+        (f"{LOGO} · 1 live", 1),
+        (f"{LOGO} · 4 live", 4),
+        (LOGO, 0),
     ]
 
 
@@ -227,7 +233,7 @@ def test_the_count_fits_the_header_beside_the_plus_at_the_sidebars_widths(
         )
 
     title, plus_shown, side_by_side = drive(body)
-    assert title.rstrip() == "rlx · 128 live"
+    assert title.rstrip() == f"{LOGO} · 128 live"
     assert plus_shown and side_by_side
 
 
@@ -301,5 +307,5 @@ def test_the_header_drops_on_the_frame_that_shows_the_agent_exited(
         return seen
 
     (first, first_state), (second, second_state) = drive(body)
-    assert (first, second) == (f"rlx · {total} live", f"rlx · {total - 1} live")
+    assert (first, second) == (f"{LOGO} · {total} live", f"{LOGO} · {total - 1} live")
     assert first_state != "exited" and second_state == "exited"

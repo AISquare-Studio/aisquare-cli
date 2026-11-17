@@ -37,7 +37,8 @@ RLX_BLUE = "#2F74F0"
 """The rlx brand colour: the wordmark's on aisquare.studio/rlx, and the mark's under ``rlx``."""
 
 MARK_VARIABLE = "rlx-mark"
-"""The theme variable the product mark is drawn in: the sidebar's ``rlx`` and Welcome's heading.
+"""The theme variable the product mark is drawn in: the sidebar's logo, ``r\\x`` (R23), and
+Welcome's heading, ``rlx``.
 
 ``rlx`` sets it to :data:`RLX_BLUE`. Every other theme leaves it unset, and
 :func:`theme_variable_defaults` gives it that theme's ``primary``, or its ``foreground`` where
@@ -46,7 +47,7 @@ theme that ``t`` picks.
 """
 
 TEXT_CONTRAST = 4.5
-"""WCAG 2's floor for text (1.4.3): the mark is the product's name, and it must read."""
+"""WCAG 2's floor for text (1.4.3): the mark is the product's name or logo, and it must read."""
 
 MARK_STYLE = f"${MARK_VARIABLE}"
 """The mark's style, for a ``textual.content.Content`` span.

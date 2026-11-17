@@ -31,6 +31,7 @@ from textual.widget import Widget
 from textual.widgets import OptionList, Static
 
 from aisquare.cli import watch as watch_mod
+from aisquare.cli.ui import sidebar as sidebar_mod
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.theme import (
     DEFAULT_THEME,
@@ -56,6 +57,10 @@ from tests.ui_workers import settle_page
 
 no_real_tmux = ui_suite.no_real_tmux
 script = ui_suite.script
+
+#: The owner's logo, the sidebar's top-left since R23: r, a backslash, x. Written out, not
+#: read from ``core.version.PRODUCT_LOGO``, so a pin of it fails if the logo changes.
+LOGO = r"r\x"
 
 TERMINALS = frozenset({"ansi-dark", "ansi-light"})
 """The themes whose colours are the terminal's own ANSI ones: no hex to compare the mark with."""
@@ -554,11 +559,11 @@ def test_the_mark_is_the_brand_blue_under_rlx_and_follows_t_to_textual_dark_and_
         return seen, [segment.text for segment in _title(fleet_app(pilot))]
 
     seen, words = drive(body)
-    assert "".join(words).strip() == "rlx · 3 live", words
+    assert "".join(words).strip() == f"{LOGO} · 3 live", words
     # textual-dark's primary is 4.14:1 on its background: the floor gives its text colour.
     expected = {"rlx": "#2F74F0", "textual-dark": "#E0E0E0", "textual-light": "#004578"}
     for theme, (text, ink, _, heading, heading_ink, _) in seen.items():
-        assert text == "rlx", (theme, text)
+        assert text == LOGO, (theme, text)
         assert ink.hex == expected[theme], (theme, ink.hex)
         assert heading.startswith("aisquare fleet") or heading.startswith("rlx"), heading
         assert heading_ink.hex == expected[theme], ("Welcome's heading", theme, heading_ink.hex)
@@ -579,7 +584,7 @@ def test_the_count_beside_the_mark_keeps_the_headers_text_colour(
         return [(segment.text, _ink(segment)[0]) for segment in _title(app)]
 
     (mark, mark_ink), *count = drive(body)
-    assert mark == "rlx" and mark_ink.hex == RLX_BLUE
+    assert mark == LOGO and mark_ink.hex == RLX_BLUE
     assert count and all(ink.hex != RLX_BLUE for _, ink in count), count
 
 
@@ -597,6 +602,58 @@ def test_the_mark_takes_every_themes_own_colour(tmp_path: Path, script: Script) 
     assert not wrong, wrong
 
 
+LOGO_LOOKS = ["rlx", "textual-dark", "textual-light"]
+"""The owner's default, the old default, and a light theme."""
+
+LogoRows = dict[str, tuple[str, list[tuple[str, str, bool]]]]
+"""Per theme: the header's row as painted, and the logo's three cells (text, ink, bold)."""
+
+
+@pytest.mark.parametrize("width", [38, 45, 60, 90, 200])
+def test_the_top_left_is_r_backslash_x_bold_in_the_marks_colour_and_cut_where_rlx_was(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """R23, the owner (2026-11-17): "rlx's logo is now r\\x: r, a backslash, x ... in place of
+    'rlx'". As the screen paints it, under each look: the header's first three cells are r, a
+    backslash and x, bold in the mark's colour. The rest of the row is what rlx's was. A
+    nine-digit count is cut in the 24-cell sidebar (38 to 60 columns), and it is cut in the
+    same cell."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def body(pilot: Pilot[None]) -> LogoRows:
+        app = fleet_app(pilot)
+        app.sidebar.show_live_total(123_456_789)
+        await settle(app)
+        seen: LogoRows = {}
+        for theme in LOGO_LOOKS:
+            app.theme = theme
+            await settle(app)
+            await _focus(app, app.sidebar)
+            header = app.query_one("#fleet-header").region
+            title = app.query_one("#fleet-title", Static).region
+            (strip,) = app.screen._compositor.render_full_update(simplify=True).strips[header.y]
+            row = "".join(segment.text for segment in strip.crop(header.x, header.right))
+            cells = [
+                (char, _ink(segment)[0].hex, bool(segment.style and segment.style.bold))
+                for segment in strip.crop(title.x, title.x + 3)
+                for char in segment.text
+            ]
+            seen[theme] = (row, cells)
+        return seen
+
+    shown = drive(body, size=(width, 40))
+    monkeypatch.setattr(sidebar_mod, "PRODUCT_LOGO", "rlx")  # the header as it was
+    before = drive(body, size=(width, 40))
+    for theme in LOGO_LOOKS:
+        row, cells = shown[theme]
+        mark = _expected_mark(theme).hex
+        assert cells == [("r", mark, True), ("\\", mark, True), ("x", mark, True)], (theme, cells)
+        assert row.lstrip().startswith(f"{LOGO} · 123456789"), (theme, row)
+        assert row == before[theme][0].replace("rlx", LOGO, 1), (theme, row, before[theme][0])
+    cut = width < 90
+    assert (" live" not in shown["rlx"][0]) is cut, shown["rlx"][0]
+
+
 def test_a_theme_that_sets_the_mark_colours_it_apart_from_its_primary(
     tmp_path: Path, script: Script
 ) -> None:
@@ -610,7 +667,7 @@ def test_a_theme_that_sets_the_mark_colours_it_apart_from_its_primary(
         return await _marks(pilot, [own.name])
 
     (text, ink, _, heading, heading_ink, _) = drive(body)[own.name]
-    assert (text, ink.hex) == ("rlx", "#E0A030")
+    assert (text, ink.hex) == (LOGO, "#E0A030")
     assert heading_ink.hex == "#E0A030", heading
 
 
@@ -724,7 +781,7 @@ def test_the_terminal_themes_draw_the_mark_too(tmp_path: Path, script: Script) -
             app.theme = theme
             await settle(app)
             seen[theme] = app.get_css_variables()[MARK_VARIABLE]
-            assert any("rlx" in line for line in _cells(app))
+            assert any(LOGO in line for line in _cells(app))
         return seen
 
     assert drive(body) == {theme: BUILTIN_THEMES[theme].primary for theme in TERMINALS}

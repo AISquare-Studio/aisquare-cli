@@ -519,6 +519,17 @@ _MENTION = re.compile(
 _BY_MENTION = {known.mention: known for known in KNOWN_FIXES}
 
 
+def _from_home(where: str) -> str:
+    """``where``, the folder a button names, with the home folder as ``~``, in this platform's
+    separators: on Windows a fix's ``C:\\Users\\me/.aisquare/…``, its separators mixed, was
+    shown whole (#517, windows-latest); paths compare as the platform does (case on Windows)."""
+    try:
+        inside = Path(where).relative_to(Path.home())
+    except ValueError:
+        return where
+    return str(Path("~") / inside)
+
+
 @dataclass(frozen=True)
 class FixCommand:
     """One doctor hint that is our own command, ready to run."""
@@ -554,9 +565,7 @@ class FixCommand:
             where = dict(zip(self.argv[3::2], self.argv[4::2], strict=False)).get("--config-dir")
             if where is None:
                 return f"Connect {agent}"
-            home = str(Path.home())
-            shown = "~" + where[len(home) :] if where.startswith(home + os.sep) else where
-            return f"Connect {agent} ({shown})"
+            return f"Connect {agent} ({_from_home(where)})"
         if head == ("project", "onboard"):
             return "Refresh this project"
         if head == ("doctor", "--fix"):

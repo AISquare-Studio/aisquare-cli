@@ -48,6 +48,7 @@ from aisquare.cli.ui.views.app_settings import (
     REMOTE_TAB,
     AppSettingsView,
     UiSettingsChanged,
+    display_label,
 )
 from aisquare.core import paths
 from aisquare.core.agent_adapters import adapters
@@ -1435,6 +1436,20 @@ def test_each_display_switch_saves_its_own_key_and_tells_the_app() -> None:
         assert written == {key: False}, (key, written)
         assert heard == [False], (key, heard)
     assert not paths.config_path().exists() or "ui" not in _config_toml()
+
+
+def test_the_marks_switch_names_every_adapters_mark() -> None:
+    """Display's *Agent marks* switch, as drawn, names each mark an adapter declares
+    (``AgentAdapter.mark``), so a new agent's mark joins it with no edit to the view."""
+    glyphs = [adapter.mark.glyph for adapter in adapters() if adapter.mark is not None]
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> str:
+        await pilot.pause()
+        return str(host.query_one("#ui-show-agent-marks", Checkbox).label)
+
+    drawn = drive(scenario)
+    assert drawn == display_label("ui-show-agent-marks"), drawn
+    assert glyphs and all(glyph in drawn for glyph in glyphs), (glyphs, drawn)
 
 
 def test_a_display_switch_over_an_unreadable_file_goes_back_and_writes_nothing() -> None:

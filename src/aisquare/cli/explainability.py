@@ -532,10 +532,10 @@ def use(
     silently start sending.
 
     Idempotent: re-running with the same destination changes nothing; a
-    different workspace revokes and drops the key the CLI minted for the old
+    different workspace revokes and drops the key rlx minted for the old
     one. Only the project's own key skips the mint — a machine key was issued
     for whichever workspace set the machine up, so it only answers meanwhile.
-    Every key the CLI minted and could not revoke yet (signed out, another
+    Every key rlx minted and could not revoke yet (signed out, another
     host, offline) is tried again here, and what is still live is said.
     """
     project = _project_for(project_ref)
@@ -691,7 +691,7 @@ def use(
         # An API host outside the table: nothing traces there until its endpoints are
         # named, and the machine's never stand in for them (review of #203).
         typer.echo(
-            f"            {target_name} is not a deployment this CLI knows — set "
+            f"            {target_name} is not a deployment rlx knows — set "
             f"{ops.deployment_fix(target)}"
         )
     typer.echo(f"  key:      {key_note}")
@@ -1239,7 +1239,7 @@ def register(
     if not target.api_key:
         fail(
             f"${target.api_key_env} is not set in this shell — export the workspace key "
-            "there (it is never stored by the CLI) and re-run",
+            "there (rlx never stores it) and re-run",
             error="no-key",
         )
 
@@ -1325,7 +1325,7 @@ def ship(
 ) -> None:
     """Drain buffered insights to the gateway (prompts, notes, task events).
 
-    This is the only place the CLI talks to the gateway. It is deliberately a
+    This is the only place rlx talks to the gateway. It is deliberately a
     separate command and a separate process: the capture seams buffer, this
     delivers, and a gateway that is down therefore costs a delay rather than a
     prompt. Exits non-zero only when records were dead-lettered — a deferral is

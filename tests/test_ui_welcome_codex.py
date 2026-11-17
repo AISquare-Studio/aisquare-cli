@@ -119,7 +119,7 @@ def test_with_neither_installed_both_install_pages_are_linked() -> None:
     assert title.startswith("2  Coding agent")
     assert "No coding agent is installed" in text
     assert text.index("Claude Code:") < text.index(CLAUDE_PAGE)
-    assert text.index("Codex (beta):") < text.index(CODEX_PAGE)
+    assert text.index("Codex:") < text.index(CODEX_PAGE)
     assert accounts_core.INSTALL_COMMAND not in text and codex_adapter.INSTALL_COMMAND not in text
     # Control: Claude Code chosen by name (not choosable) links its own page only.
     _title, claude_only = hosted(Machine(claude=[MISSING]), _look)

@@ -436,6 +436,12 @@ _KEEP_ARGVS: dict[tuple[str, str], str] = {
 }
 
 
+def _integration(why: str) -> bool:
+    """Whether a kept entry is kept as the AISquare integration's (its reason says so): its
+    commands keep their word, and it says rlx, never "the CLI" (R21, owner 2026-11-17)."""
+    return "integration" in why
+
+
 def _subcommands() -> list[str]:
     import typer.main
 
@@ -464,7 +470,9 @@ def _scopes(tree: object) -> dict[int, str]:
 def _scan() -> set[tuple[str, int, str, str]]:
     """(file, line, kind, text) for every user-facing literal that names a command with a
     hard-coded word: an old one (aisquare, asq) anywhere, rlx outside static help, or calls
-    the product "the CLI"."""
+    the product "the CLI". What R3 keeps for the AISquare integration (:func:`_integration`)
+    keeps its words, and is still read for "the CLI": the owner's R21 (2026-11-17) made that
+    rlx there too."""
     import ast
     import re
 
@@ -476,13 +484,14 @@ def _scan() -> set[tuple[str, int, str, str]]:
         lead + r"rlx(?= " + flags + r"(?:" + subs + r")\b)"
         r"(?! instances (?:have|on)\b)(?! board — )"  # rlx instances (a noun); a heading
     )
-    cli = re.compile(r"\b(?:[Tt]his|[Tt]he|an earlier|our own) CLI\b")
+    cli = re.compile(r"\b(?:[Tt]his|[Tt]he|an earlier|our own) CLI\b|\bCLI sign-in\b")
     shield = re.compile(r"`?aisquare hook\b[^`]*`?|-m aisquare\S*|aisquare-[\w-]+|aisquare@\S+")
     found: set[tuple[str, int, str, str]] = set()
     for path in sorted(_SRC.rglob("*.py")):
         rel = path.relative_to(_SRC).as_posix()
-        if rel in _KEEP_FILES:
+        if rel in _KEEP_FILES and not _integration(_KEEP_FILES[rel]):
             continue
+        kept_file = rel in _KEEP_FILES
         tree = ast.parse(path.read_text(encoding="utf-8"))
         scope = _scopes(tree)
         bare = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Expr)}
@@ -516,7 +525,7 @@ def _scan() -> set[tuple[str, int, str, str]]:
                 # An argv that hard-codes the word: the literal sweep below reads strings alone,
                 # and missed every hint built from a list (brief 215).
                 where = (rel, scope.get(id(node), "<module>"))
-                if where not in _KEEP_FUNCS and where not in _KEEP_ARGVS:
+                if not kept_file and where not in _KEEP_FUNCS and where not in _KEEP_ARGVS:
                     words = [e.value if isinstance(e, ast.Constant) else "…" for e in node.elts]
                     found.add((rel, node.lineno, "argv", " ".join(map(str, words))[:120]))
                 continue
@@ -531,16 +540,18 @@ def _scan() -> set[tuple[str, int, str, str]]:
             static = id(node) in helps or id(node) in commands
             if id(node) in bare and not static:
                 continue  # developer prose
-            if (rel, scope.get(id(node), "<module>")) in _KEEP_FUNCS:
+            func = _KEEP_FUNCS.get((rel, scope.get(id(node), "<module>")))
+            if func is not None and not _integration(func):
                 continue
             if any(rel == f and text.startswith(t) for f, t in _KEEP_TEXTS):
                 continue
+            kept = kept_file or func is not None
             plain = shield.sub(lambda m: "\x01" * len(m.group(0)), text)
             kinds = [
                 kind
                 for kind, hit in (
-                    ("old word", old.search(plain)),
-                    ("hard-coded rlx", None if static else new.search(plain)),
+                    ("old word", None if kept else old.search(plain)),
+                    ("hard-coded rlx", None if kept or static else new.search(plain)),
                     ("the CLI", cli.search(plain)),
                 )
                 if hit
@@ -586,13 +597,25 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
     root = tmp_path / "aisquare"
     (root / "cli").mkdir(parents=True)
     (root / "cli" / "fake.py").write_text(module, encoding="utf-8")
+    # The AISquare integration keeps its words, and says rlx, never "the CLI" (R21):
+    (root / "cli" / "auth.py").write_text(
+        'K = "run aisquare login; it forgets the keys the CLI minted"\n'
+        'L = "CLI sign-in is temporarily paused."\n'
+        'M = "run aisquare login; it forgets the keys rlx minted"\n',
+        encoding="utf-8",
+    )
+    # ... and what is kept for another reason is not read at all (the agents' protocol):
+    (root / "core").mkdir()
+    (root / "core" / "injection.py").write_text('N = "keys the CLI minted"\n', encoding="utf-8")
     monkeypatch.setattr(sys.modules[__name__], "_SRC", root)
-    found = sorted((kind, text) for _rel, _line, kind, text in _scan())
+    found = sorted((rel, kind, text) for rel, _line, kind, text in _scan())
     assert found == [
-        ("argv", "aisquare accounts add"),
-        ("hard-coded rlx", "`rlx accounts add` makes one"),
-        ("old word", "run aisquare doctor to see"),
-        ("the CLI", "keys the CLI minted"),
+        ("cli/auth.py", "the CLI", "CLI sign-in is temporarily paused."),
+        ("cli/auth.py", "the CLI", "run aisquare login; it forgets the keys the CLI minted"),
+        ("cli/fake.py", "argv", "aisquare accounts add"),
+        ("cli/fake.py", "hard-coded rlx", "`rlx accounts add` makes one"),
+        ("cli/fake.py", "old word", "run aisquare doctor to see"),
+        ("cli/fake.py", "the CLI", "keys the CLI minted"),
     ]
 
 

@@ -224,7 +224,7 @@ def _wait_for_approval(
                     error="expired",
                 )
             if outcome.kind == "paused":
-                fail("CLI sign-in is temporarily paused. Try again later.", error="paused")
+                fail("Sign-in from rlx is temporarily paused. Try again later.", error="paused")
             raise iam.IamError(
                 "unsupported_server", f"Unexpected answer from {endpoints.issuer} while waiting."
             )
@@ -393,7 +393,7 @@ def logout() -> None:
         )
         return
     if keys.detached:
-        _say(f"✓ Forgot {keys.detached} ingest key(s) the CLI had minted for your projects.")
+        _say(f"✓ Forgot {keys.detached} ingest key(s) rlx had minted for your projects.")
     if keys.revocations.owed:
         # Kept owed, not forgotten: the next sign-in's `use` or `doctor --live` tries again.
         _say(f"⚠ {destinations.describe_owed(keys.revocations.owed)} — {destinations.REVOKE_RETRY}")

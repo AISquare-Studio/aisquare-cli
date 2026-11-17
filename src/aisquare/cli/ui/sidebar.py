@@ -11,9 +11,9 @@ label, state chip, exit status). The Fleet header counts the agents live across 
 dialog asks which project — and under the separator, one
 row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), under it the
 ⬆ row while a newer aisquare is out (:func:`update_row_text`), and under that
-one dim status line (:func:`status_line_text`): the AISquare sign-in and the
-Claude accounts' headroom as two dots, and under them a dot for each other agent's
-accounts (Codex's). A click on that line opens Accounts.
+one dim status line (:func:`status_line_text`): the Claude accounts' headroom as a dot,
+and under it a dot for each other agent's accounts (Codex's). A click on that line opens
+Accounts, where the AISquare sign-in is: the sidebar does not show it (owner, 2026-11-17).
 
 Two rules shape the code more than the layout does:
 
@@ -640,12 +640,7 @@ class AgentHeadroom(NamedTuple):
     every_needs_login: bool = False
 
 
-STATUS_INDENT = " " * len("● aisquare  ")
-"""What puts another agent's dot under the first one's."""
-
-
 def status_line_text(
-    aisquare: bool | None,
     headroom: HeadroomSummary | None,
     *,
     every_needs_login: bool = False,
@@ -653,9 +648,9 @@ def status_line_text(
     more: Sequence[AgentHeadroom] = (),
     width: int | None = None,
 ) -> Text:
-    """``● aisquare  ● 3x claude 58%`` (the x a multiplication sign), under *⚙ Settings*.
+    """``● 3x claude 58%`` (the x a multiplication sign), under *⚙ Settings*.
 
-    The AISquare dot is green signed in, red signed out, grey while unknown. The
+    No AISquare sign-in: that is on the Accounts page alone (owner, 2026-11-17). The
     Claude dot is :func:`headroom_dot`; the count is how many accounts are usable;
     the figure is the fleet's share LEFT (``HeadroomSummary.percent_left``, #287), in
     the dot's colour, and absent until a reading; a ``⚠`` follows when an account
@@ -665,20 +660,15 @@ def status_line_text(
     same way: ``● 1x codex 58%``.
 
     ``width``, the cells the line has: the figure is left out where the line would not
-    fit it, so the ellipsis never cuts the ``⚠`` (something to do) nor a number in two.
-    In the 28 cells of the sidebar, ``2x claude 3% ⚠`` fits and ``2x claude 58% ⚠``
-    does not (review of #357).
+    fit it, so the ellipsis never cuts the ``⚠`` (something to do) nor a number in two. In
+    16 cells, ``2x claude 3% ⚠`` fits and ``2x claude 58% ⚠`` does not (review of #357,
+    when the AISquare dot took 12 of the sidebar's 28).
     """
     text = Text(no_wrap=True, overflow="ellipsis")
-    colour = "grey50" if aisquare is None else GREEN if aisquare else RED
-    text.append("● ", style=colour)
-    text.append("aisquare", style="dim")
-    text.append("  ")
-    room = None if width is None else max(0, width - cell_len(STATUS_INDENT))
-    _append_agent(text, name or default_binary(), headroom, every_needs_login, room)
+    _append_agent(text, name or default_binary(), headroom, every_needs_login, width)
     for other in more:
-        text.append("\n" + STATUS_INDENT)
-        _append_agent(text, other.name, other.headroom, other.every_needs_login, room)
+        text.append("\n")
+        _append_agent(text, other.name, other.headroom, other.every_needs_login, width)
     return text
 
 
@@ -690,7 +680,7 @@ def _append_agent(
     room: int | None,
 ) -> None:
     """One agent's dot, count, name, figure and ``⚠`` at the end of ``text``'s last line;
-    ``room`` is the cells that line has past the indent (every line starts with it)."""
+    ``room`` is the cells that line has."""
     line = Text()
     dot, colour = headroom_dot(headroom, every_needs_login=every_needs_login)
     line.append(f"{dot} ", style=colour)
@@ -1989,22 +1979,24 @@ class StatusLine(Static):
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
-        self.facts: tuple[
-            bool | None, HeadroomSummary | None, bool, str | None, tuple[AgentHeadroom, ...]
-        ] = (None, None, False, None, ())
-        """What the line says: the AISquare sign-in, the headroom, ``every_needs_login``, the
-        first dot's name and the other agents' lines."""
+        self.facts: tuple[HeadroomSummary | None, bool, str | None, tuple[AgentHeadroom, ...]] = (
+            None,
+            False,
+            None,
+            (),
+        )
+        """What the line says: the headroom, ``every_needs_login``, the first dot's name and
+        the other agents' lines."""
 
     def show_facts(
         self,
-        aisquare: bool | None,
         headroom: HeadroomSummary | None,
         every_needs_login: bool,
         *,
         name: str | None = None,
         more: Sequence[AgentHeadroom] = (),
     ) -> None:
-        self.facts = (aisquare, headroom, every_needs_login, name, tuple(more))
+        self.facts = (headroom, every_needs_login, name, tuple(more))
         self.fit_line()
 
     def on_resize(self) -> None:
@@ -2013,10 +2005,9 @@ class StatusLine(Static):
     def fit_line(self) -> None:
         """The line for :attr:`facts`, fitted to the cells it has now (:func:`status_line_text`'s
         ``width``); before the first layout, whole."""
-        aisquare, headroom, every_needs_login, name, more = self.facts
+        headroom, every_needs_login, name, more = self.facts
         self.update(
             status_line_text(
-                aisquare,
                 headroom,
                 every_needs_login=every_needs_login,
                 name=name,
@@ -2147,8 +2138,6 @@ class Sidebar(Vertical):
         arrows, a row that acts (``add``, ``group:<id>``, *Spawn agent*, *Start captain*, ⬆).
         A click, the arrows and the shell all move this one key; there is no second,
         keyboard-only highlight."""
-        self.aisquare: bool | None = None
-        """The AISquare sign-in the status line shows: signed in, out, or unknown."""
         self.headroom: HeadroomSummary | None = None
         """The Claude accounts' headroom the status line shows; ``None`` until the first."""
         self.every_needs_login = False
@@ -2781,11 +2770,6 @@ class Sidebar(Vertical):
         two or more; ``this_id`` is this asq's record."""
         self.query_one(InstancesChip).show_instances(live, this_id)
 
-    def show_aisquare(self, signed_in: bool | None) -> None:
-        """The status line's AISquare dot: signed in, out, or ``None`` when it cannot be read."""
-        self.aisquare = signed_in
-        self._paint_status()
-
     def show_headroom(
         self,
         headroom: HeadroomSummary,
@@ -2837,7 +2821,6 @@ class Sidebar(Vertical):
 
     def _paint_status(self) -> None:
         self.query_one(StatusLine).show_facts(
-            self.aisquare,
             self.headroom,
             self.every_needs_login,
             name=self.headroom_name,

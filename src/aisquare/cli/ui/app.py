@@ -97,7 +97,6 @@ from aisquare.cli.ui.sidebar import (
     HEADROOM_DOT,
     RED,
     SETTINGS_KEY,
-    STATUS_INDENT,
     TIMES,
     AccountsSelected,
     AddProject,
@@ -176,7 +175,6 @@ from aisquare.cli.ui.views.accounts import (
     WelcomeRequested,
     marks_shown,
     next_step,
-    read_session,
 )
 from aisquare.cli.ui.views.agent import (
     PAUSE_WORKER,
@@ -803,8 +801,6 @@ class HelpScreen(ModalScreen[None]):
         text.append(" what the doctor's last run found; its page has the report\n")
         text.append("\nThe line under ⚙ Settings", style="bold")
         text.append(" (a click on it opens Accounts)\n", style="dim")
-        text.append("  ● aisquare", style="bold cyan")
-        text.append("  green signed in · red signed out · grey not known\n")
         text.append("  ● 3", style="bold cyan")
         text.append(f"{TIMES} claude", style="bold cyan")
         text.append("  usable Claude accounts; the dot is the room LEFT across them:\n")
@@ -828,10 +824,10 @@ class HelpScreen(ModalScreen[None]):
         text.append("●", style=RED)
         text.append(" and ⚠ — accounts that need a login (signed out, token expired or refused);\n")
         text.append("     the dot is red when every enabled account needs one\n")
-        text.append(f"  {STATUS_INDENT}● 1", style="bold cyan")
+        text.append("  ● 1", style="bold cyan")
         text.append(f"{TIMES} codex", style="bold cyan")
         text.append("  another agent's accounts (Codex's), read the same way, on a line\n")
-        text.append(f"  {STATUS_INDENT}       of their own under the first\n")
+        text.append("     of their own under the first\n")
         text.append("\nEsc closes this", style="dim")
         return text
 
@@ -2043,12 +2039,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         )
 
     def _accounts_read(self, event: Worker.StateChanged) -> None:
-        """Paint the frame the accounts read answered, and the AISquare session beside it.
-
-        The session is a file read, as it always was here; only the registry
-        went to the worker. Then the read that was owed while this one waited,
-        if one was (:meth:`refresh_accounts`).
-        """
+        """Paint the frame the accounts read answered. Then the read that was owed while this
+        one waited, if one was (:meth:`refresh_accounts`). The AISquare session is the
+        Accounts page's own read (``AccountsView.show``): the sidebar does not show it."""
         if event.state is WorkerState.SUCCESS:
             result = event.worker.result
             overview = result if isinstance(result, AccountsOverview) else None
@@ -2056,17 +2049,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             overview = None  # a directory we cannot read costs the line, never the frame
         else:
             return  # still running, or cancelled with the app: nothing to paint or owe
-        sidebar = self.sidebar
         self.accounts_overview = overview
         if overview is not None:
             self._show_agents_named(marks_shown(overview.accounts))
-        session_known = True
-        try:
-            session = read_session()
-        except Exception:  # read_session never raises; belt to its braces
-            session, session_known = None, False
-        sidebar.show_aisquare((session is not None) if session_known else None)
-        if overview is not None:
             for view in self.query(AccountsView):
                 view.show(overview)
         # The read owed first: an AccountsChanged that landed while this read was in flight

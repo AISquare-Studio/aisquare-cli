@@ -288,7 +288,7 @@ def _key_origin_row(
 
 
 _MINTED_KEY_REFUSAL = Notice(
-    "this project's key was minted by the CLI — ask your manager to replace it, which "
+    "this project's key was minted by rlx — ask your manager to replace it, which "
     "revokes the minted one",
     "warning",
 )
@@ -755,7 +755,7 @@ class ExplainabilityView(VerticalScroll):
         yield Static(
             Text(
                 "Enable is the consent: sessions launched after it are traced through the "
-                "proxy. Ship drains the insights this CLI buffered (prompts, board notes, task "
+                "proxy. Ship drains the insights rlx buffered (prompts, board notes, task "
                 "events — no file contents, no model traffic).",
             ),
             id="explainability-note",

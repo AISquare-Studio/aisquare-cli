@@ -64,7 +64,7 @@ def init(
         bool | None,
         typer.Option(
             "--explainability/--no-explainability",
-            help="Ship this CLI's insights (prompts, board events) to the "
+            help="Ship rlx's insights (prompts, board events) to the "
             "explainability gateway. Off unless you ask for it.",
         ),
     ] = None,

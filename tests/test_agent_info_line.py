@@ -655,7 +655,7 @@ def test_a_codex_account_with_a_week_alone_counts_by_it_and_reads_limited_when_s
     both = accounts_service.fleet_headroom([room, spent], readings)
     assert (both.usable, both.limit_by_slot) == (2, {room.slot: 30.0, spent.slot: 100.0})
     assert both.percent_left == 35.0 and both.level == "fair"
-    line = status_line_text(True, None, more=[AgentHeadroom("codex", both)]).plain
+    line = status_line_text(None, more=[AgentHeadroom("codex", both)]).plain
     assert f"● 2{TIMES} codex" in line, line
     assert agent_row_text(_codex_status(_codex_turn(tmp_path)), 30.0).plain.endswith("#5·30%")
 

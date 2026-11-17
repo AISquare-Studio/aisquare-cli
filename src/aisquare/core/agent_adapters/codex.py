@@ -700,9 +700,9 @@ def _hooks_file_spellings(settings_path: Path) -> list[str]:
 class CodexAdapter:
     id = "codex"
     label = "Codex"
-    #: Beta in 0.10.0, its first release: "stable" once a release has passed with no
-    #: complaint (the owner, 2026-11-05). The one line that takes the marks away.
-    release_stage: ReleaseStage = "beta"
+    #: Beta in 0.10.0, its first release; stable from 0.10.1, no complaint heard (the owner,
+    #: 2026-11-17: its "(beta)" is dropped silently). The one line that took the marks away.
+    release_stage: ReleaseStage = "stable"
     #: >_, the mark of its own header, in a blue that reads apart from Claude Code's orange
     #: (the pair colour-blind eyes tell apart), lighter on a dark theme and darker on a light
     #: one, at 3:1 or more on every surface it is drawn on (``types.AgentMark``).

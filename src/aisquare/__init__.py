@@ -1,5 +1,5 @@
-"""aisquare — One terminal over your projects and your coding agents: task a
-manager in plain words, and it runs the coders, testers and reviewers for you.
+"""rlx is a manager for your AI coding agents. Tell it the goal: it runs Claude Code and
+Codex on accounts with room. Then relax.
 
 ``__version__`` stays re-exported here for anyone who already imports it from
 the package root, but nothing INSIDE this package may read it back off this

@@ -35,6 +35,8 @@ from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.theme import (
     DEFAULT_THEME,
     FADE_OPACITY,
+    HIGHLIGHT_TEXT_VARIABLE,
+    HIGHLIGHT_VARIABLE,
     MARK_STYLE,
     MARK_VARIABLE,
     RLX_BLUE,
@@ -121,6 +123,10 @@ PAIRS: tuple[Pair, ...] = (
     Pair("primary", ("surface",), MARK, "a dialog's border"),
     Pair("primary", ("panel",), MARK, "a border beside an odd project card"),
     Pair("button-color-foreground", ("primary",), TEXT, "a primary button's label"),
+    Pair(
+        HIGHLIGHT_TEXT_VARIABLE, (HIGHLIGHT_VARIABLE,), TEXT, "the highlighted row, sidebar focused"
+    ),
+    Pair(HIGHLIGHT_VARIABLE, ("background",), MARK, "that row's bar"),
     Pair("block-cursor-foreground", ("block-cursor-background",), TEXT, "a list's highlighted row"),
     Pair("text", ("background", "primary@35"), TEXT, "the sidebar's selected row"),
     Pair("accent", ("background",), TEXT, "+, the filter, the instances chip"),
@@ -338,11 +344,11 @@ def test_the_default_is_the_themes_mark_colour_and_rlxs_own_value_wins() -> None
     host = Host()
     host.register_theme(RLX_THEME)
     host.theme = "nord"
-    assert theme_variable_defaults(host) == {MARK_VARIABLE: BUILTIN_THEMES["nord"].primary}
+    assert theme_variable_defaults(host)[MARK_VARIABLE] == BUILTIN_THEMES["nord"].primary
     host.theme = "textual-dark"  # #0178D4 is 4.14:1 on its #121212: its text colour instead
-    assert theme_variable_defaults(host) == {MARK_VARIABLE: "#E0E0E0"}
+    assert theme_variable_defaults(host)[MARK_VARIABLE] == "#E0E0E0"
     host.theme = "rlx"
-    assert theme_variable_defaults(host) == {MARK_VARIABLE: RLX_BLUE}  # its primary, too
+    assert theme_variable_defaults(host)[MARK_VARIABLE] == RLX_BLUE  # its primary, too
     assert variables()[MARK_VARIABLE] == RLX_BLUE
 
 

@@ -482,7 +482,7 @@ def test_a_damaged_target_costs_the_trust_with_a_note_never_the_launch(
         "folder trust could not be shared into account 3: its .claude.json is not valid JSON"
         in stderr
     )
-    assert "aisquare accounts trust" in stderr
+    assert "rlx accounts trust" in stderr
     notes = service.share_for_launch(folder, account=third)
     assert notes and not any(isinstance(note, service.SharedNote) for note in notes)  # a ⚠
 

@@ -453,7 +453,8 @@ def _refuse_a_shared_numbers_rank(store: ContextStore, accounts: Sequence[Claude
             + prog.shell_advice(
                 " To give it a number of its own: "
                 f"{prog.word()} accounts remove {core.qualified_ref(account)}, then "
-                f"{prog.word()} accounts add{agent_flag}"
+                f"{prog.word()} accounts add{agent_flag}",
+                app=" To give it a number of its own: Remove it, then add it again.",
             )
         )
 

@@ -1252,7 +1252,11 @@ def not_automated(route: InstallRoute) -> str | None:
         # cannot carry, and Windows only changes WHEN the reinstall can run.
         reason = (
             "an editable install follows its checkout — pull it first"
-            + prog.shell_advice(f" ({command_line(['git', '-C', route.source or '.', 'pull'])})")
+            # Not in an f-string, whose single quotes would respell the argv the git guard
+            # reads as written (tests/test_ci_snapshot.py).
+            + prog.shell_advice(
+                " (" + command_line(["git", "-C", route.source or ".", "pull"]) + ")"
+            )
             + ", then reinstall it"
         )
         if windows is not None:

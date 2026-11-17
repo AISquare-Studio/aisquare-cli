@@ -40,6 +40,7 @@ from aisquare.cli.ui.toasts import (
     MoreToasts,
 )
 from aisquare.core import clipboard
+from tests.toast_clock import ToastClock, toast_clock  # noqa: F401 - the fixture
 
 T = TypeVar("T")
 WIDTHS = (38, 45, 60, 90, 200)
@@ -86,6 +87,14 @@ def first_row(toast: CalmToast) -> str:
 async def settle(pilot: Pilot[None]) -> None:
     await pilot.pause(0.05)
     await pilot.pause()
+
+
+async def until(pilot: Pilot[None], done: Callable[[], bool], seconds: float = 5.0) -> None:
+    """Wait for ``done``, at most ``seconds``: a bound on a slow runner, never a window."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while not done() and loop.time() < deadline:
+        await pilot.pause(0.02)
 
 
 # --- where they are -------------------------------------------------------------------------
@@ -210,16 +219,20 @@ def test_a_fourth_makes_the_oldest_wait_its_time_stopped_under_more_and_nothing_
     assert MAX_SHOWN == 3
 
 
-def test_a_toast_that_waited_longer_than_its_time_still_gets_its_time_when_it_comes_back() -> None:
+def test_a_toast_that_waited_longer_than_its_time_still_gets_its_time_when_it_comes_back(
+    toast_clock: ToastClock,  # noqa: F811
+) -> None:
     """Its time stopped while it waited: a 1 s toast that waited 1.5 s is shown for its 1 s,
-    not reaped the moment it comes back."""
+    not reaped the moment it comes back. On the test's clock (``tests.toast_clock``): on
+    wall time a busy runner could end its 1 s before the others made it wait, or spend half
+    of it between its return and the read."""
 
     async def go(app: Host, pilot: Pilot[None]) -> tuple[list[str], float]:
         app.notify("brief, and waiting", timeout=1.0)
         for n in range(3):
             app.notify(f"toast {n}", timeout=30)
         await settle(pilot)
-        await pilot.pause(1.5)
+        toast_clock.advance(1.5)  # it waits longer than its time
         await pilot.click(offset=(app.size.width - 2, 1))
         await settle(pilot)
         back = [n for n in app._notifications if n.message == "brief, and waiting"]
@@ -227,7 +240,7 @@ def test_a_toast_that_waited_longer_than_its_time_still_gets_its_time_when_it_co
 
     texts, left = drive(90, go)
     assert texts[-1] == "brief, and waiting", "it came back, at the bottom"
-    assert 0.5 < left <= 1.0
+    assert left == pytest.approx(1.0), "with the 1 s it had when it began to wait"
 
 
 def test_more_dismisses_those_that_wait() -> None:
@@ -247,32 +260,46 @@ def test_more_dismisses_those_that_wait() -> None:
 # --- time -----------------------------------------------------------------------------------
 
 
-def test_time_stops_while_the_pointer_is_over_a_toast_and_resumes_with_at_least_two_seconds() -> (
-    None
-):
-    async def go(app: Host, pilot: Pilot[None]) -> tuple[bool, float, int]:
+def test_time_stops_while_the_pointer_is_over_a_toast_and_resumes_with_at_least_two_seconds(
+    toast_clock: ToastClock,  # noqa: F811
+) -> None:
+    """On the test's clock (``tests.toast_clock``). On wall time the 0.4 s toast, read after
+    a settle, had closed by its own time on a busy runner: ``IndexError`` at ``shown(app)[0]``
+    (#524's matrix, py3.12-captain-off shard 4/4)."""
+
+    async def go(app: Host, pilot: Pilot[None]) -> tuple[bool, int, float, bool, int]:
         app.notify("hover me", timeout=0.4)
         await settle(pilot)
         toast = shown(app)[0]
         await pilot.hover(offset=(toast.region.x + 2, toast.region.y))
-        await pilot.pause(0.8)  # twice its timeout, under the pointer
-        stopped = math.isinf(toast._notification.time_left)
-        still = len(shown(app))
+        toast_clock.advance(0.8)  # twice its timeout, under the pointer
+        toast._expire()  # what its timer would do, had it kept one
+        await settle(pilot)
+        stopped, still = math.isinf(toast._notification.time_left), len(shown(app))
         await pilot.hover(offset=(0, 20))
         await settle(pilot)
-        return stopped and still == 1, toast._notification.time_left, still
+        left, running = toast._notification.time_left, toast._timer is not None
+        toast_clock.advance(left)
+        toast._expire()  # its timer, once that time has passed
+        await settle(pilot)
+        return stopped, still, left, running, len(shown(app))
 
-    stopped, left, _ = drive(90, go)
-    assert stopped, "it outlived its time under the pointer"
-    assert RESUME_AT_LEAST - 0.5 < left <= RESUME_AT_LEAST
+    stopped, still, left, running, after = drive(90, go)
+    assert stopped and still == 1, "it outlived its time under the pointer"
+    assert left == pytest.approx(RESUME_AT_LEAST) and running, "it runs again, with 2 s"
+    assert after == 0, "and goes when they have passed"
 
 
-def test_a_toast_goes_by_itself_when_its_time_is_up() -> None:
+def test_a_toast_goes_by_itself_when_its_time_is_up(toast_clock: ToastClock) -> None:  # noqa: F811
+    """Its own timer ends it once its time has passed, on the test's clock: on wall time a
+    0.3 s toast could be gone before the settle that counted it was over."""
+
     async def go(app: Host, pilot: Pilot[None]) -> tuple[int, int]:
         app.notify("brief", timeout=0.3)
         await settle(pilot)
         before = len(shown(app))
-        await pilot.pause(0.8)
+        toast_clock.advance(0.3)
+        await until(pilot, lambda: not shown(app))  # its timer fires within its 0.3 s
         return before, len(shown(app))
 
     assert drive(90, go) == (1, 0)
@@ -318,7 +345,7 @@ def test_the_cue_gives_way_to_the_dismiss_glyph(monkeypatch: pytest.MonkeyPatch)
         toast = shown(app)[0]
         toast.cue(clipboard.CopyResult("copied", "osc52"))
         cued = first_row(toast)
-        await pilot.pause(0.5)
+        await until(pilot, lambda: first_row(toast).rstrip().endswith("✕"))
         return cued, first_row(toast)
 
     cued, later = drive(90, go)

@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     # The CLI's callback holds the switch for `aisquare captain serve`; this entry skips the
     # CLI tree, so it holds it itself: off, the same exit 2 and the same one line.
     if not experimental.captain_enabled():
-        print(experimental.CAPTAIN_OFF, file=sys.stderr)
+        print(experimental.captain_off(), file=sys.stderr)
         return 2
     if not args.stdio:
         parser.error("the captain's server speaks stdio only — pass --stdio")

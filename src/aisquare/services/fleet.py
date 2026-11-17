@@ -15377,7 +15377,7 @@ def _refuse_the_captain_while_off(agent: FleetAgent) -> None:
         and not experimental.captain_enabled()
         and is_the_captains_row(agent)
     ):
-        raise FleetError(experimental.CAPTAIN_OFF)
+        raise FleetError(experimental.captain_off())
 
 
 def is_the_captains_row(agent: FleetAgent) -> bool:

@@ -155,9 +155,9 @@ def captain(
     """
     if not experimental.captain_enabled():
         fail(
-            experimental.CAPTAIN_OFF,
+            experimental.captain_off(),
             error="captain_off",
-            hint=experimental.CAPTAIN_OFF,
+            hint=experimental.captain_off(),
             exit_code=2,
         )
     if ctx.invoked_subcommand is not None:

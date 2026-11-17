@@ -169,7 +169,7 @@ def test_off_a_declared_captain_in_the_home_restarts_like_any_other_role(
     declared_captain: None,
 ) -> None:
     """Review of #240, R2-m2: by role and board alone, a declared captain spawned into the
-    home was read as the captain's leftover row and refused with CAPTAIN_OFF. Only a row
+    home was read as the captain's leftover row and refused with captain_off(). Only a row
     launched as the captain is that."""
     from aisquare.core import paths
     from aisquare.core.workspace import project_id_for

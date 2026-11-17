@@ -3685,7 +3685,8 @@ def _captain_check() -> DoctorCheck | None:
         return None
     return _ok(
         "captain",
-        "off (experimental) — turn it on with: aisquare config set experimental.captain true "
+        f"off (experimental) — turn it on with: {prog.command()} config set experimental.captain "
+        "true "
         f"(or {experimental.CAPTAIN_ENV}=1)",
     )
 

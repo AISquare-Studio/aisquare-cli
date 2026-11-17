@@ -428,7 +428,7 @@ def _run(action: str, app: FleetApp, arg: str | None, landed: threading.Event) -
     included), so a callback queued behind them runs only after them.
     """
     if not app.captain_on:
-        return False, experimental.CAPTAIN_OFF  # every action here is the captain's
+        return False, experimental.captain_off()  # every action here is the captain's
     handler = ACTIONS.get(action)
     if handler is None:
         return False, f"unknown ui action {_quoted(action)} — known: {', '.join(sorted(ACTIONS))}"

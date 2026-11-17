@@ -54,7 +54,7 @@ spawns = spawn_suite.spawns
 
 ENV = "AISQUARE_EXPERIMENTAL_CAPTAIN"
 OFF_LINE = (
-    "the captain is experimental; turn it on with aisquare config set experimental.captain "
+    "the captain is experimental; turn it on with rlx config set experimental.captain "
     "true, or AISQUARE_EXPERIMENTAL_CAPTAIN=1"
 )
 """The card's one line, word for word."""
@@ -425,7 +425,7 @@ def test_doctor_shows_one_ok_captain_row_when_off(off: None) -> None:
     (row,) = rows
     assert row.status is CheckStatus.ok
     assert row.detail.startswith("off (experimental)"), row.detail
-    assert "aisquare config set experimental.captain true" in row.detail
+    assert "rlx config set experimental.captain true" in row.detail
 
 
 @pytest.mark.needs_captain

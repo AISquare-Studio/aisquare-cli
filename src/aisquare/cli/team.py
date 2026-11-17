@@ -214,6 +214,50 @@ def focus(
         )
 
 
+@app.command("standby")
+def standby(
+    off: Annotated[bool, typer.Option("--off", help="End your standby now.")] = False,
+    as_session: SessionRef = None,
+) -> None:
+    """Wait on your person: watch's routine lines stop waking you (managers only).
+
+    Until your person's next prompt, ``--off``, or a task going back into flight on your board.
+    Results, questions, task moves, notes to you, failures, limits and dialogs still wake you.
+    """
+    if as_session is None:
+        fail("--as <session> is required (your id is on the board)", error="missing_session")
+    try:
+        change = team_service.set_standby(as_session, on=not off)
+    except team_service.StandbyRefused as exc:
+        fail(str(exc), error="standby_refused", ref=as_session)
+    except KeyError:
+        fail(f"no session matches '{as_session}'", error="not_found", ref=as_session)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, as_session)
+    who = team_service.short_id(change.session.id)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "session": change.session.id,
+                    "standby": change.standby is not None,
+                    "since": change.standby.since.isoformat() if change.standby else None,
+                    "was": change.was,
+                }
+            )
+        )
+    elif change.standby is None:
+        said = "standby ended" if change.was else "no standby to end"
+        stdout_console().print(f"✓ {who}: {said}", markup=False)
+    else:
+        stdout_console().print(
+            f"✓ {who} on standby: watch's routine lines no longer wake you, until your person's "
+            "next prompt, --off, or work back in flight. Results, questions, task moves, notes "
+            "to you, failures, limits and dialogs still do.",
+            markup=False,
+        )
+
+
 @app.command("role")
 def role(
     name: Annotated[str, typer.Argument(help="Role for this session (planner/coder/runner/…).")],

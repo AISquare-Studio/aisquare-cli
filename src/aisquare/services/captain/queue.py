@@ -97,6 +97,10 @@ QUESTION_HORIZON = timedelta(hours=24)
 #: A waiting agent whose session has not been seen for this long is stale — the
 #: fleet's own presence window (``services.team._STALE_AFTER``).
 STALE_AFTER = timedelta(minutes=30)
+
+QUIET = "shows no sign of life"
+"""What a stale observation of a waiting agent gone quiet says, where a lost or unknown one
+says what it is: ``aisquare watch`` tells the two apart by it (R12)."""
 #: Roles a question is addressed to that mean "the owner": the human, everyone.
 OWNER_ROLES: frozenset[str] = frozenset({"owner", "user", "all"})
 #: The captain's own board sessions (``captain:<project>``, T1's ``state.CAPTAIN_ROLE``):
@@ -670,9 +674,7 @@ def observe(sources: Sources, *, cursors: Mapping[str, int], now: datetime) -> O
                 if session is not None and now - session.last_seen_at > STALE_AFTER:
                     minutes = int((now - session.last_seen_at).total_seconds() // 60)
                     seen.observations.append(
-                        pane.observed(
-                            "stale", f"{label} shows no sign of life for {minutes} min", seen_at
-                        )
+                        pane.observed("stale", f"{label} {QUIET} for {minutes} min", seen_at)
                     )
                 else:
                     tail = sources.pane_tail(status)

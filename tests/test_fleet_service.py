@@ -5931,6 +5931,9 @@ def test_a_fresh_claude_manager_is_nudged_before_its_first_prompt(
     tmux.set_command(manager.pane_id, "claude")
     assert manager.session_id is not None
     team_service.hook_session_start(manager.session_id, project.root, "startup")
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert tmux.typed == [
         (manager.pane_id, "paste", NUDGE_TEXT),
@@ -6249,6 +6252,12 @@ def test_a_claude_code_managers_nudge_and_a_typed_line_are_one_paste_then_one_en
     tmux.set_command(coder.pane_id, "claude")
     typed = _timed_input(tmux, clock, monkeypatch)
     before = len(tmux.typed)
+
+    # The board write this nudge follows: a nudge is due only for news, unread
+
+    # (``team.wake_pending``, R12).
+
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
 
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     line = fleet_service.type_line(coder, "/compact", acked=lambda: True)
@@ -7449,6 +7458,9 @@ def test_every_path_that_types_into_or_shows_a_pane_refuses_a_held_rows_id(
         assert shown_pane(status) is None, "asq's Agent and Manager tabs"
     status = statuses[coder.id]
     assert not fleet_service.tell(project, "coder-1", "please rebase").delivered
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(project.id, reason="coder-1 exited") is False
     assert remote_server._remote_pane_refusal(newcomer, coder) == remote_server.PANE_OUTLIVED
     snap = remote_needs._needs_snapshot(project, status, None, (), now)
@@ -15634,6 +15646,8 @@ def _waiting_manager(tmux: FakeTmux, project: ProjectInfo) -> FleetAgent:
     manager = fleet_service.spawn(project, "manager").agent
     _board_session(manager, "waiting")
     tmux.set_command(manager.pane_id, "claude")
+    # The board write these nudges follow, unread: a nudge is due only for news (R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     return manager
 
 
@@ -15693,6 +15707,9 @@ def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
     tmux.printed(manager.pane_id)  # the pane printed just now: mid-turn
 
     assert fleet_service.status_of(manager).state == "working", "what ls and tell see"
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(project.id, reason="task_review") is False
     assert tmux.typed == []
     # Negative control: the same stale row over a QUIET pane is waiting everywhere,
@@ -15727,6 +15744,9 @@ def test_nudge_reads_the_panes_last_output_in_its_facts(
     monkeypatch.setattr(tmux, "run", run)
 
     tmux.printed(manager.pane_id)  # mid-turn
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(project.id, reason="task_review") is False
     tmux.printed(manager.pane_id, ago=ACTIVITY_WINDOW + timedelta(seconds=2))
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
@@ -15774,6 +15794,12 @@ def test_a_nudge_tmux_refuses_is_left_owed_and_one_not_due_is_not(
     _board_session(manager, "working")
     tmux.set_command(manager.pane_id, "claude")
     key = fleet_service.NUDGE_OWED + project.id
+
+    # The board write this nudge follows: a nudge is due only for news, unread
+
+    # (``team.wake_pending``, R12).
+
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
 
     assert fleet_service.nudge_manager(project.id, reason="result") is False
     tmux.socket_denied = True

@@ -1239,6 +1239,12 @@ def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
     assert fleet_service.status_of(_row(manager.id)).state == "waiting"
     typed = _timed_input(tmux, clock, monkeypatch)
 
+    # The board write this nudge follows: a nudge is due only for news, unread
+
+    # (``team.wake_pending``, R12).
+
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
+
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
 
     [(kind, text, typed_at), (key, enter, entered_at)] = typed

@@ -366,6 +366,7 @@ def turn_stopped(
             stop_hook_active=stop_hook_active,
             model=model if reported else None,
             effort=effort if reported else None,
+            last_message=last_message,
         )
     finally:
         remember_the_model(session_id, transcript_path, effort=effort)
@@ -1508,6 +1509,9 @@ def capture_prompt(
     origin = prompt_origin.origin_of_prompt(
         prompt, notice=prompt_origin.only_task_notifications(prompt)
     )
+    if session_id is not None and origin.startswith(f"{prompt_origin.HUMAN}:"):
+        # Its person spoke: a manager's standby (R12) is over. Never raises.
+        team_service.end_standby(session_id)
     # ``capture.enabled``, read once a prompt (#268). Off, the prompt is neither stored nor
     # spooled; the turn row below still opens, without text, and the teammate delta is the
     # caller's, not capture. A config that cannot be read may have said off, so it records

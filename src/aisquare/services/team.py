@@ -298,6 +298,131 @@ def exit_wakes(meta: Mapping[str, object] | None) -> bool:
     return status != 0 or (isinstance(released, int) and released > 0) or bool(meta.get("why"))
 
 
+# --- a manager's quiet (RLX R12, #145) ------------------------------------------------------
+
+ECHO_WINDOW = timedelta(minutes=30)
+"""How far back a task's review or done looks for its author's own word to the manager."""
+
+ECHO_KINDS: frozenset[str] = frozenset({"task_review", "task_done"})
+"""The task moves that repeat what their author has just told the manager."""
+
+_TOLD_MANAGER_KINDS: frozenset[str] = frozenset({"note", "result", "question", "decision"})
+
+IN_FLIGHT: frozenset[TaskStatus] = frozenset({"doing", "review"})
+"""A task someone is working on or testing: a board with one is a fleet at work."""
+
+STANDBY_META = "standby:"
+"""``team_meta`` key prefix, then a manager's session id: its standby (:func:`standby_of`)."""
+
+WORK_RETURNS_KINDS: frozenset[str] = frozenset({"task_claimed", "task_reopened", "task_review"})
+"""A task going back into flight after a standby began: work is back, and standby ends."""
+
+
+def is_echo(store: ContextStore, event: TeamEvent, me: TeamSession) -> bool:
+    """Whether ``event`` only repeats what ``me`` has already read: a task's review or done
+    whose author, within :data:`ECHO_WINDOW` before it, told the manager in a note it has read
+    (at or before its cursor). The coder's "DONE, moving to review" woke the manager; the
+    review a minute later kept it going a second time to read the same news, at the end of
+    the very turn that acted on the note (33 of 59 noise wakes on cli-next-release, R12's
+    replay). Read in one delta with that note, the pair is one wake, as before."""
+    if event.kind not in ECHO_KINDS or event.session_id is None or event.session_id == me.id:
+        return False
+    since = (event.created_at - ECHO_WINDOW).isoformat()
+    told = store.filtered_events(
+        event.project_id, session_id=event.session_id, since_iso=since, limit=20
+    )
+    return any(
+        said.seq < event.seq
+        and said.seq <= me.cursor
+        and said.kind in _TOLD_MANAGER_KINDS
+        and (said.kind in ("result", "question") or _addressed_to_manager(said.to_role))
+        for said in told
+    )
+
+
+def work_in_flight(store: ContextStore, board_id: str) -> bool:
+    """Whether a task on ``board_id`` is being worked on or tested (:data:`IN_FLIGHT`)."""
+    return store.has_team_task_in(board_id, IN_FLIGHT)
+
+
+@dataclass(frozen=True)
+class Standby:
+    """A manager waiting on its person (R12): ``why`` is ``explicit`` (``team standby``) or
+    ``asked`` (its turn ended on a question to its person, nothing in flight)."""
+
+    since: datetime
+    why: str
+
+
+def standby_of(store: ContextStore, me: TeamSession) -> Standby | None:
+    """``me``'s standby while it holds, else ``None``.
+
+    It holds while nothing is in flight on its board (:func:`work_in_flight`), and ends for
+    good when work comes back after it began (:data:`WORK_RETURNS_KINDS`): a fleet at work
+    always reaches its manager. The person's next prompt ends it too (:func:`end_standby`)."""
+    raw = store.get_meta(STANDBY_META + me.id)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        standby = Standby(since=datetime.fromisoformat(data["since"]), why=str(data["why"]))
+    except (ValueError, KeyError, TypeError):
+        store.delete_meta(STANDBY_META + me.id)
+        return None
+    returned = store.filtered_events(me.project_id, since_iso=standby.since.isoformat(), limit=200)
+    if any(e.kind in WORK_RETURNS_KINDS and e.created_at > standby.since for e in returned):
+        store.delete_meta(STANDBY_META + me.id)
+        return None
+    if work_in_flight(store, me.project_id):
+        return None
+    return standby
+
+
+def begin_standby(store: ContextStore, me: TeamSession, *, why: str) -> Standby:
+    """Put ``me`` in standby from now (:func:`standby_of`)."""
+    standby = Standby(since=_now(), why=why)
+    store.set_meta(
+        STANDBY_META + me.id,
+        json.dumps({"since": standby.since.isoformat(), "why": standby.why}),
+    )
+    return standby
+
+
+def end_standby(session_id: str) -> bool:
+    """End a session's standby: its person spoke (``UserPromptSubmit`` of a ``human`` prompt),
+    or ``team standby --off``. Whether there was one. Never raises."""
+    try:
+        with store_session() as store:
+            return store.delete_meta(STANDBY_META + session_id)
+    except Exception:
+        return False
+
+
+def held_in_standby(event: TeamEvent) -> bool:
+    """What a manager in standby is not woken for: a ``watch`` event its writer marked not
+    urgent (an idle agent gone quiet, a pull request, an operator's source, freed capacity).
+    Everything else that wakes it still does: a teammate's result or question, a task's
+    move, a note to it, a failed exit, a limit, a hand-over that failed, an unsent first
+    prompt, a dialog, a lost agent, and a note with no session (another board's manager or
+    the person at a terminal, which the board cannot tell apart)."""
+    return (
+        event.kind == "watch"
+        and isinstance(event.meta, Mapping)
+        and event.meta.get("urgent", True) is False
+    )
+
+
+def manager_wakes(
+    store: ContextStore, event: TeamEvent, me: TeamSession, standby: Standby | None
+) -> bool:
+    """Whether ``event`` wakes the manager ``me``: :func:`wake_class`, less an echo of news it
+    has read (:func:`is_echo`) and, in standby, what standby holds (:func:`held_in_standby`).
+    The one rule every door reads: the nudge, the Stop hook, its deferral."""
+    if wake_class(event, me) != "wake" or is_echo(store, event, me):
+        return False
+    return standby is None or not held_in_standby(event)
+
+
 class TeamDisabledError(RuntimeError):
     """Raised when a team command runs with the orchestrator disabled (AISQUARE_TEAM=0)."""
 
@@ -1750,6 +1875,46 @@ def set_role(role: str, session_ref: str, cwd: Path | None = None) -> TeamSessio
         if session is None:
             raise KeyError(session_ref)
         return store.update_session(session.id, role=role)
+
+
+class StandbyRefused(ValueError):
+    """``team standby`` asked of what it cannot hold: a session that is not a manager, or a
+    board with work in flight (a standby would end at once, :func:`standby_of`)."""
+
+
+@dataclass(frozen=True)
+class StandbyChange:
+    """What ``team standby`` did: the session, and its standby now (``None`` when off)."""
+
+    session: TeamSession
+    standby: Standby | None
+    was: bool
+
+
+def set_standby(session_ref: str, *, on: bool) -> StandbyChange:
+    """``team standby`` (R12): a manager waiting on its person is not woken by watch's routine
+    lines until its person's next prompt, ``--off``, or work going back into flight on its
+    board; everything urgent still wakes it (:func:`held_in_standby`). ``--off`` ends it."""
+    _require_enabled()
+    with store_session() as store:
+        session = _resolve_session(store, session_ref)
+        if session is None:
+            raise KeyError(session_ref)
+        was = store.get_meta(STANDBY_META + session.id) is not None
+        if not on:
+            store.delete_meta(STANDBY_META + session.id)
+            return StandbyChange(session, None, was)
+        if session.role != MANAGER_ROLE:
+            raise StandbyRefused(
+                f"standby is a manager's: {short_id(session.id)} is a {session.role}, and "
+                "nothing wakes it but notes addressed to it"
+            )
+        if work_in_flight(store, session.project_id):
+            raise StandbyRefused(
+                "a task on your board is being worked on or tested, and standby holds only "
+                "while none is: wait for it, or stay awake for it"
+            )
+        return StandbyChange(session, begin_standby(store, session, why="explicit"), was)
 
 
 def set_focus(text: str, session_ref: str, cwd: Path | None = None) -> TeamSession:
@@ -3221,6 +3386,7 @@ def hook_stop(
     stop_hook_active: bool = False,
     model: str | None = None,
     effort: str | None = None,
+    last_message: str | None = None,
 ) -> StopDecision | None:
     """The session finished its turn: it is now waiting for input.
 
@@ -3252,6 +3418,10 @@ def hook_stop(
     A session a hand-over has marked (:data:`HANDOVER_STATE`) keeps the mark and
     is not kept going: ``/exit`` has been typed into it, and the turn ending is
     only what that ``/exit`` waits behind.
+
+    A manager left to wait whose turn ended on a question to its person (``last_message``,
+    the agent's ``last_assistant_message``), with nothing in flight on its board, goes into
+    standby (R12, :func:`standby_of`) until its person's next prompt.
     """
     if not orchestrator.team_enabled():
         return None
@@ -3279,6 +3449,8 @@ def hook_stop(
         if session.role == MANAGER_ROLE:
             try:
                 decision = _manager_wakeup(store, session, stop_hook_active=stop_hook_active)
+                if decision is None:
+                    _standby_if_asked(store, session, last_message)
                 if decision is None and stop_hook_active:
                     deferred = _deferred_wake_reason(store, session)
                     if deferred is not None:
@@ -3314,6 +3486,23 @@ def hook_stop(
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
+
+
+def _standby_if_asked(store: ContextStore, me: TeamSession, last_message: str | None) -> None:
+    """Standby for a manager whose turn ended on a question to its person (the test the phone's
+    "asked" uses, ``remote_needs.looks_like_a_question``) while nothing is in flight on its
+    board: it waits on its person, and watch's routine lines no longer wake it. A false read
+    costs nothing that matters: what is urgent still wakes it, and the person's next prompt
+    ends it. Never raises; a standby is an extra."""
+    if not last_message or standby_of(store, me) is not None:
+        return
+    try:
+        from aisquare.services.remote_needs import looks_like_a_question  # lazy: a heavy module
+
+        if looks_like_a_question(last_message) and not work_in_flight(store, me.project_id):
+            begin_standby(store, me, why="asked")
+    except Exception:
+        return
 
 
 def _turn_end_delivery(
@@ -3435,10 +3624,12 @@ def _wake_candidates(
 
 
 def wake_pending(store: ContextStore, me: TeamSession) -> bool:
-    """Whether news a manager wakes for is past its cursor, unread: what a nudge owed
-    since a write tmux refused (``services.fleet.deliver_owed_nudge``) is still due for.
-    Every write that nudges is one of these events (:func:`wake_class`)."""
-    return any(wake_class(event, me) == "wake" for event in _wake_candidates(store, me))
+    """Whether news a manager wakes for is past its cursor, unread (:func:`manager_wakes`):
+    what every nudge is due for, a write's own and one owed since a write tmux refused
+    (``services.fleet.deliver_owed_nudge``). Every write that nudges is one of these events,
+    so a write that is not (its own result, an echo, a line standby holds) wakes nobody."""
+    standby = standby_of(store, me)
+    return any(manager_wakes(store, event, me, standby) for event in _wake_candidates(store, me))
 
 
 def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
@@ -3464,8 +3655,9 @@ def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
     """
     if not orchestrator.delta_enabled():
         return None
+    standby = standby_of(store, me)
     for event in _wake_candidates(store, me):
-        if wake_class(event, me) == "wake":
+        if manager_wakes(store, event, me, standby):
             return f"deferred:{event.kind}"
     return None
 
@@ -3473,10 +3665,13 @@ def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
 def _manager_wakeup(
     store: ContextStore, me: TeamSession, *, stop_hook_active: bool
 ) -> StopDecision | None:
-    """Keep a manager going on fresh board decisions (:func:`wake_class` ``wake``), or
-    ``None``."""
+    """Keep a manager going on fresh board decisions (:func:`manager_wakes`), or ``None``."""
+    standby = standby_of(store, me)
     return _wakeup(
-        store, me, stop_hook_active=stop_hook_active, wakes=lambda e: wake_class(e, me) == "wake"
+        store,
+        me,
+        stop_hook_active=stop_hook_active,
+        wakes=lambda e: manager_wakes(store, e, me, standby),
     )
 
 
@@ -3859,14 +4054,15 @@ def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> N
         _emit(store, project_id, "note", text, session_id=session_id)
 
 
-def watch_event(board_id: str, text: str) -> None:
+def watch_event(board_id: str, text: str, *, urgent: bool = True) -> None:
     """``aisquare watch``'s one line for a project with new items (P2-W2, #284): kind
     ``watch``, addressed to the manager, so it wakes it (:func:`wake_class`) and a working
-    manager is handed it at its turn's end. Counts and a path, never an excerpt."""
+    manager is handed it at its turn's end. Counts and a path, never an excerpt. ``urgent``
+    (``meta``) says whether a manager in standby is woken for it (:func:`held_in_standby`)."""
     if not orchestrator.team_enabled():
         return
     with store_session() as store:
-        _emit(store, board_id, "watch", text, to_role=MANAGER_ROLE)
+        _emit(store, board_id, "watch", text, to_role=MANAGER_ROLE, meta={"urgent": urgent})
 
 
 def hook_notice(project_id: str, text: str, *, session_id: str | None = None) -> None:
@@ -4649,10 +4845,11 @@ def _open_items(
             on = f" #{number}" if number is not None else ""
             slot = f" [account {agent.account_slot}]" if agent.account_slot is not None else ""
             lines.append(f"  - {agent.label} {agent.role} {state}{on}{slot}")
+    standby = standby_of(store, me)
     pending = [
         e
         for e in store.events_since(project.id, me.cursor, exclude_session=me.id, limit=500)
-        if wake_class(e, me) == "wake"
+        if manager_wakes(store, e, me, standby)
     ]
     lines.append(f"wake events pending past your cursor: {len(pending)}")
     return lines

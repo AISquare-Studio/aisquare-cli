@@ -27,6 +27,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A manager waiting on you is not woken by noise.** Watch's lines about its own results
+  and questions, its ping for an agent idle by design, and a review that repeats a note it
+  read no longer wake it. `rlx team standby` (or its question to you, with nothing in
+  flight) holds watch's routine lines until your next prompt.
 - **The product is named rlx, short for relax.** The README is titled rlx and opens with
   what it does for you: one place for your Claude Code and Codex agents across your
   projects, a manager you talk to in plain words, account usage managed for you, memory

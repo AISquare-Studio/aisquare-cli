@@ -319,7 +319,7 @@ def test_a_failed_delivery_keeps_the_news_for_the_next_tick(
     watcher = _watcher(project, Fleet(agents=[_trust_prompt(project, "coder-1")]))
     real = team_service.watch_event
 
-    def busy(board: str, text: str) -> None:
+    def busy(board: str, text: str, **_: object) -> None:
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(team_service, "watch_event", busy)
@@ -416,3 +416,33 @@ def test_once_while_a_tick_holds_the_state_lock_is_busy_not_a_traceback(
     assert result.exit_code == 1, repr(result.exception)
     assert json.loads(result.stdout) == {"error": "busy"}
     assert human.exit_code == 1 and "another look is running" in human.output, human.output
+
+
+def test_the_persons_items_are_seen_and_never_on_the_managers_line(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R12 (#145): a board result or question, and the manager's own turn ending on a question,
+    are the person's (asq's "needs you", Remote): seen, and kept off the manager's line. A coder
+    that asked in its pane is the manager's."""
+    fleet_service.spawn(project, "manager")
+    watcher = _watcher(project, Fleet(agents=[]))
+
+    def item(kind: str, agent: str) -> watch_service.WatchItem:
+        return watch_service.WatchItem(
+            f"needs:{kind}:{agent}", project.id, "p", kind, kind, {"agent": agent}
+        )
+
+    persons = [
+        item("board_result", "coder-1"),
+        item("board_question", "coder-1"),
+        item("asked", "manager"),
+    ]
+    monkeypatch.setattr(watcher, "needs", lambda now: [*persons, item("asked", "coder-1")])
+    watcher.tick(NOW)
+    (event,) = _watch_events(project.id)
+    assert "1 new (1 asked)" in event.text
+    assert {i.id for i in persons} <= set(watch_service.read_watch_state()["seen"])
+    monkeypatch.setattr(watcher, "needs", lambda now: persons)
+    assert (
+        watcher.tick(NOW + timedelta(minutes=1)).new == [] and len(_watch_events(project.id)) == 1
+    )

@@ -8,11 +8,14 @@ the managers alone. It is ``fleet_service.bulk``, the service function ``fleet r
 --all`` and ``fleet stop --all`` call.
 
 :class:`ConfirmBulk` reads the plan when it opens (``fleet_service.bulk_plan``, off the
-UI thread) and lists what it read, by project. Its *Managers only* switch redraws from
-that read. Confirm hands back the plan it SHOWED, and ``bulk`` reads the fleet again
-before it acts: for a stop, an agent that ended since is skipped as already exited; one
-started since was never shown, so it is left alone. Cancel has the focus, and Escape
-cancels.
+UI thread) and lists what it read, by project: each agent it would act on is a ticked
+checkbox, and *Select all* above them ticks or unticks them all (the owner, 2026-11-16:
+"select/unselect agents, having a select all at top, so the user can decide how many to
+pause"). Confirm hands back the plan it SHOWED, the unticked agents in it skipped as
+:data:`~aisquare.services.fleet.NOT_CHOSEN`, and ``bulk`` reads the fleet again before it
+acts: for a stop, an agent that ended since is skipped as already exited; one started since
+was never shown, so it is left alone. Cancel has the focus, and Escape cancels. The CLI's
+``--managers`` is what the pick-list replaced here, and it stays the CLI's.
 
 A restart brings back the agents that died, not only the running ones (#38, after an
 outside SIGTERM killed a whole fleet and Restart all restarted none): an agent killed,
@@ -21,9 +24,10 @@ started again``, and the count says how many are running and how many dead. One 
 stopped on purpose is left, and says so.
 
 *Pause* and *Resume* are ``fleet pause`` and ``fleet resume`` (``fleet_service.bulk``'s
-``pause`` and ``resume``): a pause exits every running agent and keeps its claim, worktree
-and session, and sets the project's ``fleet-paused`` signal; a resume clears it and starts
-again exactly the agents a pause stopped. Opened for one project (:class:`BulkAsked`, from its
+``pause`` and ``resume``): a pause exits every agent picked and keeps its claim, worktree
+and session, and sets the ``fleet-paused`` signal of each project whose every agent was
+picked (a partial pick leaves it off, R17's Q-E1); a resume clears it and starts again
+exactly the agents a pause stopped. Opened for one project (:class:`BulkAsked`, from its
 card's menu or its Settings tab), the dialog lists that project's agents alone, and the shell
 runs it (``FleetApp.on_bulk_asked``) with the toasts :func:`agent_toast` and
 :func:`report_toast` give Settings ▸ Fleet's.
@@ -31,18 +35,19 @@ runs it (``FleetApp.on_bulk_asked``) with the toasts :func:`agent_toast` and
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from dataclasses import replace
 from typing import Any, ClassVar
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, Label, Static, Switch
+from textual.widgets import Button, Checkbox, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.click_guard import GuardedButton
@@ -83,8 +88,8 @@ ABOUT: dict[fleet_service.BulkAction, str] = {
     "stop": "Each one is sent {exit}, given a grace period, and then its window is killed. "
     "Its claims go back to the board. Exited (💤) agents are left as they are.",
     "pause": "Each one is sent {exit} as a stop does, and keeps its label, task claim, "
-    "worktree, account and session for a resume. Its project is fleet-paused, so its manager "
-    "spawns nothing. Exited (💤) agents are left as they are.",
+    "worktree, account and session for a resume. Picking every agent of a project also "
+    "fleet-pauses it, so its manager spawns nothing. Exited (💤) agents are left as they are.",
     "resume": "Each paused agent is started again under its label, with the same role, task, "
     "worktree and account, its session resumed from its transcript when that is on disk; its "
     "project's fleet-paused signal is cleared. An agent that exited without a pause stays as "
@@ -183,53 +188,111 @@ def plan_text(plan: fleet_service.BulkPlan) -> Text:
         if row.project.id != shown:
             shown = row.project.id
             text.append(("\n" if text else "") + project_name(row.project) + "\n", style="bold")
-        agent, state = row.agent, row.status.state
-        chip, chip_style = STATE_CHIP.get(state, ("·", "dim"))
-        line = Text("  ")
-        line.append(f"{agent.label} · {agent.role} · ")
-        line.append(f"{chip} {state}", style=chip_style)
-        if row.skip is not None:
-            line.append(f" — left: {row.skip}")
-            line.stylize("dim")
-        elif row.refused is not None:
-            line.append(f" — refused: {row.refused}")
-            line.stylize("dim")
-        elif plan.action == "resume" and row.closes is not None:
-            line.append(f" — {row.closes}: {WILL_END}")
-        elif plan.action == "resume":
-            line.append(f" — {WILL_RESUME}")
-        elif row.dead and plan.action == "restart":
-            # Apart from the running ones (#38): its exit, and that it comes back.
-            code = fleet_service.exit_code_of(row.status)
-            exit_code = f" ({code})" if code is not None else ""
-            line.append(f"{exit_code} — {WILL_START}")
-        text.append_text(line)
+        left = row.skip is not None or row.refused is not None
+        text.append("  ", style="dim" if left else "")
+        text.append_text(row_text(plan.action, row))
         text.append("\n")
     for project, why in plan.unread:
-        text.append(f"\n⚠ {project_name(project)}: its agents could not be read — {why}\n")
+        text.append(f"\n{unread_text(project, why)}\n")
     text.rstrip()
     return text
 
 
+def row_text(action: fleet_service.BulkAction, row: fleet_service.BulkRow) -> Text:
+    """``coder-30 · coder · ▶ working``, and what ``action`` does to it or why it leaves it: one
+    row of :func:`plan_text`, and the label of its checkbox in :class:`ConfirmBulk`. A row the
+    action leaves (skipped, or refused) is dim. Every name is data."""
+    agent, state = row.agent, row.status.state
+    chip, chip_style = STATE_CHIP.get(state, ("·", "dim"))
+    line = Text()
+    line.append(f"{agent.label} · {agent.role} · ")
+    line.append(f"{chip} {state}", style=chip_style)
+    if row.skip is not None:
+        line.append(f" — left: {row.skip}")
+        line.stylize("dim")
+    elif row.refused is not None:
+        line.append(f" — refused: {row.refused}")
+        line.stylize("dim")
+    elif action == "resume" and row.closes is not None:
+        line.append(f" — {row.closes}: {WILL_END}")
+    elif action == "resume":
+        line.append(f" — {WILL_RESUME}")
+    elif row.dead and action == "restart":
+        # Apart from the running ones (#38): its exit, and that it comes back.
+        code = fleet_service.exit_code_of(row.status)
+        exit_code = f" ({code})" if code is not None else ""
+        line.append(f"{exit_code} — {WILL_START}")
+    return line
+
+
+def unread_text(project: ProjectInfo, why: str) -> str:
+    """A project whose agents the plan could not list, and why: nothing is done there."""
+    return f"⚠ {project_name(project)}: its agents could not be read — {why}"
+
+
+def picked_plan(plan: fleet_service.BulkPlan, chosen: Collection[str]) -> fleet_service.BulkPlan:
+    """``plan`` as a person picked from it: each agent it would act on whose row id is not in
+    ``chosen`` is skipped as :data:`~aisquare.services.fleet.NOT_CHOSEN`, so ``bulk`` reports it
+    and acts on it not; every other row is as the plan read it."""
+    rows = tuple(
+        replace(row, skip=fleet_service.NOT_CHOSEN)
+        if row.skip is None and row.refused is None and row.agent.id not in chosen
+        else row
+        for row in plan.rows
+    )
+    return replace(plan, rows=rows)
+
+
+SHORT_ROWS = 30
+"""Below this many rows the dialog's about text is cut to one line (the whole of it is its
+tooltip), so an 80x24 terminal still lists several agents above Confirm and Cancel."""
+
+
+class PickRow(Checkbox):
+    """One agent the action would act on, ticked to act on it — or *Select all* above them
+    (``row`` is ``None``). Space toggles it, Enter confirms the dialog, ↑ and ↓ go to the row
+    above and below; PgUp, PgDn, Home and End scroll the list."""
+
+    BINDINGS: ClassVar = [
+        Binding("enter", "screen.confirm_bulk", "confirm", show=False),
+        Binding("up", "screen.move_pick(-1)", show=False),
+        Binding("down", "screen.move_pick(1)", show=False),
+    ]
+
+    def __init__(
+        self,
+        label: Text,
+        row: fleet_service.BulkRow | None,
+        *,
+        id: str | None = None,
+        classes: str = "bulk-pick",
+    ) -> None:
+        super().__init__(label, True, id=id, classes=classes)
+        self.row = row
+
+
 class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
-    """ "Restart every running agent?" — the list, a *Managers only* switch, Confirm and Cancel.
+    """ "Restart every running agent?" — the agents it would act on, each a ticked checkbox,
+    *Select all* above them, Confirm and Cancel.
 
-    Answers the plan it showed when confirmed, ``None`` on Cancel or Escape. Confirm is
-    greyed until the plan is read, and stays greyed when it acts on nobody. It is a
-    :class:`GuardedButton`: the dialog opens where *Restart all…* was clicked, and a
-    second click that reaches it before the dialog is painted is not a confirmation; one
-    after it is, at once. ``project`` keeps it to that project's agents (a card's *Pause
-    agents*), its title naming it.
+    Answers the plan it showed when confirmed, the agents unticked in it skipped as
+    :data:`~aisquare.services.fleet.NOT_CHOSEN` (:func:`picked_plan`), ``None`` on Cancel or
+    Escape. Confirm names how many are picked, is greyed until the plan is read, and stays
+    greyed while it would act on nobody. It is a :class:`GuardedButton`: the dialog opens
+    where *Restart all…* was clicked, and a second click that reaches it before the dialog is
+    painted is not a confirmation; one after it is, at once. ``project`` keeps it to that
+    project's agents (a card's *Pause agents*), its title naming it. The agents the plan
+    leaves (exited, refused, the session asq runs in) are listed dim with why, and cannot be
+    ticked. *Select all (3 of 5)* is ticked while every agent is; ticking it ticks them all,
+    and unticking it unticks them all.
 
-    Tab goes from the switch to Confirm to Cancel, and a focused button shows the one band
-    Cancel shows, Confirm's own colour or not. A focused Confirm drew its label orange on
-    a dark band, no focus to the eye, behind a tab stop the list made that drew nothing, so
-    a keyboard Resume took three tries (SMOKE12 O2 of #113).
-
-    The list's keys are the dialog's, whichever of the three has the focus: ↑ ↓, PgUp PgDn,
-    Home and End scroll it. Out of Tab's order and twenty rows high, a longer list scrolled
-    by the wheel alone, so a keyboard user (tmux over SSH) confirmed agents they could not
-    read (r37 finding 6 of #113).
+    The keys (R17, the pick-list): ↑ and ↓ move between the checkboxes, *Select all* first,
+    from a button too, and the list scrolls as the focus moves; Space ticks or unticks the
+    focused one, and Enter confirms from any of them. PgUp PgDn, Home and End scroll the list,
+    and Tab still reaches Confirm and Cancel, a focused one showing the one band Cancel shows
+    (SMOKE12 O2 of #113: a focused Confirm drew its label orange on a dark band). Twenty rows
+    high, a longer list scrolls; a keyboard user never confirms agents they could not read (r37
+    finding 6 of #113). Below :data:`SHORT_ROWS` rows the about text is one line.
     """
 
     CSS = """
@@ -243,19 +306,27 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     }
     ConfirmBulk #bulk-title { height: auto; text-style: bold; }
     ConfirmBulk #bulk-about { height: auto; color: $text-muted; margin-bottom: 1; }
-    ConfirmBulk #bulk-switch-row { height: auto; }
-    ConfirmBulk #bulk-switch-row Label { padding: 1 0 0 1; }
+    ConfirmBulk #bulk-about.-short { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     ConfirmBulk #bulk-scroll { height: auto; max-height: 20; margin-top: 1; }
     ConfirmBulk #bulk-list { height: auto; }
+    ConfirmBulk .bulk-project { height: 1; text-style: bold; }
+    ConfirmBulk .bulk-project.-later { margin-top: 1; }
+    ConfirmBulk .bulk-left { height: auto; padding-left: 5; }
+    ConfirmBulk PickRow {
+        border: none; height: 1; padding: 0 1; width: 100%; background: transparent;
+    }
+    ConfirmBulk PickRow:focus { text-style: bold reverse; }
     ConfirmBulk #bulk-buttons { height: auto; margin-top: 1; align: right middle; }
     ConfirmBulk #bulk-buttons Button { margin-left: 2; }
     ConfirmBulk #bulk-buttons Button:focus { color: $button-foreground; text-style: bold reverse; }
     """
     BINDINGS: ClassVar = [
         ("escape", "cancel_bulk", "cancel"),
+        Binding("up", "move_pick(-1)", show=False),
+        Binding("down", "move_pick(1)", show=False),
         *(
             Binding(key, f"scroll_list('{key}')", show=False)
-            for key in ("up", "down", "pageup", "pagedown", "home", "end")
+            for key in ("pageup", "pagedown", "home", "end")
         ),
     ]
 
@@ -268,6 +339,8 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
         self.plan: fleet_service.BulkPlan | None = None
         """What the dialog read when it opened: every row, managers and teams alike."""
         self.failed: str | None = None
+        self.picks: list[PickRow] = []
+        """One checkbox per agent the plan acts on, in the list's order (not *Select all*)."""
 
     def heading(self) -> str:
         """What the dialog asks: of every project, or of ``project`` by its name."""
@@ -280,16 +353,16 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
         with Vertical(id="bulk-box", classes=self.action):
             yield Static(Text(self.heading()), id="bulk-title")
             yield Static(Text(about_text(self.action, None)), id="bulk-about")
-            with Horizontal(id="bulk-switch-row"):
-                yield Switch(False, id="bulk-managers")
-                yield Label("Managers only")
+            select_all = PickRow(Text("Select all"), None, id="bulk-all", classes="")
+            select_all.display = False  # until the plan is read, and with nobody to pick
+            yield select_all
             listing = VerticalScroll(id="bulk-scroll")
-            # Read, and scrolled by the wheel and the dialog's keys, never a stop of Tab's: it
-            # drew no focus, and an Enter there did nothing, between the switch and the
-            # buttons (SMOKE12 O2).
+            # Scrolled by the focus moving through its checkboxes and by the dialog's keys,
+            # never a stop of Tab's itself: it drew no focus, and an Enter there did nothing
+            # (SMOKE12 O2).
             listing.can_focus = False
-            with listing:
-                yield Static(Text("reading the fleet…", style="dim"), id="bulk-list")
+            with listing, Vertical(id="bulk-list"):
+                yield Static(Text("reading the fleet…", style="dim"), classes="bulk-note")
             with Horizontal(id="bulk-buttons"):
                 yield GuardedButton(
                     verb,
@@ -301,6 +374,7 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
 
     def on_mount(self) -> None:
         self.query_one("#bulk-cancel", Button).focus()
+        self._fit()
         action = self.action
         scope = [self.project] if self.project is not None else None
         self.run_worker(
@@ -312,8 +386,19 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
             exit_on_error=False,
         )
 
+    def on_resize(self, event: events.Resize) -> None:
+        self._fit()
+
+    def _fit(self) -> None:
+        """The about text on one line below :data:`SHORT_ROWS` rows, the whole of it its
+        tooltip: an 80x24 terminal keeps several agents in sight above the buttons."""
+        about = self.query_one("#bulk-about", Static)
+        short = self.app.size.height < SHORT_ROWS
+        about.set_class(short, "-short")
+        about.tooltip = str(about.content) if short else None
+
     @on(Worker.StateChanged)
-    def _plan_read(self, event: Worker.StateChanged) -> None:
+    async def _plan_read(self, event: Worker.StateChanged) -> None:
         if event.worker.name != PLAN_WORKER:
             return
         if event.state is WorkerState.SUCCESS and isinstance(
@@ -324,36 +409,94 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
             self.failed = f"could not read the fleet: {event.worker.error}"
         else:
             return
-        self._redraw()
+        await self._list()
+        self._count()
+
+    async def _list(self) -> None:
+        """The plan as rows: each project's name, then a checkbox per agent it acts on, and the
+        rows it leaves dim with why. Read once, when the dialog opens."""
+        listing = self.query_one("#bulk-list", Vertical)
+        await listing.remove_children()
+        plan = self.plan
+        if plan is None:
+            note = self.failed or "reading the fleet…"
+            await listing.mount(Static(Text(note, style="dim"), classes="bulk-note"))
+            return
+        widgets: list[Widget] = []
+        if not plan.targets and plan.acts:  # a resume with no agent paused: the signal alone
+            named = [project_name(p) for p in plan.projects if p.id in plan.fleet_paused]
+            words = "no agent is paused; Resume clears the fleet-paused signal of "
+            widgets.append(
+                Static(Text(words + ", ".join(named), style="bold"), classes="bulk-note")
+            )
+        elif not plan.targets:
+            widgets.append(
+                Static(Text(f"nothing to {plan.action}", style="bold"), classes="bulk-note")
+            )
+        shown: str | None = None
+        self.picks = []
+        for row in plan.rows:
+            if row.project.id != shown:
+                later = shown is not None
+                shown = row.project.id
+                widgets.append(
+                    Static(
+                        Text(project_name(row.project)),
+                        classes="bulk-project -later" if later else "bulk-project",
+                    )
+                )
+            if row.skip is None and row.refused is None:
+                pick = PickRow(row_text(plan.action, row), row)
+                self.picks.append(pick)
+                widgets.append(pick)
+            else:
+                widgets.append(Static(row_text(plan.action, row), classes="bulk-left"))
+        for project, why in plan.unread:
+            widgets.append(Static(Text(unread_text(project, why)), classes="bulk-note"))
+        await listing.mount_all(widgets)
+        self.query_one("#bulk-all", PickRow).display = bool(self.picks)
 
     @property
-    def managers_only(self) -> bool:
-        return self.query_one("#bulk-managers", Switch).value
+    def chosen(self) -> set[str]:
+        """The row ids of the agents ticked now."""
+        return {pick.row.agent.id for pick in self.picks if pick.value and pick.row is not None}
 
     def shown(self) -> fleet_service.BulkPlan | None:
-        """The plan as the list draws it now: the managers' rows alone with the switch on."""
+        """The plan as picked now (:func:`picked_plan`): what Confirm answers."""
         if self.plan is None:
             return None
-        return self.plan.managers() if self.managers_only else self.plan
+        return picked_plan(self.plan, self.chosen)
 
-    @on(Switch.Changed, "#bulk-managers")
-    def _switched(self, event: Switch.Changed) -> None:
+    @on(Checkbox.Changed, "#bulk-all")
+    def _all_changed(self, event: Checkbox.Changed) -> None:
+        """*Select all* ticked or unticked by the person: every agent follows. Its own change
+        when a row's tick made it agree (:meth:`_count`) is not one: nothing more moves."""
         event.stop()
-        self._redraw()
+        if event.value == (len(self.chosen) == len(self.picks)):
+            return
+        for pick in self.picks:
+            pick.value = event.value
 
-    def _redraw(self) -> None:
-        listing = self.query_one("#bulk-list", Static)
+    @on(Checkbox.Changed, ".bulk-pick")
+    def _pick_changed(self, event: Checkbox.Changed) -> None:
+        event.stop()
+        self._count()
+
+    def _count(self) -> None:
+        """*Select all*'s tick and count, the about text and Confirm, for what is picked now."""
         confirm = self.query_one("#bulk-confirm", Button)
         plan = self.shown()
-        # The agents shown, the managers' alone with the switch on: what each is sent.
+        # The agents picked: what each is sent.
         self.query_one("#bulk-about", Static).update(Text(about_text(self.action, plan)))
+        self._fit()
         if plan is None:
-            listing.update(Text(self.failed or "reading the fleet…", style="dim"))
             confirm.disabled = True
             return
-        listing.update(plan_text(plan))
-        count = len(plan.targets)
-        if count == 0 and plan.acts:  # a resume of the signal alone
+        picked, total = len(self.chosen), len(self.picks)
+        select_all = self.query_one("#bulk-all", PickRow)
+        select_all.value = picked == total
+        select_all.label = Text(f"Select all ({picked} of {total})")
+        if total == 0 and plan.acts:  # a resume of the signal alone
             confirm.label = "Clear fleet-paused"
             confirm.refresh(layout=True)
             confirm.disabled = False
@@ -362,22 +505,28 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
         dead = sum(1 for row in plan.targets if row.dead) if self.action == "restart" else 0
         verb = VERB[self.action]
         confirm.label = (
-            f"{verb} {count_words(count, managers_only=plan.managers_only, dead=dead)}"
-            if count
+            f"{verb} {count_words(picked, managers_only=plan.managers_only, dead=dead)}"
+            if picked
             else verb
         )
         # A new label is not a layout change in Textual, so the button kept the width it was
         # laid out at, for "Restart" while the plan was read: "Restart 2 managers" read
         # "Restart 2" (tester-pr266-ui, real UI).
         confirm.refresh(layout=True)
-        confirm.disabled = count == 0
+        confirm.disabled = picked == 0
 
     @on(Button.Pressed, "#bulk-confirm")
     def _confirm(self, event: Button.Pressed) -> None:
         event.stop()
+        self.action_confirm_bulk()
+
+    def action_confirm_bulk(self) -> None:
+        """Confirm, a press or Enter on a checkbox: the plan as picked, when it does anything
+        and Confirm is not greyed (nobody picked)."""
         plan = self.shown()
-        if plan is not None and plan.acts:
-            self.dismiss(plan)
+        if self.query_one("#bulk-confirm", Button).disabled or plan is None or not plan.acts:
+            return
+        self.dismiss(plan)
 
     @on(Button.Pressed, "#bulk-cancel")
     def _cancel(self, event: Button.Pressed) -> None:
@@ -386,6 +535,20 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
 
     def action_cancel_bulk(self) -> None:
         self.dismiss(None)
+
+    def action_move_pick(self, step: int) -> None:
+        """↑ or ↓: the checkbox above or below the focused one, *Select all* first; from a
+        button, *Select all* (↓) or the last agent (↑). With nobody to pick, the list scrolls."""
+        if not self.picks:
+            self.action_scroll_list("down" if step > 0 else "up")
+            return
+        boxes: list[Widget] = [self.query_one("#bulk-all", PickRow), *self.picks]
+        focused = self.focused
+        if focused in boxes:
+            index = max(0, min(len(boxes) - 1, boxes.index(focused) + step))
+        else:
+            index = 0 if step > 0 else len(boxes) - 1
+        boxes[index].focus()
 
     def action_scroll_list(self, key: str) -> None:
         """Scroll the list by ``key`` (a binding's), at once, with the focus left where it is."""

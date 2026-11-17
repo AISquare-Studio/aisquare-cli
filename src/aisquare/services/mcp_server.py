@@ -201,9 +201,10 @@ def _ensure_virtual_session() -> str:
             return bound_id
         if not store.team_active(project.id):
             raise ValueError(
+                # The agent reads this and runs what it names: the protocol's word (Q9).
                 f"the agent orchestrator is not active for {project.root} — start "
-                f"`{prog.word()} serve` "
-                f"from the project (it activates it), or run `{prog.word()} team on` there"
+                f"`{prog.PROTOCOL} serve` from the project (it activates it), or run "
+                f"`{prog.PROTOCOL} team on` there"
             )
         if not project_service.tracked(store, project):
             raise project_service.NotAdded(project)  # capture off, and nobody added it
@@ -555,8 +556,9 @@ TEAM_INSTRUCTIONS = (
     "board states with structured events — key on payload fields, not text."
 )
 
-#: What they say to a solo session: the tools are there, the protocol is not needed.
-SOLO_INSTRUCTIONS = "rlx's shared task board (team_board) and saved project context."
+#: What they say to a solo session: the tools are there, the protocol is not needed. An
+#: agent reads it, so it names the protocol's word (Q9), as the team's start pack does.
+SOLO_INSTRUCTIONS = f"{prog.PROTOCOL}'s shared task board (team_board) and saved project context."
 
 
 def _serves_a_team() -> bool:

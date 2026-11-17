@@ -55,7 +55,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   doctor and asq's screens say rlx where they said aisquare, asq or "the CLI": "Quit the
   other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title. `rlx --version`
   prints `rlx 0.10.1`; installers of earlier releases read the version from it as before.
-  No `--json` key or value changes, the doctor's `asq instances` row included.
+  No `--json` key changes, and no machine value (names, statuses, ids), the doctor's
+  `asq instances` row included; only the human text inside a value says rlx.
 - **Every command it tells you to run starts with `rlx`**: `rlx accounts add`, `rlx doctor`,
   the doctor's one-click fixes. When another program's `rlx` comes first on your PATH, those
   lines say `aisquare …` instead, so a line you paste always runs rlx. Your agents'

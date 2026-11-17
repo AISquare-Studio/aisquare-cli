@@ -301,6 +301,30 @@ def test_beside_an_asq_older_than_the_registry_asq_builds_nothing_and_says_how_t
     assert instances.live_instances() == [], "nothing of this rlx registered"
 
 
+def test_beside_two_that_cannot_be_asked_the_refusal_is_no_longer_than_it_was(
+    listing: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ "once those have quit": base said "once those asqs have quit", and "those rlx
+    instances" made the line wrap once more at 60 columns (the tester's F3, seq 12524)."""
+    listing(
+        [
+            _line(4242, 1, "02:31:07", "ttys004", f"{UV} {BIN}/asq"),
+            _line(4343, 1, "02:31:09", "ttys005", f"{UV} {BIN}/asq"),
+        ]
+    )
+    monkeypatch.setattr(ui_app, "FleetApp", lambda **options: None)
+    monkeypatch.setattr(instance_gate, "_interactive", lambda: True)
+    monkeypatch.setattr(instance_gate, "_confirm", lambda question: None)
+
+    with pytest.raises(typer.Exit):
+        ui_app.run_ui()
+
+    said = " ".join(capsys.readouterr().err.split())
+    refusal = "rlx did not start. Start it again once those have quit."
+    assert refusal in said, said
+    assert len(refusal) <= len("asq did not start. Start it again once those asqs have quit.")
+
+
 _LINGERING_STAND_IN = r"""
 import sys, threading, time
 from dataclasses import replace

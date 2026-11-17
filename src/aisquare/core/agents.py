@@ -71,6 +71,12 @@ _CONTEXT_HOOKS = frozenset({"SessionStart", "UserPromptSubmit"})
 #: does.
 _BUDGETED_HOOKS = frozenset({"SessionEnd"})
 
+#: The agents that cap a budgeted hook at its spec's own value, so a longer one buys nothing
+#: and the writer reconciles it: Codex clamps ``SessionEnd`` and ``Interrupt`` at 3 s
+#: (``codex_config._SHORT_EVENTS``). Claude Code honours up to 60 s, so an operator's longer
+#: session end is kept, as drift calls it sufficient (:func:`_installed_timeout`).
+_CLAMPS_BUDGETED_HOOKS = frozenset({"codex"})
+
 #: Claude Code's lifecycle events → the ``aisquare hook`` subcommand, as its adapter installs
 #: them (``ClaudeCodeAdapter.capabilities.hooks``). ``StopFailure`` fires INSTEAD of Stop
 #: when the turn ends on an API error — a usage limit above all (#146); an install from
@@ -699,7 +705,9 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         if isinstance(entry.get("timeout"), int):
             # Never below the ceiling the CI hook may wait for; never *reducing*
             # a longer one the operator chose deliberately.
-            entry["timeout"] = max(entry["timeout"], _installed_timeout(groups, hook.event) or 0)
+            entry["timeout"] = max(
+                entry["timeout"], _installed_timeout(groups, hook.event, name) or 0
+            )
         group: dict[str, Any] = {"hooks": [entry]}
         if hook.matcher is not None:
             group["matcher"] = hook.matcher
@@ -1315,13 +1323,18 @@ def _event_groups(hooks: dict[str, Any], event: str) -> list[Any]:
     return groups if isinstance(groups, list) else []
 
 
-def _installed_timeout(groups: Any, event: str) -> int | None:
-    """Preserve extra headroom only for the two context-producing hooks.
+def _installed_timeout(groups: Any, event: str, agent: str) -> int | None:
+    """The longest timeout one of our handlers under ``event`` already has, which the writer
+    keeps over the spec's: an operator's longer one, for the two context-producing hooks and
+    for a session end its agent honours past the spec (R20, the manager's ruling (a): drift
+    calls it sufficient, so a refresh must not cut it). ``None`` keeps nothing.
 
-    UI and decision hooks must reconcile to their adapter's bounded timeout;
+    UI and decision hooks, and the budgeted hooks of an agent that clamps them
+    (:data:`_CLAMPS_BUDGETED_HOOKS`), reconcile to their adapter's bounded timeout;
     Claude hooks without a spec timeout retain the native default.
     """
-    if event not in _CONTEXT_HOOKS or not isinstance(groups, list):
+    budgeted = event in _BUDGETED_HOOKS and agent not in _CLAMPS_BUDGETED_HOOKS
+    if not (event in _CONTEXT_HOOKS or budgeted) or not isinstance(groups, list):
         return None
     timeouts: list[int] = []
     for group in groups:

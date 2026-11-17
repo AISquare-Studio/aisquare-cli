@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
@@ -49,16 +50,26 @@ def _ours(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _as_0_10_0_left_it(runner: CliRunner, claude: Path) -> Path:
-    """``claude``'s settings.json as 0.10.0's ``agents connect`` wrote it: the same six hooks,
-    the session end with no ``timeout`` (``HookSpec("SessionEnd", "session-end")`` in
-    v0.10.0), and an operator's key and two other tools' hooks beside ours."""
+#: A session end short of its timeout: none, as 0.10.0's ``agents connect`` wrote it
+#: (``HookSpec("SessionEnd", "session-end")`` in v0.10.0), or a shorter one an operator set.
+SHORT = pytest.mark.parametrize(
+    "short", [None, SESSION_END_TIMEOUT_SECONDS - 1], ids=["0.10.0", "9"]
+)
+
+
+def _with_session_end(runner: CliRunner, claude: Path, timeout: int | None) -> Path:
+    """``claude``'s settings.json as ``agents connect`` writes it, our session end's
+    ``timeout`` then ``timeout`` (``None``: none, 0.10.0's), and an operator's key and two
+    other tools' hooks beside ours."""
     connected = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert connected.exit_code == 0, connected.output
     path = claude / "settings.json"
     settings = json.loads(path.read_text(encoding="utf-8"))
     (ours,) = _ours(settings["hooks"]["SessionEnd"])
-    del ours["timeout"]
+    if timeout is None:
+        del ours["timeout"]
+    else:
+        ours["timeout"] = timeout
     settings["hooks"]["SessionEnd"].append(FOREIGN_END)
     settings["hooks"]["Stop"].insert(0, FOREIGN_STOP)
     settings["theme"] = "dark"
@@ -76,11 +87,14 @@ def test_the_session_end_hook_names_a_timeout_that_outlasts_a_busy_store() -> No
     assert agent_core.required_hook_timeout(_spec("SessionEnd")) == SESSION_END_TIMEOUT_SECONDS
 
 
-def test_a_0_10_0_session_end_reads_as_short_and_the_upgrades_rewrite_gives_it_its_timeout(
-    runner: CliRunner, isolated_agent_home: Path
+@SHORT
+def test_a_short_session_end_reads_as_short_and_the_upgrades_rewrite_gives_it_its_timeout(
+    short: int | None, runner: CliRunner, isolated_agent_home: Path
 ) -> None:
+    """0.10.0's session end, with no timeout, and one an operator set shorter (9 s): each reads
+    as short, in ``hook_timeout_shortfall`` and doctor's row, and the upgrade raises it to 10."""
     claude = isolated_agent_home / ".claude"
-    path = _as_0_10_0_left_it(runner, claude)
+    path = _with_session_end(runner, claude, short)
     foreign_end, foreign_stop = json.dumps(FOREIGN_END), json.dumps(FOREIGN_STOP)
 
     # Short: installed and firing, and its own line in doctor, which offers connect.
@@ -115,12 +129,13 @@ def test_a_0_10_0_session_end_reads_as_short_and_the_upgrades_rewrite_gives_it_i
     assert path.read_bytes() == before
 
 
-def test_doctors_fix_connect_gives_a_0_10_0_session_end_its_timeout_once(
-    runner: CliRunner, isolated_agent_home: Path
+@SHORT
+def test_doctors_fix_connect_gives_a_short_session_end_its_timeout_once(
+    short: int | None, runner: CliRunner, isolated_agent_home: Path
 ) -> None:
     """The row's own remedy, ``agents connect``, mends it the same way."""
     claude = isolated_agent_home / ".claude"
-    path = _as_0_10_0_left_it(runner, claude)
+    path = _with_session_end(runner, claude, short)
     assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
     settings = json.loads(path.read_text(encoding="utf-8"))
     (ours,) = _ours(settings["hooks"]["SessionEnd"])
@@ -137,3 +152,24 @@ def test_a_longer_session_end_timeout_is_enough() -> None:
     assert not agent_core._is_current_aisquare_group(group, SESSION_END_TIMEOUT_SECONDS)
     group["hooks"][0]["timeout"] = True
     assert not agent_core._is_current_aisquare_group(group, SESSION_END_TIMEOUT_SECONDS)
+
+
+def test_a_longer_session_end_timeout_an_operator_set_is_kept_by_the_upgrade_and_connect(
+    runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """The manager's ruling (a) on #521: the writer agrees with drift, "sufficient, not equal".
+    An operator's 30 s session end is no shortfall, and neither the upgrade's
+    ``refresh-hooks`` nor ``connect`` cuts it to 10. Once the file is current, neither writes
+    it at all."""
+    claude = isolated_agent_home / ".claude"
+    path = _with_session_end(runner, claude, 30)
+    assert agent_core.hook_timeout_shortfall("claude-code") == []
+    argv = [*lifecycle.refresh_hooks_argv("claude-code"), "--config-dir", str(claude)]
+    assert runner.invoke(app, argv).exit_code == 0  # its own format, the 30 kept
+    (ours,) = _ours(json.loads(path.read_text(encoding="utf-8"))["hooks"]["SessionEnd"])
+    assert ours["timeout"] == 30
+    before, stamp = path.read_bytes(), path.stat().st_mtime_ns
+    assert runner.invoke(app, argv).exit_code == 0
+    assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
+    assert path.read_bytes() == before and path.stat().st_mtime_ns == stamp, "untouched"
+    assert "too little time" not in diagnostics._check_claude_code().detail

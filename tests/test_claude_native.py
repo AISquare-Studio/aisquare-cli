@@ -1074,4 +1074,7 @@ def test_real_claude_code_waits_for_a_slow_session_end_within_its_timeout(native
         f"session end on the board {ended:.1f} s after /exit, pane dead by "
         f"{time.monotonic() - typed:.1f} s"
     )
-    assert "Hook cancelled" not in native.screen(pane), native.screen(pane)
+    # Flattened, wrap-proof: at the pane's width the line wraps inside its words ("…failed:
+    # Hook cance" / "lled", seen on 2.1.318), so every space and row break goes first.
+    screen = native.screen(pane)
+    assert "Hookcancelled" not in "".join(screen.split()), screen

@@ -176,9 +176,10 @@ def test_claude_hooks_without_a_spec_timeout_keep_the_native_default(
     agents.install_hooks("claude-code", tmp_path)
     actual = json.loads(path.read_text())
     assert all("timeout" not in actual["hooks"][event][0]["hooks"][0] for event in events)
-    # The session end has a spec timeout (R20): it reconciles to the adapter's, as Codex's
-    # bounded hooks do.
-    assert actual["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] == SESSION_END_TIMEOUT_SECONDS
+    # The session end has a spec timeout (R20): an operator's longer one is kept, as drift
+    # calls it sufficient (the manager's ruling (a)); none that counts is raised to the spec's.
+    kept = timeout if timeout > SESSION_END_TIMEOUT_SECONDS else SESSION_END_TIMEOUT_SECONDS
+    assert actual["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] == kept
 
 
 def test_group_annotations_do_not_reset_readiness_but_execution_matchers_do(tmp_path: Path) -> None:

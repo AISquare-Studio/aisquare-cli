@@ -978,6 +978,29 @@ def test_a_paused_agents_view_says_it_is_paused_where_its_pane_was(
         assert len([row for row in rows if row]) > 1, rows
 
 
+def test_the_paused_words_wrap_again_when_the_terminal_narrows(
+    tmp_path: Path, script: Script
+) -> None:
+    """Opened wide, then narrowed beside a 45-column terminal's sidebar: the sentence wraps again
+    at the new width, whole. Wrapped once and kept, it stayed one wide row, cut at the pane's
+    edge: brief 233's cut sentence again (P9, tester 12849)."""
+    one_coder(tmp_path, script, "paused")
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], str, list[str], str]:
+        app = fleet_app(pilot)
+        view = await open_view(pilot, app, CODER)
+        wide = pane_said(view)
+        await pilot.resize_terminal(45, 30)
+        await pilot.pause()
+        await settle(app)
+        return *wide, *pane_said(view)
+
+    wide_rows, wide, narrow_rows, narrow = drive(go, size=(120, 40))
+    assert wide == PAUSED_WORDS, wide_rows
+    assert narrow == PAUSED_WORDS, narrow_rows
+    assert len([row for row in narrow_rows if row]) > 1, narrow_rows
+
+
 def test_pausing_from_the_view_puts_the_paused_words_where_its_pane_was(
     tmp_path: Path, script: Script, calls: Calls
 ) -> None:
@@ -1032,6 +1055,32 @@ def test_every_other_state_keeps_its_own_words(
     if words is not None:
         assert said == words
     assert PAUSED_WORDS not in said
+
+
+def test_a_held_row_read_lost_with_its_view_open_says_its_pane_is_gone(
+    tmp_path: Path, script: Script
+) -> None:
+    """A row held as another server's, then read lost, with its view open: it shows no pane
+    either way, so nothing re-attaches and only the view's own redraw puts the new words on
+    the screen. Without it, the lost row went on saying the held row's reason (P8, tester
+    12849)."""
+    row = one_coder(tmp_path, script, "unknown")
+    script["prj_a"] = [script["prj_a"][0], row.model_copy(update={"held": True})]
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str | None]:
+        app = fleet_app(pilot)
+        view = await open_view(pilot, app, CODER)
+        before = pane_said(view)[1]
+        lost = row.model_copy(update={"state": "lost", "held": False})
+        script["prj_a"] = [script["prj_a"][0], lost]
+        app.refresh_data()
+        await settle(app)
+        return before, pane_said(view)[1], view.pane.pane_id
+
+    before, after, pane_id = drive(go)
+    assert before == f"({fleet_service.ANOTHER_SERVER})", before
+    assert pane_id is None
+    assert after == PANE_GONE, after
 
 
 def test_an_open_view_whose_agent_was_stopped_elsewhere_keeps_its_pane_and_says_it_is_gone(

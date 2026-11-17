@@ -194,3 +194,95 @@ def test_every_widget_state_reads_at_text_contrast_under_rlx(
     ), "a state not measured passes nothing"
     below = [f"{r.widget}, {r.state}: {r.worst:.2f}:1" for r in seen if r.worst < TEXT]
     assert not below, f"on {ground}:\n" + "\n".join(below)
+
+
+# --- the faded side, and no size changes -------------------------------------------------------
+
+FADED_FLOOR = {"primary": TEXT, "success": TEXT, "warning": TEXT, "error": 3.0}
+"""The manager's ruling on #508's screenshot: in the side without the keyboard, the blue and
+coral buttons take the light text colour, and the fade leaves them at 4.56:1 and 3.54:1; the
+coral can do no better, so it holds 3:1 (WCAG's floor for a control's marks), the rest 4.5:1."""
+
+
+async def _probe_buttons(pilot: Pilot[None], *, compact: bool = False) -> list[Button]:
+    """One button of each variant, and a disabled one of each, on the content side (Welcome)."""
+    app = fleet_app(pilot)
+    page = app.query_one("#welcome")
+    made = []
+    for variant in VARIANTS:
+        for disabled in (False, True):
+            button = Button(
+                f"{variant} label",
+                variant=variant,  # type: ignore[arg-type]
+                compact=compact,
+                disabled=disabled,
+                id=f"probe-{variant}-{'off' if disabled else 'on'}-{'c' if compact else 'n'}",
+            )
+            made.append(button)
+    await page.mount_all(made)
+    await settle(app)
+    return made
+
+
+def test_the_faded_sides_buttons_read_as_ruled(tmp_path: Path, script: Script) -> None:
+    """At launch the keyboard is on the sidebar, so *Start manager* is drawn on the faded side:
+    there its label read 2.61:1 (#508's screenshot). Measured faded, at rest and under the mouse."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def body(pilot: Pilot[None]) -> dict[tuple[str, str], float]:
+        app = fleet_app(pilot)
+        buttons = await _probe_buttons(pilot)
+        app.sidebar.focus()
+        await settle(app)
+        seen = {}
+        for button in buttons:
+            if button.disabled or button.variant == "default":
+                continue
+            button.scroll_visible(animate=False)
+            await pilot.hover(app.query_one("#fleet-title"))
+            await settle(app)
+            assert app.content.has_class("-unfocused"), "the content side is not faded"
+            seen[(str(button.variant), "faded")] = min(r for _, r in cells(app, button))
+            await pilot.hover(button)
+            await settle(app)
+            seen[(str(button.variant), "faded, hovered")] = min(r for _, r in cells(app, button))
+        return seen
+
+    seen = drive(body, size=(120, 60))
+    assert len(seen) == 8, seen
+    below = {key: f"{ratio:.2f}" for key, ratio in seen.items() if ratio < FADED_FLOOR[key[0]]}
+    assert not below, below
+    assert seen[("primary", "faded")] >= 4.5 and seen[("error", "faded")] >= 3.0
+
+
+@pytest.mark.parametrize("compact", [False, True], ids=["full", "compact"])
+def test_rlx_changes_no_buttons_size_in_any_state(
+    compact: bool, tmp_path: Path, script: Script
+) -> None:
+    """Colours only (the task's rule 5). A border in rlx's disabled rule gave a compact disabled
+    button two rows, and the Accounts table's last button left the screen (the full suite on
+    c5d60fb1a). Every variant, enabled and disabled, on the focused side and the faded one, is
+    the size it is under textual-dark."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def body(pilot: Pilot[None]) -> dict[str, dict[str, tuple[int, int]]]:
+        app = fleet_app(pilot)
+        buttons = await _probe_buttons(pilot, compact=compact)
+        sizes: dict[str, dict[str, tuple[int, int]]] = {}
+        for theme in ("textual-dark", "rlx"):
+            app.theme = theme
+            for side in ("focused", "faded"):
+                if side == "focused":
+                    buttons[0].focus()
+                else:
+                    app.sidebar.focus()
+                await settle(app)
+                for button in buttons:
+                    key = f"{button.id} {side}"
+                    size = button.outer_size
+                    sizes.setdefault(key, {})[theme] = (size.width, size.height)
+        return sizes
+
+    sizes = drive(body, size=(120, 60))
+    changed = {key: by for key, by in sizes.items() if by["rlx"] != by["textual-dark"]}
+    assert len(sizes) == 20 and not changed, changed

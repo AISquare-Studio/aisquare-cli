@@ -98,7 +98,8 @@ RLX_CSS = """
    it on hover (-darken-2) and on a press (a 30% tint of the background), which took a label to
    3:1. Under rlx, a hover brightens the fill and a press keeps it. A disabled button reads too
    (4.5:1 or more): the muted text colour on the surface, at full opacity, where Textual
-   dims the whole button. Colours only: every size and border stays as it is. */
+   dims the whole button. Colours only, never a border or a size: a compact button has no
+   border, and one given here grew a row in the Accounts table. */
 App.-theme-rlx Button.-style-default {
     &.-primary:hover { background: $primary-lighten-1; }
     &.-success:hover { background: $success-lighten-1; }
@@ -110,9 +111,20 @@ App.-theme-rlx Button.-style-default {
         text-opacity: 1;
         color: $text-muted;
         background: $surface;
-        border-top: tall $surface-lighten-1;
-        border-bottom: tall $surface-darken-1;
     }
+}
+/* The side without the keyboard fades (Panes > .-unfocused, 82%), and Textual fades a button's
+   fill twice, its label once: a dark label on the blue fill fell to 2.61:1 there, and on the
+   coral one to 3.36:1. In the faded side those two take the light text colour instead, which
+   the fade leaves at 4.56:1 and 3.54:1 (the most the coral allows; the manager's ruling on
+   #508). Under that light label a hover darkens the fill, as Textual's own does, where the
+   brighter fill above would take it to 3.79:1. A disabled one stays muted. Green and amber keep
+   their dark label (6.09, 4.70). */
+App.-theme-rlx Panes > .-unfocused Button.-style-default {
+    &.-primary, &.-error { color: $foreground; }
+    &.-primary:hover { background: $primary-darken-1; }
+    &.-error:hover { background: $error-darken-1; }
+    &:disabled, &:disabled:hover { color: $text-muted; background: $surface; }
 }
 """
 """The rules ``rlx`` needs beyond its colours. Both apps add them to their own CSS; they

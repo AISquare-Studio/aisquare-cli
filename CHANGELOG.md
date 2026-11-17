@@ -47,7 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Usage sharing, once you turn it on, posts to `/api/v1/rlx/metrics/`, and sends the same
   counts as before. Releases up to 0.10.0 post to `/api/v1/cli/metrics/`, which AISquare
   keeps answering until May 2027. A server that answers 503 with `Retry-After` is asked
-  again after that wait, as a 429 already was, not after the first five-minute retry.
+  again after that wait, as a 429 already was, not after the first five-minute retry; either
+  waits a day at most.
 
 ## [0.10.0] - 2026-11-16
 

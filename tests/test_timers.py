@@ -47,6 +47,26 @@ def test_the_real_platform_alone_decides_the_install(monkeypatch: pytest.MonkeyP
         assert vars(textual_timer)["sleep"] is textual_time.sleep, "Textual's own, as it was"
 
 
+def test_the_longest_hold_is_the_ceiling_and_two_ticks_of_asyncio_s_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """asyncio's wait may end up to two resolutions of its clock early: one lag, one by which
+    its loop runs a timer before its time. windows-py3.12 (``GetTickCount64``, 15.625 ms) held
+    a thread 71 ms (#526's run 44083919544); within this bound, never past it."""
+    real = time.get_clock_info
+
+    def windows_py312(name: str) -> Any:
+        info = real(name)
+        return types.SimpleNamespace(**{**vars(info), "resolution": 0.015625})
+
+    here = timers.longest_hold()
+    monkeypatch.setattr(timers.time, "get_clock_info", windows_py312)
+
+    assert timers.CEILING <= here < timers.CEILING + 0.001
+    assert timers.longest_hold() == pytest.approx(0.08125)
+    assert timers.longest_hold() >= 0.071, "the hold measured on windows-py3.12 is within it"
+
+
 def test_a_textual_whose_timers_sleep_otherwise_keeps_its_own(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -96,7 +116,7 @@ def test_under_asq_s_sleep_a_timer_fires_at_its_time_never_early(
     assert vars(textual_timer)["sleep"] is timers.sleep, "installed by the app, as on Windows"
     assert seen["short"][0] >= 0.03 - 0.002 and seen["long"][0] >= 0.4 - 0.002, seen
     assert [at >= 0.12 * (n + 1) - 0.002 for n, at in enumerate(seen["every"][:4])] == [True] * 4
-    assert held and max(held) <= timers.CEILING, sorted(held)[-3:]
+    assert held and max(held) <= timers.longest_hold(), sorted(held)[-3:]
 
 
 def test_a_long_timer_stopped_before_its_time_never_took_a_thread(
@@ -114,7 +134,7 @@ def test_a_long_timer_stopped_before_its_time_never_took_a_thread(
 
     asyncio.run(run())
 
-    assert [secs for secs in held if secs > timers.CEILING] == []
+    assert [secs for secs in held if secs > timers.longest_hold()] == []
 
 
 MODES = ["here", "textual on windows", "asq on windows"]
@@ -167,7 +187,7 @@ def test_a_timer_reset_mid_wait_fires_at_textual_s_new_time(
     assert 0.4 - 0.002 <= every[0] < 0.4 + 0.12, every
     assert 0.6 - 0.002 <= every[1] < 0.6 + 0.12, every
     if mode == "asq on windows":
-        assert held and max(held) <= timers.CEILING, sorted(held)[-3:]
+        assert held and max(held) <= timers.longest_hold(), sorted(held)[-3:]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -202,7 +222,7 @@ def test_a_paused_timer_does_not_fire_until_resumed(
     assert once and marks["resumed"] <= once[0] < marks["resumed"] + 0.12, (marks, once)
     assert any(marks["resumed"] <= at < marks["resumed"] + 0.3 for at in every), (marks, every)
     if mode == "asq on windows":
-        assert held and max(held) <= timers.CEILING, sorted(held)[-3:]
+        assert held and max(held) <= timers.longest_hold(), sorted(held)[-3:]
 
 
 TICK = 0.0156  # py3.12's Windows asyncio: time.get_clock_info("monotonic").resolution
@@ -244,4 +264,4 @@ def test_windows_like_clocks_never_early_and_brief(
     late = {d: round((fired[d][0] - d) * 1000, 2) for d in delays}
     late_every = [round((at - 0.12 * (n + 1)) * 1000, 2) for n, at in enumerate(every[:5])]
     assert all(ms >= -2 for ms in [*late.values(), *late_every]), (late, late_every)
-    assert held and max(held) <= timers.CEILING + TICK, sorted(held)[-3:]
+    assert held and max(held) <= timers.longest_hold() + TICK, sorted(held)[-3:]

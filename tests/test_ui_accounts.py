@@ -1003,7 +1003,9 @@ def test_no_timer_of_asq_s_holds_a_thread_past_the_ceiling_on_windows(
     the workers and the quit run on (``cli.ui.timers``). asq's own (the refresh, headroom
     60 s, housekeeping and Remote's tunnel 30 s, the Accounts page's usage 60 s, a toast's
     10 s) took a thread each, for good. Each wait asks for a thread for the last
-    :data:`~aisquare.cli.ui.timers.CEILING` of its time at most, whoever set it."""
+    :data:`~aisquare.cli.ui.timers.CEILING` of its time at most, whoever set it, and as much
+    again as asyncio's own wait may end early (``timers.longest_hold``): 71 ms on
+    windows-py3.12, where a flat 50 ms failed (#526's run 44083919544)."""
 
     async def go(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
@@ -1016,7 +1018,7 @@ def test_no_timer_of_asq_s_holds_a_thread_past_the_ceiling_on_windows(
     drive(go)
 
     assert asq_on_windows, "the emulation saw the timers' last moments"
-    assert max(asq_on_windows) <= timers.CEILING, sorted(asq_on_windows)[-5:]
+    assert max(asq_on_windows) <= timers.longest_hold(), sorted(asq_on_windows)[-5:]
 
 
 @pytest.mark.usefixtures("windows_timers")

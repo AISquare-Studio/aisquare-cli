@@ -18,9 +18,8 @@ failed on windows-py3.12: R17's run 44051094043 and the rc/rlx gate run 44072523
 :func:`sleep` waits on asyncio's own clock, which holds no thread, until :data:`CEILING`
 before the time, and only then on Textual's precise sleep. The callback comes when Textual's
 would, read on Textual's own clock (``perf_counter`` on Windows, not asyncio's). No timer
-holds a thread for more than :data:`CEILING` plus one tick of asyncio's clock on Windows
-(15.6 ms), by which its wait may end early, whoever set it: asq, Textual, or a timer added
-later.
+holds a thread for longer than :func:`longest_hold`, whoever set it: asq, Textual, or a
+timer added later. That is :data:`CEILING` plus however early asyncio's own wait may end.
 
 Off Windows, Textual's sleep is asyncio's already, and nothing is installed.
 """
@@ -29,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 
 import textual._time as textual_time
 import textual.timer as textual_timer
@@ -38,9 +38,8 @@ WINDOWS = sys.platform == "win32"
 
 CEILING = 0.05
 """How much of its time a Textual timer waits in a thread: the last moments before it fires,
-where Textual's precise sleep keeps it on time. asyncio's own clock on Windows ticks every
-15.6 ms and may end its wait up to a tick early, so a thread is held for at most this plus
-one tick."""
+where Textual's precise sleep keeps it on time. asyncio's own wait may end early, and then a
+little more is left for the thread (:func:`longest_hold`)."""
 
 
 async def sleep(secs: float) -> None:
@@ -55,6 +54,19 @@ async def sleep(secs: float) -> None:
     left = deadline - textual_time.get_time()
     if left > 0:
         await textual_time.sleep(left)  # read now, as Textual's own: the precise end
+
+
+def longest_hold() -> float:
+    """The longest a timer waits in a thread: :data:`CEILING`, and as much again as asyncio's
+    wait before it may end early.
+
+    asyncio's loop runs a timer up to one resolution of its clock before the timer's time
+    (``_clock_resolution``), and reads that clock (``time.monotonic``), which lags real time
+    by up to one more. On Windows before Python 3.13 the clock is ``GetTickCount64``, at
+    15.6 ms, so a wait ends up to 31 ms early, and up to about 81 ms is left for the
+    thread. windows-py3.12 measured 71 ms (#526's run 44083919544). Elsewhere it is
+    :data:`CEILING`, to the nanosecond."""
+    return CEILING + 2 * time.get_clock_info("monotonic").resolution
 
 
 def install() -> bool:

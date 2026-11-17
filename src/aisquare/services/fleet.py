@@ -19294,7 +19294,9 @@ def deliver_owed_nudge(project_id: str) -> bool:
 
 def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
     """:func:`nudge_manager`, leaving the nudge owed where tmux refused it when ``owe``;
-    otherwise :func:`deliver_owed_nudge`'s, due only for unread news. Typed into the pane
+    otherwise :func:`deliver_owed_nudge`'s. Either is due only for news the manager wakes for,
+    unread (``team.wake_pending``: its own writes, echoes and what its standby holds are not,
+    R12). Typed into the pane
     the manager's launch record places, by its record's agent's rules (:func:`resolve_place`),
     never its row's: a delivery runs from a sandboxed agent's own hooks, outside its
     sandbox, and the row was the sandbox's to write before its broker (review r5 of
@@ -19324,7 +19326,10 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
             session = store.get_session(row.session_id)
             if session is None or session.ended_at is not None:
                 return False
-            if not owe and not _team().wake_pending(store, session):
+            # Due only for news it wakes for, unread (``team.wake_pending``, R12): its own
+            # result, an echo of news it has read, or a line its standby holds wakes nobody,
+            # whichever write asked. An owed one was always asked this; now every one is.
+            if not _team().wake_pending(store, session):
                 return False
             key = f"nudge:{session.id}"
             now = _now()

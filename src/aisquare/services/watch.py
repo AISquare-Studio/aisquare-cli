@@ -211,18 +211,28 @@ class Watcher:
         projects = sources.projects()
         cursors = {p.id: sources.latest_seq(p.id) for p in projects}  # no events re-read
         seen = queue.observe(sources, cursors=cursors, now=now)
-        return [
-            WatchItem(
-                id=f"stale:{o.key}",
-                project_id=o.project,
-                project_name=o.project_name,
-                kind="stale",
-                summary=o.text,
-                detail={"agent": o.agent, "seen_at": o.seen_at.isoformat(timespec="seconds")},
+        items = []
+        for o in seen.observations:
+            if o.kind != "stale":
+                continue
+            quiet = queue.QUIET in o.text
+            if quiet and _idle_by_design(o.source_ref):
+                continue
+            items.append(
+                WatchItem(
+                    id=f"stale:{o.key}",
+                    project_id=o.project,
+                    project_name=o.project_name,
+                    kind="stale",
+                    summary=o.text,
+                    detail={
+                        "agent": o.agent,
+                        "seen_at": o.seen_at.isoformat(timespec="seconds"),
+                        "quiet": quiet,
+                    },
+                )
             )
-            for o in seen.observations
-            if o.kind == "stale"
-        ]
+        return items
 
     def _due(self, name: str, every: float, now: datetime) -> bool:
         last = self.last_run.get(name)
@@ -379,9 +389,11 @@ class Watcher:
             seen = set(state.get("seen") or [])
             new = [item for item in items if item.id not in seen]
             report = TickReport(at=now, items=items, new=new, notes=notes)
+            _standby_on_questions(items, notes)  # before delivery: what standby holds waits
             by_project: dict[str, list[WatchItem]] = {}
             for item in new:
-                by_project.setdefault(item.project_id, []).append(item)
+                if for_the_manager(item):  # the rest is the person's: seen, not delivered
+                    by_project.setdefault(item.project_id, []).append(item)
             undelivered: set[str] = set()
             for project_id, found in by_project.items():
                 try:
@@ -411,6 +423,114 @@ class Watcher:
                     if done.stopped
                 ]
         return report
+
+
+IDLE_BY_DESIGN_KINDS: frozenset[str] = frozenset({"result", "question", "task_review", "task_done"})
+"""An agent whose last board act was one of these, or a note to the manager, is waiting by
+design: on its manager, a tester or its person. Its own act already woke the manager, until
+someone answers it (``team.answered_since``), and never while it holds a task in doing."""
+
+
+def _idle_by_design(agent_id: str | None) -> bool:
+    """Whether a waiting agent gone quiet is waiting by design (R12): it holds no task in
+    doing, its last act on its board was addressed to the manager or handed its task on
+    (:data:`IDLE_BY_DESIGN_KINDS`), and nothing has answered it since: no note addressed to
+    it, no reopen of that act's task (``team.answered_since``). Then it is no stale news for
+    the manager: the act woke it already. Answered and still quiet, it is stale again: a note
+    to a waiting agent waits for a turn end that never comes, and the manager must hear of it
+    (#145's reopen, F2). Never raises; an agent this cannot place is stale news, as before."""
+    if agent_id is None:
+        return False
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import team as team_service
+
+    try:
+        with store_session() as store:
+            agent = store.get_fleet_agent(agent_id)
+            if agent is None or agent.session_id is None:
+                return False
+            board = fleet_service.board_of_row(agent)
+            if any(
+                task.claimed_by == agent.session_id
+                for task in store.team_tasks(board, status="doing")
+            ):
+                return False  # mid-task: its quiet is news, whatever it said last
+            last = store.filtered_events(board, session_id=agent.session_id, limit=1)
+            if not last:
+                return False
+            act = last[-1]
+            if act.kind not in IDLE_BY_DESIGN_KINDS and not team_service._addressed_to_manager(
+                act.to_role
+            ):
+                return False
+            return not team_service.answered_since(
+                store, board, agent.session_id, act.seq, task_id=act.task_id
+            )
+    except Exception:
+        return False
+
+
+FOR_THE_PERSON_KINDS: frozenset[str] = frozenset({"board_result", "board_question"})
+"""Needs that are the person's (asq's "needs you", Remote), never the manager's line: the board
+event behind each already wakes the manager when a teammate wrote it, and is the manager's
+own when it wrote it (R12)."""
+
+NOT_URGENT_KINDS: frozenset[str] = frozenset({"capacity_freed"})
+"""Watch's routine news: a manager in standby is not woken for it (``team.held_in_standby``).
+Pull requests and the operator's sources are routine too (:func:`_urgent`)."""
+
+
+def for_the_manager(item: WatchItem) -> bool:
+    """Whether ``item`` goes on the project's manager line (R12). What is the person's does
+    not (:data:`FOR_THE_PERSON_KINDS`), nor the manager's own turn ending on a question
+    (``asked`` about it): that question is to its person, who sees it in asq and on the phone,
+    where these items stay."""
+    from aisquare.services import fleet as fleet_service
+
+    if item.kind in FOR_THE_PERSON_KINDS:
+        return False
+    agent = str(item.detail.get("agent") or "").strip().lower()
+    return not (item.kind == "asked" and agent == fleet_service.MANAGER_LABEL)
+
+
+def _urgent(item: WatchItem) -> bool:
+    """Whether ``item`` wakes a manager in standby: a need (a dialog, an agent asking, a limit,
+    a crash, a lost agent, a manager or fleet down) or a lost or unknown agent does; an idle
+    agent gone quiet, a pull request, an operator's source and freed capacity do not."""
+    if item.kind in NOT_URGENT_KINDS:
+        return False
+    if item.id.startswith("needs:"):
+        return True
+    if item.kind == "stale":
+        return not item.detail.get("quiet", False)
+    return False
+
+
+def _standby_on_questions(items: Iterable[WatchItem], notes: list[str]) -> None:
+    """A manager whose turn ended on a question to its person (an ``asked`` item about it,
+    the phone's test) goes into standby, while nothing is in flight on its board
+    (``team.standby_on_its_question``, R12): its person is who it waits on, and watch's
+    routine lines stop waking it until their next prompt. Never costs the tick."""
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import team as team_service
+
+    asked = {
+        item.project_id
+        for item in items
+        if item.kind == "asked"
+        and str(item.detail.get("agent") or "").strip().lower() == fleet_service.MANAGER_LABEL
+    }
+    for project_id in sorted(asked):
+        try:
+            with store_session() as store:
+                row = store.fleet_agent_by_label(
+                    project_id, fleet_service.MANAGER_LABEL, live_only=True
+                )
+                session = store.get_session(row.session_id) if row and row.session_id else None
+                if session is not None:
+                    team_service.standby_on_its_question(store, session)
+        except Exception as exc:
+            notes.append(f"standby of {project_id}'s manager: {type(exc).__name__}: {exc}")
 
 
 def _release_woken_holds(delivered: Iterable[WatchItem]) -> None:
@@ -528,7 +648,7 @@ def _deliver(project_id: str, items: Sequence[WatchItem], path: Path) -> bool:
             project_id, fleet_service.MANAGER_LABEL, live_only=True
         )
     board = fleet_service.board_of_row(manager) if manager is not None else project_id
-    team_service.watch_event(board, event_text(items, path))
+    team_service.watch_event(board, event_text(items, path), urgent=any(map(_urgent, items)))
     if manager is None:
         return False
     return fleet_service.nudge_manager(project_id, reason="watch", board=board)

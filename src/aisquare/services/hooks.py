@@ -1526,6 +1526,13 @@ def capture_prompt(
         text = _without_harness_blocks(text)
     try:
         with store_session() as store:
+            if session_id is not None:
+                # A turn began: a manager's `team standby --off` held until now, and its
+                # person's prompt ends its standby (R12); a fleet wake does not. In this
+                # session, not one of its own: it runs on every prompt. Never raises.
+                team_service.standby_turn_began(
+                    store, session_id, by_person=origin.startswith(f"{prompt_origin.HUMAN}:")
+                )
             project = active_project(store, cwd)
             # Before anything is written, even for an empty prompt: a metric row is
             # written for every turn below, and a row whose project_id has no

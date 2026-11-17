@@ -162,7 +162,7 @@ def stage_mark(adapter: AgentAdapter) -> str:
 
 
 def staged_label(adapter: AgentAdapter) -> str:
-    """``adapter.label`` with its :func:`stage_mark`: ``Codex (beta)``, ``Claude Code``."""
+    """``adapter.label`` with its :func:`stage_mark`: ``Claude Code``, ``<Label> (beta)``."""
     return adapter.label + stage_mark(adapter)
 
 

@@ -140,7 +140,7 @@ def _project_json(project: ProjectInfo) -> dict[str, object]:
 
 def agent_words(agents: Sequence[FleetAgentStatus]) -> dict[str, str]:
     """Each listed agent's id → its coding agent in the words ``aisquare accounts`` names it
-    by (``Claude Code``, ``Codex (beta)``: the adapter's label and stage mark, ASCII), padded
+    by (``Claude Code``, ``Codex``: the adapter's label and stage mark, ASCII), padded
     to the widest, so the columns after it stay aligned. Empty while the rows are of one
     agent's alone: a fleet of Claude Code's lists as 0.9.2's did (live mixed run, LIVE PASS
     11884 F3: the rows said ``account 3`` and ``account 4``, and not whose)."""

@@ -2152,7 +2152,7 @@ def test_the_default_binary_is_the_default_agents_own(
         created_at=datetime.now(UTC),
     )
     assert row.binary == fake_agent.binary
-    assert status_line_text(True, None).plain.endswith(fake_agent.binary)
+    assert status_line_text(None).plain.endswith(fake_agent.binary)
 
 
 def test_a_binarys_flags_session_id_and_account_are_its_adapters(

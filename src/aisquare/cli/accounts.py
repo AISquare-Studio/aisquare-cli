@@ -83,7 +83,7 @@ ProjectOpt = Annotated[
 def whose_account_help() -> str:
     """``--agent``'s help: the default agent, then every other agent with account slots, by
     their ids, a beta one's with its mark (``types.stage_mark``): ``Whose account:
-    claude-code (the default) or codex (beta).``"""
+    claude-code (the default) or codex.``"""
     first = default_adapter()
     named = [f"{first.id}{stage_mark(first)} (the default)"]
     named += [
@@ -95,7 +95,7 @@ def whose_account_help() -> str:
 
 
 def _other_agents_choice() -> str:
-    """`` [--agent codex (beta)]``: the other agents with account slots ``accounts add`` takes,
+    """`` [--agent codex]``: the other agents with account slots ``accounts add`` takes,
     a beta one's with its mark (``types.stage_mark``); ``""`` with none."""
     first = default_adapter()
     others = [

@@ -88,7 +88,7 @@ def wait_for_token(
         if outcome.kind == "expired":
             raise iam.IamError("expired", "The code expired before it was approved.")
         if outcome.kind == "paused":
-            raise iam.IamError("paused", "CLI sign-in is temporarily paused. Try again later.")
+            raise iam.IamError("paused", "Sign-in from rlx is temporarily paused. Try again later.")
         raise iam.IamError(
             "unsupported_server", f"Unexpected answer from {endpoints.issuer} while waiting."
         )

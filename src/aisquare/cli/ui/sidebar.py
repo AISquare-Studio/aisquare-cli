@@ -288,6 +288,17 @@ class OpenProjectMenu(Message):
         super().__init__()
 
 
+class OpenAgentMenu(Message):
+    """⋯ on an agent's row, a right-click on it, or ``.`` on it (R17): the agent's menu
+    (``cli/ui/agent_menu.py``), under ``anchor``."""
+
+    def __init__(self, project_id: str, agent_id: str, anchor: Region) -> None:
+        self.project_id = project_id
+        self.agent_id = agent_id
+        self.anchor = anchor
+        super().__init__()
+
+
 RESIZE_STEP = 4
 """Columns one keyboard step moves the partition (#137)."""
 
@@ -1151,6 +1162,11 @@ class AgentLabelInput(InPlaceField, Input):
 
 
 RENAME_TIP = "double-click or F2 to rename"
+MENU_TIP = "right-click, ⋯ or . for its menu"
+"""How an agent row's menu opens (R17): every row offers one, its ⋯ shown while the row is
+hovered or highlighted."""
+MENU_GLYPH = " ⋯"
+"""The row's menu, in its last two cells, on the hovered row and the highlighted one."""
 
 
 class AgentRow(Activatable):
@@ -1177,7 +1193,9 @@ class AgentRow(Activatable):
         super().__init__(agent_row_text(status), id=f"agent-row-{status.agent.id}")
         self.status = status
         self.selection_key = f"agent:{status.agent.id}"
-        self._painted: tuple[FleetAgentStatus, float | None, int, bool, bool, bool] | None = None
+        self._painted: tuple[FleetAgentStatus, float | None, int, bool, bool, bool, bool] | None = (
+            None
+        )
         self.prefill = ""
         """What the name field said when it opened: leaving it so is no change."""
         self._field: AgentLabelInput | None = None
@@ -1204,7 +1222,8 @@ class AgentRow(Activatable):
         if agent == self._tipped:
             return
         self._tipped = agent
-        tip = RENAME_TIP if fleet_service.relabel_refusal(agent) is None else None
+        renames = fleet_service.relabel_refusal(agent) is None
+        tip = f"{RENAME_TIP} · {MENU_TIP}" if renames else MENU_TIP
         if self.tooltip != tip:
             self.tooltip = tip
 
@@ -1324,6 +1343,12 @@ class AgentRow(Activatable):
             event.prevent_default()
             return
         sidebar = self._sidebar()
+        if sidebar is not None and (event.button == 3 or self._on_menu(event)):
+            # Its menu (R17): a right-click anywhere on the row, or a click on its ⋯.
+            event.stop()
+            event.prevent_default()
+            sidebar.open_agent_menu(self.status.agent.id)
+            return
         if (
             sidebar is not None
             and event.button == 1
@@ -1351,15 +1376,46 @@ class AgentRow(Activatable):
         width = self.content_size.width
         marked = sidebar is not None and sidebar.agents_marked
         shown = sidebar is None or sidebar.usage_shown
+        menu = self.menu_shown
         # The mark takes the theme's darkness's colour (``AgentMark.colour``). A theme change
         # renders every widget again, and :meth:`render` paints: the darkness is in the key.
         dark = self.app.current_theme.dark
-        wanted = (self.status, percent, width, marked, dark, shown)
+        wanted = (self.status, percent, width, marked, dark, shown, menu)
         if wanted != self._painted:
             self._painted = wanted
             mark = agent_mark(agent_kind(self.status), dark) if marked else None
-            text = agent_row_text(self.status, percent, width=width or None, mark=mark, usage=shown)
+            room = width - len(MENU_GLYPH) if menu and width else width
+            text = agent_row_text(self.status, percent, width=room or None, mark=mark, usage=shown)
+            if menu and width:
+                # The label gave way for it: the chip and ``#N·NN%`` stay whole.
+                text.truncate(room, pad=True)
+                text.append(MENU_GLYPH, style="bold")
             self.update(text, layout=False)
+
+    @property
+    def menu_shown(self) -> bool:
+        """Whether the row draws its ⋯: while hovered, or highlighted (Q-F2). Every other row
+        is drawn as before, with no cell given up."""
+        return self._hovered or self.has_class("selected")
+
+    _hovered = False
+
+    def on_enter(self, event: events.Enter) -> None:
+        if not self._hovered:
+            self._hovered = True
+            self.paint()
+
+    def on_leave(self, event: events.Leave) -> None:
+        if self._hovered:
+            self._hovered = False
+            self.paint()
+
+    def _on_menu(self, event: events.Click) -> bool:
+        """Whether ``event`` is a plain click on the row's ⋯, its last two cells."""
+        if event.button != 1 or not self.menu_shown:
+            return False
+        offset = event.get_content_offset(self)
+        return offset is not None and offset.x >= self.content_size.width - len(MENU_GLYPH)
 
     def on_resize(self) -> None:
         self.paint()
@@ -2554,10 +2610,23 @@ class Sidebar(Vertical):
             self.open_rename(target[1])
 
     def action_project_menu(self) -> None:
-        """``.``: the menu of the highlighted card, as its ⋯ opens it."""
+        """``.``: the menu of what is highlighted — an agent's row, its agent's (Q-F1); a card,
+        or any other row of it, the card's, as its ⋯ opens it."""
+        kind, _, ident = (self.selected_key or "").partition(":")
+        row = self._agent_row(ident) if kind == "agent" else None
+        if row is not None and self._on_screen(row):
+            self.open_agent_menu(ident)
+            return
         target = self._cursor_target()
         if target is not None and target[0] == "project":
             self.open_menu(target[1])
+
+    def open_agent_menu(self, agent_id: str) -> None:
+        """Ask the shell for ``agent_id``'s menu, under its row."""
+        row = self._agent_row(agent_id)
+        if row is not None:
+            agent = row.status.agent
+            self.post_message(OpenAgentMenu(agent.project_id, agent.id, row.region))
 
     # drag and drop: press on a title or a group header, move past its row, release on a target
 
@@ -2814,6 +2883,8 @@ class Sidebar(Vertical):
         # the class while hidden was a second highlight the moment it came back.
         for row in self.query(Activatable):
             row.set_class(row.selection_key == self.selected_key, "selected")
+            if isinstance(row, AgentRow):
+                row.paint()  # its ⋯ follows the highlight (R17)
         self._show_active_menus()
 
     def _show_active_menus(self) -> None:

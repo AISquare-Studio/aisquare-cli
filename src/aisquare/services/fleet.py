@@ -19015,11 +19015,15 @@ def _renamed_from(store: ContextStore, project: ProjectInfo, label: str) -> str 
 
 def _renamed_hint(store: ContextStore, project: ProjectInfo, label: str) -> str:
     """`` (renamed: it is login-fix now)``, for a refusal by a label :func:`relabel` took from
-    an agent; empty for any other."""
+    an agent; empty for any other. A paused agent is not an ended one: its row ended at the
+    pause, and a resume brings it back under the new label (``which is paused``, R17's G: it
+    read ``which has since ended`` and sent the person looking for an agent that was gone)."""
     agent_id = _renamed_from(store, project, label)
     agent = store.get_fleet_agent(agent_id) if agent_id is not None else None
     if agent is None:
         return ""
+    if _paused_row(agent):
+        return f" (renamed {agent.label}, which is paused)"
     if agent.ended_at is not None:
         return f" (renamed {agent.label}, which has since ended)"
     return f" (renamed: it is {agent.label} now)"

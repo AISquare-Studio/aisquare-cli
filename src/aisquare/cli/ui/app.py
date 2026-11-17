@@ -59,10 +59,14 @@ from textual.widgets import Button, ContentSwitcher, Footer, Static, TextArea
 from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
+from aisquare.cli.ui.agent_menu import RENAME as AGENT_RENAME
+from aisquare.cli.ui.agent_menu import RESUME as AGENT_RESUME
+from aisquare.cli.ui.agent_menu import AgentMenu
 from aisquare.cli.ui.attach import NewAccountRequested, ReturnTo
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.board import BoardPanel, board_help
-from aisquare.cli.ui.confirm_action import STOP
+from aisquare.cli.ui.confirm_action import PAUSE as AGENT_PAUSE
+from aisquare.cli.ui.confirm_action import RESTART, STOP, ConfirmActionScreen, ask_first
 from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.fresh import ConfirmFresh, FreshChoice, StartFresh
 from aisquare.cli.ui.groups import (
@@ -103,6 +107,7 @@ from aisquare.cli.ui.sidebar import (
     AppSettingsSelected,
     CaptainRequested,
     DoctorSelected,
+    OpenAgentMenu,
     OpenProjectMenu,
     ProjectCard,
     ProjectRenamed,
@@ -169,7 +174,18 @@ from aisquare.cli.ui.views.accounts import (
     next_step,
     read_session,
 )
-from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
+from aisquare.cli.ui.views.agent import (
+    PAUSE_WORKER,
+    RESTART_WORKER,
+    AgentRestarted,
+    AgentView,
+    pausable,
+    pause_question,
+    restart_question,
+    said_paused,
+    start_pause,
+    start_restart,
+)
 from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
 from aisquare.cli.ui.views.captain import CaptainView
 from aisquare.cli.ui.views.doctor import ASK_WORKER, DoctorRefreshed, DoctorView, ask_text
@@ -1318,6 +1334,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         :attr:`always_show_project_path` is, and again when the Stop dialog saves *Don't ask
         again*, which posts the same ``UiSettingsChanged``."""
         self._quick_stops: dict[Worker[Any], tuple[FleetAgent, Notification]] = {}
+        self._menu_actions: dict[Worker[Any], FleetAgent] = {}
+        """Each pause or restart an agent's menu started here, with no view of it open, and
+        the row it acts on (:meth:`_menu_start`)."""
         """Each stop :meth:`on_stop_agent` started with no dialog, with the row it stops and
         its ``stopping …`` toast: a second press for that row while it runs does nothing
         (:meth:`_stop_at_once`), and the toast goes when the stop answers."""
@@ -2260,6 +2279,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == STOP_WORKER:
             self._stopped_at_once(event)
             return
+        if event.worker.name in (PAUSE_WORKER, RESTART_WORKER):
+            self._menu_action_answered(event)
+            return
         if event.worker.name == FLEET_WORKER:
             self._fleet_read(event)
             return
@@ -2942,6 +2964,94 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         signal_on = self.snapshot is not None and project_id in self.snapshot.fleet_paused
         can = applicable(agents, fleet_paused=signal_on)
         self.push_screen(ProjectMenu(project, event.anchor, can), chosen)
+
+    def on_open_agent_menu(self, event: OpenAgentMenu) -> None:
+        """⋯, ``.`` or a right-click on an agent's row (R17): its menu, then what was chosen.
+
+        Pause, Resume and Restart are the header's own presses when the agent's view is open
+        (``AgentView.act``: its box, its worker, its greyed buttons); with no view, the same
+        box and the same service call, pinned to the row, run here. Stop is the shell's Stop,
+        as the header's and ``x`` are; Rename is the row's own field."""
+        status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
+        if status is None:
+            self.notify("that agent is no longer listed", severity="warning", timeout=4)
+            return
+        project_id, agent_id = event.project_id, event.agent_id
+        refusal = fleet_service.relabel_refusal(status.agent)
+
+        def chosen(choice: str | None) -> None:
+            if choice == AGENT_RENAME:
+                # Once the menu has gone: closing it hands the focus back to the sidebar.
+                self.call_after_refresh(self._rename_from_menu, agent_id)
+            elif choice == STOP:
+                self.post_message(StopAgent(project_id, agent_id))
+            elif choice in (AGENT_PAUSE, AGENT_RESUME, RESTART):
+                self._agent_action(status, choice)
+
+        menu = AgentMenu(status, event.anchor, pausable=pausable(status), rename_refusal=refusal)
+        self.push_screen(menu, chosen)
+
+    def _rename_from_menu(self, agent_id: str) -> None:
+        refusal = self.sidebar.open_agent_rename(agent_id)
+        if refusal is not None:
+            self.notify(f"not renamed: {refusal}", severity="warning", timeout=6, markup=False)
+
+    def _agent_action(self, status: FleetAgentStatus, kind: str) -> None:
+        """An agent menu's Pause, Resume or Restart: the open view's own press, or the same
+        box and call run here."""
+        agent = status.agent
+        view = next(
+            (v for v in self.content.query(AgentView) if v.status.agent.id == agent.id), None
+        )
+        if view is not None:
+            view.act(kind)
+            return
+        if kind == AGENT_RESUME:
+            self._menu_start(agent, AGENT_RESUME)
+        elif kind == AGENT_PAUSE:
+            pause_box: ConfirmActionScreen[bool] = ConfirmActionScreen(
+                AGENT_PAUSE, pause_question(status)
+            )
+            ask_first(self, pause_box, lambda: self._menu_start(agent, AGENT_PAUSE))
+        elif kind == RESTART:
+            restart_box: ConfirmActionScreen[bool] = ConfirmActionScreen(
+                RESTART, restart_question(status)
+            )
+            ask_first(self, restart_box, lambda: self._menu_start(agent, RESTART))
+
+    def _menu_start(self, agent: FleetAgent, kind: str) -> None:
+        """One pause or restart of ``agent`` at a time from its menu: a second press while the
+        first runs does nothing."""
+        if agent.id in {row.id for row in self._menu_actions.values()}:
+            return
+        group = f"agent-menu-{agent.id}"
+        worker = (
+            start_pause(self, agent, group=group)
+            if kind == AGENT_PAUSE
+            else start_restart(self, agent, group=group)
+        )
+        self._menu_actions[worker] = agent
+
+    def _menu_action_answered(self, event: Worker.StateChanged) -> None:
+        """A pause or restart an agent's menu started here answered: toasted as the header's
+        are, the restart through :class:`AgentRestarted`, and the frame read again."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        agent = self._menu_actions.pop(event.worker, None)
+        if agent is None or event.state is WorkerState.CANCELLED:
+            return
+        if event.worker.name == PAUSE_WORKER:
+            said_paused(self, agent, event)
+        elif event.state is WorkerState.ERROR:
+            self.notify(
+                f"could not restart {agent.label}: {event.worker.error}",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+        elif isinstance(event.worker.result, fleet_service.RestartReceipt):
+            self.post_message(AgentRestarted(event.worker.result))
+        self.refresh_data()
 
     def on_bulk_asked(self, event: BulkAsked) -> None:
         """*Pause agents…* / *Resume agents…*, from a card's menu or a Settings tab: ask

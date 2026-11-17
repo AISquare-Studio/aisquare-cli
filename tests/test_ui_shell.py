@@ -73,6 +73,7 @@ from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
 from aisquare.cli.ui.groups import DropProject, GroupPicker
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import (
+    MENU_GLYPH,
     RESIZE_STEP,
     STATE_CHIP,
     STOP_STATES,
@@ -2881,7 +2882,8 @@ def test_rebuilds_update_in_place_and_keep_the_selection(tmp_path: Path, script:
     same_card, same_row, still_selected, coder_text, labels, manager_gone = drive(go)
     assert same_card and same_row  # updated in place — the widgets were not re-created
     assert still_selected
-    assert coder_text.rstrip().endswith("⏸")  # …yet the new state is painted
+    # …yet the new state is painted, the highlighted row's ⋯ after it (R17)
+    assert coder_text.rstrip().removesuffix(MENU_GLYPH.strip()).rstrip().endswith("⏸")
     assert labels == ["coder-auth", "tester-1"]  # the newcomer mounted, in order
     assert manager_gone
 
@@ -5603,7 +5605,8 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
     assert any("✓ restarted manager (alpha) — resumed its session" in toast for toast in toasts), (
         toasts
     )
-    assert len(rows) == 1 and rows[0].rstrip().endswith("⏸")  # the old 💤 exited row is gone
+    assert len(rows) == 1  # the old 💤 exited row is gone; the new one highlighted, its ⋯ last
+    assert rows[0].rstrip().removesuffix(MENU_GLYPH.strip()).rstrip().endswith("⏸")
 
 
 def _replacement(old: FleetAgentStatus, agent_id: str) -> FleetAgentStatus:

@@ -172,6 +172,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after 1.5 s; it now has 10 s, and upgrading gives existing installs the same.
 - On Windows, quitting asq no longer waits behind asq's own timers, and neither does the work
   it runs in the background.
+- **Codex's new default model's usage is priced.** Codex 0.169.1 runs gpt-6.2-sol by default,
+  and its usage now has a cost, as does gpt-6.2-astra's and gpt-6.1-terra's. All three are
+  priced at OpenAI's list prices as of 2026-11-17.
 
 ## [0.10.0] - 2026-11-16
 

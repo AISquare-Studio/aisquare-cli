@@ -74,7 +74,7 @@ from aisquare.core.agent_adapters import adapters, get_adapter, stage_mark_of
 from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
-from aisquare.services import first_run, onboarding
+from aisquare.services import diagnostics, first_run, onboarding
 from aisquare.services.first_run import (
     Candidate,
     Candidates,
@@ -241,9 +241,8 @@ def step_two_name(claude: ClaudeState | None) -> str:
     return claude.label
 
 
-TMUX_INSTALL_PAGE = "https://github.com/tmux/tmux/wiki/Installing"
-"""tmux's own install page, which step 3 links where tmux is missing: asq names no command to
-type (R13, ruled Q1)."""
+TMUX_INSTALL_PAGE = diagnostics.TMUX_INSTALL_PAGE
+"""tmux's own install page, which step 3 links where tmux is missing (R13, ruled Q1)."""
 
 
 def _page(text: Text, agent: str, indent: str) -> None:

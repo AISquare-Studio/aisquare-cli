@@ -35,7 +35,7 @@ from typing import Literal, Protocol
 from pydantic import TypeAdapter, ValidationError
 
 from aisquare.core import program, selfcli
-from aisquare.core.agent_adapters import adapters
+from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.selfcli import CliResult
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
@@ -351,7 +351,7 @@ def run_doctor(
     """
     args = ["--json", "doctor"]
     if on_line is not None:
-        on_line(f"$ {_shown_command(args)}")
+        on_line(DOCTOR_STEP)
     result, asked = _invoke(run, args, cwd)
     if result is None:
         return [], asked
@@ -362,6 +362,14 @@ def run_doctor(
     if error is not None and result.returncode != 0 and not result.stdout.strip():
         error = failure_reason(result, "doctor")
     return checks, error
+
+
+INIT_STEP = "· setting up {path} as a project…"
+"""The onboard log's first step, as asq shows it: what it does, never the command it runs
+(R13, #146). The log is asq's alone (the Onboard view, Welcome's step 1)."""
+
+DOCTOR_STEP = "· running the checks…"
+"""The onboard log's checks step, as asq shows it."""
 
 
 def summary_line(checks: Iterable[DoctorCheck]) -> str:
@@ -396,7 +404,7 @@ def onboard(
         return OnboardOutcome(path=path, reason=reason, log=tuple(lines))
 
     init_args = ["--json", "init", *INIT_FLAGS, str(path)]
-    say(f"$ {_shown_command(init_args)}")
+    say(INIT_STEP.format(path=path))
     result, asked = _invoke(run, init_args, path)
     if result is None:
         return failed(asked or "init could not be run")
@@ -426,8 +434,8 @@ def onboard(
             if check.status is CheckStatus.ok:
                 continue
             say(f"  {_SYMBOL[check.status]} {check.name}: {check.detail}")
-            if check.fix:
-                say(f"      → {check.fix}")
+            if check.ui_fix:  # the shell's `fix` is the Doctor's below, as asq says it (R13)
+                say(f"      → {check.ui_fix}")
     return OnboardOutcome(
         path=path,
         project_id=project.id,
@@ -528,6 +536,31 @@ class FixCommand:
         """The command as the fix it came from prints it, quoted for this shell, with the word
         hints start with (``core.program.words``)."""
         return program.words(*self.argv)
+
+    @property
+    def title(self) -> str:
+        """What asq's button says: what the fix does, never its command line (R13, #146)."""
+        head = self.argv[:2]
+        if head == ("agents", "connect") and len(self.argv) > 2:
+            try:
+                agent = get_adapter(self.argv[2]).label
+            except ValueError:  # an agent no longer registered: its id
+                agent = self.argv[2]
+            # Which home, where it names one: two slots' Connects are two buttons. A path, not
+            # a command; the home folder as ``~``.
+            where = dict(zip(self.argv[3::2], self.argv[4::2], strict=False)).get("--config-dir")
+            if where is None:
+                return f"Connect {agent}"
+            home = str(Path.home())
+            shown = "~" + where[len(home) :] if where.startswith(home + os.sep) else where
+            return f"Connect {agent} ({shown})"
+        if head == ("project", "onboard"):
+            return "Refresh this project"
+        if head == ("doctor", "--fix"):
+            return "Fix what the checks can"
+        if self.sign_in_slot is not None:
+            return f"Sign in account {self.sign_in_slot}"
+        return self.label
 
     @property
     def sign_in_slot(self) -> int | None:
@@ -637,6 +670,13 @@ class FixResult:
         if self.ok:
             return f"✓ {self.fix.label}"
         return f"✗ {self.fix.label}: {self.reason}"
+
+    def said(self) -> str:
+        """:meth:`summary` as asq says it: the fix by its title, never its command (R13)."""
+        if self.ok:
+            return f"✓ {self.fix.title}"
+        reason = (self.reason or "").replace(self.fix.label, self.fix.title)
+        return f"✗ {self.fix.title}: {reason}"
 
 
 def apply_fix(fix: FixCommand, cwd: Path | None, *, run: Runner = selfcli.run) -> FixResult:

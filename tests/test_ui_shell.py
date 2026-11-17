@@ -894,20 +894,20 @@ def test_a_project_opened_between_two_ticks_names_its_session_at_once(
     tmp_path: Path, script: Script
 ) -> None:
     """Review of #267, 7: a new Project view waited for the next tick for its rows, and its
-    Settings tab said "no live tmux session" until then while the frame the app already
-    held named one. The view is handed that frame as it is built."""
+    Settings tab read no live agent until then while the frame the app already held had one.
+    The view is handed that frame as it is built: Pause agents… is armed at once. (The tab's
+    tmux attach line it once read is gone: asq names no command, R13.)"""
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
     manager = status("prj_a", "manager", "manager", "waiting")
     script["prj_a"] = [manager.model_copy(update={"tmux_session": "asq-amber-otter"})]
 
-    async def go(pilot: Pilot[None]) -> str:
+    async def go(pilot: Pilot[None]) -> bool:
         app = fleet_app(pilot)
         await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
         await settle(app)  # no tick: the app refreshes every hour here
-        return shown(app.query_one("#project-prj_a #attach-line", Static))
+        return app.query_one("#project-prj_a #pause-agents", Button).disabled
 
-    line = drive(go)
-    assert line == f"Attach in a terminal: tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter"
+    assert drive(go) is False, "the frame the app held arms Pause at once"
 
 
 def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(
@@ -1439,7 +1439,7 @@ def test_the_hubs_doctor_link_opens_the_doctor_page_and_runs_the_checks(
     assert before == "welcome"
     assert total == 2  # …and opening the page runs them again
     assert current == "doctor" and selected == "settings"  # a page of Settings'
-    assert "tmux not found" in report and "→ brew install tmux" in report
+    assert "tmux not found" in report and "brew install" not in report  # no command (R13)
     assert "Python 3.14" in report and "~/.aisquare is missing" in report
 
 
@@ -1532,8 +1532,8 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
         drive(go, doctor=lambda: list(checks))
     )
     refused = [
-        ("rlx project onboard --refresh", True),  # no project: correctly refused
-        ("rlx agents connect claude-code", False),
+        ("Refresh this project", True),  # no project: correctly refused
+        ("Connect Claude Code", False),
     ]
     assert global_cwd is None and global_buttons == refused
     assert selected_cwd is None and selected_buttons == refused, (
@@ -1541,8 +1541,8 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
     )
     assert page_cwd == projects[0].root
     assert page_buttons == [
-        ("rlx project onboard --refresh", False),  # run for the project: armed
-        ("rlx agents connect claude-code", False),
+        ("Refresh this project", False),  # run for the project: armed
+        ("Connect Claude Code", False),
     ]
     assert views == 1, "the project page has no Doctor tab of its own"
 

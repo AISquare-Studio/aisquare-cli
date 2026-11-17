@@ -407,12 +407,19 @@ def _ok(name: str, detail: str) -> DoctorCheck:
     return DoctorCheck(name=name, status=CheckStatus.ok, detail=detail)
 
 
-def _warn(name: str, detail: str, fix: str) -> DoctorCheck:
-    return DoctorCheck(name=name, status=CheckStatus.warn, detail=detail, fix=fix)
+def _warn(name: str, detail: str, fix: str, *, ui_fix: str | None = None) -> DoctorCheck:
+    """A warning; ``ui_fix`` is what asq's Doctor says in place of the shell's ``fix``, where
+    rlx itself has the way (R13)."""
+    return DoctorCheck(name=name, status=CheckStatus.warn, detail=detail, fix=fix, ui_fix=ui_fix)
 
 
-def _fail(name: str, detail: str, fix: str) -> DoctorCheck:
-    return DoctorCheck(name=name, status=CheckStatus.fail, detail=detail, fix=fix)
+def _fail(name: str, detail: str, fix: str, *, ui_fix: str | None = None) -> DoctorCheck:
+    return DoctorCheck(name=name, status=CheckStatus.fail, detail=detail, fix=fix, ui_fix=ui_fix)
+
+
+TMUX_INSTALL_PAGE = "https://github.com/tmux/tmux/wiki/Installing"
+"""tmux's own install page: what asq links where tmux is missing, never an install command to
+type (R13, ruled Q1). The shell's row keeps :func:`install_hint`."""
 
 
 def _check_python() -> DoctorCheck:
@@ -2114,6 +2121,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
             "fleet-manager",
             "the manager exited while agents are still running in: " + "; ".join(headless),
             f"Bring it back with its session: {'; '.join(restarts)} (or Restart on its row in rlx)",
+            ui_fix="Restart the manager on its sidebar row: it comes back with its session",
         )
     ]
 
@@ -2347,6 +2355,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
             f"Add or sign in another account ({prog.word()} accounts add), or wait for a reset "
             "— "
             "a fleet spawned now has nowhere to switch to",
+            ui_fix="Add or sign in another account on the Accounts page, or wait for a reset",
         )
     if not measured:
         return _warn(
@@ -2354,6 +2363,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
             f"no account's usage could be read: {summary}",
             f"Open a session on the account to refresh its token, then: {prog.word()} accounts "
             "usage",
+            ui_fix="Log in again on the Accounts page, then ↻ refreshes its usage",
         )
     return _ok(
         "claude-account-headroom",
@@ -2431,6 +2441,8 @@ def _agent_account_headroom_check(agent: str, *, live: bool = False) -> DoctorCh
             f"Add or sign in another account ({prog.word()} accounts add --agent {agent}), or "
             "wait "
             "for a reset — a fleet spawned now has nowhere to switch to",
+            ui_fix=f"Add or sign in another {label} account on the Accounts page, or wait for a "
+            "reset",
         )
     if not measured and network:
         return _warn(
@@ -2438,6 +2450,7 @@ def _agent_account_headroom_check(agent: str, *, live: bool = False) -> DoctorCh
             f"no {label} account's usage could be read: {summary}",
             f"Open a session on the account ({prog.word()} accounts run <slot>) to refresh its "
             f"login, then: {prog.word()} accounts usage",
+            ui_fix="Log in again on the Accounts page, then ↻ refreshes its usage",
         )
     if not measured:
         return _warn(
@@ -2511,6 +2524,7 @@ def _workspace_credits_check() -> DoctorCheck | None:
             "workspace-credits",
             f"could not read the balance of {names} — {summary}",
             "Sign in again (aisquare login) or check the API; the row reads once it answers",
+            ui_fix="Sign in again on the Accounts page; the row reads once the API answers",
         )
     return _ok("workspace-credits", summary)
 
@@ -2796,6 +2810,7 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
                 name,
                 "tmux not found — the fleet is unavailable; everything else works",
                 f"Install it: {install_hint('tmux')}",
+                ui_fix=f"Install tmux as {TMUX_INSTALL_PAGE} says, then re-run the checks",
             )
         version = server.version()
         minimum = f"{tmux_core.MIN_VERSION[0]}.{tmux_core.MIN_VERSION[1]}"
@@ -4548,6 +4563,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                 "coding-agent",
                 f"Selected agent executable {selected.binary.binary!r} is not on PATH",
                 selected.adapter.install_hint,
+                ui_fix=f"Install it as {selected.adapter.install_page} says",
             )
         )
     return checks

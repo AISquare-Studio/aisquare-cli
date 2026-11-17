@@ -162,7 +162,7 @@ from aisquare.cli.ui.views.accounts import (
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
 from aisquare.cli.ui.views.captain import CaptainView
-from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
+from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView, ask_text
 from aisquare.cli.ui.views.fleet_bulk import (
     BULK_WORKER,
     BulkAsked,
@@ -1364,7 +1364,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 # The Onboard view is built on the first `+` (on_add_project): its
                 # DirectoryTree scans the home directory and keeps a loader worker
                 # alive for its whole life — not a cost to pay at every start-up.
-                yield DoctorView(id="doctor", machine=True)
+                yield DoctorView(id="doctor", machine=True, manager=self._doctor_manager_name)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -4133,6 +4133,58 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         await self.action_quit()
         if self._exit:  # not when the quit was refused: a quit later is the person's own
             self.quit_asked_by = event.request
+
+    def _doctor_manager(self, cwd: Path | None) -> tuple[ProjectInfo, FleetAgent] | None:
+        """The manager *Ask the manager* asks (ruling Q2), from the frame on screen (no read):
+        the live manager of the project the report is about, else, for the machine's own
+        report, the first project's that has one."""
+        snapshot = self.snapshot
+        if snapshot is None:
+            return None
+        projects = list(snapshot.projects)
+        if cwd is not None:
+            projects = [p for p in projects if p.root == cwd]
+        for project in projects:
+            for status in snapshot.agents.get(project.id, []):
+                if _live_manager(status):
+                    return project, status.agent
+        return None
+
+    def _doctor_manager_name(self, cwd: Path | None) -> str | None:
+        found = self._doctor_manager(cwd)
+        if found is None:
+            return None
+        return f"{project_service.display_name(found[0])}'s manager"
+
+    def on_doctor_view_ask_manager(self, event: DoctorView.AskManager) -> None:
+        """Hand the row's fix to the manager (ruling Q2): typed into it when it waits, else a
+        board note to it, as ``fleet tell`` does; never asq's person at a command line."""
+        found = self._doctor_manager(event.cwd)
+        if found is None:
+            self.notify(
+                "no manager runs to ask — start one from a project's Manager tab",
+                severity="warning",
+                markup=False,
+            )
+            return
+        project, manager = found
+        check, text = event.check.name, ask_text(event.check)
+
+        def ask() -> None:
+            try:
+                fleet_service.tell(project, manager.label, text, agent_id=manager.id)
+            except Exception as exc:
+                self.call_from_thread(
+                    self.notify, f"{check}: the manager was not asked — {exc}",
+                    severity="error", markup=False,
+                )  # fmt: skip
+                return
+            name = project_service.display_name(project)
+            self.call_from_thread(
+                self.notify, f"asked {name}'s manager to fix {check}", markup=False
+            )
+
+        self.run_worker(ask, thread=True, name="doctor-ask-manager", exit_on_error=False)
 
     def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
         """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over.

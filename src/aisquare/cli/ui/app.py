@@ -55,7 +55,7 @@ from textual.notifications import Notification, Notify, SeverityLevel
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Footer, Static, TextArea
+from textual.widgets import Button, ContentSwitcher, Footer, Static, TextArea
 from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
@@ -137,6 +137,7 @@ from aisquare.cli.ui.terminal import (
     log_paste,
 )
 from aisquare.cli.ui.theme import (
+    FADE_RELABELLED,
     RLX_CSS,
     ThemePicker,
     register_themes,
@@ -952,11 +953,19 @@ class Panes(Horizontal):
         DataTable or a Tree paints from that cache, so without this they kept
         the fade after focus came back (review of #470, M2). That call is the
         one step of a restyle the children need, and it matches no CSS.
+
+        The primary and error buttons below are the exception, matched again: under
+        rlx their label is light on the faded side and dark on the other
+        (``RLX_CSS``, #139), a rule a restyle of ``side`` alone never reached, so the
+        light label stayed after focus came back (3.84:1 on the blue). A hidden
+        page's count too: it may be shown on the faded side. A side holds a handful
+        of them, not the sidebar's hundreds of rows.
         """
         if side.has_class("-unfocused") is faded:
             return
         side.set_class(faded, "-unfocused", update=False)
-        self.app.stylesheet.update_nodes([side])
+        relabelled = [b for b in side.query(Button) if b.variant in FADE_RELABELLED]
+        self.app.stylesheet.update_nodes([side, *relabelled])
         for widget in side.walk_children(Widget):
             widget.notify_style_update()
 

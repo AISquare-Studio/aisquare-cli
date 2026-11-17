@@ -130,6 +130,10 @@ App.-theme-rlx Panes > .-unfocused Button.-style-default {
 """The rules ``rlx`` needs beyond its colours. Both apps add them to their own CSS; they
 apply only while the theme is ``rlx`` (Textual puts ``-theme-rlx`` on the app)."""
 
+FADE_RELABELLED = frozenset({"primary", "error"})
+"""The button variants whose label :data:`RLX_CSS` changes on the faded side. The shell's fade
+matches the CSS again for these, and for nothing else below a side (``Panes._fade``)."""
+
 DEFAULT_THEME = RLX_THEME.name
 """The theme both apps start in while neither ``state.json`` nor ``TEXTUAL_THEME`` names one
 they can show (:func:`restore_theme`)."""

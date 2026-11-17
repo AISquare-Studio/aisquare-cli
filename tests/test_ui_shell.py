@@ -4730,12 +4730,19 @@ def test_a_focus_change_restyles_the_two_sides_and_nothing_under_them(
         sides = {app.sidebar, app.content, app.query_one(Divider)}
         return (
             {type(node).__name__ for node in restyled if node in sides},
-            [type(node).__name__ for node in restyled if node not in sides],
+            [
+                f"{type(node).__name__} {getattr(node, 'variant', '')}".strip()
+                for node in restyled
+                if node not in sides
+            ],
         )
 
     sides, below = drive(go)
     assert sides == {"Sidebar", "ContentSwitcher", "Divider"}, "each flip restyles the sides"
-    assert below == [], "and nothing under them"
+    # And under them only the primary and error buttons, whose label under rlx is light on
+    # the faded side (#139's RLX_CSS): a handful, where the rows are the fleet's size.
+    assert below, "Welcome's primary buttons are on the content side"
+    assert set(below) <= {"Button primary", "Button error"}, "and nothing else under them"
 
 
 def _painted(widget: Widget) -> list[tuple[str, str, str]]:

@@ -286,3 +286,46 @@ def test_rlx_changes_no_buttons_size_in_any_state(
     sizes = drive(body, size=(120, 60))
     changed = {key: by for key, by in sizes.items() if by["rlx"] != by["textual-dark"]}
     assert len(sizes) == 20 and not changed, changed
+
+
+def test_a_buttons_label_follows_the_fade_both_ways(tmp_path: Path, script: Script) -> None:
+    """The fade restyles its side alone (``Panes._fade``), so a rule keyed to it reached a
+    button only when something else restyled it: the light label stayed on the full blue fill
+    after focus came back, at 3.84:1 (the screenshot of f691592b1). Buttons put on screen with
+    the keyboard on their side, then the fade on, off and on again: each time they read."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def body(pilot: Pilot[None]) -> list[tuple[str, str, float, bool]]:
+        app = fleet_app(pilot)
+        buttons = [b for b in await _probe_buttons(pilot) if not b.disabled]
+        focus_on_content = buttons[0]
+        seen = []
+        for side in ("content", "faded", "content", "faded", "content"):
+            (focus_on_content if side == "content" else app.sidebar).focus()
+            await pilot.hover(app.query_one("#fleet-title"))
+            await settle(app)
+            assert app.content.has_class("-unfocused") is (side == "faded")
+            for button in buttons:
+                if str(button.variant) not in ("primary", "error"):
+                    continue
+                button.scroll_visible(animate=False)
+                await settle(app)
+                ratios = cells(app, button)
+                style = button.rich_style
+                light = (
+                    style.color is not None
+                    and style.color.triplet is not None
+                    and (sum(style.color.triplet) > 3 * 128)
+                )
+                seen.append((str(button.variant), side, min(r for _, r in ratios), light))
+        return seen
+
+    seen = drive(body, size=(120, 60))
+    assert len(seen) == 10, seen
+    for variant, side, ratio, light in seen:
+        assert light is (side == "faded"), (variant, side, "light" if light else "dark")
+        assert ratio >= FADED_FLOOR[variant] if side == "faded" else ratio >= TEXT, (
+            variant,
+            side,
+            f"{ratio:.2f}",
+        )

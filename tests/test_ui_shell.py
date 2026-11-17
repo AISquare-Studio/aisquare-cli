@@ -83,6 +83,7 @@ from aisquare.cli.ui.sidebar import (
     Disclosure,
     GroupHeader,
     ProjectCard,
+    ProjectSelected,
     ProjectTitle,
     SectionLabel,
     SettingsRow,
@@ -4718,6 +4719,8 @@ def test_a_focus_change_restyles_the_two_sides_and_nothing_under_them(
 
     async def go(pilot: Pilot[None]) -> tuple[set[str], list[str]]:
         app = fleet_app(pilot)
+        app.post_message(ProjectSelected("prj_a"))  # a highlighted row in the sidebar
+        await settle(app)
         pane = RecordingPane()
         await app.content.add_content(pane, set_current=True)
         await pilot.pause()
@@ -4728,21 +4731,25 @@ def test_a_focus_change_restyles_the_two_sides_and_nothing_under_them(
             target.focus()
             await pilot.pause()
         sides = {app.sidebar, app.content, app.query_one(Divider)}
+
+        def named(node: DOMNode) -> str:
+            if isinstance(node, Activatable) and node.has_class("selected"):
+                return "highlighted row"
+            return f"{type(node).__name__} {getattr(node, 'variant', '')}".strip()
+
         return (
             {type(node).__name__ for node in restyled if node in sides},
-            [
-                f"{type(node).__name__} {getattr(node, 'variant', '')}".strip()
-                for node in restyled
-                if node not in sides
-            ],
+            [named(node) for node in restyled if node not in sides],
         )
 
     sides, below = drive(go)
     assert sides == {"Sidebar", "ContentSwitcher", "Divider"}, "each flip restyles the sides"
     # And under them only the primary and error buttons, whose label under rlx is light on
-    # the faded side (#139's RLX_CSS): a handful, where the rows are the fleet's size.
+    # the faded side (#139's RLX_CSS), and the sidebar's highlighted row, a coloured bar while
+    # the sidebar holds the keyboard (R16): a handful, where the rows are the fleet's size.
     assert below, "Welcome's primary buttons are on the content side"
-    assert set(below) <= {"Button primary", "Button error"}, "and nothing else under them"
+    assert set(below) <= {"Button primary", "Button error", "highlighted row"}, "nothing else"
+    assert below.count("highlighted row") == 3, "the row, once a flip, as the keyboard moves"
 
 
 def _painted(widget: Widget) -> list[tuple[str, str, str]]:

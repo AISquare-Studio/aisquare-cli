@@ -77,9 +77,7 @@ GUARD_SECONDS = 0.6
 """How long a click where the last ``✕`` was is swallowed once the last toast has closed."""
 
 CUES = {"copied": "✓", "sent": "↗", "failed": "!"}
-
-GUARD_ID = "calm-toast-guard"
-MORE_ID = "calm-toast-more"
+"""What the dismiss column shows of a copy made from a toast's text, by its verdict."""
 
 HAND_OVER = 0.001
 """Textual's own toast timer (``Toast._on_mount``, which runs whatever a subclass does): it
@@ -89,7 +87,6 @@ sleeps nothing under 1.5 ms. Never a long one: on Windows a sleeping Textual tim
 thread of asyncio's default executor, the one Textual's thread workers run on (eight on a
 4-vCPU machine). Set to a year, every toast took one for good, and asq's workers starved:
 eight UI tests failed on windows-latest (#517, run 44026703595)."""
-"""What the dismiss column shows of a copy made from a toast's text, by its verdict."""
 
 CSS = f"""
 Screen > ToastRack {{
@@ -132,7 +129,6 @@ def _hooks_present() -> bool:
         (
             hasattr(App, "_refresh_notifications"),
             hasattr(App, "_unnotify"),
-            hasattr(ToastRack, "_toast_id"),
             hasattr(Toast, "_expire"),
             hasattr(Toast, "_on_mount"),
             {"raised_at", "timeout", "identity"} <= set(Notification.__dataclass_fields__),
@@ -184,19 +180,19 @@ def show_calm(rack: ToastRack, notifications: Notifications) -> None:
         del stopped[identity]  # dismissed or cleared meanwhile
     for notification in waiting:
         hold(app, notification)
-    ids = {ToastRack._toast_id(notification): notification for notification in shown}
+    showing = {notification.identity for notification in shown}
     present: dict[str, ToastHolder] = {}
     for holder in rack.query_children(ToastHolder):
-        if getattr(holder, "_calm_removed", False) or holder.id in (GUARD_ID, MORE_ID):
+        if getattr(holder, "_calm_removed", False):
             continue
-        # By the holder's id, which it has from the start: its toast may not be mounted yet
-        # when several arrive in one tick, and a second mount of it was a duplicate id.
-        found = ids.get(holder.id or "")
-        stock = any(type(toast) is Toast for toast in holder.query_children(Toast))
-        if found is None or stock:
+        if not isinstance(holder, CalmHolder):
+            _unmount_once(holder)  # a stock toast's
+        # By the identity the holder has from the start: its toast may not be mounted yet
+        # when several arrive in one tick, and a second holder for it showed it twice.
+        elif holder.identity in showing:
+            present[holder.identity] = holder
+        elif holder.identity:  # a toast no longer shown; the guard and +N more have none
             _unmount_once(holder)
-        else:
-            present[found.identity] = holder
     for notification in shown:
         waited = notification.identity not in present and notification.identity in stopped
         if waited and not _pointed_at(app, notification):
@@ -205,7 +201,7 @@ def show_calm(rack: ToastRack, notifications: Notifications) -> None:
     for index, notification in enumerate(shown):
         if notification.identity in present:
             continue
-        holder = ToastHolder(CalmToast(notification), id=ToastRack._toast_id(notification))
+        holder = CalmHolder(CalmToast(notification), notification.identity)
         after = [present[n.identity] for n in shown[index + 1 :] if n.identity in present]
         if after:
             rack.mount(holder, before=after[0])
@@ -218,11 +214,39 @@ def show_calm(rack: ToastRack, notifications: Notifications) -> None:
     rack.display = bool(live) or _guarded(rack)
 
 
+class CalmHolder(ToastHolder):
+    """A holder asq mounts in the rack: a toast's, the click guard's or ``+N more``'s. It has
+    no id, and is told apart by what it holds.
+
+    Textual frees a removed widget's id only once the removal is over, a few ticks after
+    ``remove()``, and a holder mounted with that id meanwhile raised ``DuplicateIds`` from a
+    timer or a click, asq down: the guard as the last toasts closed in the tick its own timer
+    took the last guard out (windows-py3.12, run 44041622532), a toast back from waiting in
+    the tick its old holder went, ``+N more`` back in the tick its old line went. With no id,
+    the holder that comes never meets the one still going. That there are never two of one
+    (guards, ``+N more`` lines, holders of one toast) is asq's own count of those staying
+    (:func:`_staying`): a mount is in the rack at once, so a second in the same tick finds
+    the first."""
+
+    def __init__(self, inner: Widget, identity: str = "") -> None:
+        super().__init__(inner)
+        self.inner = inner
+        """What it holds, mounted or not yet."""
+        self.identity = identity
+        """The notification its toast shows; none for the guard and ``+N more``."""
+
+
+def _staying(rack: ToastRack) -> list[CalmHolder]:
+    """asq's holders in ``rack`` that are not already going."""
+    return [
+        holder
+        for holder in rack.query_children(CalmHolder)
+        if not getattr(holder, "_calm_removed", False)
+    ]
+
+
 def _guarded(rack: ToastRack) -> bool:
-    return any(
-        holder.id == GUARD_ID and not getattr(holder, "_calm_removed", False)
-        for holder in rack.query_children(ToastHolder)
-    )
+    return any(isinstance(holder.inner, ClickGuard) for holder in _staying(rack))
 
 
 def _unmount_once(widget: Widget) -> None:
@@ -241,25 +265,19 @@ def _pointed_at(app: App[Any], notification: Notification) -> bool:
     )
 
 
-def _more_holder(rack: ToastRack) -> ToastHolder | None:
-    for holder in rack.query_children(ToastHolder):
-        if holder.id == MORE_ID and not getattr(holder, "_calm_removed", False):
-            return holder
-    return None
+def _more_holder(rack: ToastRack) -> CalmHolder | None:
+    return next((h for h in _staying(rack) if isinstance(h.inner, MoreToasts)), None)
 
 
-def _show_more(rack: ToastRack, holder: ToastHolder | None, waiting: int) -> None:
+def _show_more(rack: ToastRack, holder: CalmHolder | None, waiting: int) -> None:
     if not waiting:
         if holder is not None:
             _unmount_once(holder)
         return
     if holder is None:
-        more = MoreToasts(waiting)
-        holder = ToastHolder(more, id=MORE_ID)
-        holder._calm_more = more  # type: ignore[attr-defined]  # its own, mounted or not yet
-        rack.mount(holder)
-    else:
-        holder._calm_more.count = waiting  # type: ignore[attr-defined]
+        rack.mount(CalmHolder(MoreToasts(waiting)))
+    elif isinstance(holder.inner, MoreToasts):
+        holder.inner.count = waiting
 
 
 class CalmToast(Toast):
@@ -366,7 +384,7 @@ class CalmToast(Toast):
         app._unnotify(self._notification)
         _unmount_once(holder)
         if last and isinstance(rack, ToastRack) and not _guarded(rack):
-            guard = ToastHolder(ClickGuard(), id=GUARD_ID)
+            guard = CalmHolder(ClickGuard())
             rack.mount(guard)
             rack.display = True
             rack.set_timer(GUARD_SECONDS, lambda: _drop_guard(rack, guard))

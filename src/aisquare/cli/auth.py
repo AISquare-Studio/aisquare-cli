@@ -125,7 +125,9 @@ def login(
         grant = iam.start_device_authorization(endpoints)
         _show_verification(grant, no_browser=no_browser)
         token = _wait_for_approval(endpoints, grant)
-        session = auth_service.complete_sign_in(resolved, endpoints, token)
+        session = auth_service.complete_sign_in(
+            resolved, endpoints, token, client_id=grant.client_id
+        )
     except iam.IamError as exc:
         _fail(exc)
     except KeyboardInterrupt:
@@ -194,7 +196,7 @@ def _wait_for_approval(
                     error="expired",
                 )
             try:
-                outcome = iam.poll_token(endpoints, grant.device_code)
+                outcome = iam.poll_token(endpoints, grant)
             except iam.IamError as exc:
                 if exc.code != "unreachable":
                     raise

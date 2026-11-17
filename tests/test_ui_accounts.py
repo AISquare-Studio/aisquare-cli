@@ -501,10 +501,11 @@ def test_grant_text_puts_the_code_first_and_says_what_the_browser_did() -> None:
     grant = iam.DeviceAuthorization(
         device_code="d",
         user_code="WDJB-MJHT",
-        verification_uri="https://home.aisquare.studio/cli",
-        verification_uri_complete="https://home.aisquare.studio/cli?code=WDJB-MJHT",
+        verification_uri="https://home.aisquare.studio/rlx",
+        verification_uri_complete="https://home.aisquare.studio/rlx?code=WDJB-MJHT",
         expires_in=900,
         interval=5,
+        client_id=iam.CLIENT_ID,
     )
     opened = grant_text(grant, opened=True).plain
     assert opened.index("WDJB-MJHT") < opened.index("https://")
@@ -1358,6 +1359,9 @@ def _script_device_flow(
         verification_uri_complete="https://home.aisquare.studio/cli?code=WDJB-MJHT",
         expires_in=900,
         interval=5,
+        # A server that does not know rlx yet: the grant is aisquare-cli's, and so is the
+        # session it ends in.
+        client_id=iam.FALLBACK_CLIENT_ID,
     )
     monkeypatch.setattr(iam, "resolve_api_url", lambda explicit=None: "https://api.aisquare.studio")
     monkeypatch.setattr(iam, "discover", lambda api_url, refresh=False: endpoints)
@@ -1372,9 +1376,10 @@ def _script_device_flow(
     monkeypatch.setattr(device_flow, "wait_for_token", wait)
 
     def commit(
-        api_url: str, e: iam.Endpoints, token: dict[str, Any], *, cancelled: Any
+        api_url: str, e: iam.Endpoints, token: dict[str, Any], *, client_id: str, cancelled: Any
     ) -> iam.Session:
         seen.append(f"complete:{token['access_token']}")
+        script["client_id"] = client_id
         session = dataclasses.replace(_session("new@aisquare.studio"), unrestricted=unrestricted)
         script["session"] = session
         return session
@@ -1407,6 +1412,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
 
     status, said, code_shown, signed_in = drive(go)
     assert seen == ["wait:WDJB-MJHT", "complete:aisq_new"]
+    assert no_network["client_id"] == "aisquare-cli", "stored as the client that started it"
     # The browser helper decides (an explicit BROWSER beats the headless heuristics),
     # so it is asked even where is_headless() says no.
     assert no_network["opened"] == ["https://home.aisquare.studio/cli?code=WDJB-MJHT"]
@@ -1607,6 +1613,7 @@ def test_a_sign_out_whose_rewrite_could_not_be_restricted_says_so_on_the_page(
         expires_in=3600,
         scope="",
         claims={"email": "me@aisquare.studio", "sub": "usr_1"},
+        client_id=iam.CLIENT_ID,
     )
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: iam.stored_session())
 

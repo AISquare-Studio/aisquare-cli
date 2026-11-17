@@ -15,9 +15,13 @@ from aisquare.services import iam
 
 
 def complete_sign_in(
-    api_url: str, endpoints: iam.Endpoints, token_response: dict[str, Any]
+    api_url: str, endpoints: iam.Endpoints, token_response: dict[str, Any], *, client_id: str
 ) -> iam.Session:
-    """Identify the user, store the session, and retire the previous token for this host."""
+    """Identify the user, store the session, and retire the previous token for this host.
+
+    ``client_id`` is the client that started the grant (``DeviceAuthorization.client_id``):
+    the token is that client's, so the session is stored as that client's.
+    """
     access_token = str(token_response["access_token"])
     expires_in = token_response.get("expires_in")
     scope = str(token_response.get("scope") or iam.SCOPE)
@@ -29,6 +33,7 @@ def complete_sign_in(
         expires_in=int(expires_in) if expires_in else None,
         scope=scope,
         claims=claims,
+        client_id=client_id,
     )
     _retire(previous, api_url, endpoints, access_token)
     return session
@@ -43,12 +48,14 @@ def _retire(
     server's revocation endpoint would hand that server a live bearer for the
     first one, so a sign-in to a different host leaves the old token alone (it
     expires on its own). Best effort: a failed revoke is not a failed sign-in.
+    It is revoked as its own client, which need not be the new session's: an
+    rlx sign-in retires a session ``aisquare-cli`` started.
     """
     if previous is None or previous.token == new_token:
         return
     if previous.api_url.rstrip("/") != api_url.rstrip("/"):
         return
-    iam.revoke(endpoints, previous.token)
+    iam.revoke(endpoints, previous)
 
 
 def sign_in_with_token(api_url: str, token: str) -> iam.Session:
@@ -69,8 +76,15 @@ def sign_in_with_token(api_url: str, token: str) -> iam.Session:
             ) from exc
         raise
     previous = iam.stored_session()
+    # Which client the token was issued to is not known here, and userinfo does not
+    # say; it is stored as aisquare-cli's, as every pasted token was before 0.10.1.
     session = iam.store_session(
-        api_url=api_url, token=token, expires_in=None, scope="", claims=claims
+        api_url=api_url,
+        token=token,
+        expires_in=None,
+        scope="",
+        claims=claims,
+        client_id=iam.FALLBACK_CLIENT_ID,
     )
     _retire(previous, api_url, endpoints, token)
     return session
@@ -91,11 +105,11 @@ class SignedOut(NamedTuple):
 
 
 def sign_out(session: iam.Session) -> SignedOut:
-    """Revoke on the server when it can be reached, then forget locally."""
+    """Revoke on the server (as the session's own client) when it can be reached, then forget."""
     revoked = False
     try:
         endpoints = iam.discover(session.api_url)
-        revoked = iam.revoke(endpoints, session.token)
+        revoked = iam.revoke(endpoints, session)
     except iam.IamError:
         revoked = False
     return SignedOut(revoked=revoked, restricted=iam.clear_session())

@@ -44,6 +44,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Signing in to AISquare uses rlx's own page once the server offers it;** until then, the
+  existing page.
 - **A manager waiting on you is not woken by noise.** Watch's lines about its own results
   and questions, its ping for an agent idle by design, and a review that repeats a note it
   read no longer wake it. `rlx team standby` (or its question to you, with nothing in

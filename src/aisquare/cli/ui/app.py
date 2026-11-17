@@ -171,7 +171,7 @@ from aisquare.cli.ui.views.accounts import (
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
 from aisquare.cli.ui.views.captain import CaptainView
-from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView, ask_text
+from aisquare.cli.ui.views.doctor import ASK_WORKER, DoctorRefreshed, DoctorView, ask_text
 from aisquare.cli.ui.views.fleet_bulk import (
     BULK_WORKER,
     BulkAsked,
@@ -4211,7 +4211,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 self.notify, f"asked {name}'s manager to fix {check}", markup=False
             )
 
-        self.run_worker(ask, thread=True, name="doctor-ask-manager", exit_on_error=False)
+        self.run_worker(ask, thread=True, name=ASK_WORKER, exit_on_error=False)
 
     def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
         """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over.
@@ -4408,6 +4408,7 @@ def _writing_workers() -> dict[str, str]:
 
     return {
         doctor.FIX_WORKER: "a fix",
+        doctor.ASK_WORKER: "a question to the manager",
         onboard.ONBOARD_WORKER: "a folder's setup",
         welcome.worker_name("onboard"): "a folder's setup",
         welcome.worker_name("connect"): "Connect",

@@ -144,9 +144,10 @@ def test_with_no_captain_the_section_says_how_to_start_one(tmp_path: Path, scrip
         section = app.query_one("#captain-section")
         assert not section.query(AgentRow)
         start = app.query_one("#captain-empty")
-        # A Start captain line now (#33), and the command it stands for under the pointer.
+        # A Start captain line now (#33); under the pointer, what a click does, never the
+        # command it stands for (R13).
         assert shown(start) == "▶  Start captain"  # type: ignore[arg-type]
-        assert "rlx captain" in str(start.tooltip)
+        assert str(start.tooltip) == "No captain running — click to start one"
 
     drive(body)
 

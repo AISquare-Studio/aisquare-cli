@@ -334,12 +334,7 @@ def test_claude_codes_doctor_row_and_sign_in_button_for_a_slot_with_no_login_are
         )
     ]
     assert _doctor_buttons(checks) == (
-        [
-            (
-                "Sign in account 3",
-                f"{hint}\nOpens the Accounts page with rlx accounts run 3 in its pane.",
-            )
-        ],
+        [("Sign in account 3", "Opens the Accounts page to sign in to account 3.")],
         [3],
     )
 
@@ -653,8 +648,7 @@ def test_the_doctors_sign_in_for_a_codex_slot_stays_one_click_that_opens_its_log
         [
             (
                 f"Sign in account {account.slot}",
-                f"{hint}\nOpens the Accounts page with rlx accounts run "
-                f"{account.slot} in its pane.",
+                f"Opens the Accounts page to sign in to account {account.slot}.",
             )
         ],
         [account.slot],

@@ -45,6 +45,8 @@ _SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "�
 _STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
 FIX_WORKER = "doctor-fix"
 """The worker a one-click fix runs in (and the doctor after it): it writes."""
+ASK_WORKER = "doctor-ask-manager"
+"""The worker *Ask the manager* hands a row to the manager in (``fleet.tell``): it writes."""
 ROUTE_WORKER = "doctor-update-route"
 """The worker the machine Doctor reads how rlx was installed in, for Update."""
 

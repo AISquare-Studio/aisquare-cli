@@ -40,8 +40,8 @@ Running it again is a no-op. For Codex too, end the line with `| sh -s -- --agen
 `| sh` (`| sh -s -- --agent codex` for Codex alone). To read it first, it is
 `install.sh` at the root of this repository.
 
-That installs the latest release. To pin one, run the `install.sh` attached to it on
-[Releases](https://github.com/AISquare-Studio/rlx/releases): `curl -fsSL https://github.com/AISquare-Studio/rlx/releases/download/vX.Y.Z/install.sh | sh`.
+That installs the latest release. To pin a release, run the `install.sh` attached to it
+on [Releases](https://github.com/AISquare-Studio/rlx/releases) (recent releases carry one): `curl -fsSL https://github.com/AISquare-Studio/rlx/releases/download/vX.Y.Z/install.sh | sh`.
 
 On Windows, run `irm https://aisquare.studio/rlx/install.ps1 | iex`
 in PowerShell: it runs that installer inside your WSL2 distribution, or prints the

@@ -36,8 +36,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rlx --help` say what rlx is in the page's words: "rlx is a manager for your AI coding
   agents. Tell it the goal: it runs Claude Code and Codex on accounts with room. Then
   relax." Five of the seven pages it links say rlx too: the Codex plugin's page,
-  CONTRIBUTING, SECURITY, and the pages on running more than one rlx and on usage sharing. The package is still `aisquare-cli` on
-  PyPI, and its keywords there name rlx.
+  CONTRIBUTING, SECURITY, and the pages on running more than one rlx and on usage
+  sharing. The package is still `aisquare-cli` on PyPI, and its keywords there name rlx.
 - The AISquare sign-in keeps its name: `aisquare login`, `logout` and `whoami`, `aisquare
   init --api-key` and `aisquare explainability` are AISquare's, and every page writes them so.
 - **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count

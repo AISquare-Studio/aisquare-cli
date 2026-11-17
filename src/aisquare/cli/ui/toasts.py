@@ -81,9 +81,14 @@ CUES = {"copied": "✓", "sent": "↗", "failed": "!"}
 GUARD_ID = "calm-toast-guard"
 MORE_ID = "calm-toast-more"
 
-_NEVER = 365 * 24 * 3600.0
-"""Textual's own toast timer, set to never: the notification keeps the time
-(:meth:`CalmToast._arm`)."""
+HAND_OVER = 0.001
+"""Textual's own toast timer (``Toast._on_mount``, which runs whatever a subclass does): it
+fires at once and hands the time to :meth:`CalmToast._expire`, which arms the toast's own
+(:meth:`CalmToast._arm`). Not 0, which Textual's timer divides by; Textual's Windows sleep
+sleeps nothing under 1.5 ms. Never a long one: on Windows a sleeping Textual timer holds a
+thread of asyncio's default executor, the one Textual's thread workers run on (eight on a
+4-vCPU machine). Set to a year, every toast took one for good, and asq's workers starved:
+eight UI tests failed on windows-latest (#517, run 44026703595)."""
 """What the dismiss column shows of a copy made from a toast's text, by its verdict."""
 
 CSS = f"""
@@ -291,7 +296,9 @@ class CalmToast(Toast):
 
     def __init__(self, notification: Notification) -> None:
         super().__init__(notification)
-        self._timeout = _NEVER  # Textual's own timer; the notification keeps the time
+        self._timeout = (
+            HAND_OVER  # Textual's own timer, gone at once: the notification keeps the time
+        )
         self._timer: Timer | None = None
         self._cue: str | None = None
         """The verdict of a copy just made from the text, shown in the dismiss column."""
@@ -312,9 +319,6 @@ class CalmToast(Toast):
         return not self._calm_closing and self.parent is not None and super().allow_select
 
     # --- time -------------------------------------------------------------------------
-
-    def on_mount(self) -> None:
-        self._arm()
 
     def _arm(self) -> None:
         """One timer, for the time the notification has left; none while it is stopped."""

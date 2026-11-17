@@ -22,6 +22,7 @@ import socket
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -144,6 +145,7 @@ def drive(
             server=remote_server, tunnel_factory=tunnel, url_timeout=2, port=free_port()
         )
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
+        RAISED[app] = toast_log.record(app)
         async with app.run_test(size=size, notifications=True) as pilot:
             await started(app)
             result = await fn(pilot)
@@ -206,6 +208,29 @@ def shown(widget: Static) -> str:
 def toasts(app: FleetApp) -> list[str]:
     """The notifications the app still shows."""
     return [note.message for note in app._notifications]
+
+
+RAISED: weakref.WeakKeyDictionary[FleetApp, list[str]] = weakref.WeakKeyDictionary()
+"""Every toast each app ``drive`` ran raised, from before it started (``toast_log``)."""
+
+
+def raised(app: FleetApp) -> list[str]:
+    """What ``app`` said, as it was said: a toast raised at start, or from a thread, can be
+    gone by its time, or wait under "+N more", before a test reads the screen (windows-latest,
+    #517)."""
+    return RAISED[app]
+
+
+async def said(pilot: Pilot[None], line: str) -> bool:
+    """Whether ``line`` was toasted, waited for a bounded time: news a thread posted reaches
+    the app as a message, handled when the loop gets to it."""
+    app = pilot.app
+    assert isinstance(app, FleetApp)
+    for _ in range(250):
+        if any(told.startswith(line) for told in raised(app)):
+            return True
+        await pilot.pause(0.02)
+    return False
 
 
 def panel(pilot: Pilot[None]) -> RemotePanel:
@@ -784,10 +809,7 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         await written(pilot)
         # Back read-only, and said so: writes come back on only when switched on again
         # (review of #259, remote focus, 11/12).
-        assert any(
-            line.startswith("Remote is back on from the last session — writes turned off")
-            for line in toasts(app)
-        )
+        assert await said(pilot, "Remote is back on from the last session — writes turned off")
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-on", Switch).value is True
         assert modal.query_one("#remote-allow-write", Switch).value is False
@@ -1700,6 +1722,7 @@ def drive_controller(
 
     async def run() -> tuple[T, float]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
+        RAISED[app] = toast_log.record(app)
         async with app.run_test(size=SIZE, notifications=True) as pilot:
             await started(app)
             result = await fn(pilot)
@@ -1892,10 +1915,9 @@ def test_a_tunnel_that_does_not_come_up_after_a_restore_is_toasted_from_its_thre
         await written(pilot)
         assert app.remote.running and app.remote._waiter is not None
         app.remote._waiter.join(5)
-        await pilot.pause()
-        assert (
-            "Remote is on, but phones cannot reach it — ngrok did not announce a tunnel in time"
-            in toasts(app)
+        assert await said(
+            pilot,
+            "Remote is on, but phones cannot reach it — ngrok did not announce a tunnel in time",
         )
 
     drive_controller(go, controller)
@@ -1964,3 +1986,25 @@ def test_auto_off_is_toasted_unless_the_panel_says_it() -> None:
         assert shown(modal.query_one("#remote-status", Static)) == ran_out
 
     drive_controller(go, controller)
+
+
+def test_news_that_arrives_once_asq_s_screens_are_gone_is_dropped_not_raised() -> None:
+    """Remote's threads post news as asq quits (its auto-off, a write landing): handled once
+    the screens were gone, reading the screen raised ``ScreenStackError`` out of asq's exit
+    (windows-latest, #517: two of the eight failures)."""
+
+    async def run() -> FleetApp:
+        controller = RemoteController(
+            server=remote_server, tunnel_factory=missing_ngrok, url_timeout=2, port=free_port()
+        )
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
+        async with app.run_test(size=SIZE, notifications=True) as pilot:
+            await started(app)
+            await pilot.pause()
+        assert controller.wait_until_off(10)
+        return app
+
+    app = asyncio.run(run())
+    assert not app._screen_stack, "asq's screens are gone"
+    app.on_remote_news(app_mod.RemoteNews("Remote is off", False))
+    app.on_remote_news(app_mod.RemoteNews("revoked", False, done=True))

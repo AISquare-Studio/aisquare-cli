@@ -907,9 +907,14 @@ def test_real_claude_code_asks_about_an_added_folder_no_trust_covers_and_the_fle
     2.1.326 Claude Code asks at its start whether to trust it, over a highlighted "No, exit",
     and fires no hook there: the fleet reads the row ``attention``, its detail naming that
     folder for ``accounts trust``; its screen reader reads a ``trust`` prompt no key answers;
-    a ``tell`` is not typed into it. The human says yes, and the first message, on its command
-    line, runs once, with the folder. 2.1.318 took the folder without asking."""
-    extra = native.outside / "extra-dir"
+    a ``tell`` is not typed into it. So in each of the question's layouts: a fleet window's,
+    asq's agent pane on an 80x24 terminal (about 50x22, which draws it with no blank row
+    and wraps the folder, its name with spaces), and a pane too short for it (50x8, which
+    cuts it off and names the folder under its key hint). Each named no folder, or the
+    question not at all, on the first fix (review of #520). The human says yes, and the first
+    message, on its command line, runs once, with the folder. 2.1.318 took the folder without
+    asking."""
+    extra = native.outside / "extra dir with spaces"
     extra.mkdir()
     config = load_config()
     config.fleet.roles["coder"].agent_args = {AGENT: ["--add-dir", str(extra)]}
@@ -931,20 +936,29 @@ def test_real_claude_code_asks_about_an_added_folder_no_trust_covers_and_the_fle
         time.sleep(3)  # well past the agent's start
         assert native.sessions() == [], "no hook fires at the question"
         assert native.stub.turns == [], "nothing reached the model"
-        rows = native.rows(pane)
         reader = screen_of(get_adapter(AGENT))
         assert reader.screen_prompt is not None and reader.modal_on_screen is not None
-        shown = reader.screen_prompt(rows)
-        assert shown is not None and shown.shape == "trust", native.screen(pane)
-        assert (shown.yes_key, shown.no_key) == (None, None), "the owner's to answer"
-        assert reader.modal_on_screen(rows) == "the trust dialog"
-        native.until(lambda: fleet.status_of(row).state == "attention", 20, "attention", pane)
-        detail = fleet.status_of(row).detail
-        assert detail == fleet.trust_prompt_detail(extra), detail
-        told = fleet.tell(native.project, row.label, "not into the question")
-        assert told.typed == "no", told
-        facts = native.srv.pane_facts(pane)
-        assert facts is not None and not facts.dead, "the agent is still there"
+        size = native.srv.run(
+            "display-message", "-p", "-t", pane, "#{window_width} #{window_height}"
+        )
+        for columns, lines in (size.split(), ("50", "22"), ("50", "8")):
+            native.srv.run("resize-window", "-t", pane, "-x", columns, "-y", lines)
+            time.sleep(2)  # its redraw at the new size
+            rows = native.rows(pane)
+            at = f"{columns}x{lines}:\n{native.screen(pane)}"
+            shown = reader.screen_prompt(rows)
+            assert shown is not None and shown.shape == "trust", at
+            assert (shown.yes_key, shown.no_key) == (None, None), "the owner's to answer"
+            assert reader.modal_on_screen(rows) == "the trust dialog", at
+            native.until(lambda: fleet.status_of(row).state == "attention", 20, at, pane)
+            detail = fleet.status_of(row).detail
+            assert detail == fleet.trust_prompt_detail(extra), f"{detail}\n{at}"
+            told = fleet.tell(native.project, row.label, "not into the question")
+            assert told.typed == "no", told
+            facts = native.srv.pane_facts(pane)
+            assert facts is not None and not facts.dead, "the agent is still there"
+        native.srv.run("resize-window", "-t", pane, "-x", size.split()[0], "-y", size.split()[1])
+        time.sleep(2)  # its options both drawn again
         native.srv.send_keys(pane, "Down")
         time.sleep(0.3)
         native.srv.send_keys(pane, "Enter")  # Yes, add it

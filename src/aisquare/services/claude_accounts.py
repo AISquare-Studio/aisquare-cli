@@ -102,7 +102,6 @@ from aisquare.models import (
     session_and_week,
 )
 from aisquare.services import agents as agents_service
-from aisquare.services import install_route
 from aisquare.services import settings as settings_service
 from aisquare.statusline import FLEET_FILE as STATUSLINE_FLEET_FILE
 
@@ -5709,12 +5708,14 @@ def _share_trust_into(
 
 
 def trust_command(folder: Path | None) -> str:
-    """``aisquare accounts trust <folder>``, quoted for this shell (``install_route.command_line``):
-    ``shlex.quote`` wrapped a Windows path in single quotes, which cmd.exe passes on as part
-    of the path (review of #259, round 20). ``<dir>`` for a folder not known."""
+    """``rlx accounts trust <folder>``, its first word the program's and quoted for this shell
+    (``core.program.words``): ``shlex.quote`` wrapped a Windows path in single quotes, which
+    cmd.exe passes on as part of the path (review of #259, round 20). ``<dir>`` for a folder
+    not known. The word was a literal ``aisquare`` with a folder, so one row read
+    ``aisquare`` or ``rlx`` by whether its folder was found (R19)."""
     if folder is None:
         return f"{prog.word()} accounts trust <dir>"
-    return install_route.command_line(["aisquare", "accounts", "trust", str(folder)])
+    return prog.words("accounts", "trust", str(folder))
 
 
 def _trust_not_shared(target: ClaudeAccount, scope: sharing.TrustScope, exc: Exception) -> str:

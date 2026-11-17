@@ -9782,17 +9782,25 @@ def _at_a_start_dialog(pane: PlacedPane, adapter: AgentAdapter | None) -> bool:
     ``Enter to confirm · Esc to cancel``). Not the phrase anywhere on the screen: the agent's
     own output shows it as soon as it opens a file or a conversation that does — this
     repository's tests and docs, a ``--continue`` — and every ``tell`` became a note, a
-    spawn's prompt held back (review r5 of #113, finding 8). A screen tmux will not give
+    spawn's prompt held back (review r5 of #113, finding 8). Or its own reader's ``trust``
+    prompt (``AgentScreen.screen_prompt``), whose last line may be another: Claude Code
+    2.1.326, on a pane too short for its question about an ``--add-dir`` folder, cuts the
+    question off and names the folder under the mark (R19), where the start waited out
+    :data:`START_TIMEOUT` and its note did not say how past it. A screen tmux will not give
     shows none; never raises."""
-    mark = screen_of(adapter).start_dialog_mark if adapter is not None else None
-    if not mark:
+    reader = screen_of(adapter) if adapter is not None else None
+    mark = reader.start_dialog_mark if reader is not None else None
+    if reader is None or not mark:
         return False
     try:
         screen = pane.screen()
     except TmuxError:
         return False
     last = next((row.strip() for row in reversed(screen) if row.strip()), "")
-    return last.startswith(mark)
+    if last.startswith(mark):
+        return True
+    asked = reader.screen_prompt(screen) if reader.screen_prompt is not None else None
+    return asked is not None and asked.shape == "trust"
 
 
 def _ready_on_its_screen(pane: PlacedPane, adapter: AgentAdapter) -> bool:

@@ -48,6 +48,7 @@ from textual import events, on
 from textual.app import ComposeResult, RenderResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.geometry import Region
 from textual.message import Message
@@ -66,8 +67,10 @@ from aisquare.cli.ui.groups import (
 )
 from aisquare.cli.ui.instances_chip import InstancesChip
 from aisquare.cli.ui.terminal import InPlaceField
+from aisquare.cli.ui.theme import MARK_STYLE, MarkStatic
 from aisquare.cli.ui.views.accounts import agent_mark
 from aisquare.core import codenames
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import default_binary, recorded_adapter
 from aisquare.core.version import PRODUCT_NAME
 from aisquare.models import (
@@ -1797,7 +1800,7 @@ class StartCaptain(ActionRow):
     def __init__(self) -> None:
         super().__init__(action_text("▶", "Start captain"), id="captain-empty")
         self.selection_key = START_CAPTAIN_KEY
-        self.tooltip = "No captain running — start one (aisquare captain)"
+        self.tooltip = f"No captain running — start one ({prog.word()} captain)"
 
     def message(self) -> Message:
         return CaptainRequested()
@@ -1976,14 +1979,19 @@ class OthersSection(Vertical):
 # --- the pane ---------------------------------------------------------------------
 
 
-def fleet_title(live_total: int) -> Text:
+def fleet_title(live_total: int, *, dim: str | None = None) -> Content:
     """The header: the product's name, ``rlx`` (:data:`PRODUCT_NAME`, ``Fleet`` before #133),
     then ``· N live`` while any agent is live across the fleet — every project's, the captain
-    excluded: ``aisquare fleet capacity``'s ``live_total``."""
-    title = Text(PRODUCT_NAME)
-    if live_total > 0:
-        title.append(f" · {live_total} live", style="not bold")
-    return title
+    excluded: ``aisquare fleet capacity``'s ``live_total``.
+
+    The name is the product mark, drawn in the theme's mark colour (``MARK_STYLE``, #2F74F0
+    under ``rlx``) on either side: a ``Content`` span, whose variable is read as it is drawn,
+    so ``t`` repaints it. The count keeps the header's text colour, or ``dim``, that colour as
+    the fade draws it, while the sidebar is faded (``theme.MarkStatic``)."""
+    if live_total <= 0:
+        return Content.styled(PRODUCT_NAME, MARK_STYLE)
+    count = "not bold" if dim is None else f"not bold {dim}"
+    return Content.assemble((PRODUCT_NAME, MARK_STYLE), (f" · {live_total} live", count))
 
 
 def fleet_title_tooltip(live_total: int) -> str | None:
@@ -1991,7 +1999,7 @@ def fleet_title_tooltip(live_total: int) -> str | None:
         return None
     return (
         f"{live_total} agent{'' if live_total == 1 else 's'} live across every project, "
-        "the captain excluded — aisquare fleet capacity"
+        f"the captain excluded — {prog.word()} fleet capacity"
     )
 
 
@@ -2117,7 +2125,7 @@ class Sidebar(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
-            yield Static(fleet_title(self.live_total), id="fleet-title")
+            yield MarkStatic(lambda dim: fleet_title(self.live_total, dim=dim), id="fleet-title")
             yield AddButton()
             yield ActiveOnlyButton()
         yield ActionsSection(captain=self.captain, id="actions")
@@ -2357,8 +2365,8 @@ class Sidebar(Vertical):
         if live_total == self.live_total:
             return
         self.live_total = live_total
-        title = self.query_one("#fleet-title", Static)
-        title.update(fleet_title(live_total))
+        title = self.query_one("#fleet-title", MarkStatic)
+        title.rebuild()  # from `self.live_total`, on the side's fade as it stands
         title.tooltip = fleet_title_tooltip(live_total)
 
     def show_paths(self, always: bool) -> None:

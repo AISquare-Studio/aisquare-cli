@@ -904,7 +904,7 @@ def action_unseen_why(snap: AgentNow, label: str | None = None) -> str:
     if snap.screen_unread:
         return f"{whose} screen cannot be read"
     if status is not None and status.agent.session_id is None:
-        return f"{who} runs without aisquare's hooks"
+        return f"{who} runs without rlx's hooks"
     if status is not None and status.session is None:
         return f"{whose} board session cannot be read"
     return f"{whose} transcript cannot be read"
@@ -1289,9 +1289,7 @@ def action_tell_auto(
             # The board reaches an agent through its hooks: `no hooks`, and the note waits unread.
             # Interrupt & tell refuses a dialog as this does, so it types once that is answered.
             then = "once its prompt is answered, " if dialog else ""
-            filed += (
-                f", which it is not shown without aisquare's hooks: {then}Interrupt & tell types it"
-            )
+            filed += f", which it is not shown without rlx's hooks: {then}Interrupt & tell types it"
         return fleet_service.TellResult("no", f"{why} — {filed}")
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
         return action_pinned_call(

@@ -39,6 +39,7 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.click_guard import GuardedButton
+from aisquare.core import program as prog
 from aisquare.models import SharingStatus, ShipReport
 from aisquare.services import usage_share
 
@@ -65,18 +66,22 @@ ABOUT_SAMPLE = (
     "would be sent. Nothing is sent while sharing is off, and once it is on only days from then "
     "on are sent. Repositories are salted hashes."
 )
-CONSENT_TEXT = (
-    "Share anonymous usage with AISquare?\n\n"
-    "It tells us how aisquare is used, so we can make it better: daily counts of tokens, "
-    "sessions, turns and agents, which commands and pages get used, and a salted hash and a few "
-    "coarse traits per repository (its host, main language, size).\n\n"
-    f"{usage_share.COVERAGE}\n\n"
-    "We never collect repository names, paths or remotes, prompts, file names, emails, account "
-    "aliases or command arguments. If you are signed in to AISquare, it is linked to your "
-    "account; if not, it is anonymous. Only days from the moment you say yes are sent, nothing "
-    "from before. Turn it off at any time: Settings ▸ Usage & stats, or "
-    "`aisquare metrics share off`."
-)
+
+
+def consent_text() -> str:
+    return (
+        "Share anonymous usage with AISquare?\n\n"
+        "It tells us how rlx is used, so we can make it better: daily counts of tokens, "
+        "sessions, turns and agents, which commands and pages get used, and a salted hash and a "
+        "few "
+        "coarse traits per repository (its host, main language, size).\n\n"
+        f"{usage_share.COVERAGE}\n\n"
+        "We never collect repository names, paths or remotes, prompts, file names, emails, account "
+        "aliases or command arguments. If you are signed in to AISquare, it is linked to your "
+        "account; if not, it is anonymous. Only days from the moment you say yes are sent, nothing "
+        "from before. Turn it off at any time: Settings ▸ Usage & stats, or "
+        f"`{prog.word()} metrics share off`."
+    )
 
 
 def _answer_the_sharing_question(yes: bool) -> ShipReport | None:
@@ -328,8 +333,8 @@ class ConsentDialog(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="consent-box"):
-            yield Static(Text("Help improve AISquare?"), id="consent-title")
-            yield Static(Text(CONSENT_TEXT), id="consent-text")
+            yield Static(Text("Help improve rlx?"), id="consent-title")
+            yield Static(Text(consent_text()), id="consent-text")
             with Horizontal(id="consent-buttons"):
                 yield Button("See what would be sent", id="consent-see")
                 yield GuardedButton("Share anonymous usage", id="consent-share", variant="primary")
@@ -358,7 +363,6 @@ class ConsentDialog(ModalScreen[str]):
 
 
 __all__ = [
-    "CONSENT_TEXT",
     "PREVIEW_WORKER",
     "SHARE_WORKER",
     "SHIP_WORKER",
@@ -366,5 +370,6 @@ __all__ = [
     "PreviewDialog",
     "Sharing",
     "SharingBox",
+    "consent_text",
     "status_text",
 ]

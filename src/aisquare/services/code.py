@@ -11,11 +11,16 @@ from pathlib import Path
 
 from aisquare.core import code_index
 from aisquare.core import ignore as ignore_core
+from aisquare.core import program as prog
 from aisquare.core.config import CodeSettings, load_config
 from aisquare.core.workspace import current_project
 from aisquare.models import ProjectInfo
 
-INDEX_COMMAND = "aisquare code index"
+
+def index_hint() -> str:
+    return f"{prog.word()} code index"
+
+
 EXTRA_HINT = 'pip install --upgrade "aisquare-cli[code]"'
 """What adds the TypeScript and JavaScript parsers: the CLI named first, as every extra's
 hint names it (``services.explainability.INSTALL_HINT`` says why)."""
@@ -68,7 +73,7 @@ def _indexed(project: ProjectInfo | None) -> ProjectInfo:
     if code_index.ready(target.id):
         return target
     if not settings().enabled:
-        raise CodeIndexError(f"no code index for {target.root} yet — build it: {INDEX_COMMAND}")
+        raise CodeIndexError(f"no code index for {target.root} yet — build it: {index_hint()}")
     build_index(target)
     return target
 

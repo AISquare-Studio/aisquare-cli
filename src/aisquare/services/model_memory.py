@@ -45,6 +45,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import harness, transcripts
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, get_adapter, model_owner
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent, TeamSession
@@ -586,8 +587,8 @@ def _say_unread(store: ContextStore, unread: list[str]) -> None:
         _UNREAD_KEY, json.dumps({"at": datetime.now(tz=UTC).isoformat(), "said": said})
     )
     sys.stderr.write(
-        f"aisquare: {said}, which this aisquare cannot read as a choice — no pick was "
-        "written; run: aisquare doctor\n"
+        f"rlx: {said}, which this rlx cannot read as a choice — no pick was "
+        f"written; run: {prog.word()} doctor\n"
     )
 
 

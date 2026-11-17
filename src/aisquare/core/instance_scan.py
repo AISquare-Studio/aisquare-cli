@@ -138,7 +138,7 @@ def _short_flags(arg: str) -> bool:
 
 
 def _skipped(why: str) -> None:
-    _log.info("asq's look for an asq older than the registry is skipped: %s", why)
+    _log.info("rlx's look for an rlx older than the registry is skipped: %s", why)
 
 
 def _ps() -> str | None:

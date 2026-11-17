@@ -41,6 +41,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.fresh import StartFresh
 from aisquare.cli.ui.sidebar import ProjectRenamed
 from aisquare.cli.ui.views.fleet_bulk import BulkAsked, applicable
+from aisquare.core import program as prog
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
@@ -242,7 +243,7 @@ class SettingsView(VerticalScroll):
             Text.assemble(
                 "The nickname is the name every list shows; blank shows the folder name. "
                 "The fleet id follows it. ",
-                ("aisquare project rename", "bold"),
+                (f"{prog.word()} project rename", "bold"),
                 " sets the same. The settings for every project — roles, the fleet, "
                 "accounts — are in App settings ▸ Agent settings.",
             ),

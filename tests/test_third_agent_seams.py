@@ -369,7 +369,7 @@ def test_the_doctors_sign_in_for_its_slot_is_one_click_by_its_own_sign_in_args(
     checks = diagnostics._agent_accounts_checks(third.id)
     [check] = [c for c in checks if c.name == f"{third.id}-accounts"]
 
-    run = " ".join(("aisquare accounts run", str(slot.slot), *third.accounts.sign_in_args()))
+    run = " ".join(("rlx accounts run", str(slot.slot), *third.accounts.sign_in_args()))
     assert check.fix is not None and check.fix.endswith(run)
     [fix] = onboarding.fix_commands([check])
     assert (fix.argv, fix.interactive, fix.sign_in_slot) == (
@@ -646,7 +646,7 @@ def test_from_ssh_it_starts_the_fleets_server_as_its_keychain_login_declares(
         project = team_project(tmp_path)
 
         if keychain:
-            with pytest.raises(fleet_service.FleetError, match="start asq on the Mac first"):
+            with pytest.raises(fleet_service.FleetError, match="start rlx on the Mac first"):
                 fleet_service.spawn(project, "coder", agent=adapter.id)
             assert not tmux.running and tmux.spawned == []
             return
@@ -1652,7 +1652,7 @@ def test_a_spawn_installs_its_hooks_first_only_where_they_are_its_homes_and_aisq
                 fleet_service.spawn(project, "coder", agent=adapter.id)
             said = str(refused.value)
             assert f"hooks are not installed in {own}, a home of yours" in said, said
-            assert f"`aisquare agents connect {adapter.id} --config-dir {own}`" in said, said
+            assert f"`rlx agents connect {adapter.id} --config-dir {own}`" in said, said
             assert len(tmux.spawned) == windows, "no window"
         assert (own / adapter.settings_name).read_bytes() == THEIRS, "the user's home unwritten"
 
@@ -3099,7 +3099,7 @@ def test_the_trust_a_disconnect_left_is_named_in_the_agent_s_own_terms(
         gone = runner.invoke(app, ["agents", "disconnect", adapter.id, "--config-dir", str(home)])
         assert gone.exit_code == 0, gone.output
         note = " ".join(gone.stderr.split())
-        assert f"{home / 'trust.json'} still holds the trust aisquare recorded" in note, note
+        assert f"{home / 'trust.json'} still holds the trust rlx recorded" in note, note
         assert f"2 `trusted` key(s), {', '.join(KEPT)}" in note, note
         assert "[hooks.state]" not in note and "table" not in note, note
 
@@ -3139,7 +3139,7 @@ def test_the_trust_an_uninstall_left_is_named_in_the_agent_s_own_terms_and_no_ta
 
         assert result.exit_code == 0, result.output
         report = _one_object(result.stdout)
-        [note] = [n for n in report["notes"] if "still holds the trust aisquare recorded" in n]
+        [note] = [n for n in report["notes"] if "still holds the trust rlx recorded" in n]
         assert str(home / "trust.json") in note, note
         assert f"2 `trusted` key(s), {', '.join(KEPT)}" in note, note
         assert "tables" not in _keys(report), report

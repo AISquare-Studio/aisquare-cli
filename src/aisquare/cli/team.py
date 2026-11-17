@@ -16,9 +16,11 @@ from typing import Annotated, Any, NoReturn
 
 import typer
 
+from aisquare.cli import board_names
 from aisquare.cli.common import expected_config_write_errors, fail, local_time, parse_since
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, selfcli
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import agents_named, recorded_adapter
 from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import (
@@ -322,7 +324,7 @@ def _joins_no_board() -> str | None:
         return None
     return (
         f"{project_service.NotAdded(project)} — until then the session this line starts "
-        "joins no board (--exec adds it, as `aisquare team on` does)"
+        f"joins no board (--exec adds it, as `{prog.word()} team on` does)"
     )
 
 
@@ -340,7 +342,7 @@ def spawn(
             "--bin",
             help=(
                 "Executable that runs the agent (e.g. claude2). Overrides the per-role "
-                "map; see `aisquare team harness` for what each role resolves to."
+                "map; see `rlx team harness` for what each role resolves to."
             ),
         ),
     ] = None,
@@ -449,7 +451,7 @@ def spawn(
     if not selected.adapter.capabilities.model_ladders and (probe is not None or refresh):
         typer.echo(
             f"{selected.adapter.label} uses native model selection; --probe/--no-probe and "
-            "--refresh do not apply (no AISquare availability cache).",
+            "--refresh do not apply (no rlx availability cache).",
             err=True,
         )
     try:
@@ -489,7 +491,7 @@ def spawn(
             f"{role_name}'s binding sets {', '.join(map(repr, unnamed))}, which a shell line "
             f"cannot set ({_ENV_NAME_RULE}) — unbind it: "
             + install_route.command_line(
-                ["aisquare", "team", "bind", role_name, "--unset", unnamed[0]]
+                [prog.word(), "team", "bind", role_name, "--unset", unnamed[0]]
             )
         )
         fail(message, error="bad_env_key", detail=message)
@@ -646,7 +648,7 @@ def spawn(
                 # message that exists to list all three. Naming the command
                 # that writes it avoids the problem and is the better hint.
                 f"Set a different one with --bin, {_bin_env_hint(role_name)}, or "
-                f"aisquare team bind {role_name} --bin <command>.",
+                f"{prog.word()} team bind {role_name} --bin <command>.",
                 error="agent_binary_missing",
             )
         # The session joins this project's board, as `aisquare launch`'s does, and with
@@ -818,7 +820,7 @@ def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict
             error=str(exc),
             source="error",
             effort_source="error",
-            fix=f"Check fleet.roles.{role} and team.profiles.{role} in aisquare config.",
+            fix=f"Check fleet.roles.{role} and team.profiles.{role} in {prog.word()} config.",
         )
     return row
 
@@ -841,7 +843,7 @@ def _reading_env_files(command: str, env_files: Mapping[str, str]) -> str:
     if not env_files:
         return command
     reads = [
-        f'{key}="$(aisquare team read-env-file {shlex.quote(key)} {shlex.quote(path)})" '
+        f'{key}="$({prog.word()} team read-env-file {shlex.quote(key)} {shlex.quote(path)})" '
         f"&& export {key}"
         for key, path in env_files.items()
     ]
@@ -890,7 +892,7 @@ def harness_status() -> None:
                     "detail": str(exc),
                     "fix": exc.fix
                     if isinstance(exc, agent_launch.UnknownWrapperError)
-                    else f"Check the agent/model settings for {name} in aisquare config.",
+                    else f"Check the agent/model settings for {name} in {prog.word()} config.",
                 }
             )
             continue
@@ -981,7 +983,7 @@ def harness_status() -> None:
     console.print(
         "Resolution shown without probing; native defaults stay with the selected agent."
         if several
-        else "Resolution shown without probing — `aisquare team spawn <role>` verifies live.",
+        else f"Resolution shown without probing — `{prog.word()} team spawn <role>` verifies live.",
         markup=False,
     )
 
@@ -1108,8 +1110,8 @@ def _as_every_launch_reads_it(
             ):
                 # Its own agent named here binds it (#100's reopen 2).
                 said = (
-                    said.removesuffix(" (see: aisquare accounts)")
-                    + f", or pass --agent {reason.account.agent} (see: aisquare accounts)"
+                    said.removesuffix(f" (see: {prog.word()} accounts)")
+                    + f", or pass --agent {reason.account.agent} (see: {prog.word()} accounts)"
                 )
             fail(said, error="unknown_account", ref=ref)
 
@@ -1129,7 +1131,7 @@ def _bind_one_of(exc: claude_accounts_service.AmbiguousAccount) -> str:
         f"{claude_accounts_core.qualified_ref(account)}"
         for account in accounts
     )
-    return f"{exc.reason}. Bind one as {each}; see: aisquare accounts"
+    return f"{exc.reason}. Bind one as {each}; see: {prog.word()} accounts"
 
 
 @app.command("bind")
@@ -1186,7 +1188,7 @@ def bind(
         typer.Option(
             "--account",
             help="Account this role launches under, one of its agent's own (Claude Code or "
-            "Codex): a slot, alias or email (see `aisquare accounts`). Wins over the "
+            "Codex): a slot, alias or email (see `rlx accounts`). Wins over the "
             "agent's home in --env (CLAUDE_CONFIG_DIR, CODEX_HOME).",
             metavar="ACCOUNT",
         ),
@@ -1199,14 +1201,14 @@ def bind(
     """Pin a role's launch spec — binary, env, extra args and account — persistently.
 
     The one-time setup behind ``team.profiles``: bind a seat once, and every
-    later ``aisquare launch <role>`` and ``aisquare team spawn <role>`` carries
+    later ``rlx launch <role>`` and ``rlx team spawn <role>`` carries
     it with no flag. Flags still win over the binding, so any seat can be
     changed for a single launch without touching config.
 
     Nothing here interprets what you bind. Parallel agent installs reached
     through shell aliases are just two env entries::
 
-        aisquare team bind coder1 \\
+        rlx team bind coder1 \\
           --env CLAUDE_CONFIG_DIR='$HOME/.claude2' \\
           --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude2'
 
@@ -1219,18 +1221,18 @@ def bind(
     it, read at every launch, so config.toml and every printed line hold the
     path alone. A reviewer that can comment but not push or merge::
 
-        aisquare team bind reviewer \\
+        rlx team bind reviewer \\
           --env-file GH_TOKEN='~/.config/aisquare/reviewer-gh-token'
 
     The file is read now as well, so a typo fails here rather than every later
     launch of the role.
 
-    ``--account`` is the one binding the CLI DOES interpret: it names an
-    account the CLI owns of the role's own agent, Claude Code's or Codex's
-    (``aisquare accounts``), resolved at every launch by the same resolver
+    ``--account`` is the one binding rlx DOES interpret: it names an
+    account rlx owns of the role's own agent, Claude Code's or Codex's
+    (``rlx accounts``), resolved at every launch by the same resolver
     ``launch --account`` and ``fleet spawn`` use, and it wins over the agent's
     home in ``--env`` (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``). It is the role rung of
-    ``aisquare accounts default`` — role binding, then project default, then
+    ``rlx accounts default`` — role binding, then project default, then
     machine default.
 
     Called with no role it prints the bindings.
@@ -1331,7 +1333,7 @@ def _show_bindings() -> None:
     console = stdout_console()
     if not profiles:
         console.print(
-            "no role bindings — pin one with: aisquare team bind coder1 "
+            f"no role bindings — pin one with: {prog.word()} team bind coder1 "
             "--env CLAUDE_CONFIG_DIR='$HOME/.claude2'",
             markup=False,
         )
@@ -1586,7 +1588,9 @@ def signals(as_session: SessionRef = None) -> None:
         typer.echo(json.dumps([_signal_json(state) for state in states]))
         return
     if not states:
-        stdout_console().print("No signals set. Set one with: aisquare team signal <name> <value>")
+        stdout_console().print(
+            f"No signals set. Set one with: {prog.word()} team signal <name> <value>"
+        )
         return
     console = stdout_console()
     for state in states:
@@ -1788,12 +1792,15 @@ def board(
         return
     if not sessions and not tasks:
         stdout_console().print(
-            "The orchestrator is quiet here. Activate with `aisquare team on`, or start a "
-            "session with `aisquare launch planner` (coder/runner)."
+            f"The orchestrator is quiet here. Activate with `{prog.word()} team on`, or start a "
+            f"session with `{prog.word()} launch planner` (coder/runner)."
         )
         return
     stdout_console().print(
-        team_service.render_board(project, sessions, tasks, events), markup=False
+        team_service.render_board(
+            project, sessions, tasks, events, names=board_names.read_board_names(sessions)
+        ),
+        markup=False,
     )
 
 

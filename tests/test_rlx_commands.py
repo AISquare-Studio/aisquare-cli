@@ -74,7 +74,7 @@ def test_version_is_the_packages_under_every_name(
     code = _run_main(monkeypatch, name, "--version")
 
     assert code == 0
-    assert capsys.readouterr().out == f"aisquare {__version__}\n"
+    assert capsys.readouterr().out == f"rlx {__version__}\n"
 
 
 @pytest.mark.parametrize("name", NAMES)

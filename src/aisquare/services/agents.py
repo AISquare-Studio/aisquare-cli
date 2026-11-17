@@ -13,12 +13,12 @@ from pathlib import Path
 
 from aisquare.core import agents as agent_core
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core import sandbox_roots as sandbox_roots_core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
-from aisquare.services import install_route
 
 
 def list_agents() -> list[AgentInfo]:
@@ -130,7 +130,7 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
         return None
     return (
         f"the aisquare plugin is enabled in {plugin.config_dir} too — its hooks stand down "
-        "while these run; keep one route (aisquare doctor says how)"
+        f"while these run; keep one route ({prog.word()} doctor says how)"
     )
 
 
@@ -155,13 +155,13 @@ def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool
     user = route.installed(config_dir) if route is not None else None
     if route is not None and user is not None:
         notes.append(
-            f"the aisquare plugin is still enabled in {user.config_dir}, so aisquare keeps "
+            f"the aisquare plugin is still enabled in {user.config_dir}, so rlx keeps "
             f"running there — to stop it: {route.command('disable', user.config_dir)}"
         )
     if route is not None:
         notes.extend(
             f"the aisquare plugin is still enabled in {plugin.project} ({plugin.scope} scope), "
-            "so aisquare keeps running in sessions started there — to stop it: "
+            "so rlx keeps running in sessions started there — to stop it: "
             + route.command(
                 "uninstall", plugin.config_dir, scope=plugin.scope, project=plugin.project
             )
@@ -169,7 +169,7 @@ def disconnect_notes(name: str, config_dir: Path | None = None, *, removed: bool
         )
     if not removed and not notes:
         notes.append(
-            "no aisquare hooks found in that config dir — if you connected with "
+            "no rlx hooks found in that config dir — if you connected with "
             "--config-dir, disconnect with the same one"
         )
     left = agent_core.hook_trust_left(name, config_dir)
@@ -401,12 +401,13 @@ def access(name: str, config_dir: Path | None = None) -> DirAccess:
     return memo.setdefault(key, DirAccess(name, config_dir))
 
 
-#: For the directory sessions from this shell read; asq and aisquare read the variable
-#: only when they start (review of #257).
-_REPOINT = (
-    "point CLAUDE_CONFIG_DIR at another directory this user can write, "
-    "then start asq or aisquare again from that shell"
-)
+def _repoint() -> str:
+    """For the directory sessions from this shell read: rlx reads the variable only when it
+    starts (review of #257), so it is started again, by the word hints print."""
+    return (
+        "point CLAUDE_CONFIG_DIR at another directory this user can write, "
+        f"then start {prog.word()} again from that shell"
+    )
 
 
 def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None = None) -> list[str]:
@@ -440,25 +441,24 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
     recorded = key in {agent_core.dir_identity(p) for p in agent_core.connected_dirs(name)}
     disconnect = config_dir_command("disconnect", name, directory)
     if refusal.this_shell and not (recorded or agent_core.found_on_disk(directory)):
-        found.append(_REPOINT)
+        found.append(_repoint())
     elif (
         (refusal.this_shell or recorded)
         and access(name, directory).disconnect is None
         # Disconnect takes the hooks and the record out, and leaves a plugin to grade.
         and not ((plugin := agent_core.plugin_of(name)) and plugin.installed(directory))
     ):
-        this = f"{_REPOINT}, and disconnect this one: {disconnect}"
+        this = f"{_repoint()}, and disconnect this one: {disconnect}"
         found.append(this if refusal.this_shell else f"forget it: {disconnect}")
     return found
 
 
 def config_dir_command(verb: str, name: str, directory: Path) -> str:
-    """``aisquare agents <verb> <name> --config-dir <directory>`` as a line to paste, the path
-    quoted for this shell (``install_route.command_line``): a space or a ``$`` in it broke
-    the command, or named another directory (review of #257)."""
-    return install_route.command_line(
-        ["aisquare", "agents", verb, name, "--config-dir", str(directory)]
-    )
+    """``rlx agents <verb> <name> --config-dir <directory>`` as a line to paste (the word
+    hints print, ``core.program``), the path quoted for this shell
+    (``install_route.command_line``): a space or a ``$`` in it broke the command, or named
+    another directory (review of #257)."""
+    return prog.words("agents", verb, name, "--config-dir", str(directory))
 
 
 def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
@@ -526,7 +526,7 @@ def _disconnect_refusal(name: str, config_dir: Path | None) -> Refusal | None:
     return Refusal(
         spec.settings_path,
         f"cannot take the hooks out of {directory}: {stuck} — fix that file and disconnect "
-        "again, or take aisquare's hooks out of it by hand",
+        "again, or take rlx's hooks out of it by hand",
     )
 
 
@@ -724,7 +724,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
         # Before anything is read or written: no context ingested, nothing in
         # agents.json, no ~/.aisquare created for a connection that installs nothing.
         planned = f"; support is planned for {spec.planned}" if spec.planned else ""
-        raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet{planned}")
+        raise UnsupportedAgentError(f"rlx can't connect {spec.label} yet{planned}")
     _make_first_run_dir(name, config_dir)
     _check_found(name, config_dir)
 
@@ -752,7 +752,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
         # Unreachable while `connectable` means a settings file to write. Raised, not
         # reported: a connection that installed nothing is what the refusal above is
         # for, and it must never be recorded, or printed, as connected.
-        raise UnsupportedAgentError(f"aisquare can't connect {spec.label} yet")
+        raise UnsupportedAgentError(f"rlx can't connect {spec.label} yet")
     agent_core.set_connected(name, True, config_dir)
     readiness, detail = agent_core.integration_readiness(name, spec.home)
     return AgentConnection(

@@ -51,10 +51,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Usage sharing, once you turn it on, posts to `/api/v1/rlx/metrics/`, and sends the same
   counts as before. Releases up to 0.10.0 post to `/api/v1/cli/metrics/`, which AISquare
   keeps answering until May 2027. A server that answers 503 with `Retry-After` is asked
-  again after that wait, as a 429 already was, not after the first five-minute retry.
+  again after that wait, as a 429 already was, not after the first five-minute retry; either
+  waits a day at most.
 - The one-line install is shorter: `curl -fsSL https://aisquare.studio/rlx/install.sh | sh`,
   and on Windows `irm https://aisquare.studio/rlx/install.ps1 | iex`. Both lead to the same
   installers on GitHub, and a release's own pinned URL is unchanged.
+- **rlx names itself everywhere it speaks to you.** Its messages, errors, `--help`, the
+  doctor and asq's screens say rlx where they said aisquare, asq or "the CLI": "Quit the
+  other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title. `rlx --version`
+  prints `rlx 0.10.1`; installers of earlier releases read the version from it as before.
+  No `--json` key changes, and no machine value (names, statuses, ids), the doctor's
+  `asq instances` row included; only the human text inside a value says rlx.
+- **Every command it tells you to run starts with `rlx`**: `rlx accounts add`, `rlx doctor`,
+  the doctor's one-click fixes. When another program's `rlx` comes first on your PATH, those
+  lines say `aisquare …` instead, so a line you paste always runs rlx. Your agents'
+  instructions keep `aisquare …`, the same commands.
+- **The installers say rlx too**, and end with "Open rlx with: rlx". The Remote page is
+  titled *rlx remote*; a phone that added it to its Home Screen shows the new name once it is
+  added again. The plugins describe themselves as rlx's; their install names
+  (`aisquare@aisquare-cli`) do not change.
+- The package's page on PyPI links to rlx's site and its docs, and the README links the site.
+- **The board names each agent as the left pane does, where it showed `role·<id>`.** In
+  asq's board, `board -w` and `aisquare board`, a line's author, the sessions block, a
+  task's claim and the done archive read the agent's name, such as `coder-auth`. A session
+  the left pane has no name for reads as its role, such as `manager`. A note you wrote from
+  the command line reads `you` in asq's board and `board -w`, and `owner` in
+  `aisquare board`, which agents run too (it read `cli`). A renamed agent shows its new name.
+  An agent keeps its name after it stops, and so does the session it leaves when its
+  conversation is cleared or handed to another account, so the board never renames an
+  agent's lines to `coder`. When two sessions share a name, such as an agent you restarted
+  or cleared and its earlier session, the live one keeps the name and the earlier one adds
+  the time it started: `coder-auth (14:02)`. Two that started in the same minute add their
+  short ids instead. A long name is cut short with `…`, and the sessions block no longer
+  wraps a row onto a second line. The short id is still in a line's or a task's detail, and
+  `o` still opens the right transcript. Agents still see ids, as they address each other by
+  them, and every `--json` is unchanged.
+- **asq opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
+  blue, #2F74F0, with magenta, lime, green, amber and coral on near-black. Press `t` to
+  pick another theme, as before. A theme you picked earlier is kept, and so is one you
+  set in `TEXTUAL_THEME`. Every theme asq offered is still there. `rlx board -w`
+  shares your pick, so it opens in rlx too.
+- **The `rlx` at asq's top-left, and Welcome's heading, take their colour from the
+  theme.** Under rlx they are #2F74F0. Under any other theme they take its main colour,
+  or its text colour where the main colour is too faint to read as text (textual-dark's
+  is), so they change when you press `t`. They keep that colour while the other pane has
+  the keyboard. Only colours change: nothing moves, at any width. asq cannot set your
+  terminal's font. JetBrains Mono, the font on rlx's web page, is the one we recommend.
 
 ## [0.10.0] - 2026-11-16
 

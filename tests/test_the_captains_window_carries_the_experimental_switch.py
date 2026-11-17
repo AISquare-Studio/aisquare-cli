@@ -168,7 +168,7 @@ def test_the_window_finds_the_captain_persona_on_a_server_started_without_the_sw
 ) -> None:
     """The config flag off, the fleet's tmux server already running and started without the
     variable, and the owner opting in for one shell, the way ``docs/captain.md``,
-    ``CAPTAIN_OFF`` and doctor all suggest. What the window runs — the command it was
+    ``captain_off()`` and doctor all suggest. What the window runs — the command it was
     started with, in the server's environment plus the window's own pairs — resolves the
     bundled persona and hands the agent the switch, for the hooks that brief it."""
     assert load_config().experimental.captain is False, "the premise: off in the config"
@@ -239,7 +239,7 @@ def test_a_restart_of_the_captains_row_is_refused_while_the_switch_is_off(
     monkeypatch.delenv(ENV)  # off: no variable, and the config's default
     with pytest.raises(fleet_service.FleetError) as refused:
         fleet_service.restart(captain_state.home_project(), "captain")
-    assert str(refused.value) == experimental.CAPTAIN_OFF
+    assert str(refused.value) == experimental.captain_off()
     assert tmux.typed == [], "nothing was stopped"
     assert len(tmux.spawned) == 1, "and nothing was started"
     with store_session() as store:
@@ -258,7 +258,7 @@ def test_a_switch_of_the_captains_row_is_refused_while_the_switch_is_off(
     monkeypatch.delenv(ENV)
     with pytest.raises(fleet_service.FleetError) as refused:
         fleet_service.switch(captain_state.home_project(), "captain", to="2")
-    assert str(refused.value) == experimental.CAPTAIN_OFF
+    assert str(refused.value) == experimental.captain_off()
     assert tmux.typed == [] and len(tmux.spawned) == 1
     with store_session() as store:
         row = store.get_fleet_agent(first.id)
@@ -274,7 +274,7 @@ def test_the_fleet_cli_says_the_one_line_for_a_refused_captain_restart(
     home = captain_state.home_project()
     result = runner.invoke(app, ["fleet", "restart", "captain", "-P", home.id])
     assert result.exit_code == 1, result.output
-    assert experimental.CAPTAIN_OFF in " ".join(result.output.split())
+    assert experimental.captain_off() in " ".join(result.output.split())
 
 
 @pytest.mark.needs_captain

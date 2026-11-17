@@ -76,7 +76,7 @@ def test_connect_is_one_click_and_the_planned_agents_have_no_button(
         (isolated_agent_home / name).mkdir(parents=True)
     monkeypatch.chdir(tmp_path)
     run = InProcessConnect()
-    connect_label = f"aisquare agents connect claude-code --config-dir {claude}"
+    connect_label = f"rlx agents connect claude-code --config-dir {claude}"
 
     async def drive() -> tuple[dict[str, str], dict[str, str], str, list[Message]]:
         view = DoctorView(run=run, refresh=lambda cwd: diagnostics.doctor(cwd=cwd))

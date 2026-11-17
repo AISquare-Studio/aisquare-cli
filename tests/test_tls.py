@@ -271,7 +271,7 @@ def test_a_certificate_that_does_not_verify_is_named_as_tls_not_urlerror(
     assert (usage.cause, usage.reason, usage.fix) == (
         UsageCause.tls_cert,
         "TLS certificate could not be verified",
-        tls.CERT_HINT,
+        tls.CERT_HINT.format(program="rlx"),
     )
     assert "URLError" not in usage.reason and "sk-ant" not in usage.reason
     assert not usage.needs_login  # a log-in would not fix a trust store

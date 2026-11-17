@@ -251,7 +251,7 @@ def test_doctor_displays_selection_errors(source: str, monkeypatch: pytest.Monke
     save_config(config)
     rows = [check for check in diagnostics._check_other_agents() if check.name == "coding-agent"]
     assert len(rows) == 1 and rows[0].status is CheckStatus.warn, rows
-    assert rows[0].detail and "aisquare agents use" in (rows[0].fix or ""), rows[0]
+    assert rows[0].detail and "rlx agents use" in (rows[0].fix or ""), rows[0]
 
 
 def test_damaged_config_keeps_codex_launch_native_and_clears_parent_tracing(

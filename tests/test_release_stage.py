@@ -65,8 +65,8 @@ HEAD_ACCOUNTS_CLAUDE_ONLY = (
     "✓ Claude Code 2.1.266 · /opt/bin/claude\n"
     "slot  label         signed in as   plan  hooks  directory                     \n"
     "1     plain claude  1@example.com  max   ✓      /h/.aisquare/claude-accounts/1\n"
-    "add one: aisquare accounts add [--agent codex] · open one: aisquare accounts run <slot> · "
-    "the Accounts page in asq does both\n"
+    "add one: rlx accounts add [--agent codex] · open one: rlx accounts run <slot> · "
+    "the Accounts page in rlx does both\n"
 )
 HEAD_ACCOUNTS_BOTH = (
     "✓ Claude Code 2.1.266 · /opt/bin/claude\n"
@@ -74,8 +74,8 @@ HEAD_ACCOUNTS_BOTH = (
     "slot  agent        label         signed in as   plan  hooks  directory                     \n"
     "1     Claude Code  plain claude  1@example.com  max   ✓      /h/.aisquare/claude-accounts/1\n"
     "2     Codex        account 2     2@example.com  max   ✓      /h/.aisquare/claude-accounts/2\n"
-    "add one: aisquare accounts add [--agent codex] · open one: aisquare accounts run <slot> · "
-    "the Accounts page in asq does both\n"
+    "add one: rlx accounts add [--agent codex] · open one: rlx accounts run <slot> · "
+    "the Accounts page in rlx does both\n"
 )
 HEAD_AGENTS_LIST = (
     "┏━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┓\n"
@@ -407,10 +407,9 @@ def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> N
     assert root.exit_code == 0 and MARK not in root.output
 
 
-#: ``aisquare metrics show`` with no turns, as 0.9.2 printed it (6a77e650's cli/common.py).
-HEAD_092_NO_TURNS = (
-    "No turns recorded yet. Connect Claude Code: aisquare agents connect claude-code\n"
-)
+#: ``aisquare metrics show`` with no turns, as 0.9.2 printed it (6a77e650's cli/common.py),
+#: its command in the word hints print since the rlx rename (#135).
+HEAD_092_NO_TURNS = "No turns recorded yet. Connect Claude Code: rlx agents connect claude-code\n"
 
 
 @pytest.mark.parametrize("codex_here", ["none", "home", "binary"])
@@ -435,11 +434,11 @@ def test_the_empty_metrics_line_names_codex_only_where_it_is_and_marks_it(
     said = printed(common.emit_metrics_summary, MetricsSummary(turns=0))
     if codex_here == "none":
         assert said == HEAD_092_NO_TURNS
-        assert common.connect_hint() == "Connect Claude Code: aisquare agents connect claude-code"
+        assert common.connect_hint() == "Connect Claude Code: rlx agents connect claude-code"
     else:
         assert said == (
-            "No turns recorded yet. Connect your coding agent: aisquare agents connect "
-            "claude-code or aisquare agents connect codex (beta)\n"
+            "No turns recorded yet. Connect your coding agent: rlx agents connect "
+            "claude-code or rlx agents connect codex (beta)\n"
         )
 
 

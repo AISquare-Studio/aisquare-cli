@@ -63,7 +63,7 @@ from textual.widgets import Button, DataTable, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli import watch
+from aisquare.cli import board_names, watch
 from aisquare.cli.common import local_time
 from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.divider import Divider, floor_of
@@ -242,6 +242,7 @@ def needs_you(
     *,
     seq: int,
     now: datetime | None = None,
+    fleet_labels: Mapping[str, str] | None = None,
 ) -> NeedsYou:
     """What needs the owner on one board, from what its tick read (#286).
 
@@ -255,7 +256,7 @@ def needs_you(
 
     sources = _TickSources(project, list(sessions), list(tasks), list(events), seq)
     seen = queue.observe(sources, cursors={}, now=now or datetime.now(UTC))
-    live = {session.id: session for session in sessions if session.ended_at is None}
+    live_sessions = {session.id: session for session in sessions if session.ended_at is None}
     last_said: dict[str, int] = {}
     by_id = {event.id: event for event in events}
     for event in events:
@@ -268,14 +269,24 @@ def needs_you(
         elif observation.kind == "question":
             asked = by_id.get(observation.source_ref or "")
             asker = asked.session_id if asked is not None else None
-            if asked is None or asker not in live or last_said.get(asker or "") != asked.seq:
+            if (
+                asked is None
+                or asker not in live_sessions
+                or last_said.get(asker or "") != asked.seq
+            ):
                 continue  # answered since (the asker spoke again), or nobody left to answer
-            label = observation.agent or ""
+            asking = live_sessions.get(asker or "")
+            label = (
+                team_service.board_name(asking, fleet_labels) if asking else observation.agent or ""
+            )
             if label not in found.agents.get("question", []):
                 found.agents.setdefault("question", []).append(label)
-    for session in live.values():
+    for session in live_sessions.values():
         if session.state == "attention":
-            found.agents.setdefault("waiting", []).append(session.label or session.role)
+            # The left pane's name, as a relabel left it (#140): the button finds the agent by it.
+            found.agents.setdefault("waiting", []).append(
+                team_service.board_name(session, fleet_labels)
+            )
     return found
 
 
@@ -489,7 +500,7 @@ class BoardHelp(ModalScreen[None]):
         self._extra = extra
 
     def compose(self) -> ComposeResult:
-        text = Text("aisquare board — keys\n\n", style="bold")
+        text = Text("rlx board — keys\n\n", style="bold")
         text.append_text(board_help())
         if self._extra:
             text.append("\n")
@@ -546,7 +557,7 @@ class BoardPanel(Vertical):
     BoardPanel #board-side.collapsed { display: none; }
     BoardPanel #side-divider.collapsed { display: none; }
     BoardPanel #sessions { height: auto; min-height: 3; border: round $primary;
-                           padding: 0 1; }
+                           padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis; }
     BoardPanel #tasks { height: 1fr; min-height: 4; border: round $primary; }
     BoardPanel #feedpane { width: 1fr; min-width: 32; }
     BoardPanel #feed { height: 1fr; border: round $secondary; }
@@ -603,6 +614,11 @@ class BoardPanel(Vertical):
         self._feed_order: list[str] = []
         self._tasks_by_id: dict[str, TeamTask] = {}
         self._roles: dict[str, str] = {}
+        self._names: dict[str, str] = {}
+        """Each session's name as asq's left pane gives its agent (``cli.board_names``, #140)."""
+        self._fleet_labels: dict[str, str] = {}
+        """Each session's fleet row's label, live or ended (``team.fleet_labels``), the last
+        refresh's."""
         self._statuses: dict[str, str] = {}
         self._last_seq = 0
         self._terminal_by_task: dict[str, TeamEvent] = {}
@@ -699,12 +715,13 @@ class BoardPanel(Vertical):
         finding 11): ``aisquare captain log`` reads it.
         """
         try:
-            project, sessions, tasks, events, switches = team_service.board_read(
+            read = team_service.board_read(
                 events=400 if self._last_seq == 0 else 200,
                 since_seq=self._last_seq or None,
                 project=self.project,
                 exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS,
             )
+            project, sessions, tasks, events, switches = read[:5]
         except team_service.TeamDisabledError:
             self.query_one("#sessions", Static).update(
                 Text("orchestrator disabled (AISQUARE_TEAM=0)", style="bold red")
@@ -713,13 +730,19 @@ class BoardPanel(Vertical):
         except Exception:  # store briefly unavailable — keep the last frame
             return
         self._roles = {s.id: s.role for s in sessions}
+        self._fleet_labels = dict(read.fleet_labels)
+        self._rename(
+            board_names.board_names(
+                sessions, self._fleet_labels, cells=board_names.BOARD_NAME_CELLS
+            )
+        )
         self._sessions = {s.id: s for s in sessions}
         self._statuses = {t.id: t.status for t in tasks}
         self._all_tasks = tasks
         self._refresh_labels(sessions)
         self._switches = switches
         self.query_one("#sessions", Static).update(
-            watch._session_lines(sessions, self._labels, switches=self._switches)
+            watch._session_lines(sessions, self._labels, switches=self._switches, names=self._names)
         )
         self._ring_on_attention(sessions)
         # Events first: a task_done/dropped this tick flushes the attribution
@@ -727,8 +750,10 @@ class BoardPanel(Vertical):
         self._append_events(events)
         self._refresh_tasks(tasks)
         self._read_project = project
-        read = [self._events_by_id[event_id] for event_id in self._feed_order]
-        self.needs = needs_you(project, sessions, tasks, read, seq=self._last_seq)
+        shown = [self._events_by_id[event_id] for event_id in self._feed_order]
+        self.needs = needs_you(
+            project, sessions, tasks, shown, seq=self._last_seq, fleet_labels=self._fleet_labels
+        )
         self.query_one(NeedsYouStrip).show(self.needs)
         self.post_message(self.Refreshed(project))
 
@@ -768,7 +793,10 @@ class BoardPanel(Vertical):
             if self.is_mounted:
                 self.query_one("#sessions", Static).update(
                     watch._session_lines(
-                        list(self._sessions.values()), self._labels, switches=self._switches
+                        list(self._sessions.values()),
+                        self._labels,
+                        switches=self._switches,
+                        names=self._names,
                     )
                 )
 
@@ -887,6 +915,20 @@ class BoardPanel(Vertical):
         except Exception:
             return None
 
+    def _rename(self, names: dict[str, str]) -> None:
+        """Take this refresh's names (#140), and redraw each feed line whose author's name moved:
+        a restart that gave an earlier session's name to a new one tells the earlier's lines
+        apart too, which were drawn when its name was its own."""
+        moved = {sid for sid, name in names.items() if self._names.get(sid, name) != name}
+        self._names = names
+        if not moved or self._select_mode:
+            return
+        feed = self.query_one("#feed", OptionList)
+        for event_id in self._feed_order:
+            event = self._events_by_id[event_id]
+            if event.session_id in moved:
+                feed.replace_option_prompt(event_id, watch.feed_line(event, self._roles, names))
+
     def _append_events(self, events: list[TeamEvent]) -> None:
         if self._select_mode:
             return  # frozen while selecting; the backlog lands on exit
@@ -897,7 +939,7 @@ class BoardPanel(Vertical):
         for event in fresh:
             self._events_by_id[event.id] = event
             self._feed_order.append(event.id)
-            feed.add_option(Option(watch.feed_line(event, self._roles), id=event.id))
+            feed.add_option(Option(watch.feed_line(event, self._roles, self._names), id=event.id))
             self._last_seq = max(self._last_seq, event.seq)
             if event.kind in ("task_done", "task_dropped"):
                 # A close happened — attribution (positive AND negative entries)
@@ -976,10 +1018,14 @@ class BoardPanel(Vertical):
         task = self._tasks_by_id.get(key)
         if task is None:
             return
-        detail = watch._task_detail(task, self._statuses)
+        detail = watch._task_detail(task, self._statuses, self._names)
         done_event = self._done_event_for(task.id) if task.status in CLOSED_STATUSES else None
         if done_event is not None:
-            who = team_service.short_id(done_event.session_id or "cli")
+            who = (
+                watch._named(done_event.session_id, self._names)
+                if done_event.session_id
+                else team_service.PERSON
+            )
             verb = "done" if done_event.kind == "task_done" else "dropped"
             detail.append(
                 f"\n{verb} by {who} at {local_time(done_event.created_at):%H:%M:%S}",
@@ -1016,7 +1062,7 @@ class BoardPanel(Vertical):
         if stored is None:
             return
         self.detail_moment = (stored.session_id, stored.created_at)
-        detail = watch._event_detail(stored, self._roles)
+        detail = watch._event_detail(stored, self._roles, self._names)
         if self._moment_transcript() is not None:
             detail.append(TRANSCRIPT_HINT, style="dim")
         self._show_detail(detail)
@@ -1069,7 +1115,9 @@ class BoardPanel(Vertical):
         if self._select_mode:
             snapshot = Text()
             for event_id in self._feed_order:
-                snapshot.append(watch.feed_line(self._events_by_id[event_id], self._roles))
+                snapshot.append(
+                    watch.feed_line(self._events_by_id[event_id], self._roles, self._names)
+                )
                 snapshot.append("\n")
             self.query_one("#feedstatic", Static).update(snapshot)
             feed.add_class("hidden")

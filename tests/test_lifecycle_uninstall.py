@@ -447,7 +447,7 @@ def test_at_a_terminal_it_asks_and_no_means_nothing_is_removed(
     declined = runner.invoke(app, ["uninstall"])
 
     assert declined.exit_code == 0, declined.output
-    assert asked == [("Remove aisquare's hooks from 1 directory and remove the package?", False)]
+    assert asked == [("Remove rlx's hooks from 1 directory and remove the package?", False)]
     assert "nothing removed" in declined.stdout
     assert _snapshot(tmp_path) == before and world.events == []
 
@@ -693,7 +693,7 @@ def test_it_refuses_while_fleet_agents_are_live_and_names_the_shutdown(
     assert _one_object(result.stdout)["error"] == "fleet_running"
     human = runner.invoke(app, ["uninstall", "--yes"])
     assert "coder-1 (" in human.stderr, "the live agent is named"
-    assert "aisquare fleet shutdown --all --yes" in human.stderr
+    assert "rlx fleet shutdown --all --yes" in human.stderr
     assert _snapshot(tmp_path) == before and world.events == []
 
 
@@ -776,7 +776,7 @@ def test_it_refuses_while_a_remote_is_on_in_another_process_and_names_it(
     assert refused.exit_code == 1 and _one_object(refused.stdout)["error"] == "remote_on"
     assert plan["remote"] == named and plan["refusal"]["error"] == "remote_on", plan
     assert f"Remote is on ({named})" in said, "the Remote that is on is named"
-    assert "press Ctrl-C where `aisquare remote serve` runs" in said
+    assert "press Ctrl-C where `rlx remote serve` runs" in said
     assert after == before and world.events == [], "nothing touched"
     assert off["remote"] is None and off["refusal"] is None, "control: once it is off"
 
@@ -804,12 +804,12 @@ def test_it_refuses_while_another_asq_runs_on_this_home_and_names_it(
         after = _snapshot(tmp_path, held=held)
     alone = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
 
-    named = f"asq {other.version} (ssh on {other.host}, pid {other.pid})"
+    named = f"rlx {other.version} (ssh on {other.host}, pid {other.pid})"
     said = " ".join(human.stderr.split())
     assert refused.exit_code == 1 and _one_object(refused.stdout)["error"] == "asq_running"
     assert plan["asqs"] == [named] and plan["refusal"]["error"] == "asq_running", plan
-    assert f"another asq runs on this home ({named})" in said
-    assert "Quit it first (q in it), then run `aisquare uninstall` again." in said
+    assert f"another rlx runs on this home ({named})" in said
+    assert "Quit it first (q in it), then run `rlx uninstall` again." in said
     assert after == before and world.events == [], "nothing touched"
     assert alone["asqs"] == [] and alone["refusal"] is None, "control: once it has quit"
 
@@ -859,8 +859,8 @@ def test_with_no_usable_tmux_the_refusal_says_why_and_names_the_operators_word(
     assert _one_object(result.stdout)["error"] == "fleet_running"
     said = " ".join(human.stderr.split())
     assert f"tmux is not usable here ({refusal}), so nothing can stop them" in said
-    assert "Once tmux is usable, run aisquare fleet shutdown --all --yes, or, if coder-1 (" in said
-    assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+    assert "Once tmux is usable, run rlx fleet shutdown --all --yes, or, if coder-1 (" in said
+    assert "end its row on your word: rlx fleet shutdown --all --yes --forget" in said
     assert "A server answers" not in said
 
     answers[tmp_path / "x.sock"] = "answers"
@@ -971,9 +971,9 @@ def test_a_row_shutdown_cannot_reach_is_named_with_the_way_out(
 
     assert human.exit_code == 1 and world.events == []
     said = " ".join(human.stderr.split())
-    assert "Stop them first: aisquare fleet shutdown --all --yes; it cannot reach coder-1 (" in said
+    assert "Stop them first: rlx fleet shutdown --all --yes; it cannot reach coder-1 (" in said
     assert "send that server SIGUSR1, which makes tmux create its socket again" in said
-    assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+    assert "end its row on your word: rlx fleet shutdown --all --yes --forget" in said
 
 
 def test_a_row_whose_socket_another_server_took_still_counts_and_is_named_unreached(
@@ -1007,7 +1007,7 @@ def test_a_row_whose_socket_another_server_took_still_counts_and_is_named_unreac
     # tmux's SIGUSR1 handler takes the path from whatever listens on it: sent now, it would
     # strand every agent of the server that answers there (review of #259, round 3).
     assert "send that server SIGUSR1 once no server answers on that socket, which" in said
-    assert "end its row on your word: aisquare fleet shutdown --all --yes --forget" in said
+    assert "end its row on your word: rlx fleet shutdown --all --yes --forget" in said
     assert plan.taken == ("coder-1 (repo)",)
     # Beside a row whose socket file is gone, the condition is said of the taken one alone.
     gone = tmp_path / "gone"
@@ -1147,7 +1147,7 @@ def test_a_live_row_blocks_only_while_its_server_listens(
     assert asked == [recorded] * 2, "the row's own socket is the one asked"
     if listening:
         assert result.exit_code == 1 and world.events == []
-        assert "aisquare fleet shutdown --all --yes" in result.stderr
+        assert "rlx fleet shutdown --all --yes" in result.stderr
     else:
         assert result.exit_code == 0, result.output
         assert world.events[-1][0] == "package"
@@ -1412,7 +1412,7 @@ def test_the_guard_refuses_a_directory_with_no_aisquare_markers(
 
     reason = lifecycle.purge_refusal(stranger, custom=False)
 
-    assert reason is not None and "is not an aisquare home" in reason
+    assert reason is not None and "is not an rlx home" in reason
 
 
 def test_a_home_aisquare_home_moved_is_never_purged_whatever_its_names(
@@ -2464,7 +2464,7 @@ def test_hooks_in_a_file_that_is_not_valid_json_keep_the_package(
 
     if ours:
         assert result.exit_code == 1
-        assert "so aisquare cannot rewrite it safely" in result.stdout
+        assert "so rlx cannot rewrite it safely" in result.stdout
         assert world.execs == [], "the package stays while hooks may still call it"
     else:
         assert result.exit_code == 0, result.output
@@ -2575,10 +2575,10 @@ def test_the_question_never_offers_what_an_unreadable_site_rules_out(
 
     assert only_unreadable.exit_code == 1
     assert "nothing can be removed until" in only_unreadable.stdout
-    assert "nothing for aisquare to remove here" not in only_unreadable.stdout
+    assert "nothing for rlx to remove here" not in only_unreadable.stdout
     assert with_a_readable_site.exit_code == 0, with_a_readable_site.output
     assert asked == [
-        "Remove aisquare's hooks from 1 directory "
+        "Remove rlx's hooks from 1 directory "
         "(the package stays: the hooks in 1 other directory cannot be taken out)?"
     ]
 
@@ -2803,7 +2803,7 @@ def test_a_blocker_outside_the_home_keeps_the_slots_hooks_with_the_home(
     assert "they are deleted with" not in human, human
     assert f"then stop: the package and {home} stay, as {two}" in human, human
     assert asked == [
-        f"Remove aisquare's hooks from 1 directory (the package and {home} stay: "
+        f"Remove rlx's hooks from 1 directory (the package and {home} stay: "
         "the hooks in 2 other directories cannot be taken out)?"
     ]
     assert {(hook["config_dir"], hook["removed"]) for hook in ran["hooks"]} == {
@@ -3221,7 +3221,7 @@ def test_a_sibling_linked_where_this_user_cannot_enter_costs_no_other_sibling(
     assert (plan["home"]["action"], plan["package"]["runs"]) == ("keep", False), plan
     assert "DELETE" not in human and f"then stop: {stays}" in human, human
     assert asked == [
-        f"Remove aisquare's hooks from 1 directory ({stays}: "
+        f"Remove rlx's hooks from 1 directory ({stays}: "
         "the hooks in 1 other directory cannot be taken out)?"
     ]
     assert ran.exit_code == 1, ran.output
@@ -3902,7 +3902,7 @@ def test_a_codex_hooks_file_holding_ours_that_cannot_be_parsed_keeps_the_package
     [site] = plan.unreadable
     assert site.agent == "codex" and site.config_dir == codex
     assert site.reason is not None and site.reason.startswith(
-        "its hooks.json holds aisquare hooks but cannot be read as UTF-8 JSON"
+        "its hooks.json holds rlx hooks but cannot be read as UTF-8 JSON"
     )
     assert result.exit_code == 1
     assert world.execs == [], "the package stays while those hooks still call it"

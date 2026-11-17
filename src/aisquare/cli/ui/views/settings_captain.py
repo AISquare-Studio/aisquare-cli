@@ -55,7 +55,7 @@ def forced_text(on: bool) -> str:
     """The line under the box while :data:`~aisquare.core.experimental.CAPTAIN_ENV` decides."""
     state = "on" if on else "off"
     return (
-        f"{experimental.CAPTAIN_ENV} is set where asq runs and keeps the captain {state}: "
+        f"{experimental.CAPTAIN_ENV} is set where rlx runs and keeps the captain {state}: "
         "it wins over this setting"
     )
 

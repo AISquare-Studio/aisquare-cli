@@ -206,7 +206,7 @@ def test_version_still_works_without_no_args_is_help(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0, result.output
-    assert f"aisquare {__version__}" in result.output
+    assert f"rlx {__version__}" in result.output
     assert "Usage" not in result.output
 
 

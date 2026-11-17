@@ -276,7 +276,7 @@ NOTHING_TO_COPY = "nothing to copy — no text under the highlight"
 """What a left drag is told when it left a highlight with no text under it: once for
 the gesture, by :func:`route_selection_gesture`, or by the pane that ran a shift+drag
 itself (:meth:`TerminalPane._end_shift_drag`)."""
-SIZED_ELSEWHERE = "[sized by the other asq{where}]"
+SIZED_ELSEWHERE = "[sized by the other rlx{where}]"
 """Row 0's corner while another asq sizes the window and its size is not this widget's
 (the module's "Size between two asq"); ``where`` names that asq's terminal when known."""
 _WHERE = {"ssh": " (ssh)", "mac": " (Mac)"}

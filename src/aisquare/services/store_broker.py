@@ -180,6 +180,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aisquare.core import paths, selfcli
+from aisquare.core import program as prog
 from aisquare.core.names import undecodable_argument
 
 _log = logging.getLogger(__name__)
@@ -1024,7 +1025,7 @@ def _writable(home: Path) -> bool:
         if exc.errno in (errno.ENOSPC, errno.EDQUOT):
             # A full disk is no sandbox: cannot tell, so this process is not sandboxed, and
             # a hook outside one runs as it always did (review r11 of #113, finding 14).
-            _log.warning("aisquare home %s is full (%s): taken as unsandboxed", home, exc)
+            _log.warning("rlx home %s is full (%s): taken as unsandboxed", home, exc)
             return True
         return False
     os.close(fd)
@@ -1927,7 +1928,7 @@ def own_state_dir(env: Mapping[str, str], store: Path, cwd: Path) -> tuple[Path 
         # Below the home as the store's profile names it, resolved (`store_dir`).
         names = wanted.relative_to(paths.expand_user(paths.aisquare_home())).parts
     except ValueError:
-        return None, f"its state directory {wanted} is outside the aisquare home {store}"
+        return None, f"its state directory {wanted} is outside the rlx home {store}"
     granted = store.joinpath(*names)
     try:
         _make_below(store, names)
@@ -1935,7 +1936,7 @@ def own_state_dir(env: Mapping[str, str], store: Path, cwd: Path) -> tuple[Path 
         return None, (
             f"its sandbox may not write its state directory {granted} "
             f"({exc.strerror or exc}: a link, or not a directory, on the way from the "
-            "aisquare home), so each rewrite of its state file there asks"
+            "rlx home), so each rewrite of its state file there asks"
         )
     return granted, ""
 
@@ -2208,13 +2209,13 @@ def _remedy(inside: Path, writes: SandboxWrites) -> str:
     elsewhere = "(`uv tool install aisquare-cli`, or `pipx install aisquare-cli`)"
     if root is not None and root in real.temporary:
         return (
-            f"install aisquare outside {root}, which every such sandbox may write "
+            f"install rlx outside {root}, which every such sandbox may write "
             f"{elsewhere}, connect the agent's hooks with that install, then launch again"
         )
     if root is not None and root != real.workspace:
         return (
             f"drop {root} from what the launch gives its sandbox to write (`--add-dir`, "
-            f"`writable_roots`, a profile's `write` path), or install aisquare outside it "
+            f"`writable_roots`, a profile's `write` path), or install rlx outside it "
             f"{elsewhere}"
         )
     workspace = real.workspace or root
@@ -2230,13 +2231,13 @@ def _remedy(inside: Path, writes: SandboxWrites) -> str:
                 else "the project"
             )
             return (
-                f"install aisquare outside {which} {elsewhere}, connect the agent's "
-                "hooks with that install (its own `aisquare agents connect codex`), "
+                f"install rlx outside {which} {elsewhere}, connect the agent's "
+                f"hooks with that install (its own `{prog.word()} agents connect codex`), "
                 "then launch again"
             )
     return (
         f"launch the agent from its project's directory, not {workspace}, whose tree holds "
-        f"that aisquare, or install aisquare outside every directory the agent may write "
+        f"that rlx, or install rlx outside every directory the agent may write "
         f"{elsewhere}"
     )
 
@@ -2271,7 +2272,7 @@ def refuse_inside(
         return
     raise LaunchRefused(
         f"{adapter.label} runs its tools in a sandbox that may write {inside}, which is (or "
-        f"is in) an aisquare its hooks or its store broker run outside that sandbox: what it "
+        f"is in) an rlx its hooks or its store broker run outside that sandbox: what it "
         f"wrote there would run unsandboxed. {_sentence(_remedy(inside, writes))}"
     )
 
@@ -2331,7 +2332,7 @@ def sandbox_environment(
     if named:
         said.append(
             f"PATH names {', '.join(named)}, which this agent's sandbox may write: Codex "
-            "itself, and aisquare's hooks and store broker, run the git (and tmux) "
+            "itself, and rlx's hooks and store broker, run the git (and tmux) "
             "found there outside the sandbox. Launch from a shell whose PATH names none of "
             "them (deactivate the project's virtualenv)"
         )
@@ -2341,9 +2342,9 @@ def sandbox_environment(
             if entries:
                 said.append(
                     f"{key} names {', '.join(entries)}, which this agent's sandbox may "
-                    "write, and its hooks, connected by an older aisquare, would import "
+                    "write, and its hooks, connected by an older rlx, would import "
                     "from there outside the sandbox: connect them again "
-                    "(`aisquare agents connect codex`), which runs them with -E"
+                    f"(`{prog.word()} agents connect codex`), which runs them with -E"
                 )
     return said
 
@@ -2410,8 +2411,8 @@ def start_for_launch(
         said.append(f"{adapter.label}: {refused}")
     if sys.platform == "win32":
         said.append(
-            f"{adapter.label}: the aisquare store is read-only in its sandbox, and its "
-            "board calls go through a broker AISquare runs on POSIX only (or WSL)"
+            f"{adapter.label}: the rlx store is read-only in its sandbox, and its "
+            "board calls go through a broker rlx runs on POSIX only (or WSL)"
         )
         return access, "\n".join(said)
     import secrets
@@ -2431,7 +2432,7 @@ def start_for_launch(
     except Exception as exc:
         shutil.rmtree(directory, ignore_errors=True)
         said.append(
-            f"{adapter.label}: the aisquare store is read-only in its sandbox and its broker "
+            f"{adapter.label}: the rlx store is read-only in its sandbox and its broker "
             f"did not start ({exc}), so its board calls will fail there until a restart"
         )
         return access, "\n".join(said)

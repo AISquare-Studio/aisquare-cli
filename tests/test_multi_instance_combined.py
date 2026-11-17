@@ -93,9 +93,9 @@ def test_the_hint_names_the_owners_terminal_as_its_record_says(
         _beaten(registered, {owner_pid})
         claimed = SizeOwner(owner_pid, "mini", "mac", time.time_ns())
 
-        assert sized_elsewhere(claimed) == "[sized by the other asq (ssh)]"
+        assert sized_elsewhere(claimed) == "[sized by the other rlx (ssh)]"
 
-    assert sized_elsewhere(claimed._replace(pid=2**22 + 1)) == "[sized by the other asq (Mac)]"
+    assert sized_elsewhere(claimed._replace(pid=2**22 + 1)) == "[sized by the other rlx (Mac)]"
 
 
 # --- the owner's liveness ---------------------------------------------------------------------

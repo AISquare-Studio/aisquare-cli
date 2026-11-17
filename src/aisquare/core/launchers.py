@@ -36,6 +36,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from aisquare.core import atomic, locking, paths
+from aisquare.core import program as prog
 
 FOLDER = "launchers"
 _ID = re.compile(r"[0-9a-f]{12}")
@@ -52,7 +53,7 @@ class Launcher:
     @property
     def label(self) -> str:
         """How a refusal names it: ``aisquare launch of claude (pid 4242)``."""
-        return f"aisquare launch of {self.agent} (pid {self.pid})"
+        return f"{prog.word()} launch of {self.agent} (pid {self.pid})"
 
 
 def registry_dir() -> Path:

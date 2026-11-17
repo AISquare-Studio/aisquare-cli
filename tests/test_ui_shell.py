@@ -1532,8 +1532,8 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
         drive(go, doctor=lambda: list(checks))
     )
     refused = [
-        ("aisquare project onboard --refresh", True),  # no project: correctly refused
-        ("aisquare agents connect claude-code", False),
+        ("rlx project onboard --refresh", True),  # no project: correctly refused
+        ("rlx agents connect claude-code", False),
     ]
     assert global_cwd is None and global_buttons == refused
     assert selected_cwd is None and selected_buttons == refused, (
@@ -1541,8 +1541,8 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
     )
     assert page_cwd == projects[0].root
     assert page_buttons == [
-        ("aisquare project onboard --refresh", False),  # run for the project: armed
-        ("aisquare agents connect claude-code", False),
+        ("rlx project onboard --refresh", False),  # run for the project: armed
+        ("rlx agents connect claude-code", False),
     ]
     assert views == 1, "the project page has no Doctor tab of its own"
 
@@ -2602,7 +2602,7 @@ def test_help_from_the_board_opens_at_its_section_with_every_icon_in_view(
         # The heading is the box's first row: the key line right above it is scrolled off.
         # Its line in the text was not its row on screen — keys above it wrap (8 at 160x45).
         assert "this help — from anywhere" not in screen, screen
-    assert "aisquare fleet — keys" in from_the_sidebar
+    assert "rlx — keys" in from_the_sidebar
     assert not all(meaning in from_the_sidebar for meaning in meanings), (
         "the premise: from the top, the legend is below the fold"
     )
@@ -4730,12 +4730,19 @@ def test_a_focus_change_restyles_the_two_sides_and_nothing_under_them(
         sides = {app.sidebar, app.content, app.query_one(Divider)}
         return (
             {type(node).__name__ for node in restyled if node in sides},
-            [type(node).__name__ for node in restyled if node not in sides],
+            [
+                f"{type(node).__name__} {getattr(node, 'variant', '')}".strip()
+                for node in restyled
+                if node not in sides
+            ],
         )
 
     sides, below = drive(go)
     assert sides == {"Sidebar", "ContentSwitcher", "Divider"}, "each flip restyles the sides"
-    assert below == [], "and nothing under them"
+    # And under them only the primary and error buttons, whose label under rlx is light on
+    # the faded side (#139's RLX_CSS): a handful, where the rows are the fleet's size.
+    assert below, "Welcome's primary buttons are on the content side"
+    assert set(below) <= {"Button primary", "Button error"}, "and nothing else under them"
 
 
 def _painted(widget: Widget) -> list[tuple[str, str, str]]:

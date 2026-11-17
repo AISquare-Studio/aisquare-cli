@@ -429,7 +429,7 @@ def test_metrics_show_reports_the_token_gap(
     result = runner.invoke(app, ["metrics", "show"])
     assert result.exit_code == 0, result.output
     assert "no token counts on these turns yet" in result.stdout
-    assert "aisquare metrics tokens" in result.stdout
+    assert "rlx metrics tokens" in result.stdout
     assert "baseline (never asked)" in result.stdout
 
 
@@ -521,11 +521,11 @@ def test_an_empty_listing_names_every_agent_it_can_connect(
     said = " ".join(result.stdout.split())
     if codex_home:
         assert (
-            "Connect your coding agent: aisquare agents connect claude-code or aisquare agents "
+            "Connect your coding agent: rlx agents connect claude-code or rlx agents "
             "connect codex (beta)"
         ) in said, said
     else:
-        assert said.endswith("Connect Claude Code: aisquare agents connect claude-code"), said
+        assert said.endswith("Connect Claude Code: rlx agents connect claude-code"), said
         assert "codex" not in said, said
 
 

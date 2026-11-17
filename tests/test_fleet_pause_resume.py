@@ -989,7 +989,7 @@ def test_an_agents_resume_of_a_paused_agent_whose_task_closed_names_what_the_own
     resume = project_service.fleet_command("resume", stored)
     assert why == (
         f"{coder.label} is paused, and only the owner ends a pause — ask the owner: their "
-        f"`{resume}` (or Resume agents… in asq) ends its pause, as its task is done; nothing "
+        f"`{resume}` (or Resume agents… in rlx) ends its pause, as its task is done; nothing "
         "was changed"
     )
     assert _row(coder.id).paused_at is not None
@@ -1113,7 +1113,7 @@ def test_an_agent_that_paused_its_team_is_not_told_the_owner_paused_it(fleet: Fl
     assert outcome == "failed"
     assert why == (
         f"{coder.label} is paused, and only the owner ends a pause — ask the owner: their "
-        f"`{resume}` (or Resume agents… in asq) brings it back; nothing was changed"
+        f"`{resume}` (or Resume agents… in rlx) brings it back; nothing was changed"
     )
     assert _row(coder.id).paused_at is not None and fleet_service.is_paused(fleet.alpha)
 

@@ -679,7 +679,7 @@ def test_the_text_has_the_four_sections_and_says_what_was_inferred(world: dict[s
         "(no origin recorded: older turns, or a session no hook saw)" in lines
     )
     assert "  interventions   1 interrupts · 1 tool uses denied" in lines
-    assert lines[-1] == "How each figure is measured: aisquare outcomes --help"
+    assert lines[-1] == "How each figure is measured: rlx outcomes --help"
 
 
 def test_json_gives_the_same_data(world: dict[str, Any]) -> None:

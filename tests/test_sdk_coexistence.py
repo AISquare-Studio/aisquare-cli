@@ -65,7 +65,7 @@ def test_cli_starts_when_the_sdk_owns_the_top_level_package() -> None:
         "print(out.output.strip())\n"
     )
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-    assert result.stdout.strip().startswith("aisquare ")
+    assert result.stdout.strip().startswith("rlx ")
 
 
 def test_version_resolves_without_the_top_level_package() -> None:

@@ -285,7 +285,7 @@ def test_codex_probe_flags_explain_native_model_selection(flag: str, runner: Cli
     result = runner.invoke(app, ["--json", "team", "spawn", "coder", "--agent", "codex", flag])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["command"]
-    assert "no AISquare availability cache" in result.stderr
+    assert "no rlx availability cache" in result.stderr
 
 
 def test_project_agent_selection_has_a_machine_readable_scope(runner: CliRunner) -> None:

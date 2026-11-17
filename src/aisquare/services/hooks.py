@@ -44,6 +44,7 @@ from aisquare.core import (
     prompt_origin,
     selfcli,
 )
+from aisquare.core import program as prog
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import AccountsSettings, load_config
 from aisquare.core.injection import build_block, without_loaded_preferences
@@ -421,8 +422,8 @@ def remember_the_model(
         model_memory.observe(session_id, transcript_path, effort=effort, agent_id=agent_id)
     except Exception as exc:  # the turn ended all the same; only the reading is lost
         sys.stderr.write(
-            f"aisquare: the agent's model was not read ({type(exc).__name__}: {exc}) — a "
-            "restart starts the model it was launched with; run: aisquare doctor\n"
+            f"rlx: the agent's model was not read ({type(exc).__name__}: {exc}) — a "
+            f"restart starts the model it was launched with; run: {prog.word()} doctor\n"
         )
 
 
@@ -443,8 +444,8 @@ def remember_the_start(
         )
     except Exception as exc:  # the session starts all the same; only the reading is lost
         sys.stderr.write(
-            f"aisquare: the agent's launch model was not read ({type(exc).__name__}: {exc}) "
-            "— a restart compares with its launch flags; run: aisquare doctor\n"
+            f"rlx: the agent's launch model was not read ({type(exc).__name__}: {exc}) "
+            f"— a restart compares with its launch flags; run: {prog.word()} doctor\n"
         )
 
 
@@ -936,8 +937,8 @@ def check_before_limit(session_id: str, *, transcript_path: str | None = None) -
             _start_the_worker(found, settings)
     except Exception as exc:  # the turn ended all the same; only the early move is lost
         sys.stderr.write(
-            f"aisquare: before-limit check failed ({type(exc).__name__}: {exc}) — the agent "
-            "was not moved before its limit; run: aisquare doctor\n"
+            f"rlx: before-limit check failed ({type(exc).__name__}: {exc}) — the agent "
+            f"was not moved before its limit; run: {prog.word()} doctor\n"
         )
 
 
@@ -1519,8 +1520,8 @@ def capture_prompt(
         record = load_config(paths.config_path(), copy=False).capture.enabled
     except Exception as exc:
         sys.stderr.write(
-            f"aisquare: prompt not recorded — the config could not be read to check "
-            f"capture.enabled ({type(exc).__name__}); run: aisquare doctor\n"
+            f"rlx: prompt not recorded — the config could not be read to check "
+            f"capture.enabled ({type(exc).__name__}); run: {prog.word()} doctor\n"
         )
         record = False
     text = prompt if record and prompt is not None and prompt.strip() else None
@@ -1547,8 +1548,8 @@ def capture_prompt(
         # stderr, never stdout, for the reason cli/hook.py gives — stdout is
         # the agent's context. Silence was the regression that doctrine fixed.
         sys.stderr.write(
-            f"aisquare: prompt not recorded ({type(exc).__name__}: {exc}) — this turn has no "
-            "prompt log and no CI row; run: aisquare doctor\n"
+            f"rlx: prompt not recorded ({type(exc).__name__}: {exc}) — this turn has no "
+            f"prompt log and no CI row; run: {prog.word()} doctor\n"
         )
         return ""
     block = ""

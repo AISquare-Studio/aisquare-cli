@@ -208,7 +208,7 @@ def test_native_value_then_prompt_opens_boundary_only_at_the_prompt(native: list
 def test_unknown_native_arity_cannot_silently_choose_the_wrong_binary(runner: CliRunner) -> None:
     result = runner.invoke(app, ["launch", "coder", "--future-option", "value", "--agent", "codex"])
     assert result.exit_code == 2
-    assert "put AISquare options before it" in result.output
+    assert "put rlx options before it" in result.output
 
 
 @pytest.mark.parametrize("entry", ["launch", "team", "fleet"])

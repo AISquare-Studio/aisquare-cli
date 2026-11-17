@@ -508,7 +508,7 @@ def _refuse(store: ContextStore, project: ProjectInfo, *, dry_run: bool = False)
         raise FreshRefused(str(project_service.NotAdded(project)), code="not_onboarded")
     if is_the_home(stored.root):
         raise FreshRefused(
-            "can't start fresh in the aisquare home: it is the captain's board, not a project",
+            "can't start fresh in the rlx home: it is the captain's board, not a project",
             code="the_home",
         )
     own = orchestrator.env_fleet_agent()
@@ -517,7 +517,7 @@ def _refuse(store: ContextStore, project: ProjectInfo, *, dry_run: bool = False)
         raise FreshRefused(
             f"can't start fresh from inside {row.label}, one of "
             f"{project_service.display_name(stored)}'s own fleet agents: the stop would take "
-            "this pane down part-way through. Run it from the UI (asq) or from a terminal of "
+            "this pane down part-way through. Run it from the UI (rlx) or from a terminal of "
             "your own",
             code="inside_fleet_agent",
         )
@@ -568,7 +568,7 @@ def _sessions(project: ProjectInfo, *, live: bool, dry_run: bool = False) -> lis
         raise FreshRefused(
             f"can't start fresh from inside the fleet's own tmux server: stopping "
             f"{project_service.display_name(project)}'s fleet kills sessions on the server "
-            "this pane runs in, before anything could be reported. Run it from the UI (asq) "
+            "this pane runs in, before anything could be reported. Run it from the UI (rlx) "
             "or from a terminal outside the fleet",
             code="inside_fleet",
         ) from exc

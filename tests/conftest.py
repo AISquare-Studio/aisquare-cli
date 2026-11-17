@@ -27,7 +27,7 @@ from typer.testing import CliRunner
 
 import aisquare
 from aisquare.core import agents as agent_core
-from aisquare.core import experimental, insights, instance_scan, login_session
+from aisquare.core import experimental, insights, instance_scan, login_session, program
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.models import ProjectInfo
@@ -173,6 +173,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 #: was nothing to compare against. The per-role families, which no list of names
 #: can cover, are :data:`AMBIENT_ENV_PREFIXES` below.
 AMBIENT_ENV_VARS = (
+    # Textual's start theme, which asq's restore ranks between a saved pick and rlx
+    # (`cli.ui.theme.restore_theme`): left set, the tests of the default would start in
+    # the developer's theme.
+    "TEXTUAL_THEME",
     # Agent detection honours CLAUDE_CONFIG_DIR, and a developer running the
     # suite from inside a Claude session must never have tests write hooks into
     # their real config directory. In the tuple rather than on its own
@@ -778,6 +782,19 @@ def at_the_machine(monkeypatch: pytest.MonkeyPatch) -> None:
     a fleet spawn refuses to start a tmux server (#20), and the suite run there would refuse
     every spawn that starts one. A test of that refusal patches it back."""
     monkeypatch.setattr(login_session, "remote_session", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def hints_print_rlx(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every hint a test reads starts its command with ``rlx`` (``core.program.word``),
+    whatever the runner's PATH holds: whether ``rlx`` on PATH is this install's own is a
+    fact of the machine, not of the test. ``tests/test_program_name.py`` tests that choice
+    itself with the real :func:`program.ours_on_path`, and a test of the fallback patches
+    ``ours_on_path`` back."""
+    program.word.cache_clear()
+    monkeypatch.setattr(program, "ours_on_path", lambda name: True)
+    yield
+    program.word.cache_clear()
 
 
 @pytest.fixture(autouse=True)

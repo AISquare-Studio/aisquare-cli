@@ -209,7 +209,7 @@ def test_the_doctor_row_is_ok_with_or_without_an_index(checkout: Path) -> None:
 
     paths.ensure_home()
     row = diagnostics._check_code_index(checkout)
-    assert row.status.value == "ok" and "aisquare code index" in row.detail
+    assert row.status.value == "ok" and "rlx code index" in row.detail
     lock = code_index.code_dir(code_service.project_here().id) / "build.lock"
     lock.parent.mkdir(parents=True)
     with locking.holding(lock, wait_s=0):

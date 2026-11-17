@@ -161,8 +161,8 @@ def test_the_install_route_is_read_off_the_ui_thread_and_update_waits_for_it() -
     while_read, after = asyncio.run(drive_view())
 
     assert len(threads) == 1 and threads[0] != threading.get_ident(), "off the UI thread"
-    assert while_read == (True, "Checking how aisquare was installed…")
-    assert after == (False, doctor_view._UPDATE_TOOLTIP), "offered once it is known"
+    assert while_read == (True, "Checking how rlx was installed…")
+    assert after == (False, doctor_view._update_tooltip()), "offered once it is known"
 
 
 # --------------------------------------------------------------------------- the app
@@ -309,7 +309,7 @@ def test_update_waits_out_every_other_worker_and_starts_no_other_meanwhile(
 
     said, while_held, started, held, exits = drive(fn)
 
-    assert said == ["asq quits once the reads running end"], "not refused: waited out"
+    assert said == ["rlx quits once the reads running end"], "not refused: waited out"
     assert while_held == [], "no quit under the read"
     assert started == [], "nothing new to wait for"
     assert held and set(held) <= set(ui_app._waited_reads()), "each read asked for, held"
@@ -638,13 +638,13 @@ def test_a_hand_over_kept_waiting_says_by_what_and_a_second_press_calls_it_off(
 
     assert early == overdue == ("upgrade", "--reopen"), "waiting, the early press ignored"
     assert said[:2] == [
-        "asq quits once the reads running end",
+        "rlx quits once the reads running end",
         "Still waiting for a read after 10 s. Press Update or Uninstall again to stay "
-        "in asq; quit, and it runs once they end.",
+        "in rlx; quit, and it runs once they end.",
     ], said
-    assert said[2:] == ["Called off: asq carries on"], said
+    assert said[2:] == ["Called off: rlx carries on"], said
     assert exits == [], "no quit once the read ended"
-    assert restarted, "asq's reads start again"
+    assert restarted, "rlx's reads start again"
 
 
 def test_a_poll_queued_before_the_call_off_neither_waits_on_nor_quits(
@@ -681,7 +681,7 @@ def test_a_poll_queued_before_the_call_off_neither_waits_on_nor_quits(
     said, exits = drive(fn)
 
     assert said[1].startswith("Still waiting for a read"), "control: the wait was overdue"
-    assert said[2:] == ["Called off: asq carries on"], said
+    assert said[2:] == ["Called off: rlx carries on"], said
     assert exits == [], "no quit once the read ended"
 
 
@@ -875,7 +875,7 @@ def test_a_held_read_that_cannot_start_is_said_and_the_rest_still_begin() -> Non
     ui_app.FleetApp._call_off_hand_off(app)  # type: ignore[arg-type]
 
     assert began == [ui_app.ACCOUNTS_WORKER, accounts_view.CREDITS_WORKER], "the rest begin"
-    assert said[0] == ("Called off: asq carries on", "information")
+    assert said[0] == ("Called off: rlx carries on", "information")
     assert said[1:] == [
         ("could not start the doctor's checks again: No nodes match '#doctor-report'", "warning")
     ]
@@ -1246,7 +1246,7 @@ def terminal(monkeypatch: pytest.MonkeyPatch) -> Terminal:
     return at
 
 
-_ENTER = "Press Enter to go back to asq "
+_ENTER = "Press Enter to go back to rlx "
 
 
 def test_reopen_waits_for_enter_then_opens_asq_after_an_upgrade_that_did_not_fail(
@@ -1263,7 +1263,7 @@ def test_reopen_waits_for_enter_then_opens_asq_after_an_upgrade_that_did_not_fai
     assert upgraded.exit_code == 0, upgraded.output
     assert len(machine.installs) == 2
     assert after_upgrade == ([_ENTER], [["ui"]])
-    assert plain.exit_code == 0 and terminal.reopened == [["ui"]], "control: no --reopen, no asq"
+    assert plain.exit_code == 0 and terminal.reopened == [["ui"]], "control: no --reopen, no rlx"
 
 
 def test_reopen_opens_asq_when_there_was_nothing_to_do_or_the_answer_was_no(

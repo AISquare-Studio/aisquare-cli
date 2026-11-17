@@ -369,7 +369,7 @@ def test_forget_of_a_hub_two_projects_read_names_both_with_what_frees_each(
         known = {each.id: each for each in store.list_projects(all=True)}
 
     def forget(name: str) -> str:
-        return install_route.command_line(["aisquare", "project", "forget", str(work_dir / name)])
+        return install_route.command_line(["rlx", "project", "forget", str(work_dir / name)])
 
     refused = runner.invoke(app, ["project", "forget", "tools"])
     assert refused.exit_code == 2, refused.output
@@ -418,7 +418,7 @@ def test_forget_of_a_hub_a_running_reader_holds_gives_its_stop_and_then_its_forg
         coder = store.upsert_fleet_agent(_agent(web, "coder1").model_copy(update={"board": tools}))
         if forgotten:
             store.forget_project(web)
-    forget = install_route.command_line(["aisquare", "project", "forget", str(work_dir / "web")])
+    forget = install_route.command_line(["rlx", "project", "forget", str(work_dir / "web")])
 
     refused = runner.invoke(app, ["project", "forget", "tools"])
     assert refused.exit_code == 2, refused.output
@@ -1035,7 +1035,7 @@ def test_every_surface_names_a_forget_through_one_builder(tmp_path: Path) -> Non
     for purge, flags in ((False, []), (True, ["--purge"])):
         line = project_service.forget_command(root, purge=purge)
         assert install_route.split_line(line) == [
-            "aisquare",
+            "rlx",
             "project",
             "forget",
             *flags,
@@ -2118,7 +2118,7 @@ def test_a_worktrees_prune_says_a_worktree_whose_tree_went_is_kept_for_its_root_
     assert "kept 1 whose root went since the plan" in said, said
     [hint] = [line for line in result.stdout.splitlines() if "drop it: " in line]
     advised = install_route.split_line(hint.split("drop it: ", 1)[1])
-    assert advised == ["aisquare", "project", "forget", *flags, str(worktree.resolve())], hint
+    assert advised == ["rlx", "project", "forget", *flags, str(worktree.resolve())], hint
     assert "no longer stale" not in said, said
 
     monkeypatch.setattr(project_service, "prune_candidates", real)
@@ -2257,7 +2257,7 @@ def test_an_empty_list_names_the_captured_directories_it_hides(
 
     listed = " ".join(runner.invoke(app, ["project", "list"]).stdout.split())
     assert "No projects registered yet" not in listed
-    assert "1 captured directory hidden" in listed and "aisquare project list --all" in listed
+    assert "1 captured directory hidden" in listed and "rlx project list --all" in listed
     status = " ".join(runner.invoke(app, ["status"]).stdout.split())
     assert "0 project(s) registered (+1 captured, hidden" in status
     assert _json(runner.invoke(app, ["--json", "status"]).stdout)["captured_count"] == 1
@@ -2320,7 +2320,7 @@ def test_a_busy_project_names_the_shutdown_to_run_by_its_id_without_a_codename(
     said = str(project_service.ProjectBusyError(project, [agent]))
     printed = said.split("gone too, ", 1)[1].removesuffix(" records them")
 
-    argv = ["aisquare", "fleet", "shutdown", "--project", "p-1"]
+    argv = ["rlx", "fleet", "shutdown", "--project", "p-1"]
     assert printed == install_route.command_line(argv), said
     assert install_route.split_line(printed) == argv, said
     assert said.startswith(f"{folder} has 1 live fleet agent(s)"), said

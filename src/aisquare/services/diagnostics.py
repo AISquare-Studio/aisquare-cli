@@ -28,6 +28,7 @@ from aisquare.core import (
     tls,
 )
 from aisquare.core import ignore as ignore_core
+from aisquare.core import program as prog
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import adapter_for_binary, adapters, get_adapter
 from aisquare.core.agent_adapters.mcp_servers import DEVTOOLS_COMMAND, DEVTOOLS_NAME
@@ -242,8 +243,8 @@ def apply_fixes() -> list[str]:
     try:
         paths.ensure_home()
     except OSError as exc:
-        return [f"could not create the aisquare home at {home} ({exc})"]
-    return [f"created the aisquare home at {home}"]
+        return [f"could not create the rlx home at {home} ({exc})"]
+    return [f"created the rlx home at {home}"]
 
 
 def _sandboxing_agents(installed: bool = True) -> list[AgentAdapter]:
@@ -311,7 +312,7 @@ def _sandboxed_install_check(cwd: Path | None = None) -> DoctorCheck | None:
             continue
         return _warn(
             "sandbox-install",
-            f"aisquare runs from {inside}, in {root.name or root}'s tree, which a sandboxed "
+            f"rlx runs from {inside}, in {root.name or root}'s tree, which a sandboxed "
             f"{adapter.label} agent launched there may write: such a launch is refused",
             "install aisquare-cli outside the project (uv tool install aisquare-cli, or "
             f"pipx install aisquare-cli), then connect the {adapter.label} hooks again with "
@@ -340,10 +341,10 @@ def _sandbox_hooks_check() -> DoctorCheck | None:
             continue
         return _warn(
             "sandbox-hooks",
-            f"{adapter.label}'s aisquare hooks in {home} run the console script, which "
+            f"{adapter.label}'s rlx hooks in {home} run the console script, which "
             "imports from PYTHONPATH outside the agent's sandbox, where its sandbox may write "
             "a directory it names (direnv's $PWD/src)",
-            f"aisquare agents connect {adapter.id}",
+            f"{prog.word()} agents connect {adapter.id}",
         )
     return None
 
@@ -384,7 +385,7 @@ def _sandbox_path_check(cwd: Path | None = None) -> DoctorCheck | None:
     return _warn(
         "sandbox-path",
         f"PATH names {', '.join(named)}, in {root.name or root}'s tree, which a sandboxed "
-        f"{labels} agent launched there may write: the agent itself, and aisquare's hooks "
+        f"{labels} agent launched there may write: the agent itself, and rlx's hooks "
         "and store broker, run the git found there outside its sandbox",
         f"launch {labels} agents from a shell whose PATH names nothing in the project "
         "(deactivate its virtualenv)",
@@ -485,13 +486,13 @@ def _check_install() -> DoctorCheck:
         this = agent_core.same_install(agent_core.HookBinary(Path(binary)))
         route = _route_of_this_process() if this else None
         if route is not None and route.kind != install_route.VENV:
-            return _ok("install", f"aisquare at {binary} — {route.describe()}")
+            return _ok("install", f"rlx at {binary} — {route.describe()}")
         return _warn(
             "install",
-            f"aisquare runs from a virtualenv ({binary})",
+            f"rlx runs from a virtualenv ({binary})",
             f"For stable Claude Code hooks, install globally: {_GLOBAL_INSTALL}",
         )
-    return _ok("install", f"aisquare at {binary}")
+    return _ok("install", f"rlx at {binary}")
 
 
 def _check_commands() -> DoctorCheck | None:
@@ -596,9 +597,9 @@ def _check_home() -> DoctorCheck:
             "home",
             f"{home} exists but is not a directory — nothing can be created inside it",
             f"AISQUARE_HOME must point at a directory: move {home} aside, or repoint "
-            "AISQUARE_HOME and run `aisquare init`",
+            f"AISQUARE_HOME and run `{prog.word()} init`",
         )
-    return _fail("home", f"{home} is missing", "Set it up: aisquare init")
+    return _fail("home", f"{home} is missing", f"Set it up: {prog.word()} init")
 
 
 #: Filesystems where ``os.replace`` is the kernel's own rename and the
@@ -719,7 +720,7 @@ def _check_config() -> DoctorCheck:
         return _fail(
             "config",
             f"config.toml is invalid: {exc}",
-            "Fix it, or reset it to the defaults: aisquare init --reinit --yes",
+            f"Fix it, or reset it to the defaults: {prog.word()} init --reinit --yes",
         )
     retired = retired_sections()
     if retired:
@@ -756,7 +757,7 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
         return None
     if home.exists():
         return _ok(name, f"not evaluated — {home} is not a directory (see the `home` check)")
-    return _ok(name, "not created yet — set it up: aisquare init")
+    return _ok(name, f"not created yet — set it up: {prog.word()} init")
 
 
 #: How many missing tables, columns, indexes or triggers the database row names before
@@ -772,21 +773,22 @@ _ISSUES_URL = "https://github.com/AISquare-Studio/rlx/issues"
 #: of step in its own way, measured with it dropped (the tests repeat each measurement);
 #: the ``team_meta_*`` ones date the launch metadata its cleanup reads (#113). One per
 #: trigger the ladder makes, in its order (pinned by the tests), so a trigger added
-#: without its sentence fails a test, not the operator.
+#: without its sentence fails a test, not the operator. ``{program}`` is the command's
+#: word (``core.program.word``), filled in where the row is written.
 _TRIGGER_COSTS = {
     "entry_ai": (
-        "without trigger entry_ai a new note is not indexed: `aisquare context search` "
+        "without trigger entry_ai a new note is not indexed: `{program} context search` "
         "misses it, and editing or removing it, or purging its project, fails as "
-        "'database disk image is malformed', which the CLI calls a damaged store though "
+        "'database disk image is malformed', which rlx calls a damaged store though "
         "the notes are intact"
     ),
     "entry_ad": (
         "without trigger entry_ad a note purged with its project stays indexed, and "
-        "`aisquare context search` can match a later note on the purged one's words"
+        "`{program} context search` can match a later note on the purged one's words"
     ),
     "entry_au": (
         "without trigger entry_au an edited note stays indexed under its old text, so "
-        "`aisquare context search` matches what it said, not what it says"
+        "`{program} context search` matches what it said, not what it says"
     ),
     "team_meta_insert_time": (
         "without trigger team_meta_insert_time a new launch binding or replay record is "
@@ -869,19 +871,21 @@ def _check_database() -> DoctorCheck:
         if "shadow table" in kinds:
             costs.append(
                 "without a shadow table the notes' full-text index can be neither written "
-                "nor searched: adding a note and `aisquare context search` fail, with an "
+                f"nor searched: adding a note and `{prog.word()} context search` fail, with an "
                 "error that reads as a damaged store or, without entry_fts_config, a "
                 "traceback ending 'vtable constructor failed', though the notes are intact"
             )
         if "unreadable table" in kinds:
             costs.append(
                 "FTS5 cannot open an unreadable table, the notes' full-text index, so it can "
-                "be neither written nor searched: adding a note and `aisquare context "
+                f"be neither written nor searched: adding a note and `{prog.word()} context "
                 "search` fail with a traceback ending in SQLite's error, though the notes "
                 "are intact"
             )
         costs += [
-            cost for trigger, cost in _TRIGGER_COSTS.items() if f"trigger {trigger}" in missing
+            cost.format(program=prog.word())
+            for trigger, cost in _TRIGGER_COSTS.items()
+            if f"trigger {trigger}" in missing
         ]
         if "unique index" in kinds:
             costs.append(
@@ -900,7 +904,7 @@ def _check_database() -> DoctorCheck:
             "another line can skip, and these are not among them: another build or a "
             "hand edit changed the store in a way this build does not know. The history "
             f"in it is intact, so do not move it aside: keep a copy ({keep}) and report "
-            f"this line, with the output of `aisquare --version`, at {_ISSUES_URL}",
+            f"this line, with the output of `{prog.word()} --version`, at {_ISSUES_URL}",
         )
     marker = paths.truncation_marker_path()
     if marker.exists():
@@ -936,7 +940,11 @@ def _read_line(path: Path) -> str:
 _STALE_HOOKS = (
     "hooks are missing or outdated (older installs lack the Stop/Notification/SessionEnd events)"
 )
-_RECONNECT = "(Re)connect it: aisquare agents connect claude-code"
+
+
+def _reconnect() -> str:
+    """Claude Code's one-line fix, a button on the Doctor page (``onboarding.KNOWN_FIXES``)."""
+    return f"(Re)connect it: {prog.word()} agents connect claude-code"
 
 
 def claude_code_version(binary: str | None = None) -> str | None:
@@ -1014,7 +1022,7 @@ def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
             "",
             "finds neither aisquare nor uvx on PATH, in ~/.local/bin or in ~/.cargo/bin, "
             "so its hooks run nothing",
-            f"Install uv (https://docs.astral.sh/uv/), or the CLI: uv tool install {DISTRIBUTION}",
+            f"Install uv (https://docs.astral.sh/uv/), or rlx: uv tool install {DISTRIBUTION}",
         )
     state, version = agent_core.classify_hook_binary(agent_core.HookBinary(program))
     if state == agent_core.HOOK_BINARY_CURRENT:
@@ -1125,7 +1133,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
                 f"{product} hooks cannot be written in {ambient}: {refusal.why}",
                 _refused_fix(ambient, refusal),
             )
-        return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
+        return _warn("claude-code", f"{product} {_STALE_HOOKS}", _reconnect())
     graded = [site for site in sites if site not in switched_off]
     # The directory sessions from this shell read, when no site grades it: not made yet
     # (npm and Homebrew make it on the first start; CLAUDE_CONFIG_DIR can name a new
@@ -1277,7 +1285,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     if live:
         listed = ", ".join(str(site.config_dir) for site in live)
         problems.append(
-            f"runs aisquare two ways in: {listed} — settings.json hooks and the aisquare "
+            f"runs rlx two ways in: {listed} — settings.json hooks and the aisquare "
             "plugin, whose hooks stand down while those are installed; keep one"
         )
     if runner_problem is not None:
@@ -1294,7 +1302,7 @@ def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     if unmade is not None:
         # Bare: the directory a session from this shell reads, which connect makes. A
         # --config-dir naming any other it never makes, so that form refuses as not installed.
-        fixes.append(_RECONNECT)
+        fixes.append(_reconnect())
     fixes.extend(
         _disconnect_fix(site.config_dir, "remove them, and the plugin runs alone: ")
         for site in dead
@@ -1324,7 +1332,7 @@ def _coders_missed(
     ambient = agent_core.ambient_hook_dir("claude-code")
     here = agent_core.dir_identity(ambient) if ambient is not None else None
     connects = [
-        "aisquare agents connect claude-code"
+        f"{prog.word()} agents connect claude-code"
         if agent_core.dir_identity(directory) == here
         else agents_service.config_dir_command("connect", "claude-code", directory)
         for directory, refusal in missed.items()
@@ -1333,7 +1341,7 @@ def _coders_missed(
     clause = (
         "a coder's git worktree loads the aisquare plugin installed for this repository only "
         "where its own .claude/settings.json enables it, so the fleet's coders may run "
-        "without aisquare"
+        "without rlx"
     )
     if connects:
         clause += f": {' or '.join(connects)} runs it in every folder"
@@ -1446,11 +1454,9 @@ def _planned_agent_checks() -> list[DoctorCheck]:
             continue
         if agent_core.detected(spec):
             later = f" (planned for {spec.planned})" if spec.planned else ""
-            detail = (
-                f"{spec.label} detected at {spec.home}, but aisquare can't connect it yet{later}"
-            )
+            detail = f"{spec.label} detected at {spec.home}, but rlx can't connect it yet{later}"
         else:
-            later = f" (aisquare support is planned for {spec.planned})" if spec.planned else ""
+            later = f" (rlx support is planned for {spec.planned})" if spec.planned else ""
             detail = f"{spec.label} not detected at {spec.home}{later}"
         rows.append(_ok(spec.name, detail))
     return rows
@@ -1476,7 +1482,7 @@ def _shared_number_checks() -> list[DoctorCheck]:
     for held in claude_accounts_service.shared_numbers(accounts):
         named = " and ".join(f"{label(a.agent)}'s ({ref(a)})" for a in held)
         last = held[-1]  # in the one order: the one whose number's place is the other's
-        add = "aisquare accounts add" + (
+        add = f"{prog.word()} accounts add" + (
             "" if claude_accounts_core.kind(last.agent).legacy_slots else f" --agent {last.agent}"
         )
         rows.append(
@@ -1484,7 +1490,8 @@ def _shared_number_checks() -> list[DoctorCheck]:
                 "account-numbers",
                 f"slot {last.slot} is two accounts, {named}: name each as shown; the one listed "
                 "last cannot be moved or made the default",
-                f"aisquare accounts remove {claude_accounts_core.qualified_ref(last)}, then {add}",
+                f"{prog.word()} accounts remove {claude_accounts_core.qualified_ref(last)}, "
+                f"then {add}",
             )
         )
     return rows
@@ -1537,8 +1544,8 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
             _warn(
                 "claude-accounts",
                 detail,
-                "Sign in from asq → Accounts, or: "
-                + "; ".join(f"aisquare accounts run {slot}" for slot in unsigned),
+                "Sign in from rlx → Accounts, or: "
+                + "; ".join(f"{prog.word()} accounts run {slot}" for slot in unsigned),
             ),
             *_claude_account_default_checks(),
             *_claude_account_limit_checks(),
@@ -1596,8 +1603,8 @@ def _agent_accounts_checks(agent: str) -> list[DoctorCheck]:
             _warn(
                 name,
                 detail,
-                "Sign in from asq → Accounts, or: "
-                + "; ".join(f"aisquare accounts run {slot}{sign_in}" for slot in unsigned),
+                "Sign in from rlx → Accounts, or: "
+                + "; ".join(f"{prog.word()} accounts run {slot}{sign_in}" for slot in unsigned),
             ),
             *rest,
         ]
@@ -1707,7 +1714,7 @@ def _accounts_sharing_check(agent: str, managed: Sequence[ClaudeAccount]) -> Doc
             return _warn(
                 name,
                 f"{detail} — " + "; ".join(problems),
-                "aisquare accounts share --enable <parts> links what is missing; a link "
+                f"{prog.word()} accounts share --enable <parts> links what is missing; a link "
                 "elsewhere is yours to undo"
                 + (" (keep transcripts apart)" if kind.memory is not None else ""),
             )
@@ -1732,7 +1739,7 @@ def _undeclared_share_check() -> DoctorCheck | None:
             f"[accounts] share names {', '.join(unknown)}, which no agent here shares "
             f"(parts are {', '.join(known)})",
             "fix the name under [accounts] share in config.toml: "
-            "aisquare config set accounts.share <names>",
+            f"{prog.word()} config set accounts.share <names>",
         )
     except Exception as exc:  # diagnostics must never crash
         return _ok("accounts sharing", f"not evaluated ({exc})")
@@ -1946,8 +1953,9 @@ def _check_captured_projects() -> list[DoctorCheck]:
         _ok(
             "projects",
             f"{len(captured)} captured {noun} hidden from the sidebar and `project list` (a "
-            "hooked session ran there; nothing added it on purpose) — see them: aisquare "
-            "project list --all; drop the stale ones: aisquare project prune --captured-only",
+            f"hooked session ran there; nothing added it on purpose) — see them: {prog.word()} "
+            f"project list --all; drop the stale ones: {prog.word()} project prune "
+            "--captured-only",
         )
     ]
 
@@ -1971,15 +1979,16 @@ def _left_from_before_capture(
     working = [p for p in captured if p.id in holds and not holds[p.id]]
     read = [p for p in captured if holds.get(p.id)]
     left = "left from before project capture was turned off"
-    listed = "listed only by aisquare project list --all"
+    listed = f"listed only by {prog.word()} project list --all"
     parts: list[str] = []
     if dropped:
         parts.append(
             f"{len(dropped)} captured {_directories(len(dropped))} {left} (a hooked session "
-            f"ran there; nothing added it on purpose) — {listed}; drop them: aisquare project "
+            f"ran there; nothing added it on purpose) — {listed}; drop them: {prog.word()} "
+            "project "
             "prune --captured-only --older-than 0"
         )
-    prune = "that prune" if dropped else "aisquare project prune"
+    prune = "that prune" if dropped else f"{prog.word()} project prune"
     for kept, why in ((held, "context"), (working, "agents"), (read, "hub")):
         if not kept:
             continue
@@ -2004,7 +2013,7 @@ def _left_from_before_capture(
             agents, frees = _what_frees(kept, holds)
             what = (
                 f"{'is the board' if one else 'are the boards'} {agents}, running or stopped, "
-                f"which {prune} keeps and aisquare project forget refuses: {names} — "
+                f"which {prune} keeps and {prog.word()} project forget refuses: {names} — "
                 f"{then}{frees}, then {drop}"
             )
         elif why == "agents":
@@ -2015,7 +2024,7 @@ def _left_from_before_capture(
             stop = "; ".join(project_service.fleet_command("stop", p) + " <label>" for p in kept)
             what = (
                 f"{'has a fleet agent' if one else 'have fleet agents'} still running, which "
-                f"{prune} keeps and aisquare project forget refuses: {names} — {then}stop "
+                f"{prune} keeps and {prog.word()} project forget refuses: {names} — {then}stop "
                 f"{'its' if one else 'their'} agents first ({stop}), then {drop}"
             )
         else:
@@ -2104,7 +2113,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
         _warn(
             "fleet-manager",
             "the manager exited while agents are still running in: " + "; ".join(headless),
-            f"Bring it back with its session: {'; '.join(restarts)} (or Restart on its row in asq)",
+            f"Bring it back with its session: {'; '.join(restarts)} (or Restart on its row in rlx)",
         )
     ]
 
@@ -2173,7 +2182,7 @@ def _account_limit_checks(agent: str) -> list[DoctorCheck]:
                     if switches
                     else "Wait "
                 )
-                + f"for the reset and prompt it again — AISquare does not wait for {name} to go on",
+                + f"for the reset and prompt it again — rlx does not wait for {name} to go on",
             )
         ]
     return [
@@ -2335,14 +2344,16 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
             "claude-account-headroom",
             f"every account has used {settings.switch_at}% or more of its five-hour or weekly "
             f"window: {summary}",
-            "Add or sign in another account (aisquare accounts add), or wait for a reset — "
+            f"Add or sign in another account ({prog.word()} accounts add), or wait for a reset "
+            "— "
             "a fleet spawned now has nowhere to switch to",
         )
     if not measured:
         return _warn(
             "claude-account-headroom",
             f"no account's usage could be read: {summary}",
-            "Open a session on the account to refresh its token, then: aisquare accounts usage",
+            f"Open a session on the account to refresh its token, then: {prog.word()} accounts "
+            "usage",
         )
     return _ok(
         "claude-account-headroom",
@@ -2417,22 +2428,24 @@ def _agent_account_headroom_check(agent: str, *, live: bool = False) -> DoctorCh
             name,
             f"every {label} account has used {settings.switch_at}% or more of a window"
             f"{recorded}: {summary}",
-            f"Add or sign in another account (aisquare accounts add --agent {agent}), or wait "
+            f"Add or sign in another account ({prog.word()} accounts add --agent {agent}), or "
+            "wait "
             "for a reset — a fleet spawned now has nowhere to switch to",
         )
     if not measured and network:
         return _warn(
             name,
             f"no {label} account's usage could be read: {summary}",
-            "Open a session on the account (aisquare accounts run <slot>) to refresh its "
-            "login, then: aisquare accounts usage",
+            f"Open a session on the account ({prog.word()} accounts run <slot>) to refresh its "
+            f"login, then: {prog.word()} accounts usage",
         )
     if not measured:
         return _warn(
             name,
             f"no {label} account's usage has been recorded yet: {summary}",
-            f"Open a session on the account (aisquare accounts run <slot>): {label} records "
-            "its limits as it works; then: aisquare accounts usage",
+            f"Open a session on the account ({prog.word()} accounts run <slot>): {label} "
+            "records "
+            f"its limits as it works; then: {prog.word()} accounts usage",
         )
     return _ok(
         name,
@@ -2587,7 +2600,8 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                 f"{prefix}-account-default",
                 f"the accounts registry could not be read ({exc}) — launches run without a "
                 "default account",
-                "aisquare doctor  (the database line above says what is wrong with context.db)",
+                f"{prog.word()} doctor  (the database line above says what is wrong with "
+                "context.db)",
             )
         ]
     by_slot = {account.slot: account for account in accounts}
@@ -2606,10 +2620,11 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                 if legacy
                 else f"no enabled {name} account is signed in, so a launch of {name} "
                 f"nothing else names starts it with no login",
-                "aisquare accounts run <slot> and sign in, or: aisquare accounts enable <slot>"
+                f"{prog.word()} accounts run <slot> and sign in, or: {prog.word()} accounts "
+                "enable <slot>"
                 if legacy
-                else f"aisquare accounts run <slot>{sign_in} and sign in, or: "
-                "aisquare accounts enable <slot>",
+                else f"{prog.word()} accounts run <slot>{sign_in} and sign in, or: "
+                f"{prog.word()} accounts enable <slot>",
             )
         )
     else:
@@ -2643,11 +2658,11 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                 if legacy
                 else f"these name no {name} account this machine has, so their launches are "
                 "refused: " + "; ".join(dangling),
-                "aisquare accounts default --clear --project <project>, or "
-                "aisquare team bind <role> --clear-account"
+                f"{prog.word()} accounts default --clear --project <project>, or "
+                f"{prog.word()} team bind <role> --clear-account"
                 if legacy
-                else f"aisquare accounts default --clear --agent {agent} --project <project>, "
-                "or aisquare team bind <role> --clear-account",
+                else f"{prog.word()} accounts default --clear --agent {agent} "
+                f"--project <project>, or {prog.word()} team bind <role> --clear-account",
             )
         )
     return checks
@@ -2682,7 +2697,7 @@ def _check_role_bindings() -> list[DoctorCheck]:
     for role, profile in sorted(bindings.items()):
 
         def unset(key: str, role: str = role) -> str:
-            return line(["aisquare", "team", "bind", role, "--unset", key])
+            return line([prog.word(), "team", "bind", role, "--unset", key])
 
         for adapter, accounts in with_slots:
             variable = accounts.home_env
@@ -2695,7 +2710,7 @@ def _check_role_bindings() -> list[DoctorCheck]:
                     fixes.append(unset(variable))
                 elif not agent_core.connected(adapter.id, config_dir):
                     problems.append(
-                        f"{role}: {variable} {path} has no aisquare hooks, so its "
+                        f"{role}: {variable} {path} has no rlx hooks, so its "
                         "sessions never reach the board"
                     )
                     connect = ["aisquare", "agents", "connect", adapter.id, "--config-dir"]
@@ -2829,7 +2844,7 @@ def _check_manager_board_context() -> list[DoctorCheck]:
             "manager board context",
             f"fleet.roles.manager.board_context = {manager.board_context!r} is ignored: "
             "a manager reads the whole board",
-            "aisquare config set fleet.roles.manager.board_context all",
+            f"{prog.word()} config set fleet.roles.manager.board_context all",
         )
     ]
 
@@ -2998,7 +3013,7 @@ def _check_fleet_capacity() -> DoctorCheck:
         return _warn(
             name,
             detail,
-            "aisquare fleet capacity lists the live agents and the load — stop one, free "
+            f"{prog.word()} fleet capacity lists the live agents and the load — stop one, free "
             "memory, or change max_agents_total / min_free_mb / busy_* in [fleet]",
         )
     return _ok(name, detail)
@@ -3022,12 +3037,12 @@ def _check_watcher() -> DoctorCheck:
     age = found.age()
     looked = f"last look {int(age.total_seconds())} s ago" if age is not None else "no look yet"
     if found.pid is None:
-        return _ok(name, f"not running ({looked}); `aisquare watch --detach` starts it")
+        return _ok(name, f"not running ({looked}); `{prog.word()} watch --detach` starts it")
     if age is None or age.total_seconds() > 3 * every:
         return _warn(
             name,
             f"running (pid {found.pid}), {looked}",
-            "aisquare watch --stop, then aisquare watch --detach",
+            f"{prog.word()} watch --stop, then {prog.word()} watch --detach",
         )
     return _ok(name, f"running (pid {found.pid}), {looked}")
 
@@ -3046,17 +3061,17 @@ def _check_instances() -> DoctorCheck:
     except Exception as exc:  # diagnostics must never crash
         return _ok(name, f"not evaluated ({exc})")
     if not live:
-        return _ok(name, "no asq is running on this home")
+        return _ok(name, "no rlx is running on this home")
     others = [i for i in live if i.differs_from(me)]
     if others:
         named = "; ".join(f"{i.label}: schema {i.schema}" for i in others)
         return _warn(
             name,
-            f"{len(live)} running, {len(others)} on another release than this aisquare "
+            f"{len(live)} running, {len(others)} on another release than this rlx "
             f"{me.version} (schema {me.schema}): {named}",
             "Quit "
             + ("it" if len(others) == 1 else "each of them")
-            + " (q in that asq), then start asq again, so one release uses this home",
+            + f" (q in that rlx), then start {prog.word()} again, so one release uses this home",
         )
     one = len(live) == 1
     where = "; ".join(i.label + (" (this one)" if i.id == me.id else "") for i in live)
@@ -3685,11 +3700,13 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
     if unfinished and building:
         return _ok(name, "building in the background (agents grep until it is ready)")
     if unfinished:
-        return _ok(name, "none yet — `aisquare code index` builds one (agents grep without it)")
+        return _ok(
+            name, f"none yet — `{prog.word()} code index` builds one (agents grep without it)"
+        )
     parsers = ", ".join(f"{parser} {count}" for parser, count in sorted(found.parsers.items()))
     detail = f"{found.symbols} symbols in {found.files} files ({parsers}), built {found.built_at}"
     if found.stale:
-        detail += " — a commit behind the checkout; `aisquare code index` refreshes it"
+        detail += f" — a commit behind the checkout; `{prog.word()} code index` refreshes it"
     if found.not_indexed:
         missing = ", ".join(f"{lang} {n}" for lang, n in sorted(found.not_indexed.items()))
         detail += f"; not indexed: {missing}"
@@ -3708,7 +3725,8 @@ def _captain_check() -> DoctorCheck | None:
         return None
     return _ok(
         "captain",
-        "off (experimental) — turn it on with: aisquare config set experimental.captain true "
+        f"off (experimental) — turn it on with: {prog.word()} config set experimental.captain "
+        "true "
         f"(or {experimental.CAPTAIN_ENV}=1)",
     )
 
@@ -3796,7 +3814,7 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
                 name,
                 " — ".join(problems),
                 "unset the interfering env vars and relaunch off-ladder roles with "
-                "`aisquare team spawn <role>`",
+                f"`{prog.word()} team spawn <role>`",
             )
         seen_scopes: set[str] = set()
         detail = "role ladders clean" if selected_roles else "native model selection"
@@ -3815,7 +3833,7 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
                     name,
                     f"fable probed unavailable for {role} ({fable.reason}) — "
                     "top-tier roles fall back to opus",
-                    f"aisquare team spawn {role} --refresh",
+                    f"{prog.word()} team spawn {role} --refresh",
                 )
             if fable is not None and fable.resolved_id:
                 detail = f"role ladders clean; fable available ({fable.resolved_id})"
@@ -3840,10 +3858,10 @@ def _check_model_pick_reader() -> DoctorCheck | None:
         "fleet model pick",
         f"{found.get('said', '?')} ({found.get('at', '?')[:19]}): not read as a choice, so no "
         "pick was written, and a restart starts the model the agent ran before it",
-        "if Claude Code was updated, update aisquare (`aisquare upgrade`); a teammate's message "
-        "quoting a /model record also shows here, and is harmless. Meanwhile name the model on "
-        "the spawn (`fleet spawn <role> --model …`) or the restart (`fleet restart <label> "
-        "--model …`)",
+        f"if Claude Code was updated, update rlx (`{prog.word()} upgrade`); a teammate's "
+        "message quoting a /model record also shows here, and is harmless. Meanwhile name the "
+        "model on the spawn (`fleet spawn <role> --model …`) or the restart (`fleet restart "
+        "<label> --model …`)",
     )
 
 
@@ -3863,13 +3881,14 @@ def _check_self_invocation(cwd: Path | None = None) -> DoctorCheck:
         None,
     )
     if shadow is None:
-        return _ok("self-invocation", "no ./aisquare package or aisquare.py shadows the CLI here")
+        return _ok("self-invocation", "no ./aisquare package or aisquare.py shadows rlx here")
     return _warn(
         "self-invocation",
         f"{shadow.relative_to(root)} in {root} shadows `python -m aisquare` run from here "
-        "(the cwd goes first on sys.path); the CLI's own re-invocations pass -P and are fine",
+        "(the cwd goes first on sys.path); rlx's own re-invocations pass -P and are fine",
         "By hand, use the `aisquare`/`asq` script or `python -P -m aisquare`; hooks written by "
-        "an earlier CLI use the bare module form — re-run `aisquare agents connect <agent>`",
+        "an earlier rlx use the bare module form — re-run "
+        f"`{prog.word()} agents connect <agent>`",
     )
 
 
@@ -3982,7 +4001,7 @@ def _check_remote_control(
     return _warn(
         name,
         f"on for {on}, but Claude Code will refuse it: {'; '.join(blockers)}",
-        f"{fix}; `aisquare launch` skips the flag and says why until then",
+        f"{fix}; `{prog.word()} launch` skips the flag and says why until then",
     )
 
 
@@ -4168,7 +4187,7 @@ def _check_fleet(
             # This check is machine-wide; the command it names must be too.
             fix = (
                 "Reconcile the rows with tmux (ended, lost, merged worktrees): "
-                "aisquare fleet reap --all"
+                f"{prog.word()} fleet reap --all"
             )
             if unreached:
                 # Its server may run on, and the way back to it comes first. `reap
@@ -4179,7 +4198,7 @@ def _check_fleet(
                     "socket another server took, send it SIGUSR1 (once the socket is free), "
                     "which makes tmux create its socket again; reap --server-down leaves "
                     "such rows live, and if that server is not running, end them on your "
-                    "word: aisquare fleet shutdown --all --forget"
+                    f"word: {prog.word()} fleet shutdown --all --forget"
                 )
             if server_down:
                 # tmux says no server is there — but doctor runs in this shell and
@@ -4188,7 +4207,7 @@ def _check_fleet(
                 fix += (
                     "; if that server is genuinely gone (a reboot, kill-server) and not "
                     "merely under another TMUX_TMPDIR, mark its rows lost: "
-                    "aisquare fleet reap --all --server-down"
+                    f"{prog.word()} fleet reap --all --server-down"
                 )
             return _warn(name, "; ".join(problems), fix)
         sessions = servers[today].list_sessions()
@@ -4238,7 +4257,7 @@ def _trust_fix(adapter: AgentAdapter, directory: Path) -> str:
         else:
             run = f"{adapter.home_env}={shlex.quote(str(directory))} {adapter.binary}"
     return (
-        f"Start {run}, type /hooks, and trust aisquare's hooks there (in asq, the manager's "
+        f"Start {run}, type /hooks, and trust rlx's hooks there (in rlx, the manager's "
         f"pane does it); {adapter.label} runs them only once trusted, and this row reads "
         "observed after one runs"
     )
@@ -4275,7 +4294,7 @@ def _launch_hooks_off(adapter: AgentAdapter, cwd: Path | None) -> list[DoctorChe
             adapter.id,
             f"{adapter.label}: hooks are switched off for {', '.join(named)} ({switch}) — "
             f"{adapter.label} runs none of them in those sessions",
-            f"Remove it from the role's arguments (aisquare team bind ROLE, or "
+            f"Remove it from the role's arguments ({prog.word()} team bind ROLE, or "
             f"fleet.roles.ROLE.agent_args.{adapter.id})",
         )
         for switch, named in roles.items()
@@ -4311,7 +4330,7 @@ def _plugin_route_checks(
             return [
                 _warn(
                     adapter.id,
-                    f"{adapter.label}: runs aisquare two ways in {directory} — "
+                    f"{adapter.label}: runs rlx two ways in {directory} — "
                     f"{adapter.settings_name} hooks and {label}, whose hooks stand down "
                     "while those are installed; keep one",
                     _disconnect_fix(directory, "keep the plugin: ", adapter.id)
@@ -4382,7 +4401,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
         fix = (
             exc.fix
             if isinstance(exc, agent_launch.UnknownWrapperError)
-            else "aisquare agents use claude-code"
+            else f"{prog.word()} agents use claude-code"
         )
         checks.append(_warn("coding-agent", str(exc), fix))
     for adapter in adapters():
@@ -4429,7 +4448,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
             continue
         if not sites:
             checks.append(
-                _ok(adapter.id, f"{adapter.label} detected; AISquare integration not selected")
+                _ok(adapter.id, f"{adapter.label} detected; rlx integration not selected")
             )
         for directory in sorted(sites):
             state, detail = agent_core.integration_readiness(adapter.id, directory)
@@ -4441,7 +4460,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                     _warn(
                         adapter.id,
                         detail or (site.error if site else "") or "Cannot read native settings",
-                        "Repair native settings file access/JSON, then rerun aisquare doctor",
+                        f"Repair native settings file access/JSON, then rerun {prog.word()} doctor",
                     )
                 )
                 continue
@@ -4503,12 +4522,12 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                     # Some of aisquare's hooks, from an install that knew fewer events: they
                     # run, and the events they lack never reach the board.
                     said = (
-                        f"{adapter.label}: partial in {directory} — aisquare's hooks are "
+                        f"{adapter.label}: partial in {directory} — rlx's hooks are "
                         f"missing for {', '.join(missing)}"
                     )
                 else:
                     said = (
-                        f"{adapter.label}: {state} in {directory} — aisquare's hooks are not "
+                        f"{adapter.label}: {state} in {directory} — rlx's hooks are not "
                         f"installed there"
                     )
                 checks.append(_warn(adapter.id, said + (f". {detail}" if detail else ""), fix))

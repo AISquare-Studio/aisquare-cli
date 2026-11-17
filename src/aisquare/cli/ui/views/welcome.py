@@ -68,8 +68,10 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import ReturnTo
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
+from aisquare.cli.ui.theme import MARK_STYLE, MarkStatic
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, get_adapter, stage_mark_of
 from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.store import store_session
@@ -322,11 +324,11 @@ def _other_agent_text(text: Text, claude: ClaudeState) -> Text:
     where = f" in {claude.home}" if claude.home is not None else ""
     if claude.connected:
         text.append("\n✓ ", style="green")
-        text.append("connected — the manager gets its instructions through aisquare's hooks")
+        text.append("connected — the manager gets its instructions through rlx's hooks")
         text.append(where, style="dim")
         if claude.trust_pending:
             text.append("\n· ", style="yellow")
-            text.append(f"{name} runs aisquare's hooks once you trust them — ")
+            text.append(f"{name} runs rlx's hooks once you trust them — ")
             text.append(
                 "type /hooks in the manager's pane (step 3) and trust them; it asks once, and "
                 "again after an upgrade rewrites them",
@@ -340,11 +342,11 @@ def _other_agent_text(text: Text, claude: ClaudeState) -> Text:
         )
     elif claude.refused is not None:
         text.append("\n✗ ", style="red")
-        text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
+        text.append(f"rlx's hooks cannot be written: {claude.refused} — ")
         text.append("Connect cannot change that.")
     else:
         text.append("\n✗ ", style="red")
-        text.append(f"not connected — Connect installs aisquare's hooks{where}, which bring ")
+        text.append(f"not connected — Connect installs rlx's hooks{where}, which bring ")
         text.append("the manager its instructions")
     if claude.problem:
         text.append(f"\n{claude.problem}", style="dim")
@@ -362,14 +364,14 @@ def choice_text(claude: ClaudeState | None) -> Text:
         text.append(f"{' and '.join(labels)} are both installed. ")
         text.append(
             f"The fleet uses {claude.label} until you pick one; the pick becomes your default "
-            "(aisquare agents use).",
+            f"({prog.word()} agents use).",
             style="dim",
         )
     else:
         names = " and ".join(first_run.agent_label(agent) for agent in others)
         text.append(f"{names} {'is' if len(others) == 1 else 'are'} installed too. ")
         text.append(
-            f"Your default is {claude.label}; a pick here changes it (aisquare agents use).",
+            f"Your default is {claude.label}; a pick here changes it ({prog.word()} agents use).",
             style="dim",
         )
     return text
@@ -403,7 +405,7 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         )
     if claude.connected:
         text.append("\n✓ ", style="green")
-        text.append("connected — the manager gets its instructions through aisquare's hooks")
+        text.append("connected — the manager gets its instructions through rlx's hooks")
     elif claude.hooks_off is not None:
         text.append("\n✗ ", style="red")
         text.append(f'hooks are switched off ("disableAllHooks": true in {claude.hooks_off}) — ')
@@ -412,7 +414,7 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         )
     elif claude.refused is not None:
         text.append("\n✗ ", style="red")
-        text.append(f"aisquare's hooks cannot be written: {claude.refused} — ")
+        text.append(f"rlx's hooks cannot be written: {claude.refused} — ")
         text.append("Connect cannot change that.")
         # The doctor's remedies, as it words them, with nothing after the last: it can end in
         # a command, and a period there named another directory (review of #257).
@@ -423,13 +425,13 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         text.append("\n✗ ", style="red")
         # True either way: a repository that commits .claude/settings.json gives every
         # worktree the plugin; one that does not gives them none.
-        text.append("the coders may run without aisquare — the aisquare plugin is enabled in ")
+        text.append("the coders may run without rlx — the aisquare plugin is enabled in ")
         text.append("the project folder's .claude settings, and a coder's git worktree loads it ")
         text.append("only where its own .claude/settings.json enables it. Connect installs ")
-        text.append("aisquare's hooks, which run in every folder")
+        text.append("rlx's hooks, which run in every folder")
     else:
         text.append("\n✗ ", style="red")
-        text.append("not connected — Connect installs aisquare's hooks, which bring the manager ")
+        text.append("not connected — Connect installs rlx's hooks, which bring the manager ")
         text.append("its instructions")
     if claude.problem:
         text.append(f"\n{claude.problem}", style="dim")
@@ -610,7 +612,7 @@ class WelcomeView(VerticalScroll):
     # ------------------------------------------------------------------ layout
 
     def compose(self) -> ComposeResult:
-        yield Static(self._intro(), id="welcome-intro")
+        yield MarkStatic(self._intro, id="welcome-intro")
         with Vertical(id="step-project", classes="card"):
             yield Static(id="project-title", classes="card-title")
             yield Static(id="project-status")
@@ -645,14 +647,17 @@ class WelcomeView(VerticalScroll):
                 yield Button("Start the coders", id="fleet-coders", variant="primary")
         yield Static(self._keys(), id="welcome-keys")
 
-    def _intro(self) -> Text:
-        text = Text()
-        text.append("aisquare fleet\n", style="bold")
-        text.append(
-            "Every project, its manager and the agents it spawns — each a real session, "
-            "surfaced here. Three steps to your first fleet:"
+    def _intro(self, dim: str | None = None) -> Content:
+        # The heading is the product mark, in the theme's mark colour on either side; the rest
+        # fades with the page (``dim``, cli/ui/theme.py's MarkStatic).
+        return Content.assemble(
+            ("rlx\n", f"bold {MARK_STYLE}"),
+            (
+                "Every project, its manager and the agents it spawns — each a real session, "
+                "surfaced here. Three steps to your first fleet:",
+                dim or "",
+            ),
         )
-        return text
 
     def _keys(self) -> Text:
         return Text(
@@ -1602,7 +1607,7 @@ class WelcomeView(VerticalScroll):
         if self.claude is not None and self.claude.trust_pending:
             return (
                 f"{name} asks once whether you trust this folder, then type /hooks there and "
-                "trust aisquare's hooks, which it runs only once trusted"
+                "trust rlx's hooks, which it runs only once trusted"
             )
         return f"{name} asks once whether you trust this folder"
 
@@ -1614,7 +1619,7 @@ class WelcomeView(VerticalScroll):
 
     def _hooks_review(self) -> str:
         if self.claude is not None and self.claude.trust_pending:
-            return " and trust aisquare's hooks in /hooks"
+            return " and trust rlx's hooks in /hooks"
         return ""
 
     def _waiting_for(self) -> str:

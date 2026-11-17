@@ -1439,9 +1439,9 @@ def test_a_queue_file_from_a_later_version_is_never_read_or_written(fx: Fixture)
     body["version"] = captain_queue.FILE_VERSION + 1
     fx.path.write_text(json.dumps(body), encoding="utf-8")
     before = fx.path.read_bytes()
-    with pytest.raises(QueueError, match="newer than this aisquare reads"):
+    with pytest.raises(QueueError, match="newer than this rlx reads"):
         queue.items()
-    with pytest.raises(QueueError, match="newer than this aisquare reads"):
+    with pytest.raises(QueueError, match="newer than this rlx reads"):
         queue.refresh()
     assert fx.path.read_bytes() == before
 

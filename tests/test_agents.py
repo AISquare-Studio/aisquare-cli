@@ -728,7 +728,7 @@ def test_a_settings_json_nobody_else_shares_is_still_replaced(fake_home: Path) -
 def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home: Path) -> None:
     result = runner.invoke(app, ["agents", "disconnect", "claude-code"])
     assert result.exit_code == 0
-    assert "no aisquare hooks found" in result.output
+    assert "no rlx hooks found" in result.output
 
 
 # --- parallel installs: one agent, several config dirs -----------------------

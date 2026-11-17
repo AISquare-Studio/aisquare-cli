@@ -357,11 +357,11 @@ def test_the_preview_is_captioned_a_sample_while_sharing_is_off_and_exact_when_o
 
 
 def test_the_consent_text_says_only_days_from_yes_on_are_sent() -> None:
-    from aisquare.cli.ui.views.usage_sharing import CONSENT_TEXT
+    from aisquare.cli.ui.views.usage_sharing import consent_text
 
-    assert "Only days from the moment you say yes are sent" in CONSENT_TEXT
-    assert "every repo you run Claude Code in, including ones you haven't added" in CONSENT_TEXT
-    assert "exactly what's sent" not in CONSENT_TEXT.lower()
+    assert "Only days from the moment you say yes are sent" in consent_text()
+    assert "every repo you run Claude Code in, including ones you haven't added" in consent_text()
+    assert "exactly what's sent" not in consent_text().lower()
 
 
 def test_the_preview_is_built_off_the_ui_thread_and_a_failure_is_said() -> None:

@@ -1335,7 +1335,7 @@ def test_metrics_stats_on_an_empty_machine_says_how_to_fill_it() -> None:
     result = CliRunner().invoke(app, ["metrics", "stats", "--no-sweep"])
     assert result.exit_code == 0
     assert "No usage recorded for 7 days yet" in result.output
-    assert "aisquare metrics backfill" in result.output
+    assert "rlx metrics backfill" in result.output
     assert "Claude Code" not in result.output, "the sweep reads every agent's transcripts"
 
 

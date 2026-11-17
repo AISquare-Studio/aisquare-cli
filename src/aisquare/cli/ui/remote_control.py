@@ -59,7 +59,7 @@ from aisquare.services.ngrok_tunnel import (
 )
 
 # The one sentence every read-only refusal says, re-exported for the modal.
-from aisquare.services.remote_server import READ_ONLY_REASON as READ_ONLY_REASON
+from aisquare.services.remote_server import read_only_reason as read_only_reason
 
 AUTO_OFF_CHOICES: tuple[int | None, ...] = (30, 60, 120, None)
 """Minutes until Remote switches itself off — ``None`` is "Never".
@@ -111,9 +111,14 @@ takes milliseconds, unless another process holds the file's lock."""
 ELSEWHERE_EVERY_SECONDS = 3.0
 """How often the panel looks whether another process serves Remote from this home: a lock
 taken for a moment each time (``remote_server.remote_served_elsewhere``)."""
-ALREADY_ON = f"Remote could not start — {remote_server.REMOTE_ALREADY_ON}"
-"""What a start says that another Remote, on this home, kept off."""
-AUTO_OFF_MISSED = "Remote stayed off — its auto-off time passed while asq was not running"
+
+
+def already_on() -> str:
+    """What a start says that another Remote, on this home, kept off."""
+    return f"Remote could not start — {remote_server.remote_already_on()}"
+
+
+AUTO_OFF_MISSED = "Remote stayed off — its auto-off time passed while rlx was not running"
 """What a TUI start says of a Remote left on whose auto-off time has passed meanwhile
 (:meth:`RemoteController._auto_off_missed`)."""
 
@@ -497,7 +502,7 @@ class RemoteController:
         Remote stop it (sweep 3 of #243). Not while another Remote is on for this home (a
         ``serve``, another fleet UI): what it saved is its own, in the same ``state.json``.
         """
-        if self.info is None and self.state.remote_enabled and self.message != ALREADY_ON:
+        if self.info is None and self.state.remote_enabled and self.message != already_on():
             self._set_state(remote_enabled=False)
 
     def _save_started(self, info: remote_server.RemoteInfo) -> None:
@@ -775,7 +780,7 @@ class RemoteController:
             return
         if self._turn_on(wait=wait, restoring=True):
             return  # what came after the server is said as it ends
-        if self.message == ALREADY_ON:
+        if self.message == already_on():
             self.message = None  # on elsewhere: the panel's state says so (served_elsewhere)
             return
         self._remote_news(self.message)
@@ -1189,7 +1194,7 @@ class RemoteController:
         self.elsewhere = found and not self.running  # this one's own claim, as it started
         if not found:
             with self._lock:
-                if self.message == ALREADY_ON:
+                if self.message == already_on():
                     self.message = None
         with self._elsewhere_lock:
             self._elsewhere_looking = False

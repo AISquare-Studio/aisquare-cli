@@ -36,7 +36,6 @@ from aisquare.services.remote_server import (
     CRASHED,
     IN_PROGRESS,
     NOT_WRITE_GATED,
-    READ_ONLY_REASON,
     REQUEST_ID_REUSED,
     WRITE_ENDPOINTS,
     Device,
@@ -48,6 +47,7 @@ from aisquare.services.remote_server import (
     build_app,
     check_public_origin,
     note_public_url,
+    read_only_reason,
     remote_agent_lock,
     write_endpoint_names,
 )
@@ -269,7 +269,7 @@ def test_a_gated_lane_route_is_403_until_writes_are_on(
     client = _unlocked(app, runtime)
     refused = client.post(f"{base(runtime)}/api/needs/answer", json={"id": "ny_1"})
     assert refused.status_code == 403
-    assert refused.json() == {"error": "read_only", "message": READ_ONLY_REASON}
+    assert refused.json() == {"error": "read_only", "message": read_only_reason()}
     assert ran == [] and app.kit.ledger.calls == []
     runtime.set_allow_write(True)
     ok = client.post(f"{base(runtime)}/api/needs/answer", json={"id": "ny_1"})

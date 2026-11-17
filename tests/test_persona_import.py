@@ -1484,7 +1484,7 @@ def test_the_soft_cap_warning_names_an_import_that_condenses_the_persona_in_plac
     (long / "SKILL.md").write_text(
         "---\nname: long-skill\ndescription: Long.\n---\n" + "w" * 4_100 + "\n", encoding="utf-8"
     )
-    hint = f"`aisquare persona import {long} --condense --force` rewrites it shorter"
+    hint = f"`rlx persona import {long} --condense --force` rewrites it shorter"
 
     warned = personas.warnings(personas.resolve("long-skill"))
     result = _import(str(long), condense=True, force=True)  # what it says, as it says it

@@ -704,7 +704,7 @@ def test_a_build_entry_a_posix_acl_lets_another_account_write_is_no_page_to_serv
     served = built / "index.html" if entry == "file" else built / "assets" / "app.js"
     own_group = changed.stat().st_gid
     monkeypatch.setattr(remote_server, "_remote_private_group", lambda: own_group)
-    remedy = remote_server.PAGE_DIST_REMEDY
+    remedy = remote_server.page_dist_remedy()
     changed.chmod(0o664 if entry == "file" else 0o775)
     assert remote_server._page_open_to_others(built, remedy) is None, "this account's group"
 
@@ -870,7 +870,7 @@ def test_a_build_a_macos_acl_opens_is_told_the_chmod_that_removes_the_acl(
         remote_server, "_darwin_acl_text", lambda path: acl if path == str(opened) else None
     )
     monkeypatch.setattr(sys, "platform", "darwin")
-    remedy = remote_server.PAGE_DIST_REMEDY
+    remedy = remote_server.page_dist_remedy()
     if served:
         problem = remote_server._page_served_open_to_others(built, index, remedy)
     else:
@@ -927,7 +927,7 @@ def test_a_build_file_a_macos_acl_lets_another_account_write_is_no_page_to_serve
 
     index = built / "index.html"
     subprocess.run(["chmod", "+a", "nobody allow write", str(index)], check=True)
-    problem = remote_server._page_open_to_others(built, remote_server.PAGE_DIST_REMEDY)
+    problem = remote_server._page_open_to_others(built, remote_server.page_dist_remedy())
     assert problem is not None and problem.startswith(f"{index} can be written by another")
 
 
@@ -1038,7 +1038,7 @@ def test_the_accounts_are_listed_once_and_only_for_an_entry_a_group_may_write(
     monkeypatch.setattr(remote_server, "_private_group", None)
     for path in (built, *built.rglob("*")):
         path.chmod(0o755 if path.is_dir() else 0o644)
-    remedy = remote_server.PAGE_DIST_REMEDY
+    remedy = remote_server.page_dist_remedy()
     remote_server._page_open_to_others(built, remedy)
     remote_server._page_served_open_to_others(built, built / "index.html", remedy)
     assert listed == [], "no entry a group may write"

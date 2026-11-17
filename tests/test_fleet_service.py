@@ -23502,12 +23502,13 @@ def _added(name: str) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-ADDED_FOLDER = Path("/private/var/tmp/asq-native/extra-dir")
-"""The ``--add-dir`` folder of the 120-column capture, its temp path masked."""
+EXTRA = "/private/var/tmp/asq-native/extra-dir"
+"""The ``--add-dir`` folder of the 120-column capture, its temp path masked: the text the
+capture shows, never a ``Path``, which Windows spells with backslashes (review of #520)."""
 SPACES = "/private/var/tmp/asq-native/extra dir with spaces"
 """The one the compact, cut-off and held captures name, masked."""
 ADDED_SCREENS = [
-    pytest.param(".txt", str(ADDED_FOLDER), 120, id="a fleet window, 120 columns"),
+    pytest.param(".txt", EXTRA, 120, id="a fleet window, 120 columns"),
     pytest.param("_compact_50x22.txt", SPACES, 50, id="asq's agent pane, 50x22"),
     pytest.param("_compact_120x12.txt", SPACES, 120, id="compact, 120x12"),
     pytest.param("_cut_off_50x14.txt", SPACES, 50, id="cut off, 50x14"),
@@ -23589,7 +23590,7 @@ def test_the_trust_command_says_the_programs_word_whether_or_not_its_folder_is_k
     """``accounts trust`` with a folder said ``aisquare``, and without one (``<dir>``) the
     program's word, ``rlx``: one row read either by whether the folder was found (review of
     #520). Both say the program's word now (``core.program.word``)."""
-    assert accounts_service.trust_command(ADDED_FOLDER) == _trust(ADDED_FOLDER)
+    assert accounts_service.trust_command(Path(EXTRA)) == _trust(Path(EXTRA))
     assert accounts_service.trust_command(None) == "rlx accounts trust <dir>"
     agent = _coder(project)
     tmux.set_command(agent.pane_id, "claude")

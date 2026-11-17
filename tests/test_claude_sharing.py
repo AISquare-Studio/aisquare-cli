@@ -791,6 +791,7 @@ DRAWN = {
     "120x12": (COMPACT_ONE_ROW, SPACES, 120),
     "50x14": (CUT_OFF, SPACES, 50),
     "50x8": (CUT_OFF_SHORT, SPACES, 50),
+    "in a repository, 120 columns": (REPOSITORY, IN_A_REPOSITORY, 120),
     "in a repository, 50x22": (REPOSITORY_COMPACT, IN_A_REPOSITORY, 50),
     "held, 50x22": (HELD, SPACES, 50),
     "held, cut off, 50x8": (HELD_CUT_OFF, SPACES, 50),
@@ -830,6 +831,7 @@ def test_a_folder_on_a_row_of_its_own_under_adding_is_the_folder_cut_off() -> No
     assert sharing.trust_prompt_folder(CUT_OFF_ALONE, Path("/w"), is_dir=never) == Path(ALONE)
     read = claude_screen.prompt_showing(CUT_OFF_ALONE)
     assert read is not None and read.shape == "trust"
+    assert read.question == f"Adding: {ALONE}", "named by the folder, as the other cut-off ones"
     assert claude_screen.modal_showing(CUT_OFF_ALONE) == "the trust dialog"
     # Wrapped under it, as a longer one breaks: still the one way that is a directory.
     longer = f"/private/var/tmp/asq-native00/{'f' * 60}/x y"
@@ -846,7 +848,7 @@ WINDOWS_FOLDERS = [
     str(PureWindowsPath(r"D:\work\rlx\abcdefghijklmnopqrstuvwxyz0123456789")),
 ]
 """Folders as Windows spells them (``PureWindowsPath``): with spaces; long enough to break
-inside a word and to wrap onto rows; and 45 characters with no space, which starts a row of
+inside a word and to wrap onto rows; and 48 characters with no space, which starts a row of
 its own under ``Adding:``."""
 
 

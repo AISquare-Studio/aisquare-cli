@@ -41,7 +41,7 @@ from tests.test_usage_aware_accounts import _payload, _Usage
 from tests.test_usage_backoff import _new_process as _forget_usage_memory
 
 SSH = "192.0.2.7 52144 192.0.2.1 22"
-VIA = "via the Mac's asq"
+VIA = "via the Mac's rlx"
 LOCKED_SSH = "the login Keychain is locked in this SSH session"
 
 
@@ -285,7 +285,7 @@ def test_with_nothing_fresh_the_last_good_reading_is_kept_and_the_fix_is_the_mac
     assert reading.last_failed_cause is UsageCause.keychain_locked_ssh
     fix = service.kept_fix_line(reading, slot=two.slot)
     assert fix is not None
-    assert "open asq on the Mac itself" in fix and "security unlock-keychain" in fix
+    assert "open rlx on the Mac itself" in fix and "security unlock-keychain" in fix
     assert kept_tooltip(reading, now=NOW) == (f"reading from 20m ago, {VIA} · {LOCKED_SSH}\n{fix}")
     # An aged figure is not the fleet's room (review of #408, MAJ-1), here as anywhere.
     assert service.fleet_headroom([two], {two.slot: reading}, now=NOW).usable == 0
@@ -302,7 +302,7 @@ def test_with_nothing_on_record_the_row_says_the_keychain_is_locked_over_ssh(
     assert not reading.available and not reading.recorded_elsewhere
     assert (reading.cause, reading.reason) == (UsageCause.keychain_locked_ssh, LOCKED_SSH)
     assert reading.fix == (
-        "open asq on the Mac itself, which records usage for this session too; "
+        "open rlx on the Mac itself, which records usage for this session too; "
         "or run security unlock-keychain here, then ↻ Refresh usage (or --refresh)"
     )
     assert not reading.needs_login, "a log-in would not unlock this session's Keychain"

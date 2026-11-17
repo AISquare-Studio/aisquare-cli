@@ -1205,7 +1205,7 @@ class AppConfig(BaseModel):
 #: dropped, since no build from this one on will, and doctor's config row names them
 #: until then (:func:`retired_sections`).
 RETIRED_SECTIONS: dict[str, str] = {
-    "snapshot": "aisquare no longer packs a codebase; an ignore list in it moves to [code]",
+    "snapshot": "rlx no longer packs a codebase; an ignore list in it moves to [code]",
 }
 
 

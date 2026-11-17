@@ -703,7 +703,7 @@ def test_new_without_an_editor_scaffolds_and_says_how_to_edit(runner: CliRunner)
     result = runner.invoke(app, ["persona", "new", "pair"])
 
     assert result.exit_code == 0, result.output
-    assert "aisquare persona edit pair" in result.stdout
+    assert "rlx persona edit pair" in result.stdout
     assert core.resolve("pair").layer == "user"
 
 
@@ -712,8 +712,8 @@ def test_edit_refuses_a_bundled_persona_and_names_the_copy_commands(runner: CliR
 
     assert result.exit_code == 1
     assert "bundled persona" in result.stderr
-    assert "aisquare persona export skeptic --to DIR" in result.stderr
-    assert "aisquare persona import DIR/skeptic --user" in result.stderr
+    assert "rlx persona export skeptic --to DIR" in result.stderr
+    assert "rlx persona import DIR/skeptic --user" in result.stderr
 
 
 def test_edit_that_writes_invalid_text_leaves_the_old_file_and_exits_1(

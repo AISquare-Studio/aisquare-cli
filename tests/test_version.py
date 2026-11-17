@@ -14,7 +14,7 @@ from aisquare.cli.app import app
 def test_version_flag(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert f"aisquare {__version__}" in result.output
+    assert f"rlx {__version__}" in result.output
 
 
 def test_version_short_flag(runner: CliRunner) -> None:
@@ -44,7 +44,7 @@ def test_cli_survives_a_shadowed_root_package(monkeypatch: pytest.MonkeyPatch) -
     try:
         result = CliRunner().invoke(reloaded.app, ["--version"])
         assert result.exit_code == 0, result.output
-        assert "aisquare " in result.output
+        assert result.output.startswith("rlx ")
         assert "0.0.0+uninstalled" not in result.output
     finally:
         importlib.reload(app_module)

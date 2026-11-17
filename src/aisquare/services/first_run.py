@@ -54,6 +54,7 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import config as config_core
 from aisquare.core import harness, orchestrator, paths, selfcli
+from aisquare.core import program as prog
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, InstallRoute, executable_name
@@ -348,7 +349,7 @@ def _probe_claude(
             # a program that is gone or cannot start fail every event, unless the plugin
             # runs in their place, and the fleet started under "Your fleet is up" (review of
             # #257). Connect points them at this install.
-            problems.append("aisquare's hooks name a program that does not exist or cannot start")
+            problems.append("rlx's hooks name a program that does not exist or cannot start")
             is_connected = False
         if is_connected and connected is None and cwd is not None:
             coders = coder_folder(cwd)
@@ -569,7 +570,7 @@ def _probe_agent(
                     connected, trust = True, not install.trusted
                 elif connected and not agent_core.hooks_can_start(adapter.id, home):
                     problems.append(
-                        "aisquare's hooks name a program that does not exist or cannot start"
+                        "rlx's hooks name a program that does not exist or cannot start"
                     )
                     connected = trust = False
         except Exception as exc:
@@ -660,7 +661,7 @@ def choose_agent(agent: str, *, run: Runner = selfcli.run) -> None:
     try:
         result = run(["--json", "agents", "use", agent], cwd=None)
     except Exception as exc:
-        raise AgentNotSaved(f"could not run aisquare agents use {agent}: {_why(exc)}") from exc
+        raise AgentNotSaved(f"could not run {prog.word()} agents use {agent}: {_why(exc)}") from exc
     if not result.ok:
         raise AgentNotSaved(onboarding.failure_reason(result, f"agents use {agent}"))
 
@@ -671,7 +672,7 @@ def connect_fix(agent: str = accounts_core.AGENT, home: Path | None = None) -> F
     from this shell reads: a role whose launch sets another ``CODEX_HOME``."""
     known = next(k for k in onboarding.KNOWN_FIXES if k.agent and k.argv == CONNECT_ARGV[:2])
     argv: tuple[str, ...] = (*known.argv, agent)
-    source = f"aisquare {' '.join(argv)}"
+    source = f"rlx {' '.join(argv)}"
     ambient = agent_core.ambient_hook_dir(agent)
     if home is not None and (ambient is None or not _same_dir(home, ambient)):
         argv = (*argv, "--config-dir", str(home))

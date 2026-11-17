@@ -42,6 +42,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import usage_format as fmt
 from aisquare.cli.ui.views.usage_sharing import Sharing, SharingBox
+from aisquare.core import program as prog
 from aisquare.models import USAGE_RANGES, UsageRange, UsageStats
 from aisquare.services import usage_stats as usage_service
 
@@ -92,12 +93,14 @@ def longer_ranges_hint(range_: UsageRange) -> str:
     return f"press {', '.join(keys[:-1])} or {keys[-1]} for a longer range"
 
 
-EMPTY = (
-    "No usage recorded yet.\n\n"
-    "The agents' transcripts are read when this page opens, and each session aisquare "
-    "launches adds its turns as it goes. If you use an agent and still see this, run "
-    "`aisquare metrics backfill`."
-)
+def empty_text() -> str:
+    """The page with no usage yet, which names the command that reads the transcripts."""
+    return (
+        "No usage recorded yet.\n\n"
+        "The agents' transcripts are read when this page opens, and each session rlx "
+        "launches adds its turns as it goes. If you use an agent and still see this, run "
+        f"`{prog.word()} metrics backfill`."
+    )
 
 
 def default_loader(range_: UsageRange, sweep: bool, progress: Progress | None) -> UsageStats:
@@ -297,7 +300,7 @@ class UsageStatsView(VerticalScroll):
                     compact=True,
                 )
         yield Static("", id="usage-status")
-        yield Static(Text(EMPTY), id="usage-empty")
+        yield Static(Text(empty_text()), id="usage-empty")
         with Vertical(id="usage-body"):
             with Grid(id="usage-tiles"):
                 for stem, label in TILES:
@@ -438,7 +441,7 @@ class UsageStatsView(VerticalScroll):
                         hint=longer_ranges_hint(stats.range),
                     )
                     if elsewhere
-                    else EMPTY
+                    else empty_text()
                 )
             )
             return

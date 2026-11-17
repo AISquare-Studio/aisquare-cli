@@ -157,7 +157,7 @@ class _Taken(Exception):
 def _frame(app: FleetApp) -> FleetSnapshot:
     snapshot = app.snapshot
     if snapshot is None:
-        raise UiRefusal("asq has not read the fleet yet — ask again in a moment")
+        raise UiRefusal("rlx has not read the fleet yet — ask again in a moment")
     return snapshot
 
 
@@ -321,7 +321,7 @@ def _selected_project(app: FleetApp, snapshot: FleetSnapshot) -> ProjectInfo:
     project = snapshot.project(project_id) if project_id else None
     if project is None:
         raise UiRefusal(
-            "which project? nothing selected in asq names one — say open_spawn <project>"
+            "which project? nothing selected in rlx names one — say open_spawn <project>"
         )
     return project
 
@@ -334,7 +334,7 @@ def _no_dialog_open(app: FleetApp) -> None:
     """
     screen = app.screen
     if isinstance(screen, ModalScreen):
-        raise UiRefusal(f"{type(screen).__name__} is open in asq — close it first")
+        raise UiRefusal(f"{type(screen).__name__} is open in rlx — close it first")
 
 
 # --- the vocabulary ------------------------------------------------------------------------------
@@ -430,7 +430,7 @@ def _run(action: str, app: FleetApp, arg: str | None, landed: threading.Event) -
     included), so a callback queued behind them runs only after them.
     """
     if not app.captain_on:
-        return False, experimental.CAPTAIN_OFF  # every action here is the captain's
+        return False, experimental.captain_off()  # every action here is the captain's
     handler = ACTIONS.get(action)
     if handler is None:
         return False, f"unknown ui action {_quoted(action)} — known: {', '.join(sorted(ACTIONS))}"
@@ -473,7 +473,7 @@ def _read_line(conn: socket.socket, wake: int) -> bytes | None:
             raise UiRefusal(f"not a request: no line within {READ_S:g}s")
         readable, _, _ = select.select([conn.fileno(), wake], [], [], left)
         if wake in readable:
-            raise UiRefusal("asq is quitting")
+            raise UiRefusal("rlx is quitting")
         if readable:
             chunk = conn.recv(LINE_MAX)
             if not chunk:
@@ -558,7 +558,7 @@ def _claim(path: Path) -> tuple[socket.socket, tuple[int, int]]:
         if not stat.S_ISSOCK(facts.st_mode):
             raise _Taken(f"{path} is there and is not a socket — left alone")
         if _answered(path):
-            raise _Taken(f"another asq already listens at {path}")
+            raise _Taken(f"another rlx already listens at {path}")
         _unlink_if_same(path, (facts.st_dev, facts.st_ino))
     listener = _unix_socket()
     try:
@@ -623,7 +623,7 @@ class UiReceiver:
     def listen(self) -> None:
         """Bind the socket and start the thread — or record why not and say it once."""
         if sys.platform == "win32" or not hasattr(socket, "AF_UNIX"):
-            self.reason = "this platform has no unix sockets, so ui actions cannot reach asq"
+            self.reason = "this platform has no unix sockets, so ui actions cannot reach rlx"
             _log.debug("no ui receiver: %s", self.reason)
             return
         try:
@@ -645,7 +645,7 @@ class UiReceiver:
     def decline(self, reason: str) -> None:
         """Run without a receiver, and say why — once, in the log."""
         self.reason = reason
-        _log.warning("asq runs without a ui receiver, so the captain's ui actions cannot reach "
+        _log.warning("rlx runs without a ui receiver, so the captain's ui actions cannot reach "
                      "it: %s", reason)  # fmt: skip
 
     def stop_listening(self) -> None:
@@ -717,13 +717,13 @@ class UiReceiver:
         app = self._app()
         with self._guard:
             if self._closing or app is None:
-                return False, "asq is quitting"
+                return False, "rlx is quitting"
             self._dispatching = True
         landed = threading.Event()
         try:
             ok, said = app.call_from_thread(_run, action, app, arg, landed)
             if ok and not landed.wait(LAND_S):  # on this thread: the loop goes on landing it
-                return False, f"{said}, but asq had not finished it within {LAND_S:g}s"
+                return False, f"{said}, but rlx had not finished it within {LAND_S:g}s"
             return ok, said
         except Exception as exc:  # a handler that raised, or a loop that has gone
             _log.warning("ui action %s failed", action, exc_info=True)

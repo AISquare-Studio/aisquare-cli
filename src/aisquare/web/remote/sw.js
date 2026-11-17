@@ -33,7 +33,7 @@ function safeUrl(url, scope) {
 function pushNotice(data) {
   const text = (value, limit) => (typeof value === "string" ? value.slice(0, limit) : "");
   return {
-    title: text(data.title, 120) || "aisquare remote",
+    title: text(data.title, 120) || "rlx remote",
     options: {
       body: text(data.body, 400), tag: text(data.tag, 64) || "asq-needs", renotify: true,
       data: { url: typeof data.url === "string" ? data.url : null },

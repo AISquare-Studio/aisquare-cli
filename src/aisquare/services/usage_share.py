@@ -77,7 +77,7 @@ PLACEHOLDER_SALT = "00" * 32
 
 COVERAGE = (
     "Usage is counted for every repo you run Claude Code in, including ones you haven't added to "
-    "aisquare; capture settings don't change this."
+    "rlx; capture settings don't change this."
 )
 """Said wherever sharing is switched on (the consent dialog, the Settings switch, ``metrics share
 on``): the counts are not limited to the projects aisquare knows."""

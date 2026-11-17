@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import NamedTuple
 
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core.config import ProjectsSettings, load_config
 from aisquare.core.entries import new_entry
 from aisquare.core.names import name_flaw
+from aisquare.core.shell_line import command_line
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import ContextStore, is_the_home, store_session
 from aisquare.core.workspace import (
@@ -37,7 +39,6 @@ from aisquare.models import (
     ProjectPruneReport,
     PruneCandidate,
 )
-from aisquare.services import install_route
 
 # Files at a project root that imply a fact worth seeding during onboarding.
 _ECOSYSTEM_MARKERS: tuple[tuple[str, str], ...] = (
@@ -131,19 +132,20 @@ def capture(store: ContextStore, project: ProjectInfo) -> None:
 
 
 def onboard_command(root: Path) -> str:
-    """``aisquare project onboard <root>``, quoted for this shell (``install_route.command_line``):
-    ``shlex.quote`` wrapped a Windows path in single quotes, which cmd.exe passes on as part
-    of the path. Every surface that says how to add a directory back names it so: the
-    refusals, the Remove dialog and its toast (review of #259, round 20)."""
-    return install_route.command_line(["aisquare", "project", "onboard", str(root)])
+    """``rlx project onboard <root>`` (the word hints print, ``core.program``), quoted for
+    this shell (``install_route.command_line``): ``shlex.quote`` wrapped a Windows path in
+    single quotes, which cmd.exe passes on as part of the path. Every surface that says how
+    to add a directory back names it so: the refusals, the Remove dialog and its toast
+    (review of #259, round 20)."""
+    return prog.words("project", "onboard", str(root))
 
 
 def forget_command(root: Path, *, purge: bool = False) -> str:
-    """``aisquare project forget [--purge] <root>``, quoted for this shell, as
+    """``rlx project forget [--purge] <root>``, quoted for this shell, as
     :func:`onboard_command` names an add: a prune's root-gone hint, :meth:`BoardReader.frees`
     and doctor's capture-off line each built it by hand (review of #259, round 42, 8/11)."""
     purged = ["--purge"] if purge else []
-    return install_route.command_line(["aisquare", "project", "forget", *purged, str(root)])
+    return prog.words("project", "forget", *purged, str(root))
 
 
 class NotAdded(RuntimeError):
@@ -246,12 +248,13 @@ def resolve(ref: str) -> ProjectInfo:
         return _one_match(store, ref)
 
 
-def fleet_command(verb: str, project: ProjectInfo, *words: str) -> str:
-    """``aisquare fleet <verb> --project <ref> [words…]`` for ``project``, quoted for this shell
-    (review of #257). Always with the project: alone, a fleet command acts on the active
-    project, not on the one a message is about (review of #259, round 19). ``words`` (a
-    label, a flag) come after it, quoted too; a placeholder such as ``<label>`` is the
-    caller's to append, unquoted.
+def fleet_command(verb: str, project: ProjectInfo, *words: str, word: str | None = None) -> str:
+    """``rlx fleet <verb> --project <ref> [words…]`` for ``project``, quoted for this shell
+    (review of #257). ``rlx`` is the word hints print (``core.program.word``); ``word``
+    names another, as the agents' role cycles do (``core.program.PROTOCOL``). Always with
+    the project: alone, a fleet command acts on the active project, not on the one a message
+    is about (review of #259, round 19). ``words`` (a label, a flag) come after it, quoted
+    too; a placeholder such as ``<label>`` is the caller's to append, unquoted.
 
     Named by its codename, else its id, never its nickname: free text that ``find_projects``
     matches last, so ``--project web`` for a project nicknamed "web" shut down ``/work/web``'s
@@ -259,7 +262,9 @@ def fleet_command(verb: str, project: ProjectInfo, *words: str) -> str:
     captured rows share. One place for the rule: :class:`ProjectBusyError` and doctor's
     capture-off line each built it (round 20)."""
     ref = project.codename or project.id
-    return install_route.command_line(["aisquare", "fleet", verb, "--project", ref, *words])
+    if word is None:
+        return prog.words("fleet", verb, "--project", ref, *words)
+    return command_line([word, "fleet", verb, "--project", ref, *words])
 
 
 class Frees(NamedTuple):
@@ -1005,7 +1010,7 @@ def typed_root(path: Path | None) -> Path:
 
 
 HOME_WARNING = (
-    "this folder is aisquare's own home: it holds aisquare's settings, the fleet database "
+    "this folder is rlx's own home: it holds rlx's settings, the fleet database "
     "and every {accounts} account's login data, so agents working here can read and change them"
 )
 """What adding the aisquare home as a project says, once (the owner's decision D5), its
@@ -1106,5 +1111,5 @@ def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
     try:
         hooks_service.start_code_index(project, full=refresh)
     except Exception as exc:  # an index is optional; the onboard is not
-        return f"not started ({exc}) — build it with `aisquare code index`"
-    return "building in the background — `aisquare code index --status` says when it is ready"
+        return f"not started ({exc}) — build it with `{prog.word()} code index`"
+    return f"building in the background — `{prog.word()} code index --status` says when it is ready"

@@ -686,7 +686,7 @@ def test_the_stdio_server_closes_itself_after_the_idle_deadline(
     err = proc.stderr.read()
     proc.stderr.close()
     assert proc.returncode == 0, err
-    assert b"aisquare captain serve --stdio: no client messages for 1s" in err
+    assert b"rlx captain serve --stdio: no client messages for 1s" in err
     assert time.perf_counter() - started < 30
 
 
@@ -812,7 +812,7 @@ def test_a_tool_call_longer_than_the_idle_deadline_still_returns(
         receiver.close()
         path.unlink(missing_ok=True)
     assert is_error
-    assert text.startswith(f"error: asq did not answer within {actions.UI_TIMEOUT_S:g}s")
+    assert text.startswith(f"error: rlx did not answer within {actions.UI_TIMEOUT_S:g}s")
     # runner2's 13043 pin: the call the watchdog used to kill left NO audit row.
     uis = [a for a in audit(captain_state.home_project().id) if a["tool"] == "ui"]
     assert len(uis) == 1 and uis[0]["ok"] is False
@@ -872,7 +872,7 @@ def test_a_client_that_hangs_up_mid_call_still_gets_the_call_audited(
                 stream.close()
     uis = [a for a in audit(captain_state.home_project().id) if a["tool"] == "ui"]
     assert len(uis) == 1, "exactly one audit for the call the client walked away from"
-    assert uis[0]["said"].startswith("error: asq did not answer within")
+    assert uis[0]["said"].startswith("error: rlx did not answer within")
 
 
 @pytest.mark.needs_captain
@@ -2518,7 +2518,7 @@ def test_the_captain_presses_any_answering_key_at_a_prompt_with_no_owner_words(
 def test_ui_without_a_running_asq_is_a_said_no_op(projects: dict[str, ProjectInfo]) -> None:
     result = ok(actions.ui("open_spawn"))
     assert result["delivered"] is False
-    assert result["said"] == "asq is not running"
+    assert result["said"] == "rlx is not running"
 
 
 def test_ui_is_a_said_no_op_under_a_home_too_long_for_a_unix_socket(
@@ -2532,7 +2532,7 @@ def test_ui_is_a_said_no_op_under_a_home_too_long_for_a_unix_socket(
     monkeypatch.setenv("AISQUARE_HOME", str(deep))
     assert len(str(deep / "captain" / "ui.sock")) > 110
     result = ok(actions.ui("open_spawn"))
-    assert (result["delivered"], result["said"]) == (False, "asq is not running")
+    assert (result["delivered"], result["said"]) == (False, "rlx is not running")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
@@ -2641,7 +2641,7 @@ def test_ui_says_the_receivers_refusal(
 ) -> None:
     with _asq_socket(monkeypatch, {"ok": False, "said": "unknown ui action 'fly'"}):
         message = refused(lambda: actions.ui("fly"))
-    assert message.startswith("refused: asq said: unknown ui action 'fly'")
+    assert message.startswith("refused: rlx said: unknown ui action 'fly'")
 
 
 @UNIX_SOCKETS
@@ -2651,7 +2651,7 @@ def test_ui_says_a_receiver_that_never_answers(
     monkeypatch.setattr(actions, "UI_TIMEOUT_S", 0.2)
     with _asq_socket(monkeypatch, None):
         message = refused(lambda: actions.ui("open_spawn"))
-    assert message.startswith("error: asq did not answer within 0.2s")
+    assert message.startswith("error: rlx did not answer within 0.2s")
 
 
 @UNIX_SOCKETS
@@ -2669,7 +2669,7 @@ def test_a_socket_a_crashed_asq_left_behind_is_a_said_no_op(
     finally:
         path.unlink(missing_ok=True)
         folder.rmdir()
-    assert (result["delivered"], result["said"]) == (False, "asq is not running")
+    assert (result["delivered"], result["said"]) == (False, "rlx is not running")
 
 
 # --- act: the owner's action list -------------------------------------------------------

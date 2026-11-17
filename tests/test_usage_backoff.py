@@ -706,7 +706,7 @@ def test_the_cli_shows_a_kept_readings_reset_window_as_reset(
         (
             URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")),
             UsageCause.tls_cert,
-            tls.CERT_HINT,
+            tls.CERT_HINT.format(program="rlx"),
         ),
         (ConnectionRefusedError(61, "refused"), UsageCause.unreachable, "check the network"),
     ],

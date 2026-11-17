@@ -36,10 +36,10 @@ from aisquare.cli import remote as remote_cli
 from aisquare.cli.app import app as cli
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.remote_control import (
-    READ_ONLY_REASON,
     RemoteController,
     RemoteState,
     load_remote_state,
+    read_only_reason,
 )
 from aisquare.cli.watch import _load_saved_theme
 from aisquare.core import locking as locking_core
@@ -1775,9 +1775,9 @@ def fake_tunnel_factory(
 
 def test_fresh_state_is_off_and_one_hour_and_the_sentence_names_both_switches() -> None:
     assert load_remote_state() == RemoteState(remote_enabled=False, auto_off_minutes=60)
-    assert READ_ONLY_REASON is remote_server.READ_ONLY_REASON, "one sentence, the server's"
-    assert "aisquare remote allow-write on" in READ_ONLY_REASON
-    assert "Allow write actions in the R panel" in READ_ONLY_REASON
+    assert read_only_reason() == remote_server.read_only_reason(), "one sentence, the server's"
+    assert "rlx remote allow-write on" in read_only_reason()
+    assert "Allow write actions in the R panel" in read_only_reason()
 
 
 def test_turn_on_starts_the_server_leaves_the_write_switch_alone_and_persists() -> None:
@@ -2504,7 +2504,7 @@ def test_a_remote_another_process_serves_is_no_news_at_start_and_keeps_the_saved
     that Remote "could not start — turn it off first", pointing at the Remote that was on,
     which is what the saved switch asks for (sweep 3 of #243)."""
     server = fake_server()
-    server.fail_start = remote_server.RemoteAlreadyOn(remote_server.REMOTE_ALREADY_ON)
+    server.fail_start = remote_server.RemoteAlreadyOn(remote_server.remote_already_on())
     update_state("remote_enabled", True)
     for _start in range(2):
         second = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
@@ -2512,7 +2512,7 @@ def test_a_remote_another_process_serves_is_no_news_at_start_and_keeps_the_saved
         second.restore()
         assert heard == [] and second.message is None and not second.running
     second.turn_on()  # pressed from the panel: that one stays on, and so does its switch
-    assert second.message == remote_control.ALREADY_ON
+    assert second.message == remote_control.already_on()
     assert load_remote_state().remote_enabled is True
 
 
@@ -3801,9 +3801,9 @@ def test_the_panel_knows_when_another_process_serves_this_home() -> None:
     assert found() is True and controller.served_elsewhere() is True
     controller.served_elsewhere()
     assert looked == ["remote-elsewhere"], "on a thread of its own, at most every few seconds"
-    server.fail_start = remote_server.RemoteAlreadyOn(remote_server.REMOTE_ALREADY_ON)
+    server.fail_start = remote_server.RemoteAlreadyOn(remote_server.remote_already_on())
     controller.turn_on()
-    assert controller.message == remote_control.ALREADY_ON
+    assert controller.message == remote_control.already_on()
     assert controller.password() == server.password, "the Remote that is on is that one's"
     server.served_elsewhere = False
     controller._elsewhere_at = None  # a few seconds on

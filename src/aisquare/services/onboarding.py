@@ -34,7 +34,7 @@ from typing import Literal, Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
-from aisquare.core import selfcli
+from aisquare.core import program, selfcli
 from aisquare.core.agent_adapters import adapters
 from aisquare.core.selfcli import CliResult
 from aisquare.core.store import store_session
@@ -242,7 +242,7 @@ def _invoke(
     try:
         return run(args, cwd=cwd), None
     except Exception as exc:
-        return None, f"could not run aisquare {' '.join(args)}: {exc or type(exc).__name__}"
+        return None, f"could not run {_shown_command(args)}: {exc or type(exc).__name__}"
 
 
 def _json_object(stdout: str) -> dict[str, object] | None:
@@ -351,7 +351,7 @@ def run_doctor(
     """
     args = ["--json", "doctor"]
     if on_line is not None:
-        on_line(f"$ aisquare {' '.join(args)}")
+        on_line(f"$ {_shown_command(args)}")
     result, asked = _invoke(run, args, cwd)
     if result is None:
         return [], asked
@@ -396,7 +396,7 @@ def onboard(
         return OnboardOutcome(path=path, reason=reason, log=tuple(lines))
 
     init_args = ["--json", "init", *INIT_FLAGS, str(path)]
-    say(f"$ aisquare {' '.join(init_args)}")
+    say(f"$ {_shown_command(init_args)}")
     result, asked = _invoke(run, init_args, path)
     if result is None:
         return failed(asked or "init could not be run")
@@ -444,7 +444,8 @@ def onboard(
 @dataclass(frozen=True)
 class _KnownFix:
     mention: str
-    """How the doctor writes it, after the word ``aisquare``."""
+    """How the doctor writes it, after the program's word (``rlx`` or ``aisquare``,
+    ``core.program.PRINTED``)."""
     argv: tuple[str, ...]
     """What we actually run — the non-interactive form of the same command."""
     scope: FixScope
@@ -496,7 +497,11 @@ KNOWN_FIXES: tuple[_KnownFix, ...] = (
 )
 
 _MENTION = re.compile(
-    r"aisquare (?P<mention>"
+    # A hint starts its command with whichever word ``core.program.word`` gave it, ``rlx``
+    # or ``aisquare``: a button is read from either (#135), so a reworded hint keeps its button.
+    r"(?:"
+    + "|".join(re.escape(word) for word in program.PRINTED)
+    + r") (?P<mention>"
     + "|".join(re.escape(known.mention) for known in KNOWN_FIXES)
     + r")(?P<rest>[^;)`\n]*)"
 )
@@ -510,7 +515,7 @@ class FixCommand:
     check: str
     """The check whose ``fix`` this came from."""
     argv: tuple[str, ...]
-    """Arguments after ``aisquare``; ``apply_fix`` prepends ``--json``."""
+    """Arguments after the program's word; ``apply_fix`` prepends ``--json``."""
     scope: FixScope
     """``project`` fixes need the project's cwd; ``machine`` fixes do not care."""
     source: str
@@ -520,8 +525,9 @@ class FixCommand:
 
     @property
     def label(self) -> str:
-        """The command as the fix it came from prints it, quoted for this shell."""
-        return install_route.command_line(["aisquare", *self.argv])
+        """The command as the fix it came from prints it, quoted for this shell, with the word
+        hints start with (``core.program.words``)."""
+        return program.words(*self.argv)
 
     @property
     def sign_in_slot(self) -> int | None:
@@ -529,6 +535,12 @@ class FixCommand:
         if not self.interactive or len(self.argv) < 3 or not self.argv[2].isdigit():
             return None
         return int(self.argv[2])
+
+
+def _shown_command(args: Sequence[str]) -> str:
+    """``rlx <args>`` as the onboarding transcript and its errors show what ran: the words
+    joined, as they always were, with the word hints print (``core.program.word``)."""
+    return " ".join((program.word(), *args))
 
 
 def _sign_in_tokens() -> frozenset[str]:
@@ -640,7 +652,7 @@ def apply_fix(fix: FixCommand, cwd: Path | None, *, run: Runner = selfcli.run) -
         return FixResult(
             fix=fix,
             returncode=None,
-            reason="it opens the agent's own sign-in: run it in a terminal, or from asq → Accounts",
+            reason="it opens the agent's own sign-in: run it in a terminal, or from rlx → Accounts",
         )
     result, asked = _invoke(run, ["--json", *fix.argv], cwd)
     if result is None:

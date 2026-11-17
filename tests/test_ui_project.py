@@ -1098,7 +1098,7 @@ def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
     header, button, pane, without = drive(project, scenario)
     assert "manager exited (130)" in header and "Restart on its sidebar row" in header
     # Naming the project: alone, it restarted the active project's manager (#259, round 21).
-    restart = f"aisquare fleet restart --project {project.codename or project.id} manager"
+    restart = f"rlx fleet restart --project {project.codename or project.id} manager"
     assert restart in " ".join(header.split()) and "no manager yet" not in header
     assert button is True and pane is False  # the way to a NEW session is right there
     assert "has no manager yet" in without and "exited" not in without  # the control
@@ -1504,7 +1504,7 @@ def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
     )
     assert machine_fields == [], "no codename field of its own, and nothing machine-wide"
     assert "The fleet id follows it." in note
-    assert "aisquare project rename sets the same" in note
+    assert "rlx project rename sets the same" in note
     assert "`" not in note, "the note is a Text: backticks would show as they are"
 
 

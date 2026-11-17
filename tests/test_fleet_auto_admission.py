@@ -770,7 +770,7 @@ def test_a_spawn_that_races_past_the_floor_while_busy_backs_its_row_out(
     assert hold.project_id == project.id and "cpu load 3.86 per CPU" in hold.signal
     assert hold.project_name == project_service.display_name(project)
     assert "retry at " in str(raced.value)
-    assert "while `aisquare watch` runs, it wakes this project's manager" in str(raced.value)
+    assert "while `rlx watch` runs, it wakes this project's manager" in str(raced.value)
     monkeypatch.setattr(tmux, "spawn_window", original)
     asked = machine.probes
     with pytest.raises(fleet_service.CapacityRefused) as again:

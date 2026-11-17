@@ -109,7 +109,7 @@ def test_the_app_asks_again_on_its_own_schedule_and_toasts_a_newer_release(
 
     assert len(asked) >= 2, "the hourly ask runs on its own"
     assert version == "0.9.2"
-    assert any("aisquare 0.9.2 is out" in toast for toast in toasts)
+    assert any("rlx 0.9.2 is out" in toast for toast in toasts)
 
 
 # --- the press: only the agents alive AT the press --------------------------------------------

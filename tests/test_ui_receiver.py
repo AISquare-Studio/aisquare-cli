@@ -429,7 +429,7 @@ def test_an_action_that_has_not_landed_in_time_is_said_never_answered_ok(
         return reply, fleet_app(pilot).sidebar.selected_key
 
     reply, selected = drive(body)
-    assert reply == {"ok": False, "said": "selected beta, but asq had not finished it within 0.1s"}
+    assert reply == {"ok": False, "said": "selected beta, but rlx had not finished it within 0.1s"}
     assert selected == "project:prj_bbb", "it still lands; the answer only said it had not yet"
 
 
@@ -645,7 +645,7 @@ def test_the_captains_ui_tool_is_told_why_asq_said_no(
         return str(caught.value)
 
     message = drive(body)
-    assert message.startswith("refused: asq said: no project matches 'zeta'")
+    assert message.startswith("refused: rlx said: no project matches 'zeta'")
 
 
 @UNIX_SOCKETS
@@ -858,7 +858,7 @@ def test_a_live_listener_is_left_alone_and_survives_the_quit(
         other.close()
         ui_path.unlink(missing_ok=True)
     assert not listening
-    assert reason is not None and reason.startswith("another asq already listens at")
+    assert reason is not None and reason.startswith("another rlx already listens at")
     assert survived == inode, "the other listener's socket is not unlinked at quit"
 
 
@@ -1112,7 +1112,7 @@ def test_quit_does_not_wait_out_a_client_that_says_nothing(
                 told: dict[str, Any] = json.loads(stream.readline(64 * 1024))
         return told
 
-    assert drive(body) == {"ok": False, "said": "asq is quitting"}
+    assert drive(body) == {"ok": False, "said": "rlx is quitting"}
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux blocks a connect to a full backlog")
@@ -1178,7 +1178,7 @@ def test_stopping_the_receiver_waits_for_its_thread(
     again, alive, listening, exists, told = drive(body)
     assert again
     assert not alive, "stop returned with the receiver's thread still running"
-    assert told == {"ok": False, "said": "asq is quitting"}, "its last answer went out first"
+    assert told == {"ok": False, "said": "rlx is quitting"}, "its last answer went out first"
     assert not listening and not exists
 
 
@@ -1222,7 +1222,7 @@ def test_an_action_read_just_before_quit_is_told_asq_is_quitting(
         return took, replies, rx
 
     took, replies, rx = drive(body)
-    assert replies == [{"ok": False, "said": "asq is quitting"}]
+    assert replies == [{"ok": False, "said": "rlx is quitting"}]
     assert took < receiver.JOIN_S / 2, f"quit waited {took:.2f}s"
     assert not rx.alive
 

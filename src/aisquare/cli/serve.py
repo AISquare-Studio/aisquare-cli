@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.core import program as prog
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 
@@ -73,7 +74,7 @@ def _dependency_error() -> str | None:
         return f"the serve extra is not installed — {_INSTALL_HINT}"
     return (
         f"the installed mcp package has no {REQUIRED_MODULE}{_installed_mcp()} — "
-        "aisquare needs mcp>=2.1,<3, which is where that module lives. "
+        "rlx needs mcp>=2.1,<3, which is where that module lives. "
         "Move it into range: pip install 'mcp>=2.1,<3'"
     )
 
@@ -236,9 +237,7 @@ def serve(
             _fail_team(exc)
         # stdout is the MCP protocol channel; announce on stderr so the
         # opt-in is never invisible.
-        stderr_console().print(
-            f"aisquare agent orchestrator activated for {project.root} (stdio serve)"
-        )
+        stderr_console().print(f"rlx agent orchestrator activated for {project.root} (stdio serve)")
         mcp_server.run_stdio(close_after=close_after)
         return
     try:
@@ -248,7 +247,7 @@ def serve(
     stderr_console().print(
         f"Serving the orchestrator for {project.root.name or project.id} at "
         f"{_client_url(bind, port)} "
-        "(bearer token required — see `aisquare serve --show-token`). Ctrl-C stops."
+        f"(bearer token required — see `{prog.word()} serve --show-token`). Ctrl-C stops."
     )
     _announce_open_bind(bind)
     mcp_server.run_http(bind=bind, port=port)

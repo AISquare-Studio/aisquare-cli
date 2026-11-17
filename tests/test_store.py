@@ -3728,7 +3728,7 @@ def test_doctor_fails_on_a_full_text_index_that_lost_a_shadow_table(shadow: str)
     assert row.detail == (
         "context.db opens (1 user entries) but lacks part of this build's schema: shadow "
         f"table {shadow}; without a shadow table the notes' full-text index can be neither "
-        "written nor searched: adding a note and `aisquare context search` fail, with an "
+        "written nor searched: adding a note and `rlx context search` fail, with an "
         "error that reads as a damaged store or, without entry_fts_config, a traceback "
         "ending 'vtable constructor failed', though the notes are intact"
     ), row.detail
@@ -3770,7 +3770,7 @@ def test_doctor_names_a_full_text_index_fts5_cannot_open_instead_of_calling_the_
         "context.db opens (1 user entries) but lacks part of this build's schema: "
         "unreadable table entry_fts; FTS5 cannot open an unreadable table, the notes' "
         "full-text index, so it can be neither written nor searched: adding a note and "
-        "`aisquare context search` fail with a traceback ending in SQLite's error, though "
+        "`rlx context search` fail with a traceback ending in SQLite's error, though "
         "the notes are intact"
     ), row.detail
     assert row.fix is not None and "mv " not in row.fix, row.fix
@@ -3902,7 +3902,8 @@ def test_doctor_says_what_a_trigger_it_only_counts_costs() -> None:
         f"project.linked_repos, {', '.join(f'table {table}' for table in tables)} and 1 "
         "more; a command that reads a missing table or column fails"
     ), row.detail
-    assert row.detail.endswith(f"; {diagnostics._TRIGGER_COSTS['entry_ai']}"), row.detail
+    cost = diagnostics._TRIGGER_COSTS["entry_ai"].format(program="rlx")
+    assert row.detail.endswith(f"; {cost}"), row.detail
 
 
 @pytest.mark.parametrize(
@@ -3948,22 +3949,22 @@ def test_doctor_names_a_store_without_its_notes_table_instead_of_calling_it_unre
         (
             "DROP TRIGGER entry_ai;",
             "schema: trigger entry_ai; without trigger entry_ai a new note is not indexed: "
-            "`aisquare context search` misses it, and editing or removing it, or purging its "
-            "project, fails as 'database disk image is malformed', which the CLI calls a "
+            "`rlx context search` misses it, and editing or removing it, or purging its "
+            "project, fails as 'database disk image is malformed', which rlx calls a "
             "damaged store though the notes are intact",
             ("stays indexed", "duplicates", "slows"),
         ),
         (
             "DROP TRIGGER entry_ad;",
             "schema: trigger entry_ad; without trigger entry_ad a note purged with its "
-            "project stays indexed, and `aisquare context search` can match a later note on "
+            "project stays indexed, and `rlx context search` can match a later note on "
             "the purged one's words",
             ("malformed", "old text", "duplicates", "slows"),
         ),
         (
             "DROP TRIGGER entry_au;",
             "schema: trigger entry_au; without trigger entry_au an edited note stays indexed "
-            "under its old text, so `aisquare context search` matches what it said, not what "
+            "under its old text, so `rlx context search` matches what it said, not what "
             "it says",
             ("malformed", "purged", "duplicates", "slows"),
         ),

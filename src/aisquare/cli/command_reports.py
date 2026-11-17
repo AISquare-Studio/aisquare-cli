@@ -110,13 +110,13 @@ def exec_command(
         ),
     ] = service.DEFAULT_STREAM_LIMIT,
 ) -> None:
-    """Run a command once and save a report of how it ended: asq exec -- CMD ARGS...
+    """Run a command once and save a report of how it ended: rlx exec -- CMD ARGS...
 
     No shell is added and the arguments pass unchanged; standard input is inherited.
     Put global flags such as --json BEFORE exec: everything after -- is the command's.
     Exits with the command's status. Only git status's usage hints and pytest's
     progress lines are shortened (--raw or AISQUARE_REPORTS=off turns that off).
-    Reports are kept 14 days, newest 64; asq reports show ID reads one back.
+    Reports are kept 14 days, newest 64; rlx reports show ID reads one back.
     """
     if not ctx.args:
         fail("Provide a command: asq exec -- COMMAND [ARGS...]", error="usage", exit_code=2)

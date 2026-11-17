@@ -205,7 +205,7 @@ def test_a_name_that_gives_no_codename_saves_the_nickname_and_says_so(
     assert renamed.codename == before == _codename(project), "the codename is left as it was"
     [note] = notes
     assert "'!!!' gives no codename (it needs a letter a-z" in note and f"stays {before}" in note
-    assert f"aisquare fleet rename --project {before} <codename>" in note
+    assert f"rlx fleet rename --project {before} <codename>" in note
     # `PRJ` slugs to `prj`, how every project id begins: the note says that, not "a letter".
     prj: list[str] = []
     fleet_service.rename_project(project, "PRJ", notes=prj)

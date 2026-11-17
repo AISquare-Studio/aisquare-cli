@@ -251,11 +251,11 @@ def test_pressing_onboard_runs_init_and_doctor_and_posts_project_onboarded(tmp_p
     onboarded = received[0]
     assert isinstance(onboarded, ProjectOnboarded)
     assert onboarded.project_id == project_id_for(proj) and onboarded.path == proj
-    assert log[0] == f"$ aisquare --json init --no-explainability {proj}"
-    assert "$ aisquare --json doctor" in log
+    assert log[0] == f"$ rlx --json init --no-explainability {proj}"
+    assert "$ rlx --json doctor" in log
     assert any("⚠ claude-code" in line for line in log)
     assert doctor_shown, "the findings appear under the log"
-    assert fix_labels == ["aisquare agents connect claude-code"], (
+    assert fix_labels == ["rlx agents connect claude-code"], (
         "one button for the known fix, none for npm"
     )
     assert not running
@@ -628,7 +628,7 @@ def test_a_reload_while_onboarding_leaves_the_run_its_log_and_its_button(tmp_pat
     assert during["run disabled"], "nor its button, which stays off until the run ends"
     assert not during["reload disabled"], "↻ is allowed during a run"
     assert seen["received"] == ["ProjectOnboarded"]
-    assert "$ aisquare --json doctor" in list(seen["log"])  # type: ignore[call-overload]
+    assert "$ rlx --json doctor" in list(seen["log"])  # type: ignore[call-overload]
     assert not seen["run disabled"], "the run's end arms the button as ever"
 
 
@@ -786,8 +786,8 @@ def test_doctor_view_renders_a_button_only_for_known_fixes(tmp_path: Path) -> No
     assert "⚠ claude-code: hooks are missing" in report and "→ (Re)connect it" in report
     assert "→ Install it: brew install tmux" in report, "an unknown fix stays text"
     assert buttons == [
-        ("aisquare agents connect claude-code", False),
-        ("aisquare project onboard --refresh", False),
+        ("rlx agents connect claude-code", False),
+        ("rlx project onboard --refresh", False),
     ]
 
 
@@ -817,7 +817,7 @@ def test_a_bracketed_config_dir_survives_into_the_button(tmp_path: Path) -> None
 
     label, tooltip = asyncio.run(drive())
     # The label names the command as a shell would read it, quoted where its path needs it.
-    argv = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+    argv = ["rlx", "agents", "connect", "claude-code", "--config-dir"]
     expected = install_route.command_line([*argv, "/home/me/[archive]/.claude"])
     assert label == expected
     assert "[archive]" in label and "[archive]" in tooltip
@@ -839,8 +839,8 @@ def test_doctor_view_without_a_cwd_disables_project_scoped_fixes() -> None:
             ]
 
     assert asyncio.run(drive()) == [
-        ("aisquare agents connect claude-code", False),
-        ("aisquare project onboard --refresh", True),
+        ("rlx agents connect claude-code", False),
+        ("rlx project onboard --refresh", True),
     ]
 
 
@@ -882,7 +882,7 @@ def test_clicking_a_fix_runs_it_in_the_cwd_then_refreshes_the_doctor(tmp_path: P
         "python",
         "claude-code",
     ] and refreshed.cwd == tmp_path
-    assert status == "✓ aisquare agents connect claude-code"
+    assert status == "✓ rlx agents connect claude-code"
     assert "✓ claude-code: connected" in report, "the report is the re-run's, not the old one"
     assert buttons == 0, "a fixed check has no button left"
 
@@ -915,11 +915,9 @@ def test_a_failed_fix_shows_the_reason_and_keeps_the_buttons(tmp_path: Path) -> 
 
     kinds, status, buttons, report = asyncio.run(drive())
     assert kinds == ["FixApplied"], "no DoctorRefreshed when the re-check gave no answer"
-    assert (
-        status.startswith("✗ aisquare agents connect claude-code: ") and "not_installed" in status
-    )
+    assert status.startswith("✗ rlx agents connect claude-code: ") and "not_installed" in status
     assert "re-check failed, showing the previous report" in status
-    assert buttons == [("aisquare agents connect claude-code", False)], (
+    assert buttons == [("rlx agents connect claude-code", False)], (
         "the button is back for another try"
     )
     assert "⚠ claude-code: hooks are missing" in report

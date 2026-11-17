@@ -14,6 +14,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import AgentPath, fail
+from aisquare.core import program as prog
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.services import store_broker
@@ -41,7 +42,7 @@ def _print_tick(report: watch_service.TickReport) -> None:
     for label in report.stopped:
         console.print(f"  auto-stopped {label}", markup=False)
     for note in report.notes:
-        stderr_console().print(f"aisquare watch: {note}", markup=False)
+        stderr_console().print(f"{prog.word()} watch: {note}", markup=False)
 
 
 @app.callback()
@@ -85,7 +86,7 @@ def watch(
         _say(
             {"pid": pid, "session": watch_service.DETACHED_SESSION},
             f"✓ watching (pid {pid}) in tmux session {watch_service.DETACHED_SESSION}; "
-            "`aisquare watch --stop` ends it",
+            f"`{prog.word()} watch --stop` ends it",
         )
         return
     if once:
@@ -99,7 +100,9 @@ def watch(
         watch_service.run(
             interval=interval,
             on_tick=_print_tick,
-            on_error=lambda said: stderr_console().print(f"aisquare watch: {said}", markup=False),
+            on_error=lambda said: stderr_console().print(
+                f"{prog.word()} watch: {said}", markup=False
+            ),
         )
     except watch_service.AlreadyWatching as exc:
         fail(str(exc), error="already_watching")
@@ -122,7 +125,7 @@ def _print_watch_status() -> None:
         "last_scan_age_seconds": int(age.total_seconds()) if age is not None else None,
     }
     if found.pid is None:
-        line = "no watcher runs: `aisquare watch --detach` starts one"
+        line = f"no watcher runs: `{prog.word()} watch --detach` starts one"
     else:
         line = f"watching (pid {found.pid})"
     if age is not None:

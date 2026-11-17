@@ -364,9 +364,7 @@ def test_the_press_reads_each_agent_again_and_keeps_only_the_live(
     assert [agent.label for agent in alive] == ["coder-1", "coder-4"]
     assert agents[1].label == "coder-2" and fleet.restarted == [("coder-1", "agt_coder-1")]
     assert outcome is not None
-    assert (
-        outcome.toast() == "✓ aisquare 0.9.1 — 1 agent reattached, 1 restarted (coder-1: pane gone)"
-    )
+    assert outcome.toast() == "✓ rlx 0.9.1 — 1 agent reattached, 1 restarted (coder-1: pane gone)"
 
 
 @pytest.mark.parametrize(
@@ -472,10 +470,7 @@ def test_the_reopen_reattaches_the_running_and_restarts_only_the_gone(
     assert fleet.restarted == [("coder-2", "agt_coder-2")], "pinned to the recorded row"
     assert outcome is not None and outcome.updated
     assert outcome.kept == ("coder-1", "reviewer-1"), "unknown is no pane shown gone"
-    assert (
-        outcome.toast()
-        == "✓ aisquare 0.9.1 — 2 agents reattached, 1 restarted (coder-2: pane gone)"
-    )
+    assert outcome.toast() == "✓ rlx 0.9.1 — 2 agents reattached, 1 restarted (coder-2: pane gone)"
     assert updates.reattach_after_update() is None, "an ordinary start after it finds no record"
 
 
@@ -492,7 +487,7 @@ def test_every_agent_kept_says_so_and_names_no_restart(
 
     assert fleet.restarted == []
     assert outcome is not None
-    assert outcome.toast() == "✓ aisquare 0.9.1 — 2 agents reattached"
+    assert outcome.toast() == "✓ rlx 0.9.1 — 2 agents reattached"
 
 
 def test_a_restart_that_fails_is_named_and_its_row_left(
@@ -510,7 +505,7 @@ def test_a_restart_that_fails_is_named_and_its_row_left(
     assert outcome is not None and outcome.restarted == ()
     assert outcome.failed == (("coder-1", "exit 1; cannot restart 'coder-1': its task is done"),)
     assert outcome.toast() == (
-        "✓ aisquare 0.9.1 — 1 agent reattached, not restarted (coder-1: exit 1; cannot restart "
+        "✓ rlx 0.9.1 — 1 agent reattached, not restarted (coder-1: exit 1; cannot restart "
         "'coder-1': its task is done)"
     )
 
@@ -600,7 +595,7 @@ def test_an_agent_stopped_on_purpose_or_ended_cleanly_since_the_press_is_left_an
     assert outcome.left == (("coder-1", why),)
     assert outcome.failed == ()
     assert outcome.toast() == (
-        "✓ aisquare 0.9.1 — 1 agent reattached, 1 restarted (coder-2: pane gone), "
+        "✓ rlx 0.9.1 — 1 agent reattached, 1 restarted (coder-2: pane gone), "
         f"1 left as it was (coder-1: {why})"
     )
 
@@ -648,5 +643,5 @@ def test_a_failed_update_reopens_on_the_old_version_and_says_so(
 
     assert outcome is not None and not outcome.updated
     assert outcome.toast() == (
-        "aisquare 0.9.0 is still installed: the update did not move it — 1 agent reattached"
+        "rlx 0.9.0 is still installed: the update did not move it — 1 agent reattached"
     )

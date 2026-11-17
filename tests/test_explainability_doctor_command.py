@@ -146,7 +146,7 @@ def test_doctor_fix_makes_the_home_and_touches_nothing_of_explainability(
     is its business any more: the home is all it makes."""
 
     def refused(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("`aisquare doctor --fix` reached explainability")
+        raise AssertionError("`rlx doctor --fix` reached explainability")
 
     monkeypatch.setattr(ops, "apply_fixes", refused)
     monkeypatch.setattr(ops, "install_sdk", refused)
@@ -154,7 +154,7 @@ def test_doctor_fix_makes_the_home_and_touches_nothing_of_explainability(
 
     result = runner.invoke(app, ["doctor", "--fix", "--yes"], catch_exceptions=False)
 
-    assert f"fix: created the aisquare home at {paths.aisquare_home()}" in result.output
+    assert f"fix: created the rlx home at {paths.aisquare_home()}" in result.output
     assert paths.aisquare_home().exists()
     assert load_config().explainability.enabled is False
 

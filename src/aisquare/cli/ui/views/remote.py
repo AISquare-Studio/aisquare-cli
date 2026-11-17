@@ -31,10 +31,11 @@ from textual.widgets.data_table import ColumnKey
 from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.remote_control import (
     AUTO_OFF_CHOICES,
-    READ_ONLY_REASON,
     RemoteController,
+    read_only_reason,
 )
 from aisquare.cli.ui.ticks import while_running
+from aisquare.core import program as prog
 from aisquare.services.remote_server import _remote_instant, remote_install_hint
 
 QR_UNAVAILABLE = "QR unavailable: this install lacks segno"
@@ -45,10 +46,18 @@ LOCAL_ONLY = (
     "this machine only: a phone needs ngrok's link, which shows here, with its QR, once ngrok is up"
 )
 """Under the local link, which the panel shows while ngrok is not up."""
-ELSEWHERE = "on in another process (asq remote serve, or another asq ui) — turn it off there"
-"""The state, while another process serves Remote from this home and this one does not."""
-ELSEWHERE_LINK = "its link is shown where it runs; asq remote status prints the local one"
-"""The link row, then: that Remote's link is the other process's to show."""
+
+
+def served_elsewhere_state() -> str:
+    """The state, while another process serves Remote from this home and this one does not."""
+    return f"on in another process ({prog.word()} remote serve, or another rlx) — turn it off there"
+
+
+def served_elsewhere_link() -> str:
+    """The link row, then: that Remote's link is the other process's to show."""
+    return f"its link is shown where it runs; {prog.word()} remote status prints the local one"
+
+
 LOCAL_ZONE: tzinfo | None = None
 """The zone the panel says its times in: ``None`` is this machine's own (a seam for tests)."""
 QR_COLOURS = "#ffffff on #000000"
@@ -200,14 +209,14 @@ class RemotePanel(ModalScreen[None]):
             Text(controller.password() or "—", style="bold")
         )
         self.query_one("#remote-write-hint", Static).update(
-            "writes reach the fleet" if writes else READ_ONLY_REASON
+            "writes reach the fleet" if writes else read_only_reason()
         )
         self.query_one("#remote-unlocks", Static).update(self._unlocks_text(status))
         # With the token remote.json holds now: a --new-link from a shell redraws both.
         url, public = controller.remote_link()
         if (url, elsewhere) != self._qr_url:
             self._qr_url = (url, elsewhere)
-            link = Text(ELSEWHERE_LINK) if elsewhere else _link_text(url, public=public)
+            link = Text(served_elsewhere_link()) if elsewhere else _link_text(url, public=public)
             self.query_one("#remote-link", Static).update(link)
             # The local link's QR led a phone to its own loopback: "cannot connect", for a
             # first-time user without ngrok most of all (sweep of #243).
@@ -245,7 +254,7 @@ class RemotePanel(ModalScreen[None]):
         if not controller.running and not elsewhere:
             return Text("off", style="dim")
         if not controller.running:
-            text = Text(ELSEWHERE, style="bold yellow")
+            text = Text(served_elsewhere_state(), style="bold yellow")
             read, served = controller.served_auto_off()
             if read and served is not None:
                 text.append(f"  · auto-off at {_auto_off_time(served)}", style="dim")
@@ -273,7 +282,7 @@ class RemotePanel(ModalScreen[None]):
             return Text(f"{failed} failed unlocks in 30 min", style="dim")
         return Text(
             f"{failed} failed unlocks in 30 min — new unlocks paused; rotate the link: "
-            "aisquare remote regenerate-password --new-link"
+            f"{prog.word()} remote regenerate-password --new-link"
         )
 
     def _paint_devices(self, devices: list[dict[str, Any]]) -> None:

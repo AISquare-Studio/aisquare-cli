@@ -49,11 +49,11 @@ from textual.widgets import (
 
 from aisquare.cli.ui import persona_dialogs as dialogs
 from aisquare.cli.ui.attach import (
-    SEAT_RULE,
     AttachTargetScreen,
     NewAccountRequested,
     NewBindScreen,
     Target,
+    seat_rule,
 )
 from aisquare.cli.ui.persona_dialogs import (
     NAME_RULE,
@@ -1684,7 +1684,7 @@ def test_new_bind_checks_seat_and_binary_then_saves_through_bind_role_and_select
         seen: list[Any] = []
         form.query_one("#bind-seat", Input).value = "Bad Seat"
         await pilot.pause()
-        seen.append((save.disabled, SEAT_RULE in shown(rule)))
+        seen.append((save.disabled, seat_rule() in shown(rule)))
         form.query_one("#bind-seat", Input).value = "coder3"
         form.query_one("#bind-binary", Input).value = "definitely-not-a-binary-p7"
         await pilot.pause()

@@ -63,7 +63,7 @@ const TOAST_LINES = 4;
 /* A card's detail text this short shows whole in its box, on any phone. */
 const SHORT_TEXT = 280;
 const TEXT_MAX = { keys: 2048, tell: 8000, note: 8000 };
-const READ_ONLY = "writes are off — on the machine run `aisquare remote allow-write on`, " +
+const READ_ONLY = "writes are off — on the machine run `rlx remote allow-write on`, " +
   "or switch Allow write actions in the R panel";
 const OFF_OR_MOVED = "Remote is off on the machine, or the link changed";
 const UNKEPT_SIGN_IN = "The machine took the passphrase, but this browser did not keep the sign-in — " +
@@ -1282,7 +1282,7 @@ function buildShell() {
   UI.top = el("header", "top");
   UI.dot = el("span", "dot");
   UI.dot.setAttribute("role", "img");
-  UI.where = el("span", "where", "aisquare");
+  UI.where = el("span", "where", "rlx");
   UI.ro = button("pill ro-pill", "READ-ONLY", () => readOnlySheet());
   UI.off = el("span", "autooff");
   UI.extend = button("pill w extend", "Extend 1 h", extendAutoOff);
@@ -1359,7 +1359,7 @@ function drawNav() {
   const count = (S.needs || []).length;
   UI.badge.textContent = count ? String(count) : "";
   // Off or locked, the count is from before.
-  document.title = (count && !S.off && !S.locked ? "(" + count + ") " : "") + "aisquare remote";
+  document.title = (count && !S.off && !S.locked ? "(" + count + ") " : "") + "rlx remote";
   const here = [
     [UI.navNeeds, name === "home" || name === "card"], [UI.navProjects, name === "projects" || name === "project" || name === "agent"],
     [UI.navDevices, name === "devices"], [UI.navSettings, name === "settings"],
@@ -1614,7 +1614,7 @@ function offScreen(kind) {
 }
 
 const OFF_SCREENS = {
-  off: ["Remote is off on the machine", "Turn it on again in the R panel of aisquare ui, or with aisquare remote serve, then retry."],
+  off: ["Remote is off on the machine", "Turn it on again in rlx's R panel, or with rlx remote serve, then retry."],
   gone: [OFF_OR_MOVED, "Turn it on again, or open the link the machine shows now: the link changes when ngrok " +
     "restarts without a static domain, and with regenerate-password --new-link."],
   link: ["This link is no longer valid", "Open the link the machine shows now."],
@@ -2989,7 +2989,7 @@ VIEWS.settings = (route, main) => {
   const fill = async () => {
     if (!pushCapable()) {
       if (isIos() && !isStandalone()) {
-        said.textContent = "On iPhone and iPad, notifications need the page on the Home Screen: tap Share, then Add to Home Screen, then open aisquare from the Home Screen and unlock it there. The installed app keeps its own sign-in, so it unlocks once more and shows as a second device.";
+        said.textContent = "On iPhone and iPad, notifications need the page on the Home Screen: tap Share, then Add to Home Screen, then open rlx from the Home Screen and unlock it there. The installed app keeps its own sign-in, so it unlocks once more and shows as a second device.";
       } else said.textContent = "This browser cannot show notifications from this page.";
       return;
     }
@@ -3030,7 +3030,7 @@ VIEWS.settings = (route, main) => {
   about.appendChild(el("h3", null, "This page"));
   const facts = about.appendChild(el("p", "muted"));
   const tellFacts = () => {
-    facts.textContent = "aisquare " + plainText(S.remote && S.remote.version ? S.remote.version : "") + " · writes " + (writable() ? "on" : "off");
+    facts.textContent = "rlx " + plainText(S.remote && S.remote.version ? S.remote.version : "") + " · writes " + (writable() ? "on" : "off");
   };
   tellFacts();
   about.appendChild(button(null, "Sign out", async () => {

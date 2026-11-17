@@ -995,7 +995,7 @@ def test_watch_frame_adapts_events_to_terminal_height(
         runner.invoke(app, ["note", f"update number {index}"])
     tall = str(_board_frame(height=40, width=100))
     short = str(_board_frame(height=12, width=100))
-    assert "aisquare board" in tall and "planner" in tall
+    assert "rlx board" in tall and "planner" in tall
     assert tall.count("update number") > short.count("update number")
     assert "update number 19" in short  # newest events always survive the cut
 
@@ -1944,7 +1944,7 @@ def test_the_quiet_board_teaches_launch_not_the_env_var_incantation(
 
     board = runner.invoke(app, ["board"])
 
-    assert "aisquare launch" in board.output
+    assert "rlx launch" in board.output
     assert "AISQUARE_ROLE=" not in board.output
 
 

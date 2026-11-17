@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import agent_sessions, code_index, paths
 from aisquare.core import credentials as credentials_store
+from aisquare.core import program as prog
 from aisquare.core.spawn import LAUNCH_AGENT_ENV
 from aisquare.core.store import BriefChangedError, ContextStore, is_locked_error, store_session
 from aisquare.models import TaskStatus, TeamSession
@@ -200,8 +201,9 @@ def _ensure_virtual_session() -> str:
             return bound_id
         if not store.team_active(project.id):
             raise ValueError(
-                f"the agent orchestrator is not active for {project.root} — start `aisquare serve` "
-                "from the project (it activates it), or run `aisquare team on` there"
+                f"the agent orchestrator is not active for {project.root} — start "
+                f"`{prog.word()} serve` "
+                f"from the project (it activates it), or run `{prog.word()} team on` there"
             )
         if not project_service.tracked(store, project):
             raise project_service.NotAdded(project)  # capture off, and nobody added it
@@ -554,7 +556,7 @@ TEAM_INSTRUCTIONS = (
 )
 
 #: What they say to a solo session: the tools are there, the protocol is not needed.
-SOLO_INSTRUCTIONS = "aisquare's shared task board (team_board) and saved project context."
+SOLO_INSTRUCTIONS = "rlx's shared task board (team_board) and saved project context."
 
 
 def _serves_a_team() -> bool:
@@ -806,7 +808,7 @@ class _StampedStdin:
 
 
 async def _serve_stdio_until_idle(
-    server: MCPServer, close_after: int, command: str = "aisquare serve --stdio"
+    server: MCPServer, close_after: int, command: str | None = None
 ) -> None:
     """Run the stdio transport with an idle deadline (#19).
 
@@ -840,7 +842,8 @@ async def _serve_stdio_until_idle(
             # unblock — a normal return would hang the interpreter on that
             # thread's join and reintroduce the orphan this deadline retires.
             sys.stderr.write(
-                f"{command}: no client messages for {close_after}s — "
+                f"{command or prog.words('serve', '--stdio')}: no client messages for "
+                f"{close_after}s — "
                 "closing (idle deadline; --close-after 0 disables)\n"
             )
             sys.stderr.flush()
@@ -909,7 +912,7 @@ def run_stdio(
     *,
     close_after: int = DEFAULT_CLOSE_AFTER,
     server: MCPServer | None = None,
-    command: str = "aisquare serve --stdio",
+    command: str | None = None,
 ) -> None:
     """Serve over stdio (Claude Desktop launches and owns the process).
 
@@ -919,7 +922,8 @@ def run_stdio(
     management anywhere: the daemon minds only its own clock.
 
     ``server`` defaults to this module's; the captain passes its own, and
-    ``command`` is how the idle notice on stderr names the process.
+    ``command`` is how the idle notice on stderr names the process (``rlx serve --stdio``,
+    with the word hints print, when ``None``).
     """
     global _stdio
     keep_the_protocol_pipe_to_ourselves()  # before anything is built or started

@@ -899,8 +899,8 @@ class AttentionQueue:
             # A later aisquare's file: this one reads it wrong and would write it back
             # in its own format, so it stops, as an unreadable file does.
             raise QueueError(
-                f"{self.path} is version {version!r}, newer than this aisquare reads "
-                f"({FILE_VERSION}): left as it is — upgrade aisquare"
+                f"{self.path} is version {version!r}, newer than this rlx reads "
+                f"({FILE_VERSION}): left as it is — upgrade rlx"
             )
         if mangled is not None:
             self._report_corrupt(mangled, what="holds bytes that are not UTF-8; read past them")

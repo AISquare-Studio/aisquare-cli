@@ -26,11 +26,11 @@ from aisquare.services.remote_server import (
     NOT_TEXT,
     NOT_UNLOCKED,
     NOT_WRITE_GATED,
-    READ_ONLY_REASON,
     Runtime,
     Sources,
     Writes,
     build_app,
+    read_only_reason,
     remote_gate_body,
     write_endpoint_names,
 )
@@ -451,7 +451,7 @@ def test_every_write_is_403_until_writes_are_on(
     assert runtime.allow_write is False
     response = client.request(method, f"{base(runtime)}{path}", json={})
     assert response.status_code == 403, response.text
-    assert response.json() == {"error": "read_only", "message": READ_ONLY_REASON}
+    assert response.json() == {"error": "read_only", "message": read_only_reason()}
     assert ran == []
 
 

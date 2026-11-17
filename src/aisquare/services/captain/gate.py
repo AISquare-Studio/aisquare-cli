@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from aisquare.core import experimental, state_file
+from aisquare.core import program as prog
 from aisquare.services.captain import speaker
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Refused
@@ -72,8 +73,20 @@ ISSUER = "aisquare captain"
 """What an authenticator app shows above the code."""
 EXTRA = "pip install 'aisquare-cli[gate]'"
 """How to get pyotp, said where its absence refuses."""
-ENROLL = "aisquare captain gate enroll"
-UNLOCK = "say your authenticator's code to the captain, or run: aisquare captain gate unlock <code>"
+
+
+def enroll_command() -> str:
+    return f"{prog.word()} captain gate enroll"
+
+
+def unlock_hint() -> str:
+    """How a locked gate is unlocked: said to the captain, or typed."""
+    return (
+        "say your authenticator's code to the captain, or run: "
+        f"{prog.word()} captain gate unlock <code>"
+    )
+
+
 _STATE_KEY = "captain_gate"
 
 
@@ -104,7 +117,7 @@ class TotpVerifier:
                 "~/.aisquare/config.toml by hand: `config set` does not take it)"
             )
         if not secret_path().is_file():
-            return f"the owner gate is not enrolled yet: {ENROLL}"
+            return f"the owner gate is not enrolled yet: {enroll_command()}"
         return None
 
     def matched_step(self, code: str, now: float) -> int | None:
@@ -162,7 +175,7 @@ def admit(tool: str, *, now: datetime | None = None) -> str | None:
     if window is not None:
         return window.id
     why = VERIFIER.available()
-    raise Refused(f"{tool} acts as the owner and the gate is locked — {why or UNLOCK}")
+    raise Refused(f"{tool} acts as the owner and the gate is locked — {why or unlock_hint()}")
 
 
 def current_window(*, now: datetime | None = None) -> Window | None:
@@ -260,7 +273,8 @@ def enroll(*, replace: bool = False) -> Enrollment:
     path = secret_path()
     if path.exists() and not replace:
         raise Refused(
-            f"the owner gate is enrolled already ({path}); {ENROLL} --replace makes a new one"
+            f"the owner gate is enrolled already ({path}); {enroll_command()} --replace makes a "
+            "new one"
         )
     secret = pyotp.random_base32()
     path.parent.mkdir(parents=True, exist_ok=True)

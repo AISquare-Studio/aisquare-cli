@@ -31,6 +31,7 @@ from rich.text import Text
 from aisquare.cli.common import USAGE_ERROR, fail, format_reset, refuse_conflicting_scope
 from aisquare.cli.native_args import NativeForwardingCommand, PassthroughCommand
 from aisquare.core import harness
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import agents_named, recorded_adapter
 from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.claude_accounts import agent_label
@@ -311,7 +312,7 @@ def spawn(
             "--account",
             "-a",
             help="Account to run under, one of the agent's own (Claude Code or Codex): a "
-            "slot number, alias or email (see `aisquare accounts`); default: the role's "
+            "slot number, alias or email (see `rlx accounts`); default: the role's "
             "binding, the project default, then the machine default. -a is this option's, "
             "as launch's is (Codex's own --ask-for-approval: spell it out, or after --).",
             metavar="ACCOUNT",
@@ -331,7 +332,7 @@ def spawn(
         str | None,
         typer.Option(
             "--persona",
-            help="Persona the agent runs as (see `aisquare persona list`); default: the "
+            help="Persona the agent runs as (see `rlx persona list`); default: the "
             "role's fleet.roles.<role>.persona setting, else none.",
             metavar="NAME",
         ),
@@ -359,9 +360,9 @@ def spawn(
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Start an agent in the project's fleet (a tmux window running `aisquare launch`).
+    """Start an agent in the project's fleet (a tmux window running `rlx launch`).
 
-    Arguments after the options are passed to the agent, as with `aisquare launch`
+    Arguments after the options are passed to the agent, as with `rlx launch`
     — which is also why `--json` must come BEFORE `spawn`: after the role it
     belongs to the agent.
     """
@@ -901,7 +902,7 @@ def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: b
             console.print(
                 f"⏸ {_display_name(project)} stays fleet-paused: only the owner ends a pause "
                 f"— ask the owner: their `{project_service.fleet_command('resume', project)}` "
-                "(or Resume agents… in asq) ends it; nothing was changed",
+                "(or Resume agents… in rlx) ends it; nothing was changed",
                 markup=False,
             )
             continue
@@ -1239,7 +1240,7 @@ def _emit_shutdown(report: fleet_service.ShutdownReport, target: ProjectInfo | N
     listed = (
         f"`{project_service.fleet_command('ls', target, '--all')}`"
         if target is not None
-        else "the fleet UI (`aisquare`)"
+        else f"the rlx UI (`{prog.word()}`)"
     )
     if report.interrupted:
         console.print(
@@ -1286,7 +1287,7 @@ def _emit_shutdown(report: fleet_service.ShutdownReport, target: ProjectInfo | N
         )
     console.print(
         "  board notes and tasks kept (claims of the rows this ended are released); "
-        "the next asq / fleet spawn starts a fresh server"
+        "the next rlx / fleet spawn starts a fresh server"
     )
 
 
@@ -1728,7 +1729,7 @@ def adopt(
             return
         console = stdout_console()
         if not conversations:
-            console.print("no conversation outside the fleet on the accounts the CLI knows")
+            console.print("no conversation outside the fleet on the accounts rlx knows")
             return
         now = datetime.now(tz=UTC)
         # The agent column only where it tells rows apart: a machine with one agent's
@@ -1877,7 +1878,7 @@ def top(
     """What each live agent consumes, read once: CPU, memory and processes of its pane's
     process tree, uptime, and its session's tokens and cost so far — with a totals row.
 
-    One `ps` and one tmux listing for every agent at once; reads only, stops nothing. In asq:
+    One `ps` and one tmux listing for every agent at once; reads only, stops nothing. In rlx:
     ⚙ Settings ▸ Agent resources, which refreshes every few seconds while it is open.
     """
     from aisquare.cli import fleet_top_render as render  # lazy: only `top` draws the table
@@ -1938,7 +1939,7 @@ def gate(
         ),
     ] = None,
 ) -> None:
-    """Wait for memory headroom, then run a heavy command: `aisquare fleet gate -- pytest`.
+    """Wait for memory headroom, then run a heavy command: `rlx fleet gate -- pytest`.
 
     Polls every 5 s. With enough memory it runs the command after `--` and exits with
     its code (with no command, exits 0). At the deadline it runs nothing and exits 75.
@@ -2133,8 +2134,8 @@ def ui(
         typer.Option(
             "--after-update",
             hidden=True,
-            help="Reattach the agents asq's ⬆ Restart & update recorded, restarting any "
-            "whose pane is gone (what `upgrade --one-click` reopens asq with).",
+            help="Reattach the agents rlx's ⬆ Restart & update recorded, restarting any "
+            "whose pane is gone (what `upgrade --one-click` reopens rlx with).",
         ),
     ] = False,
     project: Annotated[
@@ -2153,19 +2154,19 @@ def ui(
         ),
     ] = None,
 ) -> None:
-    """Open the fleet UI — every project, agent and session in one view."""
+    """Open the rlx UI — every project, agent and session in one view."""
     if get_state().json_output:
         fail(
-            "the fleet UI has no --json form — for machine-readable fleet state use "
-            "`aisquare fleet ls --json`",
+            "the rlx UI has no --json form — for machine-readable fleet state use "
+            f"`{prog.word()} fleet ls --json`",
             error="not_a_tty",
             detail="--json was given; a full-screen app has no machine-readable output",
         )
     if not interactive_terminal():
         reason = not_interactive_reason() or "not an interactive terminal"
         fail(
-            f"the fleet UI needs an interactive terminal ({reason}) — run `aisquare` "
-            "in a terminal, or use `aisquare fleet ls --json`",
+            f"the rlx UI needs an interactive terminal ({reason}) — run `{prog.word()}` "
+            f"in a terminal, or use `{prog.word()} fleet ls --json`",
             error="not_a_tty",
             detail=reason,
         )

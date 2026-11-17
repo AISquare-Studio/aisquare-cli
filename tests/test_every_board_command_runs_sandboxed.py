@@ -302,7 +302,7 @@ def test_every_command_aisquare_tells_an_agent_to_run_runs_through_its_broker_if
             assert why is not None and "fleet operation" in why and "an approval" in why, path
             continue
         if why is not None:
-            refused[path] = f"aisquare {' '.join(path)} (in the {source})"
+            refused[path] = f"rlx {' '.join(path)} (in the {source})"
     if each_agent.capabilities.sandboxes_tools:
         assert refused == {}, list(refused.values())
     else:  # its own texts, not a sandboxed agent's: no broker stands in front of it

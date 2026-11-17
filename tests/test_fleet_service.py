@@ -3588,7 +3588,7 @@ def test_an_answer_this_version_cannot_read_trips_the_canary(
     _turn(agent, transcript, "claude-haiku-5-5", "max")
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
     said = capsys.readouterr().err
-    assert said.count("aisquare:") == 1 and "Effort is now max" in said
+    assert said.count("rlx:") == 1 and "Effort is now max" in said
     [check] = [c for c in diagnostics.doctor() if c.name == "fleet model pick"]
     assert check.status == "warn" and "Effort is now max" in check.detail
     tmux.die(agent.pane_id, 0)
@@ -4165,7 +4165,7 @@ def test_a_setting_record_outside_the_frame_trips_the_canary(
     _turn(agent, transcript, "claude-sonnet-5-5", "xhigh")
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
     err = capsys.readouterr().err
-    assert err.count("aisquare:") == 1 and "2.9.0" in err and "/model" in err
+    assert err.count("rlx:") == 1 and "2.9.0" in err and "/model" in err
     [check] = [c for c in diagnostics.doctor() if c.name == "fleet model pick"]
     assert check.status == "warn" and "/model" in check.detail
 
@@ -6608,14 +6608,14 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
     assert " read lost from now on, as their panes went with it " in said, said
     # Rows of every project: `reap --all`, and a restart naming each row's project and label
     # (review of #259, round 21) — bare, each acted on the active project, or was refused.
-    assert "(`aisquare fleet reap --all` records them; " in said, said
+    assert "(`rlx fleet reap --all` records them; " in said, said
     with store_session() as store:
         ours, theirs_project = store.get_project(project.id), store.get_project(plain_project.id)
     assert ours is not None and theirs_project is not None
     for where, label in ((ours, "manager"), (ours, "coder-1"), (theirs_project, "manager")):
         restart = project_service.fleet_command("restart", where, label)
         assert f"`{restart}`" in said, said
-    assert "`aisquare fleet reap`" not in said and "`aisquare fleet restart`" not in said
+    assert "`rlx fleet reap`" not in said and "`rlx fleet restart`" not in said
     # Lost, as in 0.8.0: a coder comes back under its own label, the manager's row ends at
     # a stop, and `reap` records the rest; nothing is held, and nothing of coder-3's touched.
     assert fleet_service.restart(project, "coder-1").replaced.id == coder.id
@@ -6646,14 +6646,14 @@ def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
 
     restart = project_service.fleet_command("restart", named, "manager")
     assert f"`{restart}` starts it again" in said, said
-    assert said.count("aisquare fleet restart") == 1, said
+    assert said.count("rlx fleet restart") == 1, said
     onboard = project_service.onboard_command(plain_project.root)
     assert f"{plain_project.root.name} is forgotten: {onboard} adds it back first" in said
     # Round 23, 5/10: `reap --all` walks the projects it reaches, so it records the one row
     # of a live project, "it", and never the forgotten project's alone.
-    assert "(`aisquare fleet reap --all` records it; " in said, said
+    assert "(`rlx fleet reap --all` records it; " in said, said
     alone = fleet_service._exited_note(tmux, [theirs])
-    assert "reap --all" not in alone and "aisquare fleet restart" not in alone, alone
+    assert "reap --all" not in alone and "rlx fleet restart" not in alone, alone
     assert f"({plain_project.root.name} is forgotten: {onboard} adds it back first)" in alone
 
 
@@ -8062,9 +8062,9 @@ def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
 
     frame = board_frame(height=40, width=200).plain
 
-    switch = f"aisquare fleet switch --project {stored.codename} {agent.label}"
+    switch = f"rlx fleet switch --project {stored.codename} {agent.label}"
     assert f"⏳ limited — `{switch}`" in frame
-    assert frame.count("aisquare fleet switch") == 1, "the session with no row: the chip alone"
+    assert frame.count("rlx fleet switch") == 1, "the session with no row: the chip alone"
     assert team_project(hub).id not in frame
 
 
@@ -8097,7 +8097,7 @@ def test_the_limited_chips_switch_is_read_in_the_boards_own_store_session(
 
     frame = board_frame(height=40, width=200).plain
 
-    assert f"`aisquare fleet switch --project {stored.codename} {agent.label}`" in frame
+    assert f"`rlx fleet switch --project {stored.codename} {agent.label}`" in frame
     assert opened == ["store"]
 
 
@@ -15308,7 +15308,7 @@ def test_a_reap_says_why_it_keeps_a_tree_while_a_spawn_holds_the_branch_lock(
 
     [(path, why)] = during.worktrees_kept
     assert path == agent.cwd
-    assert why.startswith("not removed now: another aisquare (a spawn or a reap) holds "), why
+    assert why.startswith("not removed now: another rlx (a spawn or a reap) holds "), why
     assert why.endswith("; when asked just before, it held: uncommitted changes"), why
     assert dict(after.worktrees_kept) == {agent.cwd: "uncommitted changes"}
     assert free == [True], "asked without the lock"
@@ -16059,7 +16059,7 @@ def test_a_row_whose_record_is_lost_after_the_census_is_told_nothing_and_never_k
         fleet_service.stop(project, agent.label)
 
     assert not told.delivered and "no launch record" in told.how
-    assert "end its agent in its own window, then `aisquare fleet stop" in str(refused.value)
+    assert "end its agent in its own window, then `rlx fleet stop" in str(refused.value)
     assert tmux.typed == [] and tmux.killed == [], "nothing typed or killed on its word"
     tmux.die(agent.pane_id, 0)  # its agent ended in its own window
     receipt = fleet_service.stop(project, agent.label)
@@ -16495,7 +16495,7 @@ def test_a_restart_of_a_row_from_before_launch_records_says_why_it_starts_fresh(
     assert why == "no session is recorded for it (its agent never reached a hook)"
     census = record.model_copy(update={"session": None, "legacy": True})
     _, why = fleet_service._resumable(census, None)
-    assert why is not None and "spawned before this aisquare kept launch records" in why
+    assert why is not None and "spawned before this rlx kept launch records" in why
 
 
 def test_a_listing_shows_the_account_its_launch_record_runs_it_on(
@@ -21250,8 +21250,8 @@ def test_the_auto_mode_board_line_s_own_way_out_brings_the_agent_back_off_auto(
     monkeypatch.delenv(PIPELINE_ID_ENV_VAR)
     [line] = _events(project, auto_mode.EVENT_KIND)
     way_out = re.search(
-        r"set a non-classifier mode \((aisquare config set [^)]+)\) and "
-        r"`(aisquare fleet restart [^`]+)`",
+        r"set a non-classifier mode \((rlx config set [^)]+)\) and "
+        r"`(rlx fleet restart [^`]+)`",
         line,
     )
     assert way_out is not None, line
@@ -22459,7 +22459,7 @@ def test_a_row_spawned_before_launch_records_is_refused_its_replay_before_the_st
     launch_seal._path(agent.id).unlink()  # as an aisquare that kept no records left it
     started = len(tmux.spawned)
     refusal = (
-        "no launch record was written for it (it was spawned by an aisquare that keeps "
+        "no launch record was written for it (it was spawned by an rlx that keeps "
         "none, or its record could not be written)"
     )
 
@@ -23762,7 +23762,7 @@ def test_spawn_refuses_below_the_memory_floor_before_any_window_opens(
         _coder(project)
     assert refused.value.code == "capacity_memory"
     assert "1500 MB available" in str(refused.value) and "2048 MB" in str(refused.value)
-    assert "aisquare fleet capacity" in str(refused.value)
+    assert "rlx fleet capacity" in str(refused.value)
     assert tmux.spawned == [], "refused before any window"
     # Negative control: the floor off admits the same spawn.
     _settings(monkeypatch, min_free_mb=0)
@@ -23906,7 +23906,7 @@ def test_the_doctor_capacity_row_warns_when_a_spawn_would_be_refused(
     _memory(monkeypatch, 1500)
     row = diagnostics._check_fleet_capacity()
     assert row.status.value == "warn"
-    assert "1500 MB available" in row.detail and "aisquare fleet capacity" in (row.fix or "")
+    assert "1500 MB available" in row.detail and "rlx fleet capacity" in (row.fix or "")
     _memory(monkeypatch, 8000)
     row = diagnostics._check_fleet_capacity()
     assert row.status.value == "ok" and "8000 MB available, pressure normal" in row.detail

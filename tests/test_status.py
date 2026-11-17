@@ -38,7 +38,7 @@ def test_status_reports_counts(runner: CliRunner) -> None:
 def test_status_human(runner: CliRunner) -> None:
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
-    assert "aisquare:" in result.stdout
+    assert "rlx:" in result.stdout
     assert "home:" in result.stdout
 
 
@@ -54,7 +54,7 @@ def test_doctor_fresh_flags_missing_home(runner: CliRunner) -> None:
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 1  # a hard failure
     assert "✗ home" in result.stdout
-    assert "aisquare init" in result.stdout  # the fix hint
+    assert "rlx init" in result.stdout  # the fix hint
 
 
 def test_doctor_reports_dependency_checks(runner: CliRunner) -> None:

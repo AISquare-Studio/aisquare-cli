@@ -183,12 +183,14 @@ from aisquare.cli.ui.views.settings_remote import RemoteChip
 from aisquare.cli.ui.views.usage_stats import UsageStatsView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import clipboard, experimental, feature_use, instances, paths
+from aisquare.core import program as prog
 from aisquare.core import sharing as usage_share_core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.console import stderr_console
 from aisquare.core.feature_use import view_feature
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.terminal import mac_keyboard
+from aisquare.core.version import PRODUCT_NAME
 from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     AccountsOverview,
@@ -671,7 +673,12 @@ class HelpScreen(ModalScreen[None]):
         ("q", "close_help", "close"),
         ("question_mark", "close_help", "close"),
     ]
-    BOARD_HEADING: ClassVar[str] = "Board (a project's Board tab, and aisquare board -w)"
+
+    @staticmethod
+    def board_heading() -> str:
+        """The help's Board heading, which names the full-screen board's command."""
+        return f"Board (a project's Board tab, and {prog.word()} board -w)"
+
     MAC_COPY_KEYS: ClassVar[tuple[tuple[str, str], ...]] = (
         ("ctrl+c", "copy a pane's highlight again; ⌘C stays the terminal's"),
         ("⌘V", "paste into the focused pane or field"),
@@ -703,7 +710,7 @@ class HelpScreen(ModalScreen[None]):
     def keys_text(self) -> Text:
         """What the help says: the fleet's keys, the board's, and the legends."""
         text = Text()
-        text.append("aisquare fleet — keys\n\n", style="bold")
+        text.append("rlx — keys\n\n", style="bold")
         for key, what in (
             ("click", "select a project or an agent; ⚙ Settings; + onboards a project"),
             # One highlight, the click's and the arrows'; passing over +, Spawn agent, Start
@@ -755,7 +762,7 @@ class HelpScreen(ModalScreen[None]):
         ):
             text.append(f"  {key:<11}", style="bold cyan")
             text.append(f" {what}\n")
-        text.append(f"\n{self.BOARD_HEADING}\n", style="bold")
+        text.append(f"\n{self.board_heading()}\n", style="bold")
         text.append_text(board_help())
         text.append("\nAccounts (⚙ Settings ▸ Accounts)\n", style="bold")
         text.append(f"  {'F2 dblclick':<11}", style="bold cyan")
@@ -809,7 +816,7 @@ class HelpScreen(ModalScreen[None]):
         keys = box.query_one(Static)
         lines = keys.render_lines(Region(0, 0, keys.size.width, keys.size.height))
         row = next(
-            (y for y, line in enumerate(lines) if line.text.startswith(self.BOARD_HEADING)), 0
+            (y for y, line in enumerate(lines) if line.text.startswith(self.board_heading())), 0
         )
         box.scroll_to(y=row, animate=False)
 
@@ -1115,7 +1122,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     of #135, findings 7 and 10).
     """
 
-    TITLE = "aisquare"
+    TITLE = PRODUCT_NAME
+    """The window's title: the product's name, the word the sidebar's header reads
+    (``core.version.PRODUCT_NAME``, #133), so the two cannot drift (#135)."""
     COMMAND_PALETTE_BINDING = "f1"
     CSS = """
     #main { height: 1fr; }
@@ -2302,7 +2311,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 name="doctor",
                 status=CheckStatus.fail,
                 detail=f"the checks crashed: {reason}",
-                fix="Run it in a terminal for the full traceback: aisquare doctor",
+                fix=f"Run it in a terminal for the full traceback: {prog.word()} doctor",
             )
         ]
         self.query_one("#doctor", DoctorView).show(
@@ -3523,10 +3532,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         self.sidebar.show_update(offer.version, runnable=offer.runnable)
         if offer.announce:
-            how = "restarts asq to update" if offer.runnable else "says how to update this install"
+            how = "restarts rlx to update" if offer.runnable else "says how to update this install"
             self.notify(
-                f"aisquare {offer.version} is out (you run {offer.current}) — ⬆ in the "
-                f"sidebar {how}",
+                f"rlx {offer.version} is out (you run {offer.current}) — ⬆ in the sidebar {how}",
                 timeout=10,
                 markup=False,
             )
@@ -3637,7 +3645,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 if screen is not None:
                     screen.dismiss(False)
                 self.notify(
-                    f"aisquare {current} is the newest release — nothing to update",
+                    f"rlx {current} is the newest release — nothing to update",
                     timeout=8,
                     markup=False,
                 )
@@ -3675,7 +3683,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.state is WorkerState.ERROR:
             self._let_go_of_refresh()  # no dialog opens to take its answer
             self.notify(
-                f"could not read how aisquare updates here: {event.worker.error}",
+                f"could not read how rlx updates here: {event.worker.error}",
                 severity="error",
                 timeout=8,
                 markup=False,
@@ -4124,7 +4132,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         (#17): quit as ``q`` does, its refusals included (a restart of the fleet still
         running), which the asker waits out and then says."""
         self.notify(
-            f"{event.request.who} asked this asq to quit, to start in its place",
+            f"{event.request.who} asked this rlx to quit, to start in its place",
             severity="warning",
             timeout=10,
             markup=False,
@@ -4183,7 +4191,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._hand_off_since = _hand_off_clock()
         self._hand_off_overdue = False
         if self._holding_the_quit():
-            self.notify("asq quits once the reads running end", timeout=4)
+            self.notify("rlx quits once the reads running end", timeout=4)
         self._exit_when_read()
 
     def _exit_when_read(self) -> None:
@@ -4217,7 +4225,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             again = "the ⬆ row" if self.hand_off == UPDATE_HAND_OFF else "Update or Uninstall"
             self.notify(
                 f"Still waiting for {_in_words(running)} after {waited:.0f} s. Press {again} "
-                "again to stay in asq; quit, and it runs once they end.",
+                "again to stay in rlx; quit, and it runs once they end.",
                 severity="warning",
                 timeout=10,
             )
@@ -4240,7 +4248,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._forget_press()  # the ⬆ update that recorded it will not run
         self.hand_off = None
         self._hand_off_overdue = False
-        self.notify("Called off: asq carries on", timeout=4)
+        self.notify("Called off: rlx carries on", timeout=4)
         for name, exc in self._worker_threads.release():
             self.notify(
                 f"could not start {_in_words([name])} again: {exc}",
@@ -4389,11 +4397,11 @@ def _waited_reads() -> dict[str, str]:
         _DOCTOR_WORKER: "the doctor's checks",
         FLEET_WORKER: "the sidebar's read of the fleet",
         CHECK_WORKER: "the release check",
-        PLAN_WORKER: "how aisquare updates here",
+        PLAN_WORKER: "how rlx updates here",
         REFRESH_WORKER: "the update dialog's ask of PyPI",
         ACCOUNTS_WORKER: "the accounts' read",
         HEADROOM_WORKER: "the accounts' headroom",
-        doctor.ROUTE_WORKER: "how aisquare was installed",
+        doctor.ROUTE_WORKER: "how rlx was installed",
         accounts.USAGE_WORKER: "the accounts' usage",
         accounts.CREDITS_WORKER: "the workspaces' credits",
         accounts.SESSIONS_WORKER: "the sessions on this machine",
@@ -4481,8 +4489,8 @@ def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
 
     args = [arg for arg in hand_off if arg not in _ASQS_OWN_FLAGS]
     button = _HANDED_OVER.get(args[0], args[0]) if args else "the hand-over"
-    command = install_route.command_line(["aisquare", *selfcli.global_flags(), *args])
-    return f"⚠ {button} did not run: asq quit at the Ctrl-C — `{command}` runs it"
+    command = install_route.command_line([prog.word(), *selfcli.global_flags(), *args])
+    return f"⚠ {button} did not run: rlx quit at the Ctrl-C — `{command}` runs it"
 
 
 def run_ui(**options: Any) -> None:
@@ -4545,7 +4553,7 @@ def _run_registered(
         asked = getattr(app, "quit_asked_by", None)
         if asked is not None:
             stderr_console().print(
-                f"asq quit: {asked.who} asked it to, to start in its place",
+                f"rlx quit: {asked.who} asked it to, to start in its place",
                 markup=False,
                 highlight=False,
             )

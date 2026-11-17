@@ -227,7 +227,7 @@ def test_the_row_says_what_step_two_says_about_the_coders(
     assert f" connected (through the aisquare plugin 0.8.0 at {scope} scope in {repo}" in (
         row.detail
     )
-    said = "so the fleet's coders may run without aisquare: aisquare agents connect" in (row.detail)
+    said = "so the fleet's coders may run without rlx: rlx agents connect" in (row.detail)
     assert (said, step_two.manager_only) == (missed, missed), (row.detail, step_two)
     assert listed[0]["connected"] is True, "agents status keeps the same verdict"
 
@@ -250,7 +250,7 @@ def test_the_coders_note_names_the_connect_for_its_own_config_dir(
     assert row.status is CheckStatus.ok, row
     assert f"through the aisquare plugin 0.8.0 at project scope in {repo} in {other}" in row.detail
     assert (
-        f"may run without aisquare: aisquare agents connect claude-code --config-dir {other} "
+        f"may run without rlx: rlx agents connect claude-code --config-dir {other} "
         "runs it in every folder"
     ) in row.detail, row.detail
 
@@ -280,12 +280,12 @@ def test_the_coders_note_never_names_a_connect_that_refuses(
 
     assert step_two.refused is not None and not step_two.connected, step_two
     assert row.status is CheckStatus.ok, row
-    assert "so the fleet's coders may run without aisquare" in row.detail, row
+    assert "so the fleet's coders may run without rlx" in row.detail, row
     assert f"connect cannot write the hooks in {claude}: {step_two.refused}" in row.detail, row
-    assert "aisquare agents connect" not in row.detail, "no Connect that refuses"
-    assert "may run without aisquare: aisquare agents connect claude-code runs it" in (
-        writable.detail
-    ), "control: where connect can write, the note names it"
+    assert "rlx agents connect" not in row.detail, "no Connect that refuses"
+    assert "may run without rlx: rlx agents connect claude-code runs it" in (writable.detail), (
+        "control: where connect can write, the note names it"
+    )
 
 
 @posix_route
@@ -318,9 +318,9 @@ def test_the_coders_note_is_said_on_an_amber_row_too(
 
     assert row.status is CheckStatus.warn and str(other) in row.detail, row
     assert step_two.manager_only, step_two
-    assert "so the fleet's coders may run without aisquare: aisquare agents connect" in (
+    assert "so the fleet's coders may run without rlx: rlx agents connect" in (row.detail), (
         row.detail
-    ), row.detail
+    )
     buttons = [fix.argv for fix in fix_commands([row])]
     assert _CONNECT in buttons, "the bare Connect step 2 offers is a button here too"
 
@@ -473,8 +473,8 @@ def test_both_routes_warn_and_name_both_ways_out_without_a_button(
     check = diagnostics._check_claude_code()
 
     assert check.status is CheckStatus.warn
-    assert f"runs aisquare two ways in: {claude}" in check.detail
-    assert f"aisquare agents disconnect claude-code --config-dir {claude}" in (check.fix or "")
+    assert f"runs rlx two ways in: {claude}" in check.detail
+    assert f"rlx agents disconnect claude-code --config-dir {claude}" in (check.fix or "")
     assert f"(or keep the hooks: claude plugin uninstall {agent_core.CLAUDE_PLUGIN_ID})" in (
         check.fix or ""
     ), "the ambient dir needs no CLAUDE_CONFIG_DIR"
@@ -497,7 +497,7 @@ def test_a_partial_install_beside_the_plugin_is_two_routes_too(
     check = diagnostics._check_claude_code()
 
     assert check.status is CheckStatus.warn
-    assert "runs aisquare two ways" in check.detail
+    assert "runs rlx two ways" in check.detail
     assert "missing or outdated" not in check.detail, "the plugin runs StopFailure"
 
 
@@ -644,10 +644,10 @@ def test_disconnect_names_a_repository_plugin_that_keeps_aisquare_running(
         assert result.exit_code == 0, result.output
         assert f"still enabled in {repo} ({scope} scope)" in result.stderr, result.stderr
         assert f"to stop it: {remove}" in result.stderr, result.stderr
-        assert "no aisquare hooks found" not in result.stderr, result.stderr
+        assert "no rlx hooks found" not in result.stderr, result.stderr
     assert status[0]["connected"] is True, "what the note explains: the plugin runs there"
     assert gone.exit_code == 0 and "still enabled" not in gone.stderr, gone.stderr
-    assert "no aisquare hooks found" in gone.stderr, "control: nothing runs, nothing removed"
+    assert "no rlx hooks found" in gone.stderr, "control: nothing runs, nothing removed"
 
 
 def test_disconnect_without_the_plugin_says_nothing_about_it(
@@ -761,13 +761,13 @@ def test_two_routes_in_a_read_only_settings_json_never_advise_a_disconnect_that_
         settings.chmod(0o644)
     writable = diagnostics._check_claude_code()
 
-    assert row.status is CheckStatus.warn and "runs aisquare two ways in" in row.detail, row
-    assert "aisquare agents disconnect" not in str(row.fix), row.fix
+    assert row.status is CheckStatus.warn and "runs rlx two ways in" in row.detail, row
+    assert "rlx agents disconnect" not in str(row.fix), row.fix
     assert f"keep the plugin: cannot take the hooks out of {claude}: its settings.json " in (
         str(row.fix)
     )
     assert json.loads(clicked.stdout)["error"] == "agent_file_unreadable", clicked.stdout
-    disconnect = f"keep the plugin: aisquare agents disconnect claude-code --config-dir {claude}"
+    disconnect = f"keep the plugin: rlx agents disconnect claude-code --config-dir {claude}"
     assert disconnect in str(writable.fix), "control: a file it can rewrite keeps the command"
 
 
@@ -800,13 +800,13 @@ def test_hooks_naming_a_gone_aisquare_beside_the_plugin_say_so(
 
     assert check.status is CheckStatus.warn
     if program == "a script that starts":
-        assert "runs aisquare two ways in" in check.detail, check
+        assert "runs rlx two ways in" in check.detail, check
         assert "keep the hooks:" in str(check.fix), check.fix
         return
     assert "name an aisquare that does not exist or cannot start" in check.detail, check
     assert "the aisquare plugin runs in their place" in check.detail
     assert "two ways" not in check.detail and "uninstall" not in (check.fix or "")
-    assert f"aisquare agents disconnect claude-code --config-dir {claude}" in (check.fix or "")
+    assert f"rlx agents disconnect claude-code --config-dir {claude}" in (check.fix or "")
     assert _buttons(check) == [], "connecting would keep both routes"
 
 
@@ -1042,6 +1042,6 @@ def test_on_native_windows_connect_and_disconnect_say_nothing_about_the_plugin(
     posix = runner.invoke(app, ["agents", "connect", "claude-code"])
 
     assert disconnected.exit_code == 0 and connected.exit_code == 0, connected.output
-    assert "no aisquare hooks found" in disconnected.stderr, disconnected.stderr
+    assert "no rlx hooks found" in disconnected.stderr, disconnected.stderr
     assert "plugin" not in disconnected.stderr + connected.stderr
     assert "the aisquare plugin is enabled" in posix.stderr, "control: where the route runs"

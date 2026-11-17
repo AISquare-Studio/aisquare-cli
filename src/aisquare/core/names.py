@@ -123,7 +123,7 @@ def undecodable_said(where: str, argument: str) -> str:
     shown = as_text(argument)
     shown = shown if len(shown) <= 200 else f"{shown[:199]}…"
     return (
-        f"{where} ({shown}) holds a byte that is not UTF-8: aisquare takes its arguments as "
+        f"{where} ({shown}) holds a byte that is not UTF-8: rlx takes its arguments as "
         "UTF-8 text, and reads, runs or stores nothing for this command"
     )
 

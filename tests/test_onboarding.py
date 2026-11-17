@@ -137,9 +137,9 @@ def test_onboard_runs_init_then_doctor_in_the_path(tmp_path: Path) -> None:
     # The log tells the story in order: the command, its result, the doctor, the warning + fix.
     log = "\n".join(outcome.log)
     assert (
-        log.index("$ aisquare --json init")
+        log.index("$ rlx --json init")
         < log.index("✓ initialized")
-        < log.index("$ aisquare --json doctor")
+        < log.index("$ rlx --json doctor")
     )
     assert "note: connected claude-code" in log
     assert "⚠ claude-code: hooks are missing" in log and "→ (Re)connect it" in log
@@ -241,7 +241,7 @@ def test_onboard_never_raises_when_the_runner_does(tmp_path: Path) -> None:
     outcome = onboard(tmp_path, run=_raising)
     assert not outcome.ok
     assert outcome.reason is not None
-    assert outcome.reason.startswith("could not run aisquare --json init")
+    assert outcome.reason.startswith("could not run rlx --json init")
     assert "no such interpreter" in outcome.reason
 
 
@@ -462,9 +462,9 @@ def test_fix_commands_maps_each_known_hint_to_its_non_interactive_argv() -> None
         ("facts", ("project", "onboard", "--refresh"), "project"),
         ("sdk", ("doctor", "--fix", "--yes"), "machine"),
     ]
-    assert fixes[0].label == "aisquare agents connect claude-code"
+    assert fixes[0].label == "rlx agents connect claude-code"
     assert fixes[0].source == WARN_CONNECT.fix
-    assert fixes[1].label == "aisquare project onboard --refresh"
+    assert fixes[1].label == "rlx project onboard --refresh"
 
 
 def test_fix_commands_leaves_everything_that_is_not_our_command_as_text() -> None:
@@ -537,7 +537,7 @@ def test_apply_fix_runs_the_command_with_json_in_the_given_cwd(tmp_path: Path) -
     run = Scripted({"agents": _result('{"agent":"claude-code","hooks":4}')})
     result = apply_fix(CONNECT, tmp_path, run=run)
     assert result.ok and result.returncode == 0 and result.reason is None
-    assert result.summary() == "✓ aisquare agents connect claude-code"
+    assert result.summary() == "✓ rlx agents connect claude-code"
     assert run.calls == [(["--json", "agents", "connect", "claude-code"], tmp_path)]
 
 
@@ -546,8 +546,7 @@ def test_apply_fix_reports_a_failure_in_the_cli_words_and_never_raises(tmp_path:
     result = apply_fix(CONNECT, tmp_path, run=run)
     assert not result.ok and result.returncode == 1
     assert result.summary() == (
-        "✗ aisquare agents connect claude-code: "
-        "aisquare agents connect claude-code failed: not_installed"
+        "✗ rlx agents connect claude-code: rlx agents connect claude-code failed: not_installed"
     )
     crashed = apply_fix(CONNECT, tmp_path, run=_raising)
     assert not crashed.ok and crashed.returncode is None

@@ -48,6 +48,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import experimental, paths
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.store import store_session
@@ -224,7 +225,7 @@ def find() -> FleetAgent | None:
             raise Unreachable(
                 f"the captain's row ({agent.id}) is live but its tmux server does not answer "
                 f"— {why}. If that server is really gone (a kill-server; a reboot elsewhere), "
-                f"run `{reap}`, then `aisquare captain` starts a fresh captain"
+                f"run `{reap}`, then `{prog.word()} captain` starts a fresh captain"
             )
         return agent
     return None
@@ -362,7 +363,8 @@ def send(text: str, *, timeout: float = SEND_TIMEOUT_S) -> datetime:
             raise NoReply(str(exc), timed_out=False) from exc
         if agent is None:
             raise NoReply(
-                "the captain is not running — `aisquare captain` starts it; nothing was typed",
+                f"the captain is not running — `{prog.word()} captain` starts it; nothing was "
+                "typed",
                 timed_out=False,
             )
         agent = _placed(agent)
@@ -423,7 +425,7 @@ def _type(srv: TmuxServer, agent: FleetAgent, text: str) -> None:
     except TmuxError as exc:
         raise NoReply(
             f"tmux could not type into the captain's pane ({exc}); nothing reached it — "
-            "`aisquare captain` shows its pane",
+            f"`{prog.word()} captain` shows its pane",
             timed_out=False,
         ) from exc
     try:
@@ -431,7 +433,7 @@ def _type(srv: TmuxServer, agent: FleetAgent, text: str) -> None:
     except TmuxError as exc:
         raise NoReply(
             f"the text is in the captain's input but tmux could not press Enter ({exc}) — "
-            "`aisquare captain` to send it; do not say it again",
+            f"`{prog.word()} captain` to send it; do not say it again",
             timed_out=False,
         ) from exc
 
@@ -450,12 +452,12 @@ def _refuse_dialog(agent: FleetAgent, pane: list[str], showing: str) -> NoReply:
         choose = f"choose {prompt.yes_option}" if prompt.yes_option else "trust it there"
         return NoReply(
             f"the captain is waiting for you to trust its folder {brain_dir()}: run "
-            f"`aisquare captain` and {choose} (once)",
+            f"`{prog.word()} captain` and {choose} (once)",
             timed_out=False,
         )
     return NoReply(
-        f"the captain's pane shows {showing}; nothing was typed — `aisquare captain` attaches, "
-        "answer it there",
+        f"the captain's pane shows {showing}; nothing was typed — `{prog.word()} captain` "
+        "attaches, answer it there",
         timed_out=False,
     )
 
@@ -494,7 +496,8 @@ def _wait_until_ready(
         state = fleet.status_of(agent).state
         if state in ("exited", "lost"):
             raise NoReply(
-                f"the captain is {state} — `aisquare captain` starts it again; nothing was typed",
+                f"the captain is {state} — `{prog.word()} captain` starts it again; nothing was "
+                "typed",
                 timed_out=False,
             )
         try:
@@ -502,7 +505,7 @@ def _wait_until_ready(
         except TmuxError as exc:
             raise NoReply(
                 f"could not read the captain's pane ({exc}); nothing was typed — "
-                "`aisquare captain` shows it",
+                f"`{prog.word()} captain` shows it",
                 timed_out=False,
             ) from exc
         showing = screen.modal_showing(agent, pane)
@@ -520,7 +523,7 @@ def _wait_until_ready(
             what = f"stayed {state}" if state != "waiting" else "never drew its prompt"
             raise NoReply(
                 f"the captain {what} for {timeout:g}s, so nothing was typed — "
-                "`aisquare captain` shows what it is doing"
+                f"`{prog.word()} captain` shows what it is doing"
             )
         _sleep(_POLL_S)
 
@@ -555,19 +558,20 @@ def _await_reply(
         state = fleet.status_of(row).state
         if state in ("exited", "lost"):
             raise NoReply(
-                f"the captain is {state} and did not answer — `aisquare captain` starts it again",
+                f"the captain is {state} and did not answer — `{prog.word()} captain` starts it "
+                "again",
                 timed_out=False,
             )
         if state == "limited":
             raise NoReply(
                 "the captain hit its usage limit before it answered — its answer comes "
-                "after the reset, in its pane (`aisquare captain`)",
+                f"after the reset, in its pane (`{prog.word()} captain`)",
                 timed_out=False,
             )
         if _now() >= deadline:
             raise NoReply(
                 f"the captain did not answer within {timeout:g}s — its answer will be in its "
-                "pane (`aisquare captain`)"
+                f"pane (`{prog.word()} captain`)"
             )
         _sleep(_POLL_S)
 

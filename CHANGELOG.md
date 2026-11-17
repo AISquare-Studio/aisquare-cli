@@ -68,6 +68,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wraps a row onto a second line. The short id is still in a line's or a task's detail, and
   `o` still opens the right transcript. Agents still see ids, as they address each other by
   them, and every `--json` is unchanged.
+- **rlx names itself everywhere it speaks to you.** Its messages, errors, `--help`, the
+  doctor and asq's screens say rlx where they said aisquare, asq or "the CLI": "Quit the
+  other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title. `rlx --version`
+  prints `rlx 0.10.1`; installers of earlier releases read the version from it as before.
+  No `--json` key or value changes, the doctor's `asq instances` row included.
+- **Every command it tells you to run starts with `rlx`**: `rlx accounts add`, `rlx doctor`,
+  the doctor's one-click fixes. When another program's `rlx` comes first on your PATH, those
+  lines say `aisquare …` instead, so a line you paste always runs rlx. Your agents'
+  instructions keep `aisquare …`, the same commands.
+- **The installers say rlx too**, and end with "Open rlx with: rlx". The Remote page is
+  titled *rlx remote*; a phone that added it to its Home Screen shows the new name once it is
+  added again. The plugins describe themselves as rlx's; their install names
+  (`aisquare@aisquare-cli`) do not change.
 - **Notifications in asq are small, sit top-right and are quick to clear.** They start
   just under the top row, so they leave the agent bar's Stop and Restart clear. They are
   one width, at most 46 columns, with no empty rows around the text. The newest is on

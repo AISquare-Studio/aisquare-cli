@@ -144,7 +144,7 @@ def test_attention_lists_what_needs_you_and_audits_the_call(
     assert item["kind"] == "question" and item["project_name"] == "alpha"
     audit = last_audit()
     assert audit["tool"] == "attention" and audit["ok"] is True
-    assert audit["utterance"] == "aisquare --json captain attention", "as typed, --json included"
+    assert audit["utterance"] == "rlx --json captain attention", "as typed, --json included"
     assert audit["args"]["via"] == "cli"
     assert audit["board"] == captain_state.home_project().root.name
 
@@ -182,9 +182,9 @@ def test_resolve_records_how_and_the_item_leaves_the_list(
     # Quoted for this shell (``install_route.command_line``): single quotes off Windows,
     # double quotes on it.
     quoted = '"told the manager: yes"' if sys.platform == "win32" else "'told the manager: yes'"
-    assert last_audit()["utterance"] == (
-        f"aisquare --json captain resolve {item['id'][:6]} {quoted}"
-    ), "the argv as typed, quoting kept"
+    assert last_audit()["utterance"] == (f"rlx --json captain resolve {item['id'][:6]} {quoted}"), (
+        "the argv as typed, quoting kept"
+    )
     assert run_json(runner, "attention")[1]["items"] == []
     # A second resolve is refused in the queue's words (#218 gate 1, blocker 3): no
     # silent second entry, and the refusal is audited like any other call.
@@ -198,7 +198,7 @@ def test_resolve_records_how_and_the_item_leaves_the_list(
     audit = last_audit()
     assert audit["tool"] == "resolve" and audit["ok"] is False
     assert audit["args"] == {"item": item["id"], "how": "again", "via": "cli"}
-    assert audit["utterance"] == f"aisquare captain resolve {item['id']} again"
+    assert audit["utterance"] == f"rlx captain resolve {item['id']} again"
 
 
 @pytest.mark.needs_captain
@@ -210,7 +210,7 @@ def test_snooze_hides_an_item_for_the_given_minutes(runner: CliRunner, alpha: Pr
     code, data = run_json(runner, "snooze", item["id"], "-m", "7")
     assert code == 0 and data["item"]["status"] == "snoozed"
     assert data["item"]["snoozed_until"] is not None
-    assert last_audit()["utterance"] == f"aisquare --json captain snooze {item['id']} -m 7"
+    assert last_audit()["utterance"] == f"rlx --json captain snooze {item['id']} -m 7"
     assert set(data) == {"item", "action_seq"} and set(data["item"]) == ITEM_KEYS
 
 
@@ -220,7 +220,7 @@ def test_snooze_defaults_to_fifteen_minutes(runner: CliRunner, alpha: ProjectInf
     assert run(runner, "snooze", item["id"])[1].count("15 min") == 1
     audit = last_audit()
     assert audit["args"]["minutes"] == captain_verbs.DEFAULT_SNOOZE_MINUTES == 15
-    assert audit["utterance"] == f"aisquare captain snooze {item['id']}", "no flag it was not given"
+    assert audit["utterance"] == f"rlx captain snooze {item['id']}", "no flag it was not given"
 
 
 @pytest.mark.needs_captain
@@ -240,7 +240,7 @@ def test_uav_prints_the_sitrep_header_first_and_carries_the_busy_flag(
     assert data["uav"] == "online" and data["busy_since"] is not None
     assert len(data["items"]) == 1
     assert "captain thinking since" in run(runner, "uav")[1]
-    assert last_audit()["utterance"] == "aisquare captain uav"
+    assert last_audit()["utterance"] == "rlx captain uav"
 
 
 # --- since and log ------------------------------------------------------------------------------
@@ -263,7 +263,7 @@ def test_since_reads_a_board_and_advance_moves_the_watermark(
     code, data = run_json(runner, "since", "alpha")
     assert code == 0 and data["from_seq"] == first_to and data["events"] == []
     assert "watermark advanced" not in run(runner, "since", "alpha")[1]
-    assert last_audit("alpha")["utterance"] == "aisquare captain since alpha"
+    assert last_audit("alpha")["utterance"] == "rlx captain since alpha"
 
 
 @pytest.mark.needs_captain
@@ -392,7 +392,7 @@ def test_wololo_converts_an_idle_agent_and_refuses_a_missing_one(
     assert card is not None and card.status == "doing" and card.claimed_by == agent.session_id
     audit = last_audit("alpha")
     assert audit["tool"] == "wololo" and audit["receipt"] is not None
-    assert audit["utterance"] == f"aisquare --json captain wololo alpha coder-1 {tid}"
+    assert audit["utterance"] == f"rlx --json captain wololo alpha coder-1 {tid}"
     code, data = run_json(runner, "wololo", "alpha", "nobody", tid)
     assert code == 1 and data["error"] == "refused"
     assert "no live agent" in data["detail"] and "nobody" in data["detail"]
@@ -474,11 +474,11 @@ def test_log_and_actions_are_audited_like_every_verb(runner: CliRunner) -> None:
     """13081: one captain_action per call, reads included — the audit of the audit too."""
     run(runner, "log")
     audit = last_audit()
-    assert (audit["tool"], audit["ok"], audit["utterance"]) == ("log", True, "aisquare captain log")
+    assert (audit["tool"], audit["ok"], audit["utterance"]) == ("log", True, "rlx captain log")
     assert audit["args"]["via"] == "cli"
     run(runner, "actions")
     audit = last_audit()
-    assert (audit["tool"], audit["utterance"]) == ("actions", "aisquare captain actions")
+    assert (audit["tool"], audit["utterance"]) == ("actions", "rlx captain actions")
 
 
 def test_the_everyday_cli_does_not_load_the_captain(tmp_path: Path) -> None:
@@ -568,11 +568,11 @@ def test_the_utterance_is_the_argv_as_typed(
     typed = ["--no-color", "captain", "attention", "--limit", "3"]
     monkeypatch.setattr(sys, "argv", ["/usr/local/bin/aisquare", *typed])
     assert runner.invoke(app, typed, catch_exceptions=False).exit_code == 0
-    assert last_audit()["utterance"] == "aisquare --no-color captain attention --limit 3"
+    assert last_audit()["utterance"] == "rlx --no-color captain attention --limit 3"
     monkeypatch.setattr(sys, "argv", ["pytest"])
     # (--json right after `captain` is a message to the captain: T2's say-by-default.)
     assert runner.invoke(app, ["captain", "next", "--json"], catch_exceptions=False).exit_code == 0
-    assert last_audit()["utterance"] == "aisquare captain next --json"
+    assert last_audit()["utterance"] == "rlx captain next --json"
 
 
 @pytest.mark.needs_captain
@@ -604,7 +604,7 @@ def test_the_one_captain_group_records_the_words_before_it_routes_a_message_to_s
     assert [text for text, _ in heard[3:]] == ["one", "two"]
     code, _ = run(runner, "attention")
     assert code == 0 and last_audit()["tool"] == "attention", "a verb is never a message"
-    assert last_audit()["utterance"] == "aisquare captain attention"
+    assert last_audit()["utterance"] == "rlx captain attention"
 
 
 @pytest.mark.needs_captain
@@ -627,7 +627,7 @@ def test_a_leading_option_looks_past_itself_and_the_first_word_decides(
     assert result.exit_code == 0, result.output
     assert heard == [], "the verb ran; nothing was typed into the captain"
     assert last_audit()["tool"] == "next"
-    assert last_audit()["utterance"] == "aisquare captain --json next"
+    assert last_audit()["utterance"] == "rlx captain --json next"
     result = runner.invoke(app, ["captain", "--json", "what", "is", "up"], catch_exceptions=False)
     assert result.exit_code == 0 and json.loads(result.output)["reply"] == "all quiet"
     result = runner.invoke(app, ["captain", "--timeout", "30", "next"], catch_exceptions=False)

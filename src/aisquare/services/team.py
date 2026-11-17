@@ -47,6 +47,7 @@ from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import (
     LAUNCH_AGENT_META,
+    RETIRED_LABEL,
     AmbiguousIdError,
     ContextStore,
     Relevance,
@@ -1239,15 +1240,16 @@ def board_data_in(
 
 class BoardRead(NamedTuple):
     """What a painted board shows: :func:`board_data`'s four, the ``fleet switch`` of each
-    limited session's chip (:func:`fleet_switches`), and each live session's fleet row's label
-    (:func:`live_labels`), which names it as asq's left pane does (``cli.board_names``, #140)."""
+    limited session's chip (:func:`fleet_switches`), and each session's fleet row's label, live
+    or ended (:func:`fleet_labels`), which names it as asq's left pane does
+    (``cli.board_names``, #140)."""
 
     project: ProjectInfo
     sessions: list[TeamSession]
     tasks: list[TeamTask]
     events: list[TeamEvent]
     switches: dict[str, str]
-    live: dict[str, str] = {}  # noqa: RUF012 — a NamedTuple default, never mutated
+    fleet_labels: dict[str, str] = {}  # noqa: RUF012 — a NamedTuple default, never mutated
 
 
 def board_read(
@@ -1277,7 +1279,7 @@ def board_read(
             project=project,
             exclude_kinds=exclude_kinds,
         )
-        return BoardRead(*read, fleet_switches(store, read[1]), live_labels(store, read[1]))
+        return BoardRead(*read, fleet_switches(store, read[1]), fleet_labels(store, read[1]))
 
 
 def _read_board(
@@ -3776,25 +3778,30 @@ OWNER = "owner"
 "you note: …" as their own. The agent-facing lines keep ``cli``."""
 
 
-def board_name(session: TeamSession, live: Mapping[str, str] | None = None) -> str:
-    """The name asq's left pane shows for ``session``'s agent (#140): its live fleet row's label
-    (``live``, :func:`live_labels`, as a ``fleet relabel`` left it), else the label it started
-    under, else its role: the manager's row has no label, and the pane shows "manager"."""
-    return (live or {}).get(session.id) or session.label or session.role
+def board_name(session: TeamSession, fleet_labels: Mapping[str, str] | None = None) -> str:
+    """The name asq's left pane shows for ``session``'s agent (#140): its fleet row's label
+    (``fleet_labels``, :func:`fleet_labels`, as a ``fleet relabel`` left it, and kept once the
+    agent has ended), else the label the session recorded, else its role: the manager's row has
+    no label, and the pane shows "manager"."""
+    return (fleet_labels or {}).get(session.id) or session.label or session.role
 
 
-def live_labels(store: ContextStore, sessions: Sequence[TeamSession]) -> dict[str, str]:
-    """Each live session's fleet row's label, by session id: what the left pane shows, which a
-    ``fleet relabel`` changes after the session recorded its own (#140). One indexed lookup per
-    live session (``fleet_agent_for_session``), in the board's own store session. A read that
-    fails costs the relabelled names, never the board: each falls back to its own label."""
-    found: dict[str, str] = {}
+def fleet_labels(store: ContextStore, sessions: Sequence[TeamSession]) -> dict[str, str]:
+    """Each session's fleet row's label, by session id, LIVE OR ENDED (#140): what the left pane
+    shows for its agent, as a ``fleet relabel`` left it.
+
+    An agent that has ended keeps the name of the newest row recorded against it
+    (``fleet_labels_for_sessions``). The session itself records no label (the hooks write
+    none), so a lookup of the live rows alone named an ended agent by its role: a stopped
+    agent's whole history was renamed on an open board, and a restarted one's earlier round
+    read "coder" (tester-rlx-board, #140). A row a relabel retired (``~login-fix``,
+    :data:`~aisquare.core.store.RETIRED_LABEL`) is named by the label it had; the board tells it
+    apart from the agent that took the label by the time each started (``cli.board_names``).
+
+    One read in the board's own store session. A read that fails costs the names, never the
+    board: each session falls back to its own label, else its role."""
     try:
-        for session in sessions:
-            if session.ended_at is None:
-                agent = store.fleet_agent_for_session(session.id)
-                if agent is not None:
-                    found[session.id] = agent.label
+        found = store.fleet_labels_for_sessions([session.id for session in sessions])
     except Exception as exc:
         _log.warning(
             "the board's names read the labels the sessions started under: their fleet rows "
@@ -3802,7 +3809,8 @@ def live_labels(store: ContextStore, sessions: Sequence[TeamSession]) -> dict[st
             type(exc).__name__,
             exc,
         )
-    return found
+        return {}
+    return {sid: label.removeprefix(RETIRED_LABEL) for sid, label in found.items()}
 
 
 def fleet_switches(store: ContextStore, sessions: list[TeamSession]) -> dict[str, str]:

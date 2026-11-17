@@ -3,7 +3,8 @@
 The owner, verbatim: "the board currently has persona.<id> sort of format which is impossible
 to understand, can that be just the name shown on left pane". asq's board, ``board -w`` and
 ``aisquare board``'s text name a session by ``services.team.board_name`` (its fleet row's label,
-as a relabel left it, else its own, else its role), and tell two sessions of one name apart
+live or ended, as a relabel left it, else its own, else its role), and tell two sessions of one
+name apart
 here, by the time each started, as the board shows its other times (``cli.common.local_time``).
 The agent-facing text keeps ids (``services.team.authors_of``, ``event_line`` without names).
 """
@@ -31,7 +32,7 @@ def _fit(name: str, cells: int | None) -> str:
 
 def board_names(
     sessions: Sequence[TeamSession],
-    live: Mapping[str, str] | None = None,
+    fleet_labels: Mapping[str, str] | None = None,
     *,
     cells: int | None = None,
 ) -> dict[str, str]:
@@ -41,7 +42,7 @@ def board_names(
     each other gets the time it started, ``coder-1 (14:02)``, or its short id where that time
     is shared too. ``cells`` caps each (:data:`BOARD_NAME_CELLS` for a view), the name shortened
     and never what tells it apart."""
-    names = {session.id: team_service.board_name(session, live) for session in sessions}
+    names = {session.id: team_service.board_name(session, fleet_labels) for session in sessions}
     told_apart: set[str] = set()
     groups: dict[str, list[TeamSession]] = {}
     for session in sessions:
@@ -65,13 +66,13 @@ def board_names(
 
 
 def read_board_names(sessions: Sequence[TeamSession]) -> dict[str, str]:
-    """:func:`board_names`, with ``team.live_labels`` read in a store session of its own: for a
+    """:func:`board_names`, with ``team.fleet_labels`` read in a store session of its own: for a
     board painted from ``team.board_data`` (``aisquare board``), whose session has closed. A
-    read that fails costs the relabelled names, never the board."""
+    read that fails costs the fleet rows' names, never the board."""
     try:
         with store_session() as store:
-            live = team_service.live_labels(store, sessions)
+            fleet_labels = team_service.fleet_labels(store, sessions)
     except Exception as exc:
         _log.warning("the board's names read the sessions' own labels (%s)", exc)
-        live = {}
-    return board_names(sessions, live)
+        fleet_labels = {}
+    return board_names(sessions, fleet_labels)

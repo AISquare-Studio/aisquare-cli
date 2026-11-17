@@ -242,7 +242,7 @@ def needs_you(
     *,
     seq: int,
     now: datetime | None = None,
-    live: Mapping[str, str] | None = None,
+    fleet_labels: Mapping[str, str] | None = None,
 ) -> NeedsYou:
     """What needs the owner on one board, from what its tick read (#286).
 
@@ -276,13 +276,17 @@ def needs_you(
             ):
                 continue  # answered since (the asker spoke again), or nobody left to answer
             asking = live_sessions.get(asker or "")
-            label = team_service.board_name(asking, live) if asking else observation.agent or ""
+            label = (
+                team_service.board_name(asking, fleet_labels) if asking else observation.agent or ""
+            )
             if label not in found.agents.get("question", []):
                 found.agents.setdefault("question", []).append(label)
     for session in live_sessions.values():
         if session.state == "attention":
             # The left pane's name, as a relabel left it (#140): the button finds the agent by it.
-            found.agents.setdefault("waiting", []).append(team_service.board_name(session, live))
+            found.agents.setdefault("waiting", []).append(
+                team_service.board_name(session, fleet_labels)
+            )
     return found
 
 
@@ -612,8 +616,9 @@ class BoardPanel(Vertical):
         self._roles: dict[str, str] = {}
         self._names: dict[str, str] = {}
         """Each session's name as asq's left pane gives its agent (``cli.board_names``, #140)."""
-        self._live: dict[str, str] = {}
-        """Each live session's fleet row's label (``team.live_labels``), the last refresh's."""
+        self._fleet_labels: dict[str, str] = {}
+        """Each session's fleet row's label, live or ended (``team.fleet_labels``), the last
+        refresh's."""
         self._statuses: dict[str, str] = {}
         self._last_seq = 0
         self._terminal_by_task: dict[str, TeamEvent] = {}
@@ -725,9 +730,11 @@ class BoardPanel(Vertical):
         except Exception:  # store briefly unavailable — keep the last frame
             return
         self._roles = {s.id: s.role for s in sessions}
-        self._live = dict(read.live)
+        self._fleet_labels = dict(read.fleet_labels)
         self._rename(
-            board_names.board_names(sessions, self._live, cells=board_names.BOARD_NAME_CELLS)
+            board_names.board_names(
+                sessions, self._fleet_labels, cells=board_names.BOARD_NAME_CELLS
+            )
         )
         self._sessions = {s.id: s for s in sessions}
         self._statuses = {t.id: t.status for t in tasks}
@@ -744,7 +751,9 @@ class BoardPanel(Vertical):
         self._refresh_tasks(tasks)
         self._read_project = project
         shown = [self._events_by_id[event_id] for event_id in self._feed_order]
-        self.needs = needs_you(project, sessions, tasks, shown, seq=self._last_seq, live=self._live)
+        self.needs = needs_you(
+            project, sessions, tasks, shown, seq=self._last_seq, fleet_labels=self._fleet_labels
+        )
         self.query_one(NeedsYouStrip).show(self.needs)
         self.post_message(self.Refreshed(project))
 

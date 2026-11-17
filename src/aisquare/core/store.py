@@ -2084,6 +2084,7 @@ class ContextStore(Protocol):
     def fleet_board(self, project_id: str) -> str | None: ...
     def fleet_manager_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
+    def fleet_labels_for_sessions(self, session_ids: Collection[str]) -> dict[str, str]: ...
     def fleet_session_ids(self) -> set[str]: ...
     def land_fleet_session(self, agent_id: str) -> bool: ...
     def ui_state(self, key: str) -> str | None: ...
@@ -6550,6 +6551,36 @@ class SqliteStore:
             (session_id, session_id),
         ).fetchone()
         return self._bound_fleet_agent(row) if row is not None else None
+
+    def fleet_labels_for_sessions(self, session_ids: Collection[str]) -> dict[str, str]:
+        """The label of the fleet row recorded against each of ``session_ids``, LIVE OR ENDED,
+        by session id; a session no row names is left out. What the board calls a session
+        (``services.team.fleet_labels``, #140).
+
+        A row's session is its own column, else the one its launch bound
+        (``fleet-session:<id>``), as :meth:`fleet_agent_for_session` and
+        :meth:`fleet_session_ids` read it. Of several rows on one session (a resume that kept
+        its id), a live one wins, as :meth:`fleet_agent_for_session` picks it; else the
+        newest, the row the agent ended on, whose label a ``fleet relabel`` moved with it. In
+        any project, as :meth:`fleet_agent_for_session` looks: a hub's sessions are rows
+        elsewhere. One pass over the rows per 500 sessions, not a lookup each: the board asks
+        for every session it shows, at every tick.
+        """
+        named = sorted(set(session_ids))
+        labels: dict[str, str] = {}
+        for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
+            chunk = named[start : start + 500]
+            rows = self._conn.execute(
+                "SELECT owned, label FROM (SELECT COALESCE(session_id, (SELECT value "
+                "FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id)) AS owned, "
+                "label, ended_at, created_at, id FROM fleet_agent) "
+                f"WHERE owned IN ({', '.join('?' * len(chunk))}) "
+                "ORDER BY ended_at IS NULL, created_at, id",
+                chunk,
+            ).fetchall()
+            for row in rows:  # the live row, else the newest, comes last and stays
+                labels[str(row["owned"])] = str(row["label"])
+        return labels
 
     def fleet_session_ids(self) -> set[str]:
         """Every session id a fleet row has recorded, live or ended, in any project: the

@@ -20,8 +20,9 @@ what is and is never collected). This module is its client:
   while sharing is off or forced off (``core.sharing.forced_off_reason``).
 
 The transport is a seam (:data:`Transport`): the tests give :func:`ship` a fake, and no test
-reaches a server. The endpoint (``/api/v1/cli/metrics/`` of ``AISquare-Studio-BE``) is the
-contract's.
+reaches a server. The endpoint (``/api/v1/rlx/metrics/`` of ``AISquare-Studio-BE``) is the
+contract's. Releases up to 0.10.0 post to ``/api/v1/cli/metrics/``, which the server keeps as
+a deprecated alias until May 2027.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ from aisquare.services import settings as settings_service
 
 SCHEMA_VERSION = 1
 log = logging.getLogger("aisquare.usage_share")
-ENDPOINT_PATH = "/api/v1/cli/metrics/"
+ENDPOINT_PATH = "/api/v1/rlx/metrics/"
 WINDOW_DAYS = 31
 """A batch holds at most this many days: today and the 30 before."""
 REJECTED_IN_A_ROW = 3
@@ -605,13 +606,21 @@ def _ship(
             if refused_in_a_row == REJECTED_IN_A_ROW:
                 del pending[:-1]  # the rest wait for next time; the newest, with today, still goes
             continue
-        wait = result.retry_after() if result.status == 429 else None
+        wait = result.retry_after() if result.status in _SAYS_WHEN else None
         return _failed(moment, f"{what}{_detail(result)}", retry_after=wait, report=report)
     if first_refusal is not None:
         if not report.sent:
             return _failed(moment, first_refusal, report=report)
         _note_refusal(first_refusal)  # a debug line in the state; the shipment itself went
     return report
+
+
+_SAYS_WHEN = frozenset({429, 503})
+"""The answers whose ``Retry-After`` the next try waits for, when it is longer than the backoff:
+a throttle (429) and a server that is unavailable for now (503), as the server's ingest answers
+with ``Retry-After: 3600`` while its kill switch is off (AISquare-Studio-BE #3791). An answer that
+names no wait (``retry_after``'s 30 s default, under any backoff) keeps the backoff, as every
+other failure does."""
 
 
 def _refused(result: iam.HttpResult) -> bool:

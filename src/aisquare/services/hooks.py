@@ -366,7 +366,6 @@ def turn_stopped(
             stop_hook_active=stop_hook_active,
             model=model if reported else None,
             effort=effort if reported else None,
-            last_message=last_message,
         )
     finally:
         remember_the_model(session_id, transcript_path, effort=effort)

@@ -388,6 +388,20 @@ def begin_standby(store: ContextStore, me: TeamSession, *, why: str) -> Standby:
     return standby
 
 
+def standby_on_its_question(store: ContextStore, me: TeamSession) -> Standby | None:
+    """``me``'s standby once its turn ended on a question to its person: begun now unless one
+    holds already or work is in flight on its board (:func:`work_in_flight`). ``aisquare
+    watch`` calls it when its look finds the manager ``asked`` (the phone's own test of a
+    turn's last words), so the decision stays off the hooks; and it is watch's routine lines
+    alone that standby holds, so a fleet with no watcher loses nothing."""
+    standby = standby_of(store, me)
+    if standby is not None:
+        return standby
+    if work_in_flight(store, me.project_id):
+        return None
+    return begin_standby(store, me, why="asked")
+
+
 def end_standby(session_id: str) -> bool:
     """End a session's standby: its person spoke (``UserPromptSubmit`` of a ``human`` prompt),
     or ``team standby --off``. Whether there was one. Never raises."""
@@ -3386,7 +3400,6 @@ def hook_stop(
     stop_hook_active: bool = False,
     model: str | None = None,
     effort: str | None = None,
-    last_message: str | None = None,
 ) -> StopDecision | None:
     """The session finished its turn: it is now waiting for input.
 
@@ -3418,10 +3431,6 @@ def hook_stop(
     A session a hand-over has marked (:data:`HANDOVER_STATE`) keeps the mark and
     is not kept going: ``/exit`` has been typed into it, and the turn ending is
     only what that ``/exit`` waits behind.
-
-    A manager left to wait whose turn ended on a question to its person (``last_message``,
-    the agent's ``last_assistant_message``), with nothing in flight on its board, goes into
-    standby (R12, :func:`standby_of`) until its person's next prompt.
     """
     if not orchestrator.team_enabled():
         return None
@@ -3449,8 +3458,6 @@ def hook_stop(
         if session.role == MANAGER_ROLE:
             try:
                 decision = _manager_wakeup(store, session, stop_hook_active=stop_hook_active)
-                if decision is None:
-                    _standby_if_asked(store, session, last_message)
                 if decision is None and stop_hook_active:
                     deferred = _deferred_wake_reason(store, session)
                     if deferred is not None:
@@ -3486,23 +3493,6 @@ def hook_stop(
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
-
-
-def _standby_if_asked(store: ContextStore, me: TeamSession, last_message: str | None) -> None:
-    """Standby for a manager whose turn ended on a question to its person (the test the phone's
-    "asked" uses, ``remote_needs.looks_like_a_question``) while nothing is in flight on its
-    board: it waits on its person, and watch's routine lines no longer wake it. A false read
-    costs nothing that matters: what is urgent still wakes it, and the person's next prompt
-    ends it. Never raises; a standby is an extra."""
-    if not last_message or standby_of(store, me) is not None:
-        return
-    try:
-        from aisquare.services.remote_needs import looks_like_a_question  # lazy: a heavy module
-
-        if looks_like_a_question(last_message) and not work_in_flight(store, me.project_id):
-            begin_standby(store, me, why="asked")
-    except Exception:
-        return
 
 
 def _turn_end_delivery(

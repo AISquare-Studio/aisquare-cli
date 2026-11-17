@@ -36,6 +36,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import harness
+from aisquare.core.config import WatchSettings
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, TeamSession
@@ -437,30 +438,35 @@ def test_standby_never_strands_a_working_fleet(runner: CliRunner, board: str) ->
     assert _wakes(), "the line it held wakes it now"
 
 
-def _stop(runner: CliRunner, work: Path, said: str) -> None:
-    payload = json.dumps({"cwd": str(work), "session_id": MANAGER, "last_assistant_message": said})
-    result = runner.invoke(app, ["hook", "stop"], input=payload)
-    assert result.exit_code == 0, result.output
-
-
-QUESTION = "Both are ready. Which one should ship first, the theme or the board names?"
+def _asked(board: str, agent: str) -> None:
+    """One watch tick whose look found ``agent``'s turn ended on a question (``asked``)."""
+    watcher = watch_service.Watcher(
+        WatchSettings(auto_stop=False), needs_sources=lambda: [], stale=False
+    )
+    item = WatchItem(f"needs:asked:{agent}", board, "p", "asked", "asked", {"agent": agent})
+    watcher.needs = lambda now: [item]  # type: ignore[method-assign]
+    watcher.tick(datetime.now(tz=UTC))
 
 
 def test_a_manager_that_asks_its_person_with_nothing_in_flight_goes_into_standby(
-    runner: CliRunner, board: str, work_dir: Path
+    runner: CliRunner, board: str
 ) -> None:
-    _stop(runner, work_dir, QUESTION)
+    """Watch's look decides it: the manager's turn ended on a question to its person (the
+    phone's ``asked``), and nothing is in flight. The Stop hook stays off the remote code."""
+    _agent(board, "manager", MANAGER)
+    _asked(board, "manager")
     standby = _standby()
     assert standby is not None and standby.why == "asked"
 
 
-def test_a_manager_that_states_or_has_work_in_flight_does_not(
-    runner: CliRunner, board: str, work_dir: Path
+def test_a_coders_question_or_work_in_flight_puts_no_manager_in_standby(
+    runner: CliRunner, board: str
 ) -> None:
-    _stop(runner, work_dir, "Both are merged. The release notes are up to date.")
-    assert _standby() is None, "no question"
+    _agent(board, "manager", MANAGER)
+    _asked(board, "coder-x")
+    assert _standby() is None, "a coder's question is the manager's to answer"
     _task(runner, "doing")
-    _stop(runner, work_dir, QUESTION)
+    _asked(board, "manager")
     assert _standby() is None, "a task in flight: the fleet is at work"
 
 

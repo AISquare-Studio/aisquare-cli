@@ -388,6 +388,7 @@ class Watcher:
             seen = set(state.get("seen") or [])
             new = [item for item in items if item.id not in seen]
             report = TickReport(at=now, items=items, new=new, notes=notes)
+            _standby_on_questions(items, notes)  # before delivery: what standby holds waits
             by_project: dict[str, list[WatchItem]] = {}
             for item in new:
                 if for_the_manager(item):  # the rest is the person's: seen, not delivered
@@ -487,6 +488,33 @@ def _urgent(item: WatchItem) -> bool:
     if item.kind == "stale":
         return not item.detail.get("quiet", False)
     return False
+
+
+def _standby_on_questions(items: Iterable[WatchItem], notes: list[str]) -> None:
+    """A manager whose turn ended on a question to its person (an ``asked`` item about it,
+    the phone's test) goes into standby, while nothing is in flight on its board
+    (``team.standby_on_its_question``, R12): its person is who it waits on, and watch's
+    routine lines stop waking it until their next prompt. Never costs the tick."""
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import team as team_service
+
+    asked = {
+        item.project_id
+        for item in items
+        if item.kind == "asked"
+        and str(item.detail.get("agent") or "").strip().lower() == fleet_service.MANAGER_LABEL
+    }
+    for project_id in sorted(asked):
+        try:
+            with store_session() as store:
+                row = store.fleet_agent_by_label(
+                    project_id, fleet_service.MANAGER_LABEL, live_only=True
+                )
+                session = store.get_session(row.session_id) if row and row.session_id else None
+                if session is not None:
+                    team_service.standby_on_its_question(store, session)
+        except Exception as exc:
+            notes.append(f"standby of {project_id}'s manager: {type(exc).__name__}: {exc}")
 
 
 def _release_woken_holds(delivered: Iterable[WatchItem]) -> None:

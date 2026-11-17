@@ -98,18 +98,6 @@ ToastHolder > CalmToast {{
     margin-top: 1;
     padding: 0 {DISMISS} 0 1;
 }}
-CalmToast > .calm-toast--dismiss {{
-    color: $text-muted;
-}}
-CalmToast:hover > .calm-toast--dismiss {{
-    color: $text-error;
-}}
-CalmToast > .calm-toast--copied {{
-    color: $text-success;
-}}
-CalmToast > .calm-toast--failed {{
-    color: $text-warning;
-}}
 MoreToasts {{
     width: {WIDTH};
     max-width: 100%;
@@ -283,6 +271,22 @@ class CalmToast(Toast):
         "calm-toast--copied",
         "calm-toast--failed",
     }
+
+    # The glyph's colours: its own, so they resolve where component classes are looked up.
+    DEFAULT_CSS = """
+    CalmToast > .calm-toast--dismiss {
+        color: $foreground-muted;
+    }
+    CalmToast:hover > .calm-toast--dismiss {
+        color: $text-error;
+    }
+    CalmToast > .calm-toast--copied {
+        color: $text-success;
+    }
+    CalmToast > .calm-toast--failed {
+        color: $text-warning;
+    }
+    """
 
     def __init__(self, notification: Notification) -> None:
         super().__init__(notification)

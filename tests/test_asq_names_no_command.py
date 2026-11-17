@@ -27,8 +27,8 @@ from aisquare.cli.ui.views.doctor import (
     render_checks,
     ui_way,
 )
+from aisquare.core import selfcli
 from aisquare.models import CheckStatus, DoctorCheck
-from aisquare.services import onboarding
 from aisquare.services.onboarding import FixCommand, FixResult
 
 UI = Path(__file__).resolve().parents[1] / "src" / "aisquare" / "cli" / "ui"
@@ -213,7 +213,7 @@ def _doctor(
     manager: str | None, tmp_path: Path
 ) -> tuple[list[str], list[tuple[str, Path | None]], str]:
     async def drive() -> tuple[list[str], list[tuple[str, Path | None]], str]:
-        view = DoctorView(cwd=tmp_path, run=onboarding.selfcli.run, manager=lambda cwd: manager)
+        view = DoctorView(cwd=tmp_path, run=selfcli.run, manager=lambda cwd: manager)
         host = Host(view)
         async with host.run_test(size=(140, 40)) as pilot:
             view.show([OK, CONNECT, WARN, OWN_WAY])

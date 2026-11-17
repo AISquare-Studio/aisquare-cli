@@ -419,7 +419,7 @@ def test_once_while_a_tick_holds_the_state_lock_is_busy_not_a_traceback(
 
 
 def test_the_persons_items_are_seen_and_never_on_the_managers_line(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R12 (#145): a board result or question, and the manager's own turn ending on a question,
     are the person's (asq's "needs you", Remote): seen, and kept off the manager's line. A coder

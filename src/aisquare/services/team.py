@@ -515,16 +515,21 @@ def standby_on_its_question(store: ContextStore, me: TeamSession) -> Standby | N
     return begin_standby(store, me, why="asked")
 
 
-def standby_turn_began(session_id: str, *, by_person: bool) -> None:
+def standby_turn_began(store: ContextStore, session_id: str, *, by_person: bool) -> None:
     """A turn of ``session_id`` began (``UserPromptSubmit``): a ``team standby --off`` held
     only until now, and a prompt its person typed (``by_person``) ends its standby. A fleet
     wake or a teammate's ``fleet tell`` does not: standby holds watch's routine lines until
-    its person speaks. Never raises."""
+    its person speaks. Never raises.
+
+    It runs on EVERY prompt of every agent, inside the prompt hook's own store session
+    (``hooks.capture_prompt``): two key reads, and a write only for a mark that is there,
+    which few sessions ever have. Its own session and two deletes cost every prompt a store
+    open and two write transactions (#514's CI, brief 212)."""
     try:
-        with store_session() as store:
-            store.delete_meta(STANDBY_OFF_META + session_id)
-            if by_person:
-                store.delete_meta(STANDBY_META + session_id)
+        keys = [STANDBY_OFF_META + session_id, *([STANDBY_META + session_id] if by_person else [])]
+        for key in keys:
+            if store.get_meta(key) is not None:
+                store.delete_meta(key)
     except Exception:
         return
 

@@ -962,3 +962,88 @@ def test_a_task_less_note_naming_two_tasks_is_no_echo(board: str) -> None:
     _say(board, "note", by="coder", to="manager", text=f"DONE #{first.number}, PR #507 is up")
     _read_all(board)
     assert _echo(_say(board, "task_review", by="coder", task=first.id)), "#507 is no task"
+
+
+# --- what R12 costs the hooks (#514's CI, brief 212) ------------------------------------------
+
+#: R12's board reads: the echo, the walks it and watch's idle-by-design read answers with, the
+#: standby and its in-flight check, and the wake rule that calls them.
+R12_BOARD_SCANS = (
+    "is_echo",
+    "_about_the_task",
+    "answered_since",
+    "addressee_names",
+    "standby_of",
+    "standby_on_its_question",
+    "work_in_flight",
+    "manager_wakes",
+    "wake_pending",
+)
+
+
+def test_a_session_end_runs_none_of_r12s_board_scans(
+    runner: CliRunner,
+    board: str,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_nudge: list[str],
+) -> None:
+    """Claude Code 2.1.318 gives a SessionEnd hook 1.5 s, the interpreter included, and cancels
+    it past that: the session's end never reaches the board. R12's reads are a manager's (what
+    wakes it, its standby), and a session's end needs none of them, with every one in play: a
+    coder that holds a task, a review of its unread, a manager in standby."""
+    held = _real_task(board, "the held work")
+    team_service.claim_task(held.id, session_ref=SESSIONS["coder"])
+    reviewed = _real_task(board, "the reviewed work")
+    _say(board, "note", by="coder", to="manager", text=f"DONE #{reviewed.number}")
+    _read_all(board)
+    _say(board, "task_review", by="coder", task=reviewed.id)
+    with store_session() as store:
+        team_service.begin_standby(store, _manager(), why="explicit")
+    scans: list[str] = []
+    for name in R12_BOARD_SCANS:
+
+        def scan(*args: object, _name: str = name, **kwargs: object) -> bool:
+            scans.append(_name)
+            raise AssertionError(f"session end ran R12's {_name}")
+
+        monkeypatch.setattr(team_service, name, scan)
+    payload = {"cwd": str(work_dir), "session_id": SESSIONS["coder"], "reason": "prompt_input_exit"}
+    ended = runner.invoke(app, ["hook", "session-end"], input=json.dumps(payload))
+    assert ended.exit_code == 0, ended.output
+    assert scans == [] and no_nudge == []
+    with store_session() as store:
+        session = store.get_session(SESSIONS["coder"])
+        task = store.get_task(held.id, project_ids=(board,))
+    assert session is not None and session.ended_at is not None, "its end reached the board"
+    assert task is not None and task.status == "todo" and task.claimed_by is None, "released"
+
+
+def test_a_prompt_ends_standby_in_the_prompt_hooks_own_store_session_writing_only_what_it_finds(
+    board: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Standby's check runs on every prompt of every agent. It rides the prompt hook's store
+    session, where it cost every prompt a store open and two write transactions of its own,
+    and it writes only a mark that is there: most sessions never have one."""
+    off_key = team_service.STANDBY_OFF_META + MANAGER
+    standby_key = team_service.STANDBY_META + MANAGER
+    with store_session() as store:
+        store.set_meta(off_key, "2026-11-17T00:00:00+00:00")
+        team_service.begin_standby(store, _manager(), why="explicit")
+
+    def no_store_of_its_own() -> None:
+        raise AssertionError("standby_turn_began opened a store session of its own")
+
+    monkeypatch.setattr(team_service, "store_session", no_store_of_its_own)
+    with store_session() as store:
+        team_service.standby_turn_began(store, MANAGER, by_person=False)
+        assert store.get_meta(off_key) is None, "a new turn ends --off's hold"
+        assert store.get_meta(standby_key) is not None, "a fleet wake keeps standby"
+        team_service.standby_turn_began(store, MANAGER, by_person=True)
+        assert store.get_meta(standby_key) is None, "its person's prompt ends it"
+        writes: list[str] = []
+        monkeypatch.setattr(type(store), "delete_meta", lambda self, key: writes.append(key))
+        monkeypatch.setattr(type(store), "set_meta", lambda self, key, value: writes.append(key))
+        team_service.standby_turn_began(store, MANAGER, by_person=True)
+        team_service.standby_turn_began(store, SESSIONS["coder"], by_person=True)
+    assert writes == [], "no mark, no write"

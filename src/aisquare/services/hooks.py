@@ -1509,12 +1509,6 @@ def capture_prompt(
     origin = prompt_origin.origin_of_prompt(
         prompt, notice=prompt_origin.only_task_notifications(prompt)
     )
-    if session_id is not None:
-        # A turn began: a manager's `team standby --off` held until now, and its person's
-        # prompt ends its standby (R12); a fleet wake does not. Never raises.
-        team_service.standby_turn_began(
-            session_id, by_person=origin.startswith(f"{prompt_origin.HUMAN}:")
-        )
     # ``capture.enabled``, read once a prompt (#268). Off, the prompt is neither stored nor
     # spooled; the turn row below still opens, without text, and the teammate delta is the
     # caller's, not capture. A config that cannot be read may have said off, so it records
@@ -1532,6 +1526,13 @@ def capture_prompt(
         text = _without_harness_blocks(text)
     try:
         with store_session() as store:
+            if session_id is not None:
+                # A turn began: a manager's `team standby --off` held until now, and its
+                # person's prompt ends its standby (R12); a fleet wake does not. In this
+                # session, not one of its own: it runs on every prompt. Never raises.
+                team_service.standby_turn_began(
+                    store, session_id, by_person=origin.startswith(f"{prompt_origin.HUMAN}:")
+                )
             project = active_project(store, cwd)
             # Before anything is written, even for an empty prompt: a metric row is
             # written for every turn below, and a row whose project_id has no

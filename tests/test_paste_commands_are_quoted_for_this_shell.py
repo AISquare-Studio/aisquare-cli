@@ -99,11 +99,11 @@ def test_shlex_quotes_only_what_no_windows_shell_is_told_to_run() -> None:
             id="onboard",
         ),
         pytest.param(
-            accounts_service.trust_command, ["aisquare", "accounts", "trust", "{root}"], id="trust"
+            accounts_service.trust_command, ["rlx", "accounts", "trust", "{root}"], id="trust"
         ),
         pytest.param(
             lambda root: fleet_service.trust_prompt_detail(root).split("`")[1],
-            ["aisquare", "accounts", "trust", "{root}"],
+            ["rlx", "accounts", "trust", "{root}"],
             id="trust-prompt",
         ),
         pytest.param(

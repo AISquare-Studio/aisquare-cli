@@ -37,6 +37,7 @@ account in as one.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import os
 import re
@@ -326,10 +327,34 @@ _SCREEN_ESCAPES = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)"  # OSC: the dialog's "Security guide" is a link
     r"|\x1b\[[0-?]*[ -/]*[@-~]"  # CSI, SGR included
 )
-_TRUST_QUESTION = re.compile(r"\btrust (?:this folder|the files in this folder)\b", re.IGNORECASE)
+_ADDED_QUESTION = re.compile(r"\ba directory you created or one you trust\b", re.IGNORECASE)
+"""The words of 2.1.326's question about an ``--add-dir`` folder no trust covers."""
+_TRUST_QUESTION = re.compile(
+    r"\btrust (?:this folder|the files in this folder)\b|" + _ADDED_QUESTION.pattern,
+    re.IGNORECASE,
+)
+"""The question's words: the folder Claude Code starts in (2.1.299, the 1.x builds), and
+each ``--add-dir`` folder no trust covers (2.1.326)."""
+_ADD_IT = re.compile(r"(?:\u276f ?)?Yes, add it")
+"""2.1.326's yes to its question about an ``--add-dir`` folder, a row of its own: the
+question's words too, where the foot of the question is all a pane shows of it."""
 _TRUST_EXIT = re.compile(r"(?:\u276f ?|> ?)?(?:\d+\. ?)?No, exit")
 """The dialog's "No, exit" option, a row of its own: its pointer when highlighted, its
 number on the 1.x builds."""
+_KEY_HINT = re.compile(r"Enter to confirm\b|\bEsc to (?:cancel|exit)\b")
+"""The question's key hint, ``Enter to confirm \u00b7 Esc to cancel``; or, once 2.1.326 refused
+a key at its question at its start (text typed there, an Enter right after it), ``Esc to
+exit \u00b7 To add it, press \u2193 to Yes, then Enter (your text is kept)``, wrapped onto rows
+of its own."""
+_FOLDER_LINE = re.compile(r"Adding:(?: (\S.*))?")
+"""The row 2.1.326 draws under the key hint of its question about an ``--add-dir`` folder
+when the question is cut off: on a pane too short for even its compact layout (under 30
+rows, no blank rows), whose top it pushes off the screen, title and all. The folder,
+named, wraps onto the rows under it, the last the question draws. Measured from 40 rows
+down to 4, at which only the key hint and this are left. ``Adding:`` alone where the
+folder starts a row of its own: one with no space in it that does not fit on the row
+with ``Adding:`` but does on the next (45 characters at 50 columns, measured), or that
+breaks fewer times from there (brief 217)."""
 _INPUT_BOX = re.compile(r"[\u276f>](?! ?(?:\d+\. ?)?(?:Yes|No)\b).*")
 """An input box's row: its pointer, with nothing, a placeholder or what is typed after it —
 never one of the dialog's options."""
@@ -343,26 +368,149 @@ def shows_trust_prompt(lines: Iterable[str]) -> bool:
 
     2.1.299 draws "Yes, I trust this folder" under a highlighted "No, exit", over its key
     hint; the 1.x builds asked "Do you trust the files in this folder?" over a numbered
-    "2. No, exit", in a rounded box. Read fail-closed, since a screen read as not the
-    question is typed into, and Enter there picks "No, exit": the question's words on the
-    screen and "No, exit" an option of its own (box borders aside), with no input box under
-    it. At work, the screen ends on its input box (:data:`_INPUT_BOX`), and the dialog
-    takes the input box's place, so the words above one are a reviewer reading this module
-    or the captured screen the tests pin (review of #259, round 14). Anything else that
+    "2. No, exit", in a rounded box. 2.1.326 asks the same at its start of each
+    ``--add-dir`` folder no trust covers ("Adding a new directory: … Is this a directory
+    you created or one you trust?" over a highlighted "No, exit" and "Yes, add it"), and an
+    agent there fires no hook either (:func:`trust_prompt_folder` reads which folder).
+    Read fail-closed, since a screen read as not the question is typed into, and Enter
+    there picks "No, exit": the question's words on the screen and "No, exit" an option of
+    its own (box borders aside), with no input box under it. At work, the screen ends on
+    its input box (:data:`_INPUT_BOX`), and the dialog takes the input box's place, so the
+    words above one are a reviewer reading this module or the captured screen the tests pin
+    (review of #259, round 14). Anything else that
     holds both reads as the question — a dialog in a box, a key hint wrapped in a narrow
     pane, a row the build adds under it — rather than a fixed count of rows at the foot,
-    which each of those pushed "No, exit" out of (round 15). A Claude Code string, not a
-    contract: pinned by a test with the captured screen.
+    which each of those pushed "No, exit" out of (round 15). 2.1.326's "Yes, add it" is
+    its question's words too, so a pane that shows only the foot of the question reads it
+    as the screen reader does (``agent_adapters.claude_screen``; R19). And on a pane too
+    short for its question, 2.1.326 cuts its top off and names the folder under the key
+    hint (:data:`_FOLDER_LINE`), down to a pane that shows nothing else: that, with no
+    input box under it, is the question too. A Claude Code string, not a contract: pinned
+    by a test with the captured screens.
     """
     rows = [
         row
         for line in lines
         if (row := " ".join(_SCREEN_ESCAPES.sub("", line).split()).strip(_BORDERS))
     ]
+    cut = _cut_off_at(rows)
+    if cut is not None:
+        return not any(_INPUT_BOX.fullmatch(row) for row in rows[cut:])
     exits = [at for at, row in enumerate(rows) if _TRUST_EXIT.fullmatch(row)]
-    if not exits or not _TRUST_QUESTION.search(" ".join(rows)):
+    if not exits:
+        return False
+    if not _TRUST_QUESTION.search(" ".join(rows)) and not any(map(_ADD_IT.fullmatch, rows)):
         return False
     return not any(_INPUT_BOX.fullmatch(row) for row in rows[exits[-1] + 1 :])
+
+
+def _cut_off_at(rows: list[str]) -> int | None:
+    """Where ``rows`` (escapes and borders gone) show the folder line of 2.1.326's question
+    about an ``--add-dir`` folder, cut off (:data:`_FOLDER_LINE`): the last row of the
+    screen that names the folder under the key hint, whose rows a narrow pane wraps.
+    ``None`` where none does."""
+    hints = [at for at, row in enumerate(rows) if _KEY_HINT.search(row)]
+    lines = [
+        at for at, row in enumerate(rows) if hints and hints[0] < at and _FOLDER_LINE.fullmatch(row)
+    ]
+    return lines[-1] if lines else None
+
+
+_ADDING = re.compile(r"Adding a new directory:")
+"""The title of 2.1.326's question about an ``--add-dir`` folder, the folder's rows under it."""
+_ASKED = re.compile(
+    r"This (?:session hasn.t worked here before|directory is part of the repository at)\b"
+)
+"""The first words under the folder's rows: the question's, or, over them for a folder in a
+git repository, the note that trusting it trusts that whole repository. Right under the
+folder in the compact layout of a pane under 30 rows tall, which draws no blank rows."""
+FOLDER_ROWS = 8
+"""The most rows of a wrapped folder :func:`trust_prompt_folder` joins every way (128)."""
+
+
+def trust_prompt_folder(
+    lines: Iterable[str],
+    default: Path | None,
+    *,
+    is_dir: Callable[[str], bool] = os.path.isdir,
+) -> Path | None:
+    """The folder Claude Code's folder-trust question on ``lines`` (a screen
+    :func:`shows_trust_prompt` reads as the question) asks about.
+
+    2.1.326's question about an ``--add-dir`` folder names it, in bold rows under its
+    "Adding a new directory:" title, up to the question's first row, or the note over it
+    for a folder in a git repository (:data:`_ASKED`), blank rows aside: a pane under 30
+    rows tall draws none between them (an agent's pane in asq on an 80x24 terminal is about
+    50x22), so the blank row that ended them on a taller one is not theirs to end on (review
+    of #520). Where the question is cut off, title and all, the folder is the
+    :data:`_FOLDER_LINE` under its key hint and the rows under that, the last it draws. A
+    folder wider than the pane wraps as words do: at a space, which the wrap drops, and
+    inside a word wider than the pane (measured at 48 columns). So the rows are joined
+    every way, and the folder is the spelling that is a directory here; one row is one
+    spelling. Rows whose end is not seen (the question's first words changed in a build to
+    come) are read as the longest of their first rows that is a directory here. ``None``
+    where none is (the agent's folder is not on this machine), or where neither the title
+    nor the folder line shows on a screen of that question: a command then names ``<dir>``,
+    never the folder the agent starts in, which is trusted. Any other screen asks about that
+    one, ``default``. A Claude Code string, not a contract: pinned by a test with the
+    captured screens.
+    """
+    rows = [_SCREEN_ESCAPES.sub("", line).strip(_BORDERS) for line in lines]
+    plain = [" ".join(row.split()) for row in rows]
+    titles = [at for at, row in enumerate(plain) if _ADDING.fullmatch(row)]
+    if titles:
+        below = rows[titles[-1] + 1 :]
+        below = below[next((at for at, row in enumerate(below) if row), len(below)) :]
+        asked = next(
+            (
+                at
+                for at in range(len(below))
+                if _ASKED.match(" ".join(" ".join(below[at:]).split()))
+            ),
+            None,
+        )
+        if asked is None:
+            return _longest_folder([row for row in below if row], is_dir)
+        return _folder(below[:asked], is_dir)
+    kept = [at for at, row in enumerate(plain) if row]
+    cut = _cut_off_at([plain[at] for at in kept])
+    if cut is not None:
+        at = kept[cut]
+        named = _FOLDER_LINE.fullmatch(rows[at])
+        first = [named[1]] if named and named[1] else []
+        return _folder([*first, *itertools.takewhile(bool, rows[at + 1 :])], is_dir)
+    if _ADDED_QUESTION.search(" ".join(plain)) or any(map(_ADD_IT.fullmatch, plain)):
+        return None
+    return default
+
+
+def _spellings(rows: list[str]) -> list[str]:
+    """Every way of joining a folder's wrapped ``rows``: each break with its space or not."""
+    return [
+        "".join(row + gap for row, gap in zip(rows, (*gaps, ""), strict=True))
+        for gaps in itertools.product(("", " "), repeat=len(rows) - 1)
+    ]
+
+
+def _folder(rows: list[str], is_dir: Callable[[str], bool]) -> Path | None:
+    """The folder a question names on ``rows``, all of them its: one row as it reads, more
+    the one way of joining them that is a directory (:func:`trust_prompt_folder`)."""
+    if not rows or len(rows) > FOLDER_ROWS:
+        return None
+    spellings = _spellings(rows)
+    if len(spellings) == 1:
+        return Path(spellings[0])
+    return next((Path(spelling) for spelling in spellings if is_dir(spelling)), None)
+
+
+def _longest_folder(rows: list[str], is_dir: Callable[[str], bool]) -> Path | None:
+    """The folder a question names on the first of ``rows``, its end not seen:
+    the most of them that, joined some way, is a directory (:func:`trust_prompt_folder`)."""
+    for count in range(min(len(rows), FOLDER_ROWS), 0, -1):
+        found = next((spelling for spelling in _spellings(rows[:count]) if is_dir(spelling)), None)
+        if found is not None:
+            return Path(found)
+    return None
 
 
 _SECURITY_TITLE = re.compile(r"Security notes:")

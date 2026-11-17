@@ -1,5 +1,5 @@
 {
-  "about": "Claude Code's screens (capture-pane -p -J), from main's tests/captain_screens.py and tests/screens/: runner2's captures of a real Claude Code 2.1.282 (board 13265, PR #224) and the shapes the captain's reader is pinned on. Each dialog's prompt is [shape, yes_key, no_key] as AgentScreen.screen_prompt reads it; on its permission chooser and trust dialog the letter y does nothing, the digit 1 (Yes) does. A screen marked ready is one AgentScreen.ready_on_screen (or its default) reads as ready for a typed line; every other is not. A screen's modal is what AgentScreen.modal_on_screen names on it, the words the captain's say refuses it by; a screen with none has none. The Claude Code 2.1.318 screens are R6's real captures (#113, 2026-11-05) of a fleet window (launched with --name) and a hand-started one, at 72, 120 and 200 columns; their temp path is masked.",
+  "about": "Claude Code's screens (capture-pane -p -J), from main's tests/captain_screens.py and tests/screens/: runner2's captures of a real Claude Code 2.1.282 (board 13265, PR #224) and the shapes the captain's reader is pinned on. Each dialog's prompt is [shape, yes_key, no_key] as AgentScreen.screen_prompt reads it; on its permission chooser and trust dialog the letter y does nothing, the digit 1 (Yes) does. A screen marked ready is one AgentScreen.ready_on_screen (or its default) reads as ready for a typed line; every other is not. A screen's modal is what AgentScreen.modal_on_screen names on it, the words the captain's say refuses it by; a screen with none has none. The Claude Code 2.1.318 screens are R6's real captures (#113, 2026-11-05) of a fleet window (launched with --name) and a hand-started one, at 72, 120 and 200 columns; their temp path is masked. The Claude Code 2.1.326 screen is a real capture (R19, 2026-11-16) of a fleet window at its question about an --add-dir folder; its temp path is masked. The second is the same question cut off at 50x14 (review of #520), where the screen read no dialog: the footer was no longer on its last two rows.",
   "dialogs": [
     {
       "what": "the real permission chooser",
@@ -28,6 +28,60 @@
         "   Yes, I trust this folder",
         "",
         " Enter to confirm · Esc to cancel"
+      ],
+      "modal": "the trust dialog",
+      "prompt": [
+        "trust",
+        null,
+        null
+      ]
+    },
+    {
+      "what": "Claude Code 2.1.326's question at its start about an --add-dir folder no trust covers (real capture, a fleet window at 120 columns)",
+      "rows": [
+        "Launching claude as coder on the w board…",
+        "",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        " Adding a new directory:",
+        "",
+        " /private/var/tmp/asq-native/extra-dir",
+        "",
+        " This session hasn't worked here before. Is this a directory you created or one you trust?",
+        "",
+        " Claude Code'll be able to read, edit, and execute files here. Its skills, commands, and agents load and can run",
+        " commands, and so can the git settings of its repository. Your answer holds for this session. Starting Claude Code in",
+        " this directory and trusting it there lasts, and covers its whole repository or everything below it.",
+        "",
+        " Security guide",
+        "",
+        " ❯ No, exit",
+        "   Yes, add it",
+        "",
+        " Enter to confirm · Esc to cancel"
+      ],
+      "modal": "the trust dialog",
+      "prompt": [
+        "trust",
+        null,
+        null
+      ]
+    },
+    {
+      "what": "The same question cut off on a pane too short for it (real capture at 50x14): its top gone, title and all, the folder named under its footer, wrapped",
+      "rows": [
+        " This session hasn't worked here before. Is this",
+        " a directory you created or one you trust?",
+        " Claude Code'll be able to read, edit, and",
+        " execute files here. Its skills, commands, and",
+        " agents load and can run commands, and so can the",
+        " git settings of its repository. Your answer",
+        " holds for this session.",
+        " Security guide",
+        " ❯ No, exit",
+        "   Yes, add it",
+        " Enter to confirm · Esc to cancel",
+        " Adding: /private/var/tmp/asq-native/extra dir",
+        "with spaces"
       ],
       "modal": "the trust dialog",
       "prompt": [

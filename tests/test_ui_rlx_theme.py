@@ -34,10 +34,13 @@ from aisquare.cli import watch as watch_mod
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.theme import (
     DEFAULT_THEME,
+    FADE_OPACITY,
     MARK_STYLE,
     MARK_VARIABLE,
     RLX_BLUE,
     RLX_THEME,
+    MarkStatic,
+    faded,
     mark_colour,
     theme_variable_defaults,
 )
@@ -608,6 +611,100 @@ def test_a_theme_that_sets_the_mark_colours_it_apart_from_its_primary(
 def _cells(app: FleetApp) -> Iterator[str]:
     for (strip,) in app.screen._compositor.render_full_update(simplify=True).strips:
         yield "".join(segment.text for segment in strip)
+
+
+# --- the mark is not faded (#508's tester, F1; the manager's ruling) ---------------------------
+
+FADED_THEMES = ["rlx", "textual-dark", "flexoki", "solarized-dark"]
+"""rlx, the old default, and two whose mark is floored to their text colour (flexoki's primary
+reads 2.93:1, solarized-dark's text colour 4.75:1 and 3.64:1 once faded)."""
+
+
+def _segments(widget: Static, line: int) -> list[Segment]:
+    strip = widget.render_lines(Region(0, 0, widget.size.width, line + 1))[line]
+    return [segment for segment in strip if segment.text.strip()]
+
+
+Drawn = dict[str, dict[str, tuple[Color, Color, Color, Color]]]
+"""Per theme and side: the mark's ink and ground, and the ink of the text beside it."""
+
+
+async def _drawn_both_ways(pilot: Pilot[None], themes: list[str]) -> Drawn:
+    """Each theme, the keyboard on the content (the sidebar faded), then on the sidebar (the
+    content faded), then on the content again: the top-left mark and its count, Welcome's
+    heading and the line under it, as drawn on each side."""
+    app = fleet_app(pilot)
+    app.sidebar.show_live_total(3)
+    seen: Drawn = {}
+    page = app.query_one(WelcomeView)
+    intro = page.query_one("#welcome-intro", MarkStatic)
+    for theme in themes:
+        app.theme = theme
+        await settle(app)
+        seen[theme] = {}
+        for side in ("content", "sidebar", "content"):
+            await _focus(app, page if side == "content" else app.sidebar)
+            mark, *count = _title(app)
+            heading = _heading(app)
+            body = _segments(intro, 1)[0]
+            key = "sidebar faded" if side == "content" else "content faded"
+            seen[theme][key] = (*_ink(mark), _ink(count[0])[0], _ink(heading)[0])
+            seen[theme][f"{key}, the body"] = (*_ink(heading), _ink(body)[0], _ink(body)[1])
+    return seen
+
+
+def test_the_mark_draws_at_its_full_colour_on_its_faded_side(
+    tmp_path: Path, script: Script
+) -> None:
+    """The ruling: the product mark is left out of the fade, on every theme, so it always
+    draws at its floored colour (4.5:1 or more); before, #2F74F0 faded to #2760C6, 3.39:1."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    seen = drive(lambda pilot: _drawn_both_ways(pilot, FADED_THEMES))
+    for theme, sides in seen.items():
+        want = _expected_mark(theme)
+        mark, ground, _, _ = sides["sidebar faded"]
+        heading, heading_ground, _, _ = sides["content faded, the body"]
+        assert (mark, heading) == (want, want), (theme, mark.hex, heading.hex, want.hex)
+        assert (
+            contrast(mark.rgb, ground.rgb) >= TEXT
+            and contrast(heading.rgb, heading_ground.rgb) >= TEXT
+        )
+
+
+def test_the_rest_of_a_marks_widget_still_fades(tmp_path: Path, script: Script) -> None:
+    """Only the mark leaves the fade: the count beside it and the line under Welcome's
+    heading are drawn as the fade draws them, their colour at 82% over their ground."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def body(pilot: Pilot[None]) -> tuple[Drawn, dict[str, Color]]:
+        app = fleet_app(pilot)
+        app.sidebar.show_live_total(3)
+        page = app.query_one(WelcomeView)
+        intro = page.query_one("#welcome-intro", MarkStatic)
+        full = {}
+        await _focus(app, app.sidebar)  # the sidebar at full strength: its count's own colour
+        full["count"] = _ink(_title(app)[1])[0]
+        await _focus(app, page)
+        full["body"] = _ink(_segments(intro, 1)[0])[0]
+        return await _drawn_both_ways(pilot, ["rlx"]), full
+
+    seen, full = drive(body)
+    _, ground, count, _ = seen["rlx"]["sidebar faded"]
+    _, body_ground, body_ink, _ = seen["rlx"]["content faded, the body"]
+    for drawn, own, under in (
+        (count, full["count"], ground),
+        (body_ink, full["body"], body_ground),
+    ):
+        expected = faded(own, under)
+        assert drawn != own, "it fades"
+        assert max(abs(a - b) for a, b in zip(drawn.rgb, expected.rgb, strict=True)) <= 1
+
+
+def test_the_fade_is_one_number_the_shell_and_the_mark_share() -> None:
+    from aisquare.cli.ui.app import Panes
+
+    assert FADE_OPACITY == 0.82
+    assert f"opacity: {FADE_OPACITY};" in Panes.DEFAULT_CSS
 
 
 def test_the_terminal_themes_draw_the_mark_too(tmp_path: Path, script: Script) -> None:

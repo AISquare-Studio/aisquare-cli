@@ -17,6 +17,7 @@ product mark's colour (:data:`MARK_VARIABLE`, :func:`theme_variable_defaults`).
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 from textual.app import App, ComposeResult
@@ -24,6 +25,8 @@ from textual.color import Color
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.theme import Theme
+from textual.visual import VisualType
+from textual.widget import Widget
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -55,6 +58,10 @@ text colour. It does not raise.
 
 RLX_GROUND = "#08090B"
 """``rlx``'s background, near-black. #2F74F0 on it is 4.63:1, above text's 4.5:1."""
+
+FADE_OPACITY = 0.82
+"""The opacity of the side that does not hold the keyboard (``Panes > .-unfocused``): its text
+is drawn at 82% over its ground. The product mark is not (:class:`MarkStatic`)."""
 
 RLX_THEME = Theme(
     name="rlx",
@@ -164,12 +171,18 @@ def contrast_ratio(one: Color, other: Color) -> float:
     return (light + 0.05) / (dark + 0.05)
 
 
+def faded(colour: Color, ground: Color) -> Color:
+    """``colour`` as the faded side draws it: at :data:`FADE_OPACITY` over ``ground``."""
+    return ground.blend(colour, FADE_OPACITY)
+
+
 def mark_colour(theme: Theme) -> str:
     """The mark's colour under ``theme`` when it sets none: its ``primary``, read as text.
 
     Where the primary is under :data:`TEXT_CONTRAST` on the theme's own background (6 of
     Textual's built-ins, textual-dark's #0178D4 at 4.14:1 among them), the mark takes the
-    theme's ``foreground``, the colour its text is drawn in, which reads. A theme of the
+    theme's ``foreground``, the colour its text is drawn in, which reads. The mark is drawn at
+    that colour on either side, the faded one included (:class:`MarkStatic`). A theme of the
     terminal's own ANSI colours keeps its primary: its real colours are the terminal's, and
     no ratio can be known.
     """
@@ -190,6 +203,60 @@ def theme_variable_defaults(app: App[Any]) -> dict[str, str]:
     own variables. A theme that sets one (``rlx`` sets the mark) overrides it there.
     """
     return {MARK_VARIABLE: mark_colour(app.current_theme)}
+
+
+def on_faded_side(widget: Widget) -> bool:
+    """Whether ``widget`` is on the side that does not hold the keyboard (``-unfocused``)."""
+    return any(node.has_class("-unfocused") for node in widget.ancestors_with_self)
+
+
+class MarkStatic(Static):
+    """A ``Static`` that draws the product mark, which the fade never reaches.
+
+    The manager's ruling on #508's F1. The side without the keyboard is drawn at
+    :data:`FADE_OPACITY`, and the mark faded with it: #2F74F0 became #2760C6, 3.39:1 under
+    rlx, and ten other themes' marks fell under 4.5:1. Textual applies opacity widget by
+    widget as it paints (``Widget.opacity``, its ancestors' product), so this one reports
+    full strength and is never blended. While its side is faded, the rest of its text is
+    handed, through ``build(dim)``, the colour the fade would have drawn it in
+    (:meth:`faded_ink`): only the mark is left out of the fade.
+
+    It looks again whenever its styles change (``notify_style_update``): the shell's fade
+    tells everything below the side it fades, and a theme change restyles everything.
+    :meth:`rebuild` takes new content (the sidebar's live count)."""
+
+    def __init__(self, build: Callable[[str | None], VisualType], **kwargs: Any) -> None:
+        self._build = build
+        self._dim: str | None = None
+        super().__init__(build(None), **kwargs)
+
+    @property
+    def opacity(self) -> float:
+        """Full strength while it is shown at all: the fade is not the mark's."""
+        return 1.0 if super().opacity > 0 else 0.0
+
+    def faded_ink(self) -> str | None:
+        """The colour the fade would draw this widget's text in, or ``None`` when its side is
+        not faded: its text colour at :data:`FADE_OPACITY` over its ground."""
+        if not on_faded_side(self):
+            return None
+        style = self.rich_style
+        if style.color is None or style.bgcolor is None:
+            return None
+        ground = Color.from_rich_color(style.bgcolor)
+        return faded(Color.from_rich_color(style.color), ground).hex
+
+    def rebuild(self) -> None:
+        self._dim = self.faded_ink()
+        self.update(self._build(self._dim))
+
+    def on_mount(self) -> None:
+        self.rebuild()
+
+    def notify_style_update(self) -> None:
+        super().notify_style_update()
+        if self.is_mounted and self.faded_ink() != self._dim:
+            self.rebuild()
 
 
 class ThemePicker(ModalScreen[None]):

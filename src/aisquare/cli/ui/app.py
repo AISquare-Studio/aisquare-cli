@@ -137,6 +137,7 @@ from aisquare.cli.ui.terminal import (
     log_paste,
 )
 from aisquare.cli.ui.theme import (
+    FADE_OPACITY,
     FADE_RELABELLED,
     RLX_CSS,
     ThemePicker,
@@ -872,8 +873,10 @@ class Panes(Horizontal):
     # a pane keep their strength; the pane's own text, and the 256- and 24-bit
     # colours Claude Code draws in (the bundled tmux conf passes `Tc`), fade with
     # the rest.
-    DEFAULT_CSS = """
-    Panes > .-unfocused { opacity: 0.82; }
+    # One number with the theme's (``theme.FADE_OPACITY``): the product mark stays out of the
+    # fade, and draws the rest of its widget's text as the fade would (``theme.MarkStatic``).
+    DEFAULT_CSS = f"""
+    Panes > .-unfocused {{ opacity: {FADE_OPACITY}; }}
     """
 
     MIN_CONTENT: ClassVar[int] = 40

@@ -21,7 +21,6 @@ from typer.testing import CliRunner
 from aisquare import __version__
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
-from tests.test_install_script_functions import base_path, sh
 
 POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="install.sh is POSIX sh")
 
@@ -40,6 +39,10 @@ def test_version_prints_the_products_name_then_the_version() -> None:
 def test_install_shs_reader_finds_the_version_in_it(tmp_path: Path) -> None:
     """A fake ``aisquare`` that prints this release's line, read the way every installer since
     0.9.0 reads it."""
+    # Imported here: that module skips itself on Windows, and imported at the top it took
+    # this whole file with it, the two tests that run everywhere included.
+    from tests.test_install_script_functions import base_path, sh
+
     line = _version_line()
     stubs = tmp_path / "stubs"
     stubs.mkdir()

@@ -173,3 +173,22 @@ def test_a_longer_session_end_timeout_an_operator_set_is_kept_by_the_upgrade_and
     assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
     assert path.read_bytes() == before and path.stat().st_mtime_ns == stamp, "untouched"
     assert "too little time" not in diagnostics._check_claude_code().detail
+
+
+def test_codex_clamps_its_session_end_so_a_reconnect_writes_the_spec_s(tmp_path: Path) -> None:
+    """Codex declares the events it clamps at the spec's own value
+    (``AgentCapabilities.clamped_hook_events``): its ``SessionEnd`` and ``Interrupt``, at 3 s.
+    There a longer timeout buys nothing, and a reconnect writes 3 over an operator's 5. Claude
+    Code declares none, so its longer session end is kept."""
+    codex = get_adapter("codex")
+    assert codex.capabilities.clamped_hook_events == {"SessionEnd", "Interrupt"}
+    assert get_adapter("claude-code").capabilities.clamped_hook_events == frozenset()
+    agent_core.install_hooks("codex", tmp_path)
+    path = tmp_path / codex.settings_name
+    hooks = json.loads(path.read_text(encoding="utf-8"))
+    (ours,) = _ours(hooks["hooks"]["SessionEnd"])
+    ours["timeout"] = 5
+    path.write_text(json.dumps(hooks, indent=2), encoding="utf-8")
+    agent_core.install_hooks("codex", tmp_path)
+    (ours,) = _ours(json.loads(path.read_text(encoding="utf-8"))["hooks"]["SessionEnd"])
+    assert ours["timeout"] == 3

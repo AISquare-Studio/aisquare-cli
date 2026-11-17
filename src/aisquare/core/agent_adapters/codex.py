@@ -778,6 +778,9 @@ class CodexAdapter:
         hooks_before_launch=True,
         stop_reason_as_prompt=True,
         session_end_closes_turn=True,
+        # Codex defaults SessionEnd and Interrupt to 1 s and clamps them at 3 (the spec's):
+        # a longer timeout there buys nothing, so a reconnect writes the spec's (RLX R20).
+        clamped_hook_events=codex_config._SHORT_EVENTS,
         limits_in_transcript=True,
         native_telemetry=True,
         positional_prompt=True,

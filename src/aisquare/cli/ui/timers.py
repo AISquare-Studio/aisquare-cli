@@ -17,8 +17,10 @@ failed on windows-py3.12: R17's run 44051094043 and the rc/rlx gate run 44072523
 
 :func:`sleep` waits on asyncio's own clock, which holds no thread, until :data:`CEILING`
 before the time, and only then on Textual's precise sleep. The callback comes when Textual's
-would, and no timer holds a thread for more than :data:`CEILING`, whoever set it: asq,
-Textual or a timer added later.
+would, read on Textual's own clock (``perf_counter`` on Windows, not asyncio's). No timer
+holds a thread for more than :data:`CEILING` plus one tick of asyncio's clock on Windows
+(15.6 ms), by which its wait may end early, whoever set it: asq, Textual, or a timer added
+later.
 
 Off Windows, Textual's sleep is asyncio's already, and nothing is installed.
 """
@@ -35,13 +37,18 @@ WINDOWS = sys.platform == "win32"
 """Whether to install :func:`sleep` (:func:`install`): Textual's timers hold a thread only there."""
 
 CEILING = 0.05
-"""The longest a Textual timer waits in a thread: the last moments before its time, where
-Textual's precise sleep keeps it on time. asyncio's own clock on Windows is coarse (about
-15 ms), finer than this."""
+"""How much of its time a Textual timer waits in a thread: the last moments before it fires,
+where Textual's precise sleep keeps it on time. asyncio's own clock on Windows ticks every
+15.6 ms and may end its wait up to a tick early, so a thread is held for at most this plus
+one tick."""
 
 
 async def sleep(secs: float) -> None:
-    """Textual's timer sleep, holding no thread until :data:`CEILING` before the time."""
+    """Textual's timer sleep, holding no thread until :data:`CEILING` before the time.
+
+    The deadline and what is left of it are both read on Textual's clock, which its timer
+    keeps time by: on Windows that is ``perf_counter``, whose epoch is not asyncio's. Read
+    on asyncio's, the deadline fired 34 to 64 ms early there (tester's mutant M2, #526)."""
     deadline = textual_time.get_time() + secs
     if secs > CEILING:
         await asyncio.sleep(secs - CEILING)

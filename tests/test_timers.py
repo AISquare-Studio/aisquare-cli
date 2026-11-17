@@ -2,11 +2,29 @@
 
 Off Windows nothing changes. On Windows (``tests.windows_timers``, on any OS) a timer still
 fires at its time, and asks a thread only for the last ``CEILING`` of it.
+
+From tester-rlx-calm's review of #526 (note 12799):
+
+- reset mid-wait: Textual's own semantics (the wait in flight ends, then a whole interval),
+  identical here, as Textual alone on Windows and as asq on Windows;
+- pause: a paused timer does not fire until resumed, in all three;
+- Windows-like clocks: Textual's clock on its own epoch (perf_counter on Windows, not
+  asyncio's monotonic) and asyncio's first wait waking a coarse tick early or late
+  (py3.12's Windows loop: ``_clock_resolution`` 15.6 ms). asq's timers still fire never
+  early, and hold a thread for ``CEILING`` plus one tick at most. A deadline on asyncio's
+  clock read against Textual's fired 34 to 64 ms early there (mutant M2);
+- the real platform alone decides the install, with no ``WINDOWS`` monkeypatch: a module
+  forced to install everywhere passed a pin that set ``WINDOWS`` itself (mutant M4).
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
+import time
+import types
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import pytest
 import textual._time as textual_time
@@ -17,16 +35,16 @@ from aisquare.cli.ui.clipboard import ClipboardApp
 from tests import windows_timers
 
 
-def test_off_windows_textual_s_own_sleep_stands(monkeypatch: pytest.MonkeyPatch) -> None:
-    """macOS and Linux: Textual's sleep is asyncio's already, holding no thread; the same
-    callbacks come at the same times because nothing is changed."""
-    monkeypatch.setattr(timers, "WINDOWS", False)
-    before = vars(textual_timer)["sleep"]
-
-    assert timers.install() is False
+def test_the_real_platform_alone_decides_the_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """macOS and Linux keep Textual's own sleep, asyncio's already, so the same callbacks come
+    at the same times; Windows has asq's. No ``WINDOWS`` set here: the platform decides."""
+    monkeypatch.setattr(textual_timer, "sleep", vars(textual_timer)["sleep"])  # undone after
     ClipboardApp()
 
-    assert vars(textual_timer)["sleep"] is before is textual_time.sleep
+    installed = vars(textual_timer)["sleep"] is timers.sleep
+    assert installed is (sys.platform == "win32"), vars(textual_timer)["sleep"]
+    if not installed:
+        assert vars(textual_timer)["sleep"] is textual_time.sleep, "Textual's own, as it was"
 
 
 def test_a_textual_whose_timers_sleep_otherwise_keeps_its_own(
@@ -97,3 +115,133 @@ def test_a_long_timer_stopped_before_its_time_never_took_a_thread(
     asyncio.run(run())
 
     assert [secs for secs in held if secs > timers.CEILING] == []
+
+
+MODES = ["here", "textual on windows", "asq on windows"]
+
+
+def _mode(monkeypatch: pytest.MonkeyPatch, mode: str) -> list[float]:
+    if mode == "here":
+        return []
+    return windows_timers.emulate(monkeypatch, asq=mode == "asq on windows")
+
+
+def _run(body: Callable[[ClipboardApp[None]], Awaitable[None]]) -> None:
+    async def run() -> None:
+        app: ClipboardApp[None] = ClipboardApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await body(app)
+
+    asyncio.run(run())
+
+
+async def _until(cond: Callable[[], bool], limit: float = 3.0) -> None:
+    end = time.monotonic() + limit
+    while not cond() and time.monotonic() < end:
+        await asyncio.sleep(0.005)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_timer_reset_mid_wait_fires_at_textual_s_new_time(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    held = _mode(monkeypatch, mode)
+    once: list[float] = []
+    every: list[float] = []
+
+    async def body(app: ClipboardApp[None]) -> None:
+        start = textual_time.get_time()
+        one = app.set_timer(0.3, lambda: once.append(textual_time.get_time() - start))
+        rep = app.set_interval(0.2, lambda: every.append(textual_time.get_time() - start))
+        await asyncio.sleep(0.1)
+        one.reset()
+        rep.reset()
+        await _until(lambda: bool(once) and len(every) >= 2)
+        await asyncio.sleep(0.15)
+
+    _run(body)
+
+    # Textual's reset: the wait in flight runs out (0.3 / 0.2), then a whole interval.
+    assert len(once) == 1 and 0.6 - 0.002 <= once[0] < 0.6 + 0.12, once
+    assert 0.4 - 0.002 <= every[0] < 0.4 + 0.12, every
+    assert 0.6 - 0.002 <= every[1] < 0.6 + 0.12, every
+    if mode == "asq on windows":
+        assert held and max(held) <= timers.CEILING, sorted(held)[-3:]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_paused_timer_does_not_fire_until_resumed(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    held = _mode(monkeypatch, mode)
+    once: list[float] = []
+    every: list[float] = []
+    marks: dict[str, float] = {}
+
+    async def body(app: ClipboardApp[None]) -> None:
+        start = textual_time.get_time()
+        one = app.set_timer(0.2, lambda: once.append(textual_time.get_time() - start))
+        rep = app.set_interval(0.15, lambda: every.append(textual_time.get_time() - start))
+        await asyncio.sleep(0.05)
+        one.pause()
+        await _until(lambda: len(every) >= 1)
+        rep.pause()
+        marks["paused"] = textual_time.get_time() - start
+        await asyncio.sleep(0.6)
+        marks["resumed"] = textual_time.get_time() - start
+        marks["once_during"] = len(once)
+        marks["every_during"] = len([at for at in every if at > marks["paused"]])
+        one.resume()
+        rep.resume()
+        await _until(lambda: bool(once) and any(at > marks["resumed"] for at in every))
+
+    _run(body)
+
+    assert marks["once_during"] == 0 and marks["every_during"] == 0, (marks, once, every)
+    assert once and marks["resumed"] <= once[0] < marks["resumed"] + 0.12, (marks, once)
+    assert any(marks["resumed"] <= at < marks["resumed"] + 0.3 for at in every), (marks, every)
+    if mode == "asq on windows":
+        assert held and max(held) <= timers.CEILING, sorted(held)[-3:]
+
+
+TICK = 0.0156  # py3.12's Windows asyncio: time.get_clock_info("monotonic").resolution
+
+
+def test_windows_like_clocks_never_early_and_brief(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held = windows_timers.emulate(monkeypatch, asq=True)
+    perf = time.perf_counter
+    monkeypatch.setattr(textual_time, "get_time", lambda: perf() + 1000.0)
+    flips = {"n": 0}
+
+    async def coarse_sleep(secs: float, *a: Any) -> None:
+        # asyncio's own wait on Windows ends within a coarse tick of its time, either way
+        flips["n"] += 1
+        skew = TICK * 0.95 * (1 if flips["n"] % 2 else -1)
+        await asyncio.sleep(max(0.0, secs + skew))
+
+    monkeypatch.setattr(
+        timers,
+        "asyncio",
+        types.SimpleNamespace(sleep=coarse_sleep, get_running_loop=asyncio.get_running_loop),
+    )
+    delays = [0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
+    fired: dict[float, list[float]] = {d: [] for d in delays}
+    every: list[float] = []
+
+    async def body(app: ClipboardApp[None]) -> None:
+        start = textual_time.get_time()
+        for d in delays:
+            app.set_timer(d, lambda d=d: fired[d].append(textual_time.get_time() - start))
+        app.set_interval(0.12, lambda: every.append(textual_time.get_time() - start))
+        await _until(lambda: all(fired.values()) and len(every) >= 5)
+
+    _run(body)
+
+    assert flips["n"] >= 8, flips
+    late = {d: round((fired[d][0] - d) * 1000, 2) for d in delays}
+    late_every = [round((at - 0.12 * (n + 1)) * 1000, 2) for n, at in enumerate(every[:5])]
+    assert all(ms >= -2 for ms in [*late.values(), *late_every]), (late, late_every)
+    assert held and max(held) <= timers.CEILING + TICK, sorted(held)[-3:]

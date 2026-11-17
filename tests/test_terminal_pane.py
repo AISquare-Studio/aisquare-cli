@@ -521,17 +521,23 @@ def test_render_loop_runs_fast_while_streaming_and_backs_off_when_idle(
     captured the same frame again, with no input, :attr:`IDLE_INTERVAL` on. Frames counted
     in fixed windows of wall time (at least 4 in 0.4 s, 1 or 2 in 0.6 s) measured the runner
     as much as the loop. Before the resize lands, a frame's new line is above the rows shown,
-    a change no one sees: those ticks are not the cadence asked about."""
+    a change no one sees: those ticks are not the cadence asked about.
+
+    The cadence RUN, too, not only the one chosen: each such tick arms its frame timer with
+    the delay it chose. A loop that recorded IDLE_INTERVAL and armed FAST_INTERVAL passed
+    when only the choice was read (tester-rlx-quiet's mutant J4, #525, note 12790)."""
     phase = {"now": "sizing"}
     lines = itertools.count(1)
-    chosen: list[tuple[str, float]] = []  # each tick that captured: its phase, the next delay
+    # Each tick that captured: its phase, the delay it chose, the delay its timer was armed with.
+    chosen: list[tuple[str, float, float | None]] = []
     real_tick = TerminalPane._tick
 
     def counting_tick(pane: TerminalPane) -> None:
         now, frames = phase["now"], pane.frames
         real_tick(pane)
         if now != "sizing" and pane.frames > frames:
-            chosen.append((now, pane.interval))
+            armed = pane._timer._interval if pane._timer is not None else None
+            chosen.append((now, pane.interval, armed))
 
     monkeypatch.setattr(TerminalPane, "_tick", counting_tick)
 
@@ -542,9 +548,9 @@ def test_render_loop_runs_fast_while_streaming_and_backs_off_when_idle(
     fake.before_capture = stream
 
     def captured(now: str) -> int:
-        return sum(1 for was, _ in chosen if was == now)
+        return sum(1 for was, _, _ in chosen if was == now)
 
-    async def drive() -> list[tuple[str, float]]:
+    async def drive() -> list[tuple[str, float, float | None]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             await wait_until(pilot, lambda: synced(host.pane))
@@ -555,10 +561,16 @@ def test_render_loop_runs_fast_while_streaming_and_backs_off_when_idle(
             return list(chosen)
 
     ticks = run(drive())
-    assert {delay for now, delay in ticks if now == "streaming"} == {TerminalPane.FAST_INTERVAL}, (
+    assert [(chose, armed) for _, chose, armed in ticks if armed != chose] == [], (
+        "each tick armed the delay it chose",
+        ticks,
+    )
+    assert {chose for now, chose, _ in ticks if now == "streaming"} == {
+        TerminalPane.FAST_INTERVAL
+    }, ticks
+    assert {chose for now, chose, _ in ticks if now == "idle"} == {TerminalPane.IDLE_INTERVAL}, (
         ticks
     )
-    assert {delay for now, delay in ticks if now == "idle"} == {TerminalPane.IDLE_INTERVAL}, ticks
 
 
 def test_a_hidden_pane_is_not_captured_and_catches_up_when_shown(

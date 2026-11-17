@@ -1412,7 +1412,8 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended(
         await pilot.pause()
         line = shown(modal.query_one("#remote-unlocks", Static))
         assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
-        assert "new unlocks paused" in line and "regenerate-password --new-link" in line
+        assert "new unlocks paused; Regenerate sets a new password" in line
+        assert "regenerate-password" not in line, "asq names no command (R13)"
         state_line = shown(modal.query_one("#remote-state", Static))
         # with its date: an extension can cross midnight
         assert f"auto-off at {there:%b} {there.day} 00:{there.minute:02d}" in state_line

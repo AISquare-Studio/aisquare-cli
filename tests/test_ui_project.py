@@ -2129,7 +2129,7 @@ def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
     [attached] = [m for m, _ in notices if m.startswith("✓ key attached to")]
     assert attached.startswith("✓ key attached to hub (the AISQUARE_TEAM_HUB project"), attached
     assert "its own key for target stg is not used — its launches join hub" in status, status
-    assert f"key clear --project {project.id}" in status
+    assert "key clear" not in status, "asq names no command (R13)"
 
 
 def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_one(

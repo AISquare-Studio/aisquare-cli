@@ -33,7 +33,11 @@ from aisquare.core import program as prog
 from aisquare.core.config import load_config
 from aisquare.core.version import __version__
 
-CLIENT_ID = "aisquare-cli"
+CLIENT_ID = "rlx"
+"""The client a sign-in starts as: the server sends the person to its own ``/rlx`` page."""
+FALLBACK_CLIENT_ID = "aisquare-cli"
+"""The client a server that does not know ``rlx`` yet still serves, at its ``/cli`` page.
+Also the client of every session stored before 0.10.1: 0.7.0 to 0.10.0 recorded it."""
 SCOPE = "openid profile email aisquare"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
@@ -126,6 +130,9 @@ class DeviceAuthorization:
     verification_uri_complete: str
     expires_in: int
     interval: int
+    client_id: str
+    """The client that started the grant. The server binds the device code to it, so every
+    poll is made as this client, and the session it ends in is stored as this client's."""
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,10 @@ class Session:
     """True on the session ``store_session`` returns when the credentials file could NOT be
     restricted to this account. A surface that cannot see stderr (the fleet UI, where Textual
     captures it) says so from this flag. A session read back from disk leaves it False."""
+    client_id: str = FALLBACK_CLIENT_ID
+    """The client the token was issued to, and the one that revokes it. A stored session
+    that does not say is ``aisquare-cli``'s, as every session before 0.10.1 was.
+    ``AISQUARE_TOKEN``'s does not say either, and nothing here revokes it."""
 
     def expires_in_days(self, now: datetime | None = None) -> int | None:
         if self.expires_at is None:
@@ -418,12 +429,22 @@ def _reject_common(result: HttpResult, what: str) -> None:
 
 
 def start_device_authorization(endpoints: Endpoints) -> DeviceAuthorization:
-    result = _http(
-        "POST",
-        endpoints.device_authorization,
-        form={"client_id": CLIENT_ID, "scope": SCOPE},
-        headers={"X-Device-Name": device_name()},
-    )
+    """Start the device grant as ``rlx``, or as ``aisquare-cli`` on a server that does not know rlx.
+
+    Such a server answers exactly HTTP 401 ``invalid_client`` (every server does, until the
+    identity provider learns the rlx client), and the grant starts again as
+    ``aisquare-cli``, whose ``/cli`` page signs the person in just the same: a normal
+    fallback, so nothing is said about it. Any other answer is the server's answer, said as
+    it always was; it is never a reason to try the other client.
+
+    The links come from the response, never from here: the page lives on the web app's
+    host, which differs per environment and is not the API's.
+    """
+    client_id = CLIENT_ID
+    result = _start_as(endpoints, client_id)
+    if result.status == 401 and result.error == "invalid_client":
+        client_id = FALLBACK_CLIENT_ID
+        result = _start_as(endpoints, client_id)
     _reject_common(result, "start a sign-in")
     if result.status != 200 or not isinstance(result.body, dict):
         raise IamError(
@@ -442,6 +463,7 @@ def start_device_authorization(endpoints: Endpoints) -> DeviceAuthorization:
             ),
             expires_in=int(body.get("expires_in", 900)),
             interval=int(body.get("interval", 5)),
+            client_id=client_id,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise IamError(
@@ -449,11 +471,29 @@ def start_device_authorization(endpoints: Endpoints) -> DeviceAuthorization:
         ) from exc
 
 
-def poll_token(endpoints: Endpoints, device_code: str) -> PollOutcome:
+def _start_as(endpoints: Endpoints, client_id: str) -> HttpResult:
+    return _http(
+        "POST",
+        endpoints.device_authorization,
+        form={"client_id": client_id, "scope": SCOPE},
+        headers={"X-Device-Name": device_name()},
+    )
+
+
+def poll_token(endpoints: Endpoints, grant: DeviceAuthorization) -> PollOutcome:
+    """One poll for ``grant``'s token, as the client that started it.
+
+    The server binds a device code to its client, and answers another client's poll for it
+    with ``invalid_grant``, which reads here as an expired code.
+    """
     result = _http(
         "POST",
         endpoints.token,
-        form={"grant_type": DEVICE_GRANT, "device_code": device_code, "client_id": CLIENT_ID},
+        form={
+            "grant_type": DEVICE_GRANT,
+            "device_code": grant.device_code,
+            "client_id": grant.client_id,
+        },
     )
     if result.status == 200 and isinstance(result.body, dict) and result.body.get("access_token"):
         return PollOutcome("token", token=result.body)
@@ -492,10 +532,14 @@ def fetch_userinfo(endpoints: Endpoints, token: str) -> dict[str, Any]:
     return result.body
 
 
-def revoke(endpoints: Endpoints, token: str) -> bool:
-    """RFC 7009. ``True`` when the server answered; a network failure is ``False``."""
+def revoke(endpoints: Endpoints, session: Session) -> bool:
+    """RFC 7009, as the client ``session``'s token was issued to.
+
+    ``True`` when the server answered; a network failure is ``False``.
+    """
+    form = {"token": session.token, "client_id": session.client_id}
     try:
-        result = _http("POST", endpoints.revocation, form={"token": token, "client_id": CLIENT_ID})
+        result = _http("POST", endpoints.revocation, form=form)
     except IamError:
         return False
     return 200 <= result.status < 300
@@ -519,6 +563,9 @@ def stored_session() -> Session | None:
         sub=data.get(KEY_SUB, ""),
         email=data.get(KEY_EMAIL, ""),
         name=data.get(KEY_NAME, ""),
+        # 0.7.0 to 0.10.0 recorded aisquare-cli and never read it back. A file without
+        # the key is read as theirs, which is what it was before this line read it.
+        client_id=data.get(KEY_CLIENT_ID) or FALLBACK_CLIENT_ID,
     )
 
 
@@ -555,6 +602,7 @@ def store_session(
     expires_in: int | None,
     scope: str,
     claims: dict[str, Any],
+    client_id: str,
 ) -> Session:
     expires_at = datetime.now(UTC) + timedelta(seconds=int(expires_in)) if expires_in else None
     values = {
@@ -565,9 +613,9 @@ def store_session(
         KEY_SUB: str(claims.get("sub", "")),
         KEY_EMAIL: str(claims.get("email", "")),
         KEY_NAME: str(claims.get("name", "")),
-        # Recorded, not read back yet: a second client_id in this file would mean
-        # a second stored session, and the reader that handles that is not here.
-        KEY_CLIENT_ID: CLIENT_ID,
+        # The client the token was issued to, read back to revoke it as that client.
+        # Still one session per file: a sign-in as either client replaces the other's.
+        KEY_CLIENT_ID: client_id,
     }
     # store() merges only non-empty values. Replace this session's keys first
     # so an unknown expiry or omitted claim cannot survive from the old token —
@@ -593,6 +641,7 @@ def store_session(
         email=values[KEY_EMAIL],
         name=values[KEY_NAME],
         unrestricted=not restricted,
+        client_id=client_id,
     )
 
 

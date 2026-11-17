@@ -2069,7 +2069,9 @@ class AccountsView(Vertical):
         token = device_flow.wait_for_token(endpoints, grant, cancelled=cancel.is_set)
         # The commit checks the flag once more after the userinfo request, the
         # last thing before the session is written: nothing is stored past a Cancel.
-        return device_flow.commit_sign_in(api_url, endpoints, token, cancelled=cancel.is_set)
+        return device_flow.commit_sign_in(
+            api_url, endpoints, token, client_id=grant.client_id, cancelled=cancel.is_set
+        )
 
     def _show_grant(self, grant: iam.DeviceAuthorization, opened: bool | None) -> None:
         self.query_one("#aisquare-code", Static).update(grant_text(grant, opened=opened))

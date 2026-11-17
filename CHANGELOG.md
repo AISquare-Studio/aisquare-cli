@@ -44,6 +44,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Signing in to AISquare uses rlx's own page once the server offers it;** until then, the
+  existing page.
 - **A manager waiting on you is not woken by noise.** Watch's lines about its own results
   and questions, its ping for an agent idle by design, and a review that repeats a note it
   read no longer wake it. `rlx team standby` (or its question to you, with nothing in
@@ -114,7 +116,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transcript. Agents still see ids, as they address each other by
   them, and every `--json` is unchanged.
 - **asq opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
-  blue, #2F74F0, with magenta, lime, green, amber and coral on near-black. Press `t` to
+  blue, #2F74F0, with teal, lime, green, amber and coral on near-black. Press `t` to
   pick another theme, as before. A theme you picked earlier is kept, and so is one you
   set in `TEXTUAL_THEME`. Every theme asq offered is still there. `rlx board -w`
   shares your pick, so it opens in rlx too.

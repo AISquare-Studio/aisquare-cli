@@ -294,11 +294,12 @@ def test_an_agents_board_and_the_watch_line_say_the_protocols_word() -> None:
     assert "… 3 more — `aisquare task list`" in agents, agents
     assert "… 3 more — `rlx task list`" in human, human
 
+    shown = Path("/watch/p/20261116T000000Z.json")  # as this platform writes it
     line = watch.event_text(
         [watch.WatchItem("i1", project.id, "p", "permission", "a dialog")],
-        Path("/watch/p/20261116T000000Z.json"),
+        shown,
     )
-    assert line.endswith(": aisquare watch show /watch/p/20261116T000000Z.json"), line
+    assert line.endswith(f": aisquare watch show {shown}"), line
 
 
 def test_what_the_mcp_server_tells_its_agent_says_the_protocols_word(

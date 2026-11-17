@@ -39,7 +39,7 @@ from aisquare.core import harness
 from aisquare.core.config import WatchSettings
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, TeamSession
+from aisquare.models import FleetAgent, TeamEvent, TeamSession
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services import watch as watch_service
@@ -476,3 +476,285 @@ def test_the_manager_cycle_names_standby() -> None:
     )
     assert "aisquare team standby --as abcd1234" in cycle
     assert "urgent news still does" in cycle
+
+
+# --- #145's reopen (tester 12612): the echo and idle by design, narrowed ----------------------
+
+
+def _say(
+    board_id: str,
+    kind: str,
+    *,
+    by: str | None,
+    to: str | None = None,
+    task: str | None = None,
+) -> TeamEvent:
+    """One board write by session ``by`` (a role of :data:`SESSIONS`, or a session id), addressed
+    to ``to`` as typed and about ``task``: the event."""
+    with store_session() as store:
+        return team_service._emit(
+            store,
+            board_id,
+            kind,
+            f"{kind} (#145 reopen)",
+            session_id=None if by is None else SESSIONS.get(by, by),
+            to_role=to,
+            task_id=task,
+        )
+
+
+def _echo(event: TeamEvent) -> bool:
+    with store_session() as store:
+        return team_service.is_echo(store, event, _manager())
+
+
+def test_the_echo_still_holds_for_a_done_note_then_its_review(board: str) -> None:
+    """The replay's 33: the coder's note to the manager, read, then its review of that task."""
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
+    _read_all(board)
+    assert _echo(_say(board, "task_review", by="coder", task="tsk_a"))
+    assert not _wakes()
+
+
+@pytest.mark.parametrize("kind", ["note", "decision", "result"])
+def test_each_word_to_the_manager_makes_its_authors_next_move_an_echo(
+    kind: str, board: str
+) -> None:
+    _say(board, kind, by="tester", to="manager" if kind != "result" else None)
+    _read_all(board)
+    assert _echo(_say(board, "task_done", by="tester", task="tsk_a"))
+
+
+def test_a_second_rounds_review_after_a_reopen_wakes(board: str) -> None:
+    """CE1.4: DONE note, review, reopened, fixed, reviewed again with no new note. The last
+    act before round 2's review is round 1's review, and a reopen came between: news."""
+    _say(board, "note", by="coder", to="manager")
+    _say(board, "task_review", by="coder", task="tsk_a")
+    _read_all(board)
+    _say(board, "task_reopened", by="tester", task="tsk_a")
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder", task="tsk_a"))
+    assert _wakes(), "the manager must brief a tester for round 2"
+
+
+def test_a_reopen_between_a_note_and_the_review_makes_the_review_news(board: str) -> None:
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
+    _say(board, "task_reopened", by="tester", task="tsk_a")
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder", task="tsk_a"))
+
+
+def test_a_second_tasks_review_wakes(board: str) -> None:
+    """CE1.5: the same coder's review of another task, after its first one's note and review."""
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
+    _say(board, "task_review", by="coder", task="tsk_a")
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder", task="tsk_b"))
+    assert _wakes()
+
+
+def test_a_note_about_another_task_is_no_echo(board: str) -> None:
+    _say(board, "note", by="coder", to="manager", task="tsk_a")
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder", task="tsk_b"))
+
+
+@pytest.mark.parametrize("answered", [False, True], ids=["unanswered", "answered"])
+def test_a_verdict_after_its_testers_question_wakes(answered: bool, board: str) -> None:
+    """CE1.7: a question asks; the answer to it is no news of the verdict that follows."""
+    _say(board, "question", by="tester", to="manager")
+    if answered:
+        _say(board, "note", by=MANAGER, to="tester")
+    _read_all(board)
+    assert not _echo(_say(board, "task_done", by="tester", task="tsk_a"))
+    assert _wakes()
+
+
+@pytest.mark.parametrize("to", ["coder", "CODER", "coder-auth"])
+def test_a_word_to_the_author_between_its_note_and_its_move_makes_the_move_news(
+    to: str, board: str
+) -> None:
+    """Told "also do X" after its DONE note, the coder's review says X is done: news. Its role,
+    any case, or its fleet row's label, as turn-end delivery reads an address."""
+    _agent(board, "coder-auth", SESSIONS["coder"])
+    _say(board, "note", by="coder", to="manager")
+    _read_all(board)
+    _say(board, "note", by=MANAGER, to=to)
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder", task="tsk_a"))
+
+
+def test_a_word_to_someone_else_between_them_keeps_the_echo(board: str) -> None:
+    _say(board, "note", by="coder", to="manager")
+    _say(board, "note", by=MANAGER, to="tester")
+    _say(board, "task_reopened", by="tester", task="tsk_other")
+    _read_all(board)
+    assert _echo(_say(board, "task_review", by="coder", task="tsk_a"))
+
+
+def test_a_note_to_another_role_is_no_echo(board: str) -> None:
+    """Told the tester, not the manager: the review is the manager's first word of it."""
+    _say(board, "note", by="coder", to="tester")
+    _read_all(board)
+    assert not _echo(_say(board, "task_review", by="coder", task="tsk_a"))
+    assert _wakes()
+
+
+def test_an_unread_note_makes_no_echo(board: str) -> None:
+    _say(board, "note", by="coder", to="manager")
+    assert not _echo(_say(board, "task_review", by="coder", task="tsk_a"))
+
+
+def test_what_hooks_file_under_the_author_does_not_break_the_echo(board: str) -> None:
+    """Its last BOARD act counts: an attention line or an exit filed under its session is not
+    something it said."""
+    _say(board, "note", by="coder", to="manager")
+    _say(board, "attention", by="coder")
+    _read_all(board)
+    assert _echo(_say(board, "task_review", by="coder", task="tsk_a"))
+
+
+@pytest.mark.parametrize(("minutes", "echo"), [(29, True), (31, False)])
+def test_the_echo_looks_back_thirty_minutes(
+    minutes: int, echo: bool, board: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert timedelta(minutes=30) == team_service.ECHO_WINDOW
+    now = datetime.now(tz=UTC)
+    monkeypatch.setattr(team_service, "_now", lambda: now - timedelta(minutes=minutes))
+    _say(board, "note", by="coder", to="manager")
+    _read_all(board)
+    monkeypatch.setattr(team_service, "_now", lambda: now)
+    assert _echo(_say(board, "task_review", by="coder", task="tsk_a")) is echo
+
+
+def test_a_re_review_after_a_reopen_wakes_through_the_cli(runner: CliRunner, board: str) -> None:
+    """CE1.4 through the real writes: the board's commands, not ``_emit``."""
+
+    def run(*args: str) -> str:
+        done = runner.invoke(app, ["--json", *args])
+        assert done.exit_code == 0, done.output
+        return done.output
+
+    task_id = json.loads(run("task", "add", "the work", "--as", MANAGER[:8]))["id"]
+    coder, tester = SESSIONS["coder"][:8], SESSIONS["tester"][:8]
+    run("task", "claim", task_id, "--as", coder)
+    run("note", "DONE, moving to review", "--to", "manager", "--as", coder)
+    run("task", "review", task_id, "--as", coder)
+    _read_all(board)
+    run("task", "reopen", task_id, "--reason", "the state check is missing", "--as", tester)
+    _read_all(board)
+    with store_session() as store:
+        if store.get_task(task_id).claimed_by is None:  # type: ignore[union-attr]
+            run("task", "claim", task_id, "--as", coder)
+    _read_all(board)
+    run("task", "review", task_id, "--as", coder)
+    assert _wakes(), "round 2 is ready: the manager must hear it"
+
+
+# idle by design, answered
+
+
+@pytest.mark.parametrize("act", ["note", "result", "question", "task_review"])
+@pytest.mark.parametrize("to", ["coder-quiet", "coder", "Coder-Quiet"])
+def test_an_agent_answered_after_its_act_is_stale_news_again(act: str, to: str, board: str) -> None:
+    """CE2: the manager answered (``note --to coder-20 GO``), and a note to a waiting agent waits
+    for a turn end that never comes. Its quiet is no longer by design."""
+    agent = _agent(board, "coder-quiet", "qz-r12-0000-0000-0000-000000000009")
+    _say(board, act, by=agent.session_id, to="manager" if act == "note" else None, task="tsk_q")
+    assert watch_service._idle_by_design(agent.id) is True
+    _say(board, "note", by=MANAGER, to=to)
+    assert watch_service._idle_by_design(agent.id) is False
+
+
+def test_an_agent_whose_reviewed_task_was_reopened_is_stale_news_again(board: str) -> None:
+    agent = _agent(board, "coder-quiet", "qz-r12-0000-0000-0000-000000000009")
+    _say(board, "task_review", by=agent.session_id, task="tsk_q")
+    _say(board, "task_reopened", by="tester", task="tsk_other")
+    assert watch_service._idle_by_design(agent.id) is True, "another task's reopen"
+    _say(board, "task_reopened", by="tester", task="tsk_q")
+    assert watch_service._idle_by_design(agent.id) is False
+
+
+def test_a_word_to_someone_else_leaves_an_agent_idle_by_design(board: str) -> None:
+    agent = _agent(board, "coder-quiet", "qz-r12-0000-0000-0000-000000000009")
+    _say(board, "result", by=agent.session_id)
+    _say(board, "note", by=MANAGER, to="tester")
+    _say(board, "task_claimed", by="coder", task="tsk_q")
+    assert watch_service._idle_by_design(agent.id) is True
+
+
+def _stale_look(board: str, texts: list[str], agent_id: str, monkeypatch: Any) -> list[str]:
+    """Watch's stale look over ``texts`` as the captain queue's observations of one agent."""
+    from aisquare.services.captain import queue
+
+    now = datetime.now(tz=UTC)
+    seen = queue.Observed(
+        observations=[
+            queue.Observation(
+                key=f"k{n}",
+                project=board,
+                project_name="repo",
+                agent="coder-quiet",
+                kind="stale",
+                text=text,
+                seen_at=now - timedelta(minutes=41),
+                source_ref=agent_id,
+            )
+            for n, text in enumerate(texts)
+        ]
+    )
+    monkeypatch.setattr(queue, "observe", lambda *_, **__: seen)
+    watcher = watch_service.Watcher(
+        WatchSettings(auto_stop=False), needs_sources=lambda: [], stale=True
+    )
+    return [item.summary for item in watcher.stale(now)]
+
+
+def test_a_lost_or_unknown_agent_is_never_idle_by_design(
+    board: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an agent that WAITS quietly can be waiting by design: lost and unknown are news."""
+    from aisquare.services.captain import queue
+
+    agent = _agent(board, "coder-quiet", "qz-r12-0000-0000-0000-000000000009")
+    _say(board, "result", by=agent.session_id)
+    quiet = f"coder-quiet {queue.QUIET} for 41 min"
+    lost, unknown = "coder-quiet is lost: pane gone", "coder-quiet is unknown"
+    assert _stale_look(board, [quiet, lost, unknown], agent.id, monkeypatch) == [lost, unknown]
+    _say(board, "note", by=MANAGER, to="coder-quiet")
+    assert _stale_look(board, [quiet], agent.id, monkeypatch) == [quiet], "answered: news"
+
+
+# standby's ends and holds
+
+
+@pytest.mark.parametrize("prompt", ["wake", "tell"])
+def test_a_fleet_prompt_does_not_end_standby(
+    prompt: str, runner: CliRunner, board: str, work_dir: Path
+) -> None:
+    """The brief: "A fleet wake must NOT end it". Only its person's prompt does."""
+    from aisquare.core import prompt_origin
+
+    assert runner.invoke(app, ["team", "standby", "--as", MANAGER[:8]]).exit_code == 0
+    text = prompt_origin.WAKE_TEXT
+    if prompt == "tell":
+        text = "coder-auth: PR #42 is up"
+        prompt_origin.mark_origin(text, prompt_origin.TELL, by="agent")
+    payload = json.dumps({"cwd": str(work_dir), "session_id": MANAGER, "prompt": text})
+    assert runner.invoke(app, ["hook", "user-prompt-submit"], input=payload).exit_code == 0
+    assert _standby() is not None, f"a fleet {prompt} keeps it"
+
+
+def test_standby_holds_nothing_while_work_is_in_flight(runner: CliRunner, board: str) -> None:
+    """standby_of itself: a standby begun before a task was in flight holds nothing while one
+    is, even with no work-returns event to end it (a task added already in doing)."""
+    with store_session() as store:
+        team_service.begin_standby(store, _manager(), why="explicit")
+        assert team_service.standby_of(store, _manager()) is not None
+    _task(runner, "doing")
+    with store_session() as store:
+        store.delete_meta(team_service.STANDBY_META + MANAGER)
+        team_service.begin_standby(store, _manager(), why="explicit")  # after the claim
+        assert team_service.work_in_flight(store, board)
+        assert team_service.standby_of(store, _manager()) is None
+        assert team_service.standby_on_its_question(store, _manager()) is None

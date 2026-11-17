@@ -308,7 +308,9 @@ ECHO_WINDOW = timedelta(minutes=30)
 ECHO_KINDS: frozenset[str] = frozenset({"task_review", "task_done"})
 """The task moves that repeat what their author has just told the manager."""
 
-_TOLD_MANAGER_KINDS: frozenset[str] = frozenset({"note", "result", "question", "decision"})
+_TOLD_MANAGER_KINDS: frozenset[str] = frozenset({"note", "result", "decision"})
+"""What can carry a move's news to the manager ahead of it. Never a question: a question asks,
+and the manager's answer to it is not the news of the move that follows (#145's reopen)."""
 
 IN_FLIGHT: frozenset[TaskStatus] = frozenset({"doing", "review"})
 """A task someone is working on or testing: a board with one is a fleet at work."""
@@ -322,24 +324,96 @@ WORK_RETURNS_KINDS: frozenset[str] = frozenset({"task_claimed", "task_reopened",
 
 def is_echo(store: ContextStore, event: TeamEvent, me: TeamSession) -> bool:
     """Whether ``event`` only repeats what ``me`` has already read: a task's review or done
-    whose author, within :data:`ECHO_WINDOW` before it, told the manager in a note it has read
-    (at or before its cursor). The coder's "DONE, moving to review" woke the manager; the
-    review a minute later kept it going a second time to read the same news, at the end of
-    the very turn that acted on the note (33 of 59 noise wakes on cli-next-release, R12's
-    replay). Read in one delta with that note, the pair is one wake, as before."""
+    right after its author's own word to the manager, about it. The coder's "DONE, moving to
+    review" woke the manager; the review a minute later kept it going a second time to read
+    the same news, at the end of the very turn that acted on the note (33 of 59 noise wakes
+    on cli-next-release, R12's replay). Read in one delta with that note, the pair is one
+    wake, as before.
+
+    The word must be the author's LAST board act before the move (its notes and task
+    writes), within :data:`ECHO_WINDOW`: a note or decision ``--to manager``, or a result
+    (:data:`_TOLD_MANAGER_KINDS`), that the manager has read and that names no other task.
+    And nothing may come between them: no word addressed to the author, no reopen of the
+    task (:func:`answered_since`). A second round's review after a reopen, a second task's
+    review, and a verdict after an answered question all wake (#145's reopen, F1)."""
     if event.kind not in ECHO_KINDS or event.session_id is None or event.session_id == me.id:
         return False
     since = (event.created_at - ECHO_WINDOW).isoformat()
-    told = store.filtered_events(
-        event.project_id, session_id=event.session_id, since_iso=since, limit=20
-    )
-    return any(
-        said.seq < event.seq
-        and said.seq <= me.cursor
+    acts = [
+        said
+        for said in store.filtered_events(
+            event.project_id, session_id=event.session_id, since_iso=since, limit=50
+        )
+        if said.seq < event.seq and _board_act(said)
+    ]
+    if not acts:
+        return False
+    said = acts[-1]
+    return (
+        said.seq <= me.cursor
         and said.kind in _TOLD_MANAGER_KINDS
-        and (said.kind in ("result", "question") or _addressed_to_manager(said.to_role))
-        for said in told
+        and (said.kind == "result" or _addressed_to_manager(said.to_role))
+        and said.task_id in (None, event.task_id)
+        and not answered_since(
+            store,
+            event.project_id,
+            event.session_id,
+            said.seq,
+            task_id=event.task_id,
+            before=event.seq,
+        )
     )
+
+
+def _board_act(event: TeamEvent) -> bool:
+    """Whether ``event`` is something its session did on the board: a note of any kind, or
+    a task write. Not what hooks and the fleet file under it (an attention line, an exit)."""
+    return event.kind in NOTE_KINDS or event.kind.startswith("task_")
+
+
+def addressee_names(store: ContextStore, session_id: str) -> frozenset[str]:
+    """The names a note reaches ``session_id`` by, lower case, as turn-end delivery reads
+    them (:func:`_turn_end_delivery`): its role, the role its seat is numbered from, its
+    label, and the label of the fleet row it runs in (that row's role too: the session's)."""
+    session = store.get_session(session_id)
+    row = store.fleet_agent_for_session(session_id)
+    names: set[str] = set()
+    if row is not None:
+        names |= {row.label, row.role or "", base_role(row.role or "")}
+    if session is not None:
+        names |= {session.role, base_role(session.role), session.label or ""}
+    return frozenset(name.strip().lower() for name in names if name and name.strip())
+
+
+def answered_since(
+    store: ContextStore,
+    board_id: str,
+    session_id: str,
+    seq: int,
+    *,
+    task_id: str | None = None,
+    before: int | None = None,
+) -> bool:
+    """Whether, past board event ``seq`` (and before ``before``), someone else addressed
+    ``session_id`` (a note to one of its :func:`addressee_names`) or reopened ``task_id``:
+    news that its own last word did not carry. R12's echo (:func:`is_echo`) and watch's idle
+    by design both end there (#145's reopen, F1 and F2)."""
+    names = addressee_names(store, session_id)
+    relevant = Relevance(
+        task_ids=(task_id,) if task_id else (), names=tuple(sorted(names)), decisions=False
+    )
+    if not relevant.task_ids and not relevant.names:
+        return False
+    for later in store.events_since(
+        board_id, seq, exclude_session=session_id, relevant=relevant, limit=200
+    ):
+        if before is not None and later.seq >= before:
+            return False
+        if later.kind in NOTE_KINDS and (later.to_role or "").strip().lower() in names:
+            return True
+        if later.kind == "task_reopened" and task_id is not None and later.task_id == task_id:
+            return True
+    return False
 
 
 def work_in_flight(store: ContextStore, board_id: str) -> bool:

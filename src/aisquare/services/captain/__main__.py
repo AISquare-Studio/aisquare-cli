@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m aisquare.services.captain",
         description=(
-            f"The captain's Actions MCP server (the same as `{prog.command()} captain serve`)."
+            f"The captain's Actions MCP server (the same as `{prog.word()} captain serve`)."
         ),
     )
     parser.add_argument("--stdio", action="store_true", help="serve over stdio (required)")
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError as exc:
         print(
             f"the MCP server cannot start: {exc} — pip install 'aisquare-cli[serve]' "
-            f"({prog.command()} captain serve --stdio says more)",
+            f"({prog.word()} captain serve --stdio says more)",
             file=sys.stderr,
         )
         return 1

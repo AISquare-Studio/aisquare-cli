@@ -4879,7 +4879,7 @@ def _require_role(role: str) -> None:
     if not _role_ok(role):
         raise FleetError(
             f"unknown role {role!r} — expected one of: {', '.join(FLEET_ROLES)}, a harness "
-            f"role, one bound with `{prog.command()} team bind`, or {PLAIN_ROLE!r} for no role"
+            f"role, one bound with `{prog.word()} team bind`, or {PLAIN_ROLE!r} for no role"
         )
 
 
@@ -5473,7 +5473,7 @@ def spawn(
     )
     if experimental.captain_role(role) and not is_home_project(project):
         raise FleetError(
-            f"the captain lives on the home board, one per home — `{prog.command()} captain` "
+            f"the captain lives on the home board, one per home — `{prog.word()} captain` "
             "starts "
             f"it; it cannot be spawned into {_name(project)}"
         )
@@ -5500,7 +5500,7 @@ def spawn(
         # `fleet spawn captain` on the home was a captain with every tool, in the
         # home itself — and `aisquare captain` then attached to it and typed into it.
         raise FleetError(
-            f"the captain is started by `{prog.command()} captain`, which gives it its brain "
+            f"the captain is started by `{prog.word()} captain`, which gives it its brain "
             "folder "
             "and no tool but its own server"
         )
@@ -5823,7 +5823,7 @@ def spawn(
         if captain is not None:
             raise FleetError(
                 f"the home already has a captain ({captain.id}) — one per home; "
-                f"`{prog.command()} captain` attaches to it"
+                f"`{prog.word()} captain` attaches to it"
             )
     cap = config.max_agents_per_project
     # The agents the project runs, as the row's settlement (`_verify_cap`, `_verify_burst`),
@@ -7308,7 +7308,7 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
                         f"the previous session {_team().short_id(previous)} was not marked ended "
                         f"({type(exc).__name__}: {exc}) — it shows on the board as a live "
                         f"session, marked (stale) once it has been silent for {stale} minutes; "
-                        f"from then on `{prog.command()} team prune` retires it"
+                        f"from then on `{prog.word()} team prune` retires it"
                     )
             store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
             current = store.get_fleet_agent(agent.id)
@@ -7622,9 +7622,9 @@ def _refuse_a_server_started_over_ssh(srv: TmuxServer, agent: str | None) -> Non
         return
     if _started_over_ssh(srv):
         raise FleetError(
-            f"not started: {SSH_STARTED_REFUSAL}. `{prog.command()} fleet shutdown --all` ends "
+            f"not started: {SSH_STARTED_REFUSAL}. `{prog.word()} fleet shutdown --all` ends "
             "that "
-            f"server; then start {prog.command()} on the Mac, and "
+            f"server; then start {prog.word()} on the Mac, and "
             f"{claude_accounts_core.agent_label(agent)} "
             "agents start from SSH after that"
         )
@@ -7733,7 +7733,7 @@ def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
         for row in reached
     ]
     ways = (
-        [f"`{prog.command()} fleet reap --all` records {'it' if len(reached) == 1 else 'them'}"]
+        [f"`{prog.word()} fleet reap --all` records {'it' if len(reached) == 1 else 'them'}"]
         if reached
         else []
     )
@@ -8229,7 +8229,7 @@ def _admit(config: FleetSettings) -> list[str]:
         raise CapacityRefused(
             "capacity_fleet",
             f"{live_total} live agents across the fleet (max_agents_total = "
-            f"{config.max_agents_total}): {each} — stop one (`{prog.command()} fleet capacity` "
+            f"{config.max_agents_total}): {each} — stop one (`{prog.word()} fleet capacity` "
             "lists "
             "them), or raise the budget in [fleet]",
         )
@@ -8698,7 +8698,7 @@ def _retry(hold: Hold, now: datetime) -> str:
     left = max(int((hold.until - now).total_seconds()), 0)
     at = hold.until.astimezone().isoformat(timespec="seconds")
     return (
-        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s); while `{prog.command()} "
+        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s); while `{prog.word()} "
         "watch` "
         "runs, it wakes this project's manager when a seat frees up"
     )
@@ -8894,7 +8894,7 @@ def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
     _log_admission("capacity_memory", record)
     raise CapacityRefused(
         "capacity_memory",
-        f"not enough memory to start another agent: {why} — see `{prog.command()} fleet capacity`, "
+        f"not enough memory to start another agent: {why} — see `{prog.word()} fleet capacity`, "
         "or lower min_free_mb in [fleet] (0 turns the floor off)",
     )
 
@@ -13297,7 +13297,7 @@ def _release_or_say(
     except Exception as exc:
         return [], (
             f"could not be released ({type(exc).__name__}: {exc}) — they stay with the ended "
-            f"session until the lease lapses; `{prog.command()} task release <id>` frees one now"
+            f"session until the lease lapses; `{prog.word()} task release <id>` frees one now"
         )
     if outcome.unannounced:
         # Released — the rows say so — but the board was not told, and the
@@ -14490,7 +14490,7 @@ def switch(
             )
         raise FleetError(
             f"no other account with headroom for {label!r}{where}"
-            f" — add or enable one (`{prog.command()} accounts`), name one with --to, or wait for "
+            f" — add or enable one (`{prog.word()} accounts`), name one with --to, or wait for "
             f"the reset{said}"
         )
     target = choice.account
@@ -15250,7 +15250,7 @@ def _hooks_installed_first(
         return
     if agent_core.connected(adapter.id, home, cwd=cwd):
         return
-    connect = f"`{prog.command()} agents connect {adapter.id} --config-dir {home}` installs them"
+    connect = f"`{prog.word()} agents connect {adapter.id} --config-dir {home}` installs them"
     if claude_accounts_core.managed_slot(home, adapter.id) is None:
         raise FleetError(
             f"{adapter.label}'s hooks are not installed in {home}, a home of yours that "
@@ -15412,7 +15412,7 @@ def _refuse_a_replay_spawn_refuses(project: ProjectInfo, agent: FleetAgent, role
         raise FleetError(f"{exc} — {keep}") from exc
     if experimental.captain_role(role) and not is_home_project(project):
         raise FleetError(
-            f"the captain lives on the home board, one per home — `{prog.command()} captain` "
+            f"the captain lives on the home board, one per home — `{prog.word()} captain` "
             "starts "
             f"it; {agent.label!r} cannot be started again in {_name(project)}, so nothing "
             "was stopped"
@@ -17200,7 +17200,7 @@ the agents a ``fleet pause`` stopped come back."""
 def the_captain_reason() -> str:
     """Why a pause by :func:`bulk` leaves the captain: it is the owner's, on the home board, and
     no project's fleet."""
-    return f"the captain — `{prog.command()} captain` runs it"
+    return f"the captain — `{prog.word()} captain` runs it"
 
 
 @dataclass(frozen=True)

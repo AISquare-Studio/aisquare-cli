@@ -202,8 +202,8 @@ def _ensure_virtual_session() -> str:
         if not store.team_active(project.id):
             raise ValueError(
                 f"the agent orchestrator is not active for {project.root} — start "
-                f"`{prog.command()} serve` "
-                f"from the project (it activates it), or run `{prog.command()} team on` there"
+                f"`{prog.word()} serve` "
+                f"from the project (it activates it), or run `{prog.word()} team on` there"
             )
         if not project_service.tracked(store, project):
             raise project_service.NotAdded(project)  # capture off, and nobody added it
@@ -842,7 +842,7 @@ async def _serve_stdio_until_idle(
             # unblock — a normal return would hang the interpreter on that
             # thread's join and reintroduce the orphan this deadline retires.
             sys.stderr.write(
-                f"{command or prog.line('serve', '--stdio')}: no client messages for "
+                f"{command or prog.words('serve', '--stdio')}: no client messages for "
                 f"{close_after}s — "
                 "closing (idle deadline; --close-after 0 disables)\n"
             )

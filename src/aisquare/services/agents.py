@@ -130,7 +130,7 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
         return None
     return (
         f"the aisquare plugin is enabled in {plugin.config_dir} too — its hooks stand down "
-        f"while these run; keep one route ({prog.command()} doctor says how)"
+        f"while these run; keep one route ({prog.word()} doctor says how)"
     )
 
 
@@ -406,7 +406,7 @@ def _repoint() -> str:
     starts (review of #257), so it is started again, by the word hints print."""
     return (
         "point CLAUDE_CONFIG_DIR at another directory this user can write, "
-        f"then start {prog.command()} again from that shell"
+        f"then start {prog.word()} again from that shell"
     )
 
 
@@ -458,7 +458,7 @@ def config_dir_command(verb: str, name: str, directory: Path) -> str:
     hints print, ``core.program``), the path quoted for this shell
     (``install_route.command_line``): a space or a ``$`` in it broke the command, or named
     another directory (review of #257)."""
-    return prog.line("agents", verb, name, "--config-dir", str(directory))
+    return prog.words("agents", verb, name, "--config-dir", str(directory))
 
 
 def _connect_refusal(name: str, config_dir: Path | None) -> Refusal | None:

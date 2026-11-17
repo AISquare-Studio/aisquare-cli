@@ -150,7 +150,7 @@ def start_broker(
         raise store_broker.LaunchRefused(
             f"{selected.adapter.label}: its launch could not work out what its sandbox may "
             f"write ({type(exc).__name__}: {exc}), so it is not started without the store's "
-            f"protection; run `{prog.command()} doctor`"
+            f"protection; run `{prog.word()} doctor`"
         ) from exc
 
 

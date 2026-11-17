@@ -243,7 +243,7 @@ class SettingsView(VerticalScroll):
             Text.assemble(
                 "The nickname is the name every list shows; blank shows the folder name. "
                 "The fleet id follows it. ",
-                (f"{prog.command()} project rename", "bold"),
+                (f"{prog.word()} project rename", "bold"),
                 " sets the same. The settings for every project — roles, the fleet, "
                 "accounts — are in App settings ▸ Agent settings.",
             ),

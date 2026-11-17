@@ -80,7 +80,7 @@ def consent_text() -> str:
         "aliases or command arguments. If you are signed in to AISquare, it is linked to your "
         "account; if not, it is anonymous. Only days from the moment you say yes are sent, nothing "
         "from before. Turn it off at any time: Settings ▸ Usage & stats, or "
-        f"`{prog.command()} metrics share off`."
+        f"`{prog.word()} metrics share off`."
     )
 
 

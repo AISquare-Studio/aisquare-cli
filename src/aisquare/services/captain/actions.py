@@ -2340,5 +2340,5 @@ def run_stdio(*, close_after: int) -> None:
     mcp_server.run_stdio(
         close_after=close_after,
         server=build_server(),
-        command=f"{prog.command()} captain serve --stdio",
+        command=f"{prog.word()} captain serve --stdio",
     )

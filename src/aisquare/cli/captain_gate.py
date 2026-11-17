@@ -61,7 +61,7 @@ def enroll(
             console.print(line, markup=False, highlight=False)
     console.print(f"or add it by hand: {enrolled.uri}", markup=False, highlight=False)
     console.print(
-        f"then unlock with a code: say it to the captain, or `{prog.command()} captain gate unlock "
+        f"then unlock with a code: say it to the captain, or `{prog.word()} captain gate unlock "
         "<code>`",
         markup=False,
     )

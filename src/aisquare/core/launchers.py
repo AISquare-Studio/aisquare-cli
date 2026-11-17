@@ -53,7 +53,7 @@ class Launcher:
     @property
     def label(self) -> str:
         """How a refusal names it: ``aisquare launch of claude (pid 4242)``."""
-        return f"{prog.command()} launch of {self.agent} (pid {self.pid})"
+        return f"{prog.word()} launch of {self.agent} (pid {self.pid})"
 
 
 def registry_dir() -> Path:

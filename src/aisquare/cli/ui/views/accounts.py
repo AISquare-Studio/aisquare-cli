@@ -158,7 +158,7 @@ def machine_sessions_text(sessions: Sequence[StatuslineSession], now: datetime) 
     text = Text("Sessions on this machine", style="bold")
     if not sessions:
         text.append(
-            f" — none reported in the last 15 min; `{prog.command()} accounts statusline "
+            f" — none reported in the last 15 min; `{prog.word()} accounts statusline "
             "--install` "
             "adds the status line that reports them",
             style="dim",
@@ -979,7 +979,7 @@ def _hooks_did_not_install(error: object, agent: str = core.AGENT) -> str:
     ``agent`` is the slot's, whose ``agents connect`` the line names."""
     return (
         f"⚠ signed in, but rlx's hooks did not install: {error} — "
-        f"run: {prog.command()} agents connect {agent} --config-dir <the slot's directory>"
+        f"run: {prog.word()} agents connect {agent} --config-dir <the slot's directory>"
     )
 
 
@@ -2541,9 +2541,9 @@ class AccountsView(Vertical):
         if not args:
             return ""
         command = (
-            f"{prog.command()} accounts add --agent {login.account.agent} --browser"
+            f"{prog.word()} accounts add --agent {login.account.agent} --browser"
             if login.fresh
-            else " ".join((f"{prog.command()} accounts run", self._ref_of(login.account), *args))
+            else " ".join((f"{prog.word()} accounts run", self._ref_of(login.account), *args))
         )
         return f"{accounts.browser_sign_in_hint}: {command}"
 

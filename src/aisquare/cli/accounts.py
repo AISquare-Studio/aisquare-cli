@@ -373,8 +373,8 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
             console.print(f"{status.label}: {status.detail}", markup=False, style="yellow")
     console.print(
         Text(
-            f"add one: {prog.command()} accounts add{_other_agents_choice()} · open one: "
-            f"{prog.command()} "
+            f"add one: {prog.word()} accounts add{_other_agents_choice()} · open one: "
+            f"{prog.word()} "
             "accounts run <slot> · the Accounts page in rlx does both",
             style="dim",
         )
@@ -788,7 +788,7 @@ def sessions_(
     console = stdout_console()
     if not sessions:
         console.print(
-            f"no session reported in the last {since}: `{prog.command()} accounts statusline` says "
+            f"no session reported in the last {since}: `{prog.word()} accounts statusline` says "
             "which accounts carry the status line",
             markup=False,
         )
@@ -1027,7 +1027,7 @@ def default(
             # of #406, m1): say so, or the line above promises what the next launch skips.
             stdout_console().print(
                 f"  · it is not signed in, so launches skip it until it is: "
-                f"{prog.command()} accounts run {accounts_service.ref_for(chosen)}",
+                f"{prog.word()} accounts run {accounts_service.ref_for(chosen)}",
                 markup=False,
             )
     else:
@@ -1197,7 +1197,7 @@ def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
     if get_state().json_output:
         fail(
             "accounts add hands the terminal to Claude Code and has no --json form — "
-            f"list accounts with `{prog.command()} --json accounts list`",
+            f"list accounts with `{prog.word()} --json accounts list`",
             error="no_json_form",
         )
     reason = not_interactive_reason()
@@ -1247,7 +1247,7 @@ def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
             f"{how}) — nothing was added"
         )
         if not browser and slots.browser_sign_in_args():  # its other way, the browser's
-            browser_add = f"{prog.command()} accounts add --agent {whose} --browser"
+            browser_add = f"{prog.word()} accounts add --agent {whose} --browser"
             said += f". {slots.browser_sign_in_hint}: {browser_add}"
         fail(said, error="not_signed_in")
     described = accounts_service.complete_sign_in(account)
@@ -1269,8 +1269,8 @@ def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
         "coder" if _role_agent("coder", str(account.slot)) == whose else f"coder --agent {whose}"
     )
     console.print(
-        f"  open it: {prog.command()} accounts run {account.slot} · "
-        f"as a role: {prog.command()} launch {as_role} --account {account.slot}",
+        f"  open it: {prog.word()} accounts run {account.slot} · "
+        f"as a role: {prog.word()} launch {as_role} --account {account.slot}",
         style="dim",
     )
 
@@ -1492,7 +1492,7 @@ def settings(
             console.print(f"  ⚠ cannot be shared: {refusal}", markup=False, style="yellow")
         if not changes:
             console.print(
-                f"  · no managed accounts — `{prog.command()} accounts add` makes one", markup=False
+                f"  · no managed accounts — `{prog.word()} accounts add` makes one", markup=False
             )
         for change in changes:
             line = f"  · {core.label(change.account)} {_SETTINGS_WORDS[change.outcome]}"

@@ -581,7 +581,7 @@ def clear_note(role: str) -> Text:
     text = Text("The whole binding of ", style="bold")
     text.append(role, style="bold")
     text.append(
-        f" goes: its binary, environment, args and account, as `{prog.command()} team bind <role> "
+        f" goes: its binary, environment, args and account, as `{prog.word()} team bind <role> "
         "--clear` takes them; the role then launches as an unbound one."
     )
     return text
@@ -673,7 +673,7 @@ class AppSettingsView(Vertical):
         """The Role bindings section's title and line, which name the command that binds."""
         return (
             "Role bindings",
-            f"binary, environment and args per role ({prog.command()} team bind), each written "
+            f"binary, environment and args per role ({prog.word()} team bind), each written "
             "at once",
         )
 
@@ -1065,14 +1065,14 @@ class AppSettingsView(Vertical):
         yield Static(
             Text.assemble(
                 "Model and effort per role: ",
-                (f"{prog.command()} team harness", "bold"),
+                (f"{prog.word()} team harness", "bold"),
                 "; each role's binding (binary, environment, args) is under Role bindings "
                 "below, as ",
-                (f"{prog.command()} team bind", "bold"),
+                (f"{prog.word()} team bind", "bold"),
                 " writes it; the account select is ",
                 ("team bind <role> --account", "bold"),
                 ". The machine and project account defaults: the Accounts page and ",
-                (f"{prog.command()} accounts default", "bold"),
+                (f"{prog.word()} accounts default", "bold"),
                 ". No value on this tab is read from the environment.",
             ),
             id="agent-settings-note",
@@ -1091,7 +1091,7 @@ class AppSettingsView(Vertical):
         if not self._role_bindings:
             yield Static(
                 Text(
-                    f"no role bindings — `{prog.command()} team bind <role> --bin … --env "
+                    f"no role bindings — `{prog.word()} team bind <role> --bin … --env "
                     "KEY=VALUE` "
                     "makes one, or + New bind"
                 ),
@@ -1175,7 +1175,7 @@ class AppSettingsView(Vertical):
             yield Static(
                 Text.assemble(
                     before,
-                    (f"{prog.command()} config set ui.always_show_project_path true", "bold"),
+                    (f"{prog.word()} config set ui.always_show_project_path true", "bold"),
                     after,
                 ),
                 id="preferences-from-a-shell",
@@ -1664,7 +1664,7 @@ class AppSettingsView(Vertical):
             self.notify(f"{key} not unset: {exc}", severity="error", markup=False)
             return
         self.notify(
-            f"{role}: {key} unset ({prog.command()} team bind {role} --unset {key})", markup=False
+            f"{role}: {key} unset ({prog.word()} team bind {role} --unset {key})", markup=False
         )
         self.call_later(self.reload_bindings)
 
@@ -1675,7 +1675,7 @@ class AppSettingsView(Vertical):
             self.notify(f"{role}'s binding not cleared: {exc}", severity="error", markup=False)
             return
         self.notify(
-            f"{role}: binding cleared ({prog.command()} team bind {role} --clear)", markup=False
+            f"{role}: binding cleared ({prog.word()} team bind {role} --clear)", markup=False
         )
         self.call_later(self.reload_bindings)
 

@@ -279,7 +279,7 @@ def _joins_no_board() -> str | None:
         return None
     return (
         f"{project_service.NotAdded(project)} — until then the session this line starts "
-        f"joins no board (--exec adds it, as `{prog.command()} team on` does)"
+        f"joins no board (--exec adds it, as `{prog.word()} team on` does)"
     )
 
 
@@ -446,7 +446,7 @@ def spawn(
             f"{role_name}'s binding sets {', '.join(map(repr, unnamed))}, which a shell line "
             f"cannot set ({_ENV_NAME_RULE}) — unbind it: "
             + install_route.command_line(
-                [prog.command(), "team", "bind", role_name, "--unset", unnamed[0]]
+                [prog.word(), "team", "bind", role_name, "--unset", unnamed[0]]
             )
         )
         fail(message, error="bad_env_key", detail=message)
@@ -603,7 +603,7 @@ def spawn(
                 # message that exists to list all three. Naming the command
                 # that writes it avoids the problem and is the better hint.
                 f"Set a different one with --bin, {_bin_env_hint(role_name)}, or "
-                f"{prog.command()} team bind {role_name} --bin <command>.",
+                f"{prog.word()} team bind {role_name} --bin <command>.",
                 error="agent_binary_missing",
             )
         # The session joins this project's board, as `aisquare launch`'s does, and with
@@ -775,7 +775,7 @@ def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict
             error=str(exc),
             source="error",
             effort_source="error",
-            fix=f"Check fleet.roles.{role} and team.profiles.{role} in {prog.command()} config.",
+            fix=f"Check fleet.roles.{role} and team.profiles.{role} in {prog.word()} config.",
         )
     return row
 
@@ -798,7 +798,7 @@ def _reading_env_files(command: str, env_files: Mapping[str, str]) -> str:
     if not env_files:
         return command
     reads = [
-        f'{key}="$({prog.command()} team read-env-file {shlex.quote(key)} {shlex.quote(path)})" '
+        f'{key}="$({prog.word()} team read-env-file {shlex.quote(key)} {shlex.quote(path)})" '
         f"&& export {key}"
         for key, path in env_files.items()
     ]
@@ -847,7 +847,7 @@ def harness_status() -> None:
                     "detail": str(exc),
                     "fix": exc.fix
                     if isinstance(exc, agent_launch.UnknownWrapperError)
-                    else f"Check the agent/model settings for {name} in {prog.command()} config.",
+                    else f"Check the agent/model settings for {name} in {prog.word()} config.",
                 }
             )
             continue
@@ -938,8 +938,7 @@ def harness_status() -> None:
     console.print(
         "Resolution shown without probing; native defaults stay with the selected agent."
         if several
-        else f"Resolution shown without probing — `{prog.command()} team spawn <role>` "
-        "verifies live.",
+        else f"Resolution shown without probing — `{prog.word()} team spawn <role>` verifies live.",
         markup=False,
     )
 
@@ -1066,8 +1065,8 @@ def _as_every_launch_reads_it(
             ):
                 # Its own agent named here binds it (#100's reopen 2).
                 said = (
-                    said.removesuffix(f" (see: {prog.command()} accounts)")
-                    + f", or pass --agent {reason.account.agent} (see: {prog.command()} accounts)"
+                    said.removesuffix(f" (see: {prog.word()} accounts)")
+                    + f", or pass --agent {reason.account.agent} (see: {prog.word()} accounts)"
                 )
             fail(said, error="unknown_account", ref=ref)
 
@@ -1087,7 +1086,7 @@ def _bind_one_of(exc: claude_accounts_service.AmbiguousAccount) -> str:
         f"{claude_accounts_core.qualified_ref(account)}"
         for account in accounts
     )
-    return f"{exc.reason}. Bind one as {each}; see: {prog.command()} accounts"
+    return f"{exc.reason}. Bind one as {each}; see: {prog.word()} accounts"
 
 
 @app.command("bind")
@@ -1289,7 +1288,7 @@ def _show_bindings() -> None:
     console = stdout_console()
     if not profiles:
         console.print(
-            f"no role bindings — pin one with: {prog.command()} team bind coder1 "
+            f"no role bindings — pin one with: {prog.word()} team bind coder1 "
             "--env CLAUDE_CONFIG_DIR='$HOME/.claude2'",
             markup=False,
         )
@@ -1545,7 +1544,7 @@ def signals(as_session: SessionRef = None) -> None:
         return
     if not states:
         stdout_console().print(
-            f"No signals set. Set one with: {prog.command()} team signal <name> <value>"
+            f"No signals set. Set one with: {prog.word()} team signal <name> <value>"
         )
         return
     console = stdout_console()
@@ -1748,8 +1747,8 @@ def board(
         return
     if not sessions and not tasks:
         stdout_console().print(
-            f"The orchestrator is quiet here. Activate with `{prog.command()} team on`, or start a "
-            f"session with `{prog.command()} launch planner` (coder/runner)."
+            f"The orchestrator is quiet here. Activate with `{prog.word()} team on`, or start a "
+            f"session with `{prog.word()} launch planner` (coder/runner)."
         )
         return
     stdout_console().print(

@@ -17,8 +17,8 @@ from aisquare.core.workspace import current_project
 from aisquare.models import ProjectInfo
 
 
-def index_command() -> str:
-    return f"{prog.command()} code index"
+def index_hint() -> str:
+    return f"{prog.word()} code index"
 
 
 EXTRA_HINT = 'pip install --upgrade "aisquare-cli[code]"'
@@ -73,7 +73,7 @@ def _indexed(project: ProjectInfo | None) -> ProjectInfo:
     if code_index.ready(target.id):
         return target
     if not settings().enabled:
-        raise CodeIndexError(f"no code index for {target.root} yet — build it: {index_command()}")
+        raise CodeIndexError(f"no code index for {target.root} yet — build it: {index_hint()}")
     build_index(target)
     return target
 

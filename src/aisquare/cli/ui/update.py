@@ -145,7 +145,7 @@ class UpdateScreen(ModalScreen[bool]):
             if self.plan.command:
                 text.append(" Update it with:\n\n")
                 text.append(self.plan.command, style="bold")
-                text.append(f"\n\nthen start {prog.command()} again. The agents keep running.")
+                text.append(f"\n\nthen start {prog.word()} again. The agents keep running.")
             if self.status is not None:
                 text.append("\n")
                 text.append(self.status, style="dim")

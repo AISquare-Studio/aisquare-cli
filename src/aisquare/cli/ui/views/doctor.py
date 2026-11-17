@@ -52,7 +52,7 @@ ROUTE_WORKER = "doctor-update-route"
 def _update_tooltip() -> str:
     """What Update does, for its tooltip."""
     return (
-        f"Quits rlx and runs `{prog.command()} upgrade` here: it shows what it will do and asks "
+        f"Quits rlx and runs `{prog.word()} upgrade` here: it shows what it will do and asks "
         "first. rlx opens again when it is done."
     )
 
@@ -209,7 +209,7 @@ class DoctorView(VerticalScroll):
                 yield update
                 uninstall = Button("Uninstall rlx…", id="doctor-uninstall", variant="error")
                 uninstall.tooltip = (
-                    f"Quits rlx and runs `{prog.command()} uninstall` here: it lists what goes and "
+                    f"Quits rlx and runs `{prog.word()} uninstall` here: it lists what goes and "
                     "what stays, and asks first. rlx opens again if nothing is removed."
                 )
                 yield uninstall

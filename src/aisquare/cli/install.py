@@ -151,10 +151,7 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
     index_only = f"({plan.pin_unmet}: the command finds it only on an index set up for it)"
     if plan.pin_unmet is not None and plan.reason == plan.pin_unmet:
         # Not "upgrade with" a pin uv refuses here (review of #257's fixes).
-        _say(
-            f"`{prog.command()} upgrade --version {plan.target}` cannot install it: "
-            f"{plan.pin_unmet}"
-        )
+        _say(f"`{prog.word()} upgrade --version {plan.target}` cannot install it: {plan.pin_unmet}")
         return
     if plan.runnable:
         if plan.up_to_date:
@@ -165,12 +162,12 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             # Nothing to compare (an index of its own, PyPI out of reach): "upgrade with"
             # sent every run to a reinstall that changed nothing (review of #257).
             _say(
-                f"can't tell whether anything is newer: `{prog.command()} upgrade` reinstalls the "
+                f"can't tell whether anything is newer: `{prog.word()} upgrade` reinstalls the "
                 "release uv picks for this install, which may be the one you have"
             )
             return
         pin = f" --version {plan.target}" if plan.target else ""
-        _say(f"upgrade with: {prog.command()} upgrade{pin}")
+        _say(f"upgrade with: {prog.word()} upgrade{pin}")
         if unlisted:
             _say(index_only)
     else:
@@ -187,7 +184,7 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             _say(plan.reason or "")
         else:
             _say(f"upgrade with: {plan.command}")
-            _say(f"(`{prog.command()} upgrade` does not run it: {plan.reason})")
+            _say(f"(`{prog.word()} upgrade` does not run it: {plan.reason})")
             if unlisted:
                 _say(index_only)
                 return
@@ -326,7 +323,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         else:
             remedy = install_route.command_line(
                 [
-                    prog.command(),
+                    prog.word(),
                     *lifecycle_service.refresh_hooks_argv(hook.agent),
                     "--config-dir",
                     str(hook.config_dir),
@@ -345,7 +342,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
 def _by_hand(version: str | None) -> str:
     """The command a person runs instead of ``--one-click``: asq's own flag is never told."""
     return install_route.command_line(
-        [prog.command(), "upgrade", *(["--version", version] if version else [])]
+        [prog.word(), "upgrade", *(["--version", version] if version else [])]
     )
 
 
@@ -439,7 +436,7 @@ def _reopen_after_one_click(*, failed: bool, installed: bool, started: datetime 
         else:
             said = "nothing was installed, and rlx could not be opened again"
         stderr_console().print(
-            f"✗ {said} ({exc}). Type `{prog.command()}` to open it.",
+            f"✗ {said} ({exc}). Type `{prog.word()}` to open it.",
             markup=False,
         )
 
@@ -828,8 +825,7 @@ def _package_kept(report: lifecycle_service.UninstallReport) -> str | None:
         return _blocked_reason(plan)
     if report.failed:
         return (
-            f"a step before it failed, so it stays and `{prog.command()} uninstall` can be run "
-            "again"
+            f"a step before it failed, so it stays and `{prog.word()} uninstall` can be run again"
         )
     return None
 
@@ -854,7 +850,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     if get_state().json_output:
         _echo_json({"dry_run": True, **_uninstall_plan_json(plan)})
         return
-    _say(f"{prog.command()} uninstall would:")
+    _say(f"{prog.word()} uninstall would:")
     if plan.hooks:
         _say("  remove rlx's hooks from:")
         for site in plan.hooks:
@@ -902,7 +898,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     for agent, entries in by_agent.items():
         owner = lifecycle_service.agent_label(agent)
         files = ", ".join(dict.fromkeys(entry.file.name for entry in entries))
-        _say(f"  MCP servers that run {prog.command()} ({owner} owns {files}; remove each with")
+        _say(f"  MCP servers that run {prog.word()} ({owner} owns {files}; remove each with")
         _say("  the command under it):")
         for entry in entries:
             _say(f"    {entry.name} in {lifecycle_service.mcp_place(entry)}")
@@ -996,7 +992,7 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
         _say(f"· {note}")
     if report.failed:
         _say(
-            f"✗ the package was NOT removed, so `{prog.command()} uninstall` can be run again once "
+            f"✗ the package was NOT removed, so `{prog.word()} uninstall` can be run again once "
             "the problems above are fixed"
         )
     elif plan.package_reason is not None:

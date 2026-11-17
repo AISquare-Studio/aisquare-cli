@@ -24,7 +24,7 @@ _HAND_BUILT = re.compile(
     r"(?:\baisquare|\brlx|<program>) fleet "
     r"(?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b|adopt\b)[a-z]"
 )
-"""``aisquare fleet``, ``rlx fleet`` or ``<program> fleet`` (the word ``core.program.command``
+"""``aisquare fleet``, ``rlx fleet`` or ``<program> fleet`` (the word ``core.program.word``
 gives a hint, #135) and a word: any verb, except those that walk every project: ``reap
 --all``, ``shutdown --all``, ``gate`` and ``capacity``, which take no ``--project`` (#283),
 and ``adopt``, which finds the project from the conversation's directory (#290)."""
@@ -55,12 +55,12 @@ why. Keyed by the literal's text, so a change to one is looked at again."""
 
 def _field(value: ast.expr) -> str:
     """An f-string field as the scan reads it: ``<program>`` for the program's word
-    (``prog.command()``, ``program.command()``), ``{…}`` for any other."""
+    (``prog.word()``, ``program.word()``), ``{…}`` for any other."""
     inner = value.value if isinstance(value, ast.FormattedValue) else value
     if (
         isinstance(inner, ast.Call)
         and isinstance(inner.func, ast.Attribute)
-        and inner.func.attr == "command"
+        and inner.func.attr == "word"
         and isinstance(inner.func.value, ast.Name)
         and inner.func.value.id in ("prog", "program")
     ):
@@ -129,8 +129,8 @@ D = "`aisquare fleet reap --all` and `aisquare fleet shutdown --all --yes`"
 E = 1
 """aisquare fleet stop, an attribute's docstring."""
 F = "`aisquare fleet ls --all` is this project's, ended rows included"
-G = f"`{prog.command()} fleet stop <label>` ends it"
-H = f"`{prog.command()} fleet reap --all` and `rlx fleet capacity`"
+G = f"`{prog.word()} fleet stop <label>` ends it"
+H = f"`{prog.word()} fleet reap --all` and `rlx fleet capacity`"
 '''
     hits = [text for _line, text in _literals(ast.parse(module)) if _HAND_BUILT.search(text)]
     assert hits == [

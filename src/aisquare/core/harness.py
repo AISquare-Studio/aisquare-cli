@@ -2024,7 +2024,7 @@ def resolve_profile(
             refusal = (
                 f"{role} reads {key} from {path}, a relative path, which each launch would "
                 f"look for in its own working directory — not launching {role} without it. "
-                f"Bind it by its full path: {prog.command()} team bind {role} --env-file "
+                f"Bind it by its full path: {prog.word()} team bind {role} --env-file "
                 f"{key}=<path>"
             )
             continue
@@ -2033,7 +2033,7 @@ def resolve_profile(
         except ValueError as exc:
             refusal = (
                 f"{role} reads {key} from {path}, which {exc} — not launching {role} without it. "
-                f"Fix the file, or unbind it: {prog.command()} team bind {role} --unset {key}"
+                f"Fix the file, or unbind it: {prog.word()} team bind {role} --unset {key}"
             )
     return LaunchProfile(
         env=env,

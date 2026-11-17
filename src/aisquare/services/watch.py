@@ -580,7 +580,7 @@ def run(
         os.close(fd)
         pid = running_pid()
         raise AlreadyWatching(
-            f"a watcher already runs for this home (pid {pid}): `{prog.command()} watch --status`"
+            f"a watcher already runs for this home (pid {pid}): `{prog.word()} watch --status`"
         ) from exc
     stop = False
 
@@ -618,7 +618,7 @@ def detach() -> int:
     pid = running_pid()
     if pid is not None:
         raise AlreadyWatching(
-            f"a watcher already runs for this home (pid {pid}): `{prog.command()} watch --status`"
+            f"a watcher already runs for this home (pid {pid}): `{prog.word()} watch --status`"
         )
     config = fleet_service.settings()
     fleet_service.open_window(  # the one way a window opens at the fleet's socket

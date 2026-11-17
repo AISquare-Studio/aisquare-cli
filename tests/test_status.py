@@ -38,7 +38,7 @@ def test_status_reports_counts(runner: CliRunner) -> None:
 def test_status_human(runner: CliRunner) -> None:
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
-    assert "aisquare:" in result.stdout
+    assert "rlx:" in result.stdout
     assert "home:" in result.stdout
 
 

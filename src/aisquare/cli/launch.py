@@ -632,7 +632,7 @@ def launch(
         fail(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
             "a numbered seat of one (coder1, coder2), a role you have "
-            f"bound with `{prog.command()} team bind`, or {harness.PLAIN_ROLE!r} for no role",
+            f"bound with `{prog.word()} team bind`, or {harness.PLAIN_ROLE!r} for no role",
             error="unknown_role",
         )
     if experimental.captain_role(role) and not _in_the_captains_window():
@@ -640,8 +640,7 @@ def launch(
         # its one server, no other tool. By hand in a project this was plain claude
         # with every tool, briefed as the one captain that has no shell.
         fail(
-            f"the {role} lives on the home board, one per home — `{prog.command()} captain` starts "
-            "it",
+            f"the {role} lives on the home board, one per home — `{prog.word()} captain` starts it",
             error="unknown_role",
         )
     # Resolve WHICH executable on the same ladder `team spawn` uses, so a role

@@ -78,7 +78,7 @@ def chip_tooltip(live: Sequence[Instance], this_id: str | None) -> str:
         lines.append(f"• rlx {instance.version} — {instance.where}{mark}")
     if differ(live):
         lines.append("They run different releases: quit the older one (q in it).")
-    lines.append(f"`{prog.command()} instances` lists them.")
+    lines.append(f"`{prog.word()} instances` lists them.")
     return "\n".join(lines)
 
 

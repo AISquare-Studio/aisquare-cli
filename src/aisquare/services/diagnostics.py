@@ -344,7 +344,7 @@ def _sandbox_hooks_check() -> DoctorCheck | None:
             f"{adapter.label}'s rlx hooks in {home} run the console script, which "
             "imports from PYTHONPATH outside the agent's sandbox, where its sandbox may write "
             "a directory it names (direnv's $PWD/src)",
-            f"{prog.command()} agents connect {adapter.id}",
+            f"{prog.word()} agents connect {adapter.id}",
         )
     return None
 
@@ -597,9 +597,9 @@ def _check_home() -> DoctorCheck:
             "home",
             f"{home} exists but is not a directory — nothing can be created inside it",
             f"AISQUARE_HOME must point at a directory: move {home} aside, or repoint "
-            f"AISQUARE_HOME and run `{prog.command()} init`",
+            f"AISQUARE_HOME and run `{prog.word()} init`",
         )
-    return _fail("home", f"{home} is missing", f"Set it up: {prog.command()} init")
+    return _fail("home", f"{home} is missing", f"Set it up: {prog.word()} init")
 
 
 #: Filesystems where ``os.replace`` is the kernel's own rename and the
@@ -720,7 +720,7 @@ def _check_config() -> DoctorCheck:
         return _fail(
             "config",
             f"config.toml is invalid: {exc}",
-            f"Fix it, or reset it to the defaults: {prog.command()} init --reinit --yes",
+            f"Fix it, or reset it to the defaults: {prog.word()} init --reinit --yes",
         )
     retired = retired_sections()
     if retired:
@@ -757,7 +757,7 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
         return None
     if home.exists():
         return _ok(name, f"not evaluated — {home} is not a directory (see the `home` check)")
-    return _ok(name, f"not created yet — set it up: {prog.command()} init")
+    return _ok(name, f"not created yet — set it up: {prog.word()} init")
 
 
 #: How many missing tables, columns, indexes or triggers the database row names before
@@ -774,7 +774,7 @@ _ISSUES_URL = "https://github.com/AISquare-Studio/rlx/issues"
 #: the ``team_meta_*`` ones date the launch metadata its cleanup reads (#113). One per
 #: trigger the ladder makes, in its order (pinned by the tests), so a trigger added
 #: without its sentence fails a test, not the operator. ``{program}`` is the command's
-#: word (``core.program.command``), filled in where the row is written.
+#: word (``core.program.word``), filled in where the row is written.
 _TRIGGER_COSTS = {
     "entry_ai": (
         "without trigger entry_ai a new note is not indexed: `{program} context search` "
@@ -871,19 +871,19 @@ def _check_database() -> DoctorCheck:
         if "shadow table" in kinds:
             costs.append(
                 "without a shadow table the notes' full-text index can be neither written "
-                f"nor searched: adding a note and `{prog.command()} context search` fail, with an "
+                f"nor searched: adding a note and `{prog.word()} context search` fail, with an "
                 "error that reads as a damaged store or, without entry_fts_config, a "
                 "traceback ending 'vtable constructor failed', though the notes are intact"
             )
         if "unreadable table" in kinds:
             costs.append(
                 "FTS5 cannot open an unreadable table, the notes' full-text index, so it can "
-                f"be neither written nor searched: adding a note and `{prog.command()} context "
+                f"be neither written nor searched: adding a note and `{prog.word()} context "
                 "search` fail with a traceback ending in SQLite's error, though the notes "
                 "are intact"
             )
         costs += [
-            cost.format(program=prog.command())
+            cost.format(program=prog.word())
             for trigger, cost in _TRIGGER_COSTS.items()
             if f"trigger {trigger}" in missing
         ]
@@ -904,7 +904,7 @@ def _check_database() -> DoctorCheck:
             "another line can skip, and these are not among them: another build or a "
             "hand edit changed the store in a way this build does not know. The history "
             f"in it is intact, so do not move it aside: keep a copy ({keep}) and report "
-            f"this line, with the output of `{prog.command()} --version`, at {_ISSUES_URL}",
+            f"this line, with the output of `{prog.word()} --version`, at {_ISSUES_URL}",
         )
     marker = paths.truncation_marker_path()
     if marker.exists():
@@ -944,7 +944,7 @@ _STALE_HOOKS = (
 
 def _reconnect() -> str:
     """Claude Code's one-line fix, a button on the Doctor page (``onboarding.KNOWN_FIXES``)."""
-    return f"(Re)connect it: {prog.command()} agents connect claude-code"
+    return f"(Re)connect it: {prog.word()} agents connect claude-code"
 
 
 def claude_code_version(binary: str | None = None) -> str | None:
@@ -1332,7 +1332,7 @@ def _coders_missed(
     ambient = agent_core.ambient_hook_dir("claude-code")
     here = agent_core.dir_identity(ambient) if ambient is not None else None
     connects = [
-        f"{prog.command()} agents connect claude-code"
+        f"{prog.word()} agents connect claude-code"
         if agent_core.dir_identity(directory) == here
         else agents_service.config_dir_command("connect", "claude-code", directory)
         for directory, refusal in missed.items()
@@ -1482,7 +1482,7 @@ def _shared_number_checks() -> list[DoctorCheck]:
     for held in claude_accounts_service.shared_numbers(accounts):
         named = " and ".join(f"{label(a.agent)}'s ({ref(a)})" for a in held)
         last = held[-1]  # in the one order: the one whose number's place is the other's
-        add = f"{prog.command()} accounts add" + (
+        add = f"{prog.word()} accounts add" + (
             "" if claude_accounts_core.kind(last.agent).legacy_slots else f" --agent {last.agent}"
         )
         rows.append(
@@ -1490,7 +1490,7 @@ def _shared_number_checks() -> list[DoctorCheck]:
                 "account-numbers",
                 f"slot {last.slot} is two accounts, {named}: name each as shown; the one listed "
                 "last cannot be moved or made the default",
-                f"{prog.command()} accounts remove {claude_accounts_core.qualified_ref(last)}, "
+                f"{prog.word()} accounts remove {claude_accounts_core.qualified_ref(last)}, "
                 f"then {add}",
             )
         )
@@ -1545,7 +1545,7 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
                 "claude-accounts",
                 detail,
                 "Sign in from rlx → Accounts, or: "
-                + "; ".join(f"{prog.command()} accounts run {slot}" for slot in unsigned),
+                + "; ".join(f"{prog.word()} accounts run {slot}" for slot in unsigned),
             ),
             *_claude_account_default_checks(),
             *_claude_account_limit_checks(),
@@ -1604,7 +1604,7 @@ def _agent_accounts_checks(agent: str) -> list[DoctorCheck]:
                 name,
                 detail,
                 "Sign in from rlx → Accounts, or: "
-                + "; ".join(f"{prog.command()} accounts run {slot}{sign_in}" for slot in unsigned),
+                + "; ".join(f"{prog.word()} accounts run {slot}{sign_in}" for slot in unsigned),
             ),
             *rest,
         ]
@@ -1714,7 +1714,7 @@ def _accounts_sharing_check(agent: str, managed: Sequence[ClaudeAccount]) -> Doc
             return _warn(
                 name,
                 f"{detail} — " + "; ".join(problems),
-                f"{prog.command()} accounts share --enable <parts> links what is missing; a link "
+                f"{prog.word()} accounts share --enable <parts> links what is missing; a link "
                 "elsewhere is yours to undo"
                 + (" (keep transcripts apart)" if kind.memory is not None else ""),
             )
@@ -1739,7 +1739,7 @@ def _undeclared_share_check() -> DoctorCheck | None:
             f"[accounts] share names {', '.join(unknown)}, which no agent here shares "
             f"(parts are {', '.join(known)})",
             "fix the name under [accounts] share in config.toml: "
-            f"{prog.command()} config set accounts.share <names>",
+            f"{prog.word()} config set accounts.share <names>",
         )
     except Exception as exc:  # diagnostics must never crash
         return _ok("accounts sharing", f"not evaluated ({exc})")
@@ -1953,8 +1953,8 @@ def _check_captured_projects() -> list[DoctorCheck]:
         _ok(
             "projects",
             f"{len(captured)} captured {noun} hidden from the sidebar and `project list` (a "
-            f"hooked session ran there; nothing added it on purpose) — see them: {prog.command()} "
-            f"project list --all; drop the stale ones: {prog.command()} project prune "
+            f"hooked session ran there; nothing added it on purpose) — see them: {prog.word()} "
+            f"project list --all; drop the stale ones: {prog.word()} project prune "
             "--captured-only",
         )
     ]
@@ -1979,16 +1979,16 @@ def _left_from_before_capture(
     working = [p for p in captured if p.id in holds and not holds[p.id]]
     read = [p for p in captured if holds.get(p.id)]
     left = "left from before project capture was turned off"
-    listed = f"listed only by {prog.command()} project list --all"
+    listed = f"listed only by {prog.word()} project list --all"
     parts: list[str] = []
     if dropped:
         parts.append(
             f"{len(dropped)} captured {_directories(len(dropped))} {left} (a hooked session "
-            f"ran there; nothing added it on purpose) — {listed}; drop them: {prog.command()} "
+            f"ran there; nothing added it on purpose) — {listed}; drop them: {prog.word()} "
             "project "
             "prune --captured-only --older-than 0"
         )
-    prune = "that prune" if dropped else f"{prog.command()} project prune"
+    prune = "that prune" if dropped else f"{prog.word()} project prune"
     for kept, why in ((held, "context"), (working, "agents"), (read, "hub")):
         if not kept:
             continue
@@ -2013,7 +2013,7 @@ def _left_from_before_capture(
             agents, frees = _what_frees(kept, holds)
             what = (
                 f"{'is the board' if one else 'are the boards'} {agents}, running or stopped, "
-                f"which {prune} keeps and {prog.command()} project forget refuses: {names} — "
+                f"which {prune} keeps and {prog.word()} project forget refuses: {names} — "
                 f"{then}{frees}, then {drop}"
             )
         elif why == "agents":
@@ -2024,7 +2024,7 @@ def _left_from_before_capture(
             stop = "; ".join(project_service.fleet_command("stop", p) + " <label>" for p in kept)
             what = (
                 f"{'has a fleet agent' if one else 'have fleet agents'} still running, which "
-                f"{prune} keeps and {prog.command()} project forget refuses: {names} — {then}stop "
+                f"{prune} keeps and {prog.word()} project forget refuses: {names} — {then}stop "
                 f"{'its' if one else 'their'} agents first ({stop}), then {drop}"
             )
         else:
@@ -2344,7 +2344,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
             "claude-account-headroom",
             f"every account has used {settings.switch_at}% or more of its five-hour or weekly "
             f"window: {summary}",
-            f"Add or sign in another account ({prog.command()} accounts add), or wait for a reset "
+            f"Add or sign in another account ({prog.word()} accounts add), or wait for a reset "
             "— "
             "a fleet spawned now has nowhere to switch to",
         )
@@ -2352,7 +2352,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         return _warn(
             "claude-account-headroom",
             f"no account's usage could be read: {summary}",
-            f"Open a session on the account to refresh its token, then: {prog.command()} accounts "
+            f"Open a session on the account to refresh its token, then: {prog.word()} accounts "
             "usage",
         )
     return _ok(
@@ -2428,7 +2428,7 @@ def _agent_account_headroom_check(agent: str, *, live: bool = False) -> DoctorCh
             name,
             f"every {label} account has used {settings.switch_at}% or more of a window"
             f"{recorded}: {summary}",
-            f"Add or sign in another account ({prog.command()} accounts add --agent {agent}), or "
+            f"Add or sign in another account ({prog.word()} accounts add --agent {agent}), or "
             "wait "
             "for a reset — a fleet spawned now has nowhere to switch to",
         )
@@ -2436,16 +2436,16 @@ def _agent_account_headroom_check(agent: str, *, live: bool = False) -> DoctorCh
         return _warn(
             name,
             f"no {label} account's usage could be read: {summary}",
-            f"Open a session on the account ({prog.command()} accounts run <slot>) to refresh its "
-            f"login, then: {prog.command()} accounts usage",
+            f"Open a session on the account ({prog.word()} accounts run <slot>) to refresh its "
+            f"login, then: {prog.word()} accounts usage",
         )
     if not measured:
         return _warn(
             name,
             f"no {label} account's usage has been recorded yet: {summary}",
-            f"Open a session on the account ({prog.command()} accounts run <slot>): {label} "
+            f"Open a session on the account ({prog.word()} accounts run <slot>): {label} "
             "records "
-            f"its limits as it works; then: {prog.command()} accounts usage",
+            f"its limits as it works; then: {prog.word()} accounts usage",
         )
     return _ok(
         name,
@@ -2600,7 +2600,7 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                 f"{prefix}-account-default",
                 f"the accounts registry could not be read ({exc}) — launches run without a "
                 "default account",
-                f"{prog.command()} doctor  (the database line above says what is wrong with "
+                f"{prog.word()} doctor  (the database line above says what is wrong with "
                 "context.db)",
             )
         ]
@@ -2620,11 +2620,11 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                 if legacy
                 else f"no enabled {name} account is signed in, so a launch of {name} "
                 f"nothing else names starts it with no login",
-                f"{prog.command()} accounts run <slot> and sign in, or: {prog.command()} accounts "
+                f"{prog.word()} accounts run <slot> and sign in, or: {prog.word()} accounts "
                 "enable <slot>"
                 if legacy
-                else f"{prog.command()} accounts run <slot>{sign_in} and sign in, or: "
-                f"{prog.command()} accounts enable <slot>",
+                else f"{prog.word()} accounts run <slot>{sign_in} and sign in, or: "
+                f"{prog.word()} accounts enable <slot>",
             )
         )
     else:
@@ -2658,11 +2658,11 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                 if legacy
                 else f"these name no {name} account this machine has, so their launches are "
                 "refused: " + "; ".join(dangling),
-                f"{prog.command()} accounts default --clear --project <project>, or "
-                f"{prog.command()} team bind <role> --clear-account"
+                f"{prog.word()} accounts default --clear --project <project>, or "
+                f"{prog.word()} team bind <role> --clear-account"
                 if legacy
-                else f"{prog.command()} accounts default --clear --agent {agent} "
-                f"--project <project>, or {prog.command()} team bind <role> --clear-account",
+                else f"{prog.word()} accounts default --clear --agent {agent} "
+                f"--project <project>, or {prog.word()} team bind <role> --clear-account",
             )
         )
     return checks
@@ -2697,7 +2697,7 @@ def _check_role_bindings() -> list[DoctorCheck]:
     for role, profile in sorted(bindings.items()):
 
         def unset(key: str, role: str = role) -> str:
-            return line([prog.command(), "team", "bind", role, "--unset", key])
+            return line([prog.word(), "team", "bind", role, "--unset", key])
 
         for adapter, accounts in with_slots:
             variable = accounts.home_env
@@ -2844,7 +2844,7 @@ def _check_manager_board_context() -> list[DoctorCheck]:
             "manager board context",
             f"fleet.roles.manager.board_context = {manager.board_context!r} is ignored: "
             "a manager reads the whole board",
-            f"{prog.command()} config set fleet.roles.manager.board_context all",
+            f"{prog.word()} config set fleet.roles.manager.board_context all",
         )
     ]
 
@@ -3013,7 +3013,7 @@ def _check_fleet_capacity() -> DoctorCheck:
         return _warn(
             name,
             detail,
-            f"{prog.command()} fleet capacity lists the live agents and the load — stop one, free "
+            f"{prog.word()} fleet capacity lists the live agents and the load — stop one, free "
             "memory, or change max_agents_total / min_free_mb / busy_* in [fleet]",
         )
     return _ok(name, detail)
@@ -3037,12 +3037,12 @@ def _check_watcher() -> DoctorCheck:
     age = found.age()
     looked = f"last look {int(age.total_seconds())} s ago" if age is not None else "no look yet"
     if found.pid is None:
-        return _ok(name, f"not running ({looked}); `{prog.command()} watch --detach` starts it")
+        return _ok(name, f"not running ({looked}); `{prog.word()} watch --detach` starts it")
     if age is None or age.total_seconds() > 3 * every:
         return _warn(
             name,
             f"running (pid {found.pid}), {looked}",
-            f"{prog.command()} watch --stop, then {prog.command()} watch --detach",
+            f"{prog.word()} watch --stop, then {prog.word()} watch --detach",
         )
     return _ok(name, f"running (pid {found.pid}), {looked}")
 
@@ -3071,7 +3071,7 @@ def _check_instances() -> DoctorCheck:
             f"{me.version} (schema {me.schema}): {named}",
             "Quit "
             + ("it" if len(others) == 1 else "each of them")
-            + f" (q in that rlx), then start {prog.command()} again, so one release uses this home",
+            + f" (q in that rlx), then start {prog.word()} again, so one release uses this home",
         )
     one = len(live) == 1
     where = "; ".join(i.label + (" (this one)" if i.id == me.id else "") for i in live)
@@ -3701,12 +3701,12 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
         return _ok(name, "building in the background (agents grep until it is ready)")
     if unfinished:
         return _ok(
-            name, f"none yet — `{prog.command()} code index` builds one (agents grep without it)"
+            name, f"none yet — `{prog.word()} code index` builds one (agents grep without it)"
         )
     parsers = ", ".join(f"{parser} {count}" for parser, count in sorted(found.parsers.items()))
     detail = f"{found.symbols} symbols in {found.files} files ({parsers}), built {found.built_at}"
     if found.stale:
-        detail += f" — a commit behind the checkout; `{prog.command()} code index` refreshes it"
+        detail += f" — a commit behind the checkout; `{prog.word()} code index` refreshes it"
     if found.not_indexed:
         missing = ", ".join(f"{lang} {n}" for lang, n in sorted(found.not_indexed.items()))
         detail += f"; not indexed: {missing}"
@@ -3725,7 +3725,7 @@ def _captain_check() -> DoctorCheck | None:
         return None
     return _ok(
         "captain",
-        f"off (experimental) — turn it on with: {prog.command()} config set experimental.captain "
+        f"off (experimental) — turn it on with: {prog.word()} config set experimental.captain "
         "true "
         f"(or {experimental.CAPTAIN_ENV}=1)",
     )
@@ -3814,7 +3814,7 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
                 name,
                 " — ".join(problems),
                 "unset the interfering env vars and relaunch off-ladder roles with "
-                f"`{prog.command()} team spawn <role>`",
+                f"`{prog.word()} team spawn <role>`",
             )
         seen_scopes: set[str] = set()
         detail = "role ladders clean" if selected_roles else "native model selection"
@@ -3833,7 +3833,7 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
                     name,
                     f"fable probed unavailable for {role} ({fable.reason}) — "
                     "top-tier roles fall back to opus",
-                    f"{prog.command()} team spawn {role} --refresh",
+                    f"{prog.word()} team spawn {role} --refresh",
                 )
             if fable is not None and fable.resolved_id:
                 detail = f"role ladders clean; fable available ({fable.resolved_id})"
@@ -3858,7 +3858,7 @@ def _check_model_pick_reader() -> DoctorCheck | None:
         "fleet model pick",
         f"{found.get('said', '?')} ({found.get('at', '?')[:19]}): not read as a choice, so no "
         "pick was written, and a restart starts the model the agent ran before it",
-        f"if Claude Code was updated, update rlx (`{prog.command()} upgrade`); a teammate's "
+        f"if Claude Code was updated, update rlx (`{prog.word()} upgrade`); a teammate's "
         "message quoting a /model record also shows here, and is harmless. Meanwhile name the "
         "model on the spawn (`fleet spawn <role> --model …`) or the restart (`fleet restart "
         "<label> --model …`)",
@@ -3888,7 +3888,7 @@ def _check_self_invocation(cwd: Path | None = None) -> DoctorCheck:
         "(the cwd goes first on sys.path); rlx's own re-invocations pass -P and are fine",
         "By hand, use the `aisquare`/`asq` script or `python -P -m aisquare`; hooks written by "
         "an earlier rlx use the bare module form — re-run "
-        f"`{prog.command()} agents connect <agent>`",
+        f"`{prog.word()} agents connect <agent>`",
     )
 
 
@@ -4001,7 +4001,7 @@ def _check_remote_control(
     return _warn(
         name,
         f"on for {on}, but Claude Code will refuse it: {'; '.join(blockers)}",
-        f"{fix}; `{prog.command()} launch` skips the flag and says why until then",
+        f"{fix}; `{prog.word()} launch` skips the flag and says why until then",
     )
 
 
@@ -4187,7 +4187,7 @@ def _check_fleet(
             # This check is machine-wide; the command it names must be too.
             fix = (
                 "Reconcile the rows with tmux (ended, lost, merged worktrees): "
-                f"{prog.command()} fleet reap --all"
+                f"{prog.word()} fleet reap --all"
             )
             if unreached:
                 # Its server may run on, and the way back to it comes first. `reap
@@ -4198,7 +4198,7 @@ def _check_fleet(
                     "socket another server took, send it SIGUSR1 (once the socket is free), "
                     "which makes tmux create its socket again; reap --server-down leaves "
                     "such rows live, and if that server is not running, end them on your "
-                    f"word: {prog.command()} fleet shutdown --all --forget"
+                    f"word: {prog.word()} fleet shutdown --all --forget"
                 )
             if server_down:
                 # tmux says no server is there — but doctor runs in this shell and
@@ -4207,7 +4207,7 @@ def _check_fleet(
                 fix += (
                     "; if that server is genuinely gone (a reboot, kill-server) and not "
                     "merely under another TMUX_TMPDIR, mark its rows lost: "
-                    f"{prog.command()} fleet reap --all --server-down"
+                    f"{prog.word()} fleet reap --all --server-down"
                 )
             return _warn(name, "; ".join(problems), fix)
         sessions = servers[today].list_sessions()
@@ -4294,7 +4294,7 @@ def _launch_hooks_off(adapter: AgentAdapter, cwd: Path | None) -> list[DoctorChe
             adapter.id,
             f"{adapter.label}: hooks are switched off for {', '.join(named)} ({switch}) — "
             f"{adapter.label} runs none of them in those sessions",
-            f"Remove it from the role's arguments ({prog.command()} team bind ROLE, or "
+            f"Remove it from the role's arguments ({prog.word()} team bind ROLE, or "
             f"fleet.roles.ROLE.agent_args.{adapter.id})",
         )
         for switch, named in roles.items()
@@ -4401,7 +4401,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
         fix = (
             exc.fix
             if isinstance(exc, agent_launch.UnknownWrapperError)
-            else f"{prog.command()} agents use claude-code"
+            else f"{prog.word()} agents use claude-code"
         )
         checks.append(_warn("coding-agent", str(exc), fix))
     for adapter in adapters():
@@ -4460,8 +4460,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                     _warn(
                         adapter.id,
                         detail or (site.error if site else "") or "Cannot read native settings",
-                        f"Repair native settings file access/JSON, then rerun {prog.command()} "
-                        "doctor",
+                        f"Repair native settings file access/JSON, then rerun {prog.word()} doctor",
                     )
                 )
                 continue

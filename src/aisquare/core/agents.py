@@ -1889,7 +1889,7 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
     both = (
         f"rlx runs two ways here: the {spec.settings_path.name} hooks and "
         f"{plugin_label(install)}, whose hooks stand down beside them; keep one "
-        f"({prog.command()} doctor says how)."
+        f"({prog.word()} doctor says how)."
         if install is not None and spec.settings_path is not None
         else ""
     )

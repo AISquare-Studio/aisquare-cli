@@ -38,7 +38,7 @@ def captain_off() -> str:
     """The one line every refusal says: the CLI's, the lean server entry's, the ui receiver's
     and doctor's."""
     return (
-        f"the captain is experimental; turn it on with {prog.command()} config set "
+        f"the captain is experimental; turn it on with {prog.word()} config set "
         "experimental.captain "
         f"true, or {CAPTAIN_ENV}=1"
     )

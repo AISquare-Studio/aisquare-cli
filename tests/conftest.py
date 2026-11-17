@@ -782,15 +782,15 @@ def at_the_machine(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def hints_print_rlx(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Every hint a test reads starts its command with ``rlx`` (``core.program.command``),
+    """Every hint a test reads starts its command with ``rlx`` (``core.program.word``),
     whatever the runner's PATH holds: whether ``rlx`` on PATH is this install's own is a
     fact of the machine, not of the test. ``tests/test_program_name.py`` tests that choice
     itself with the real :func:`program.ours_on_path`, and a test of the fallback patches
     ``ours_on_path`` back."""
-    program.command.cache_clear()
+    program.word.cache_clear()
     monkeypatch.setattr(program, "ours_on_path", lambda name: True)
     yield
-    program.command.cache_clear()
+    program.word.cache_clear()
 
 
 @pytest.fixture(autouse=True)

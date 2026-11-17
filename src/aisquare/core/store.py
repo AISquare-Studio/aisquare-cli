@@ -7617,8 +7617,8 @@ def store_recovery(exc: BaseException) -> str:
     return (
         f"Leave it where it is: nothing in it is damaged, and this process may not write "
         f"{paths.db_path().parent}. Inside an agent's sandbox, where the store is read-only, "
-        f"its board calls go through its launch's broker: an agent `{prog.command()} fleet` or "
-        f"`{prog.command()} launch` started has one (restart it if it says the broker is not "
+        f"its board calls go through its launch's broker: an agent `{prog.word()} fleet` or "
+        f"`{prog.word()} launch` started has one (restart it if it says the broker is not "
         f"running); otherwise run the command outside the sandbox (an approval), or give "
         f"the directory back its permissions"
     )
@@ -7641,7 +7641,7 @@ def damaged_store_recovery() -> str:
     """
     db = paths.db_path()
     return (
-        f"Move it aside and re-create: mv {db} {db}.broken && {prog.command()} init "
+        f"Move it aside and re-create: mv {db} {db}.broken && {prog.word()} init "
         f"— the board history in it is lost; config.toml and credentials are untouched"
     )
 

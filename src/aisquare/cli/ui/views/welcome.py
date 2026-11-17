@@ -363,15 +363,14 @@ def choice_text(claude: ClaudeState | None) -> Text:
         text.append(f"{' and '.join(labels)} are both installed. ")
         text.append(
             f"The fleet uses {claude.label} until you pick one; the pick becomes your default "
-            f"({prog.command()} agents use).",
+            f"({prog.word()} agents use).",
             style="dim",
         )
     else:
         names = " and ".join(first_run.agent_label(agent) for agent in others)
         text.append(f"{names} {'is' if len(others) == 1 else 'are'} installed too. ")
         text.append(
-            f"Your default is {claude.label}; a pick here changes it ({prog.command()} agents "
-            "use).",
+            f"Your default is {claude.label}; a pick here changes it ({prog.word()} agents use).",
             style="dim",
         )
     return text

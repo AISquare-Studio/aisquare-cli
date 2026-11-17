@@ -588,7 +588,7 @@ def _say_unread(store: ContextStore, unread: list[str]) -> None:
     )
     sys.stderr.write(
         f"rlx: {said}, which this rlx cannot read as a choice — no pick was "
-        f"written; run: {prog.command()} doctor\n"
+        f"written; run: {prog.word()} doctor\n"
     )
 
 

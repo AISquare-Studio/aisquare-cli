@@ -436,7 +436,7 @@ def _find(ref: str, accounts: Sequence[ClaudeAccount]) -> _Found:
             raise AdoptRefused(
                 "not_on_a_known_account",
                 f"{ref} is no conversation under an account rlx knows (its slots, and each "
-                f"agent's plain home): `{prog.command()} accounts list` shows them",
+                f"agent's plain home): `{prog.word()} accounts list` shows them",
             )
         return homes[0]
     # An id or the start of one (the list shows eight characters): only the characters a
@@ -446,7 +446,7 @@ def _find(ref: str, accounts: Sequence[ClaudeAccount]) -> _Found:
         raise AdoptRefused(
             "no_such_conversation",
             f"{ref!r} is no session id (or the start of one) — "
-            f"`{prog.command()} fleet adopt --list` shows the recent ones",
+            f"`{prog.word()} fleet adopt --list` shows the recent ones",
         )
     matches = [
         each for account in accounts for each in _found_in(account) if each.native.startswith(ref)
@@ -455,7 +455,7 @@ def _find(ref: str, accounts: Sequence[ClaudeAccount]) -> _Found:
         raise AdoptRefused(
             "no_such_conversation",
             f"no conversation {ref!r} under the accounts rlx knows — "
-            f"`{prog.command()} fleet adopt --list` shows the recent ones",
+            f"`{prog.word()} fleet adopt --list` shows the recent ones",
         )
     sessions = sorted({each.native for each in matches})
     if len(sessions) > 1:
@@ -513,7 +513,7 @@ def adopt(ref: str, *, role: str = "coder", label: str | None = None) -> fleet_s
         raise AdoptRefused(
             "not_onboarded",
             f"{found.native} ran in {where}, which no onboarded project holds: "
-            f"`{prog.command()} project onboard {conversation.cwd or '<dir>'}` first",
+            f"`{prog.word()} project onboard {conversation.cwd or '<dir>'}` first",
         )
     return fleet_service.spawn(
         project,

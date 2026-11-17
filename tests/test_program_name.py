@@ -40,7 +40,7 @@ def _script(directory: Path, name: str) -> Path:
 
 def _path(monkeypatch: pytest.MonkeyPatch, *directories: Path) -> None:
     monkeypatch.setenv("PATH", os.pathsep.join(str(directory) for directory in directories))
-    program.command.cache_clear()
+    program.word.cache_clear()
 
 
 @pytest.fixture
@@ -52,7 +52,7 @@ def install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _script(scripts, "rlx")
     monkeypatch.setattr(agent_core, "current_install", lambda: scripts / f"aisquare{SUFFIX}")
     monkeypatch.setattr(program, "ours_on_path", real_ours_on_path)
-    program.command.cache_clear()
+    program.word.cache_clear()
     return scripts
 
 
@@ -64,8 +64,8 @@ def test_hints_say_rlx_while_the_rlx_on_path_is_this_installs_own(
 ) -> None:
     _path(monkeypatch, install)
 
-    assert program.command() == "rlx"
-    assert program.line("accounts", "add") == "rlx accounts add"
+    assert program.word() == "rlx"
+    assert program.words("accounts", "add") == "rlx accounts add"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uv links ~/.local/bin on POSIX only")
@@ -79,7 +79,7 @@ def test_a_link_to_it_as_uv_makes_in_local_bin_is_ours(
     (local / "rlx").symlink_to(install / "rlx")
     _path(monkeypatch, local)
 
-    assert program.command() == "rlx"
+    assert program.word() == "rlx"
 
 
 def test_another_programs_rlx_first_on_path_makes_hints_say_aisquare(
@@ -90,9 +90,9 @@ def test_another_programs_rlx_first_on_path_makes_hints_say_aisquare(
     other = tmp_path / "other" / "bin"
     _script(other, "rlx")
     _path(monkeypatch, other, install)
-    foreign = (program.command(), program.line("doctor"))
+    foreign = (program.word(), program.words("doctor"))
     _path(monkeypatch, install, other)
-    ours_first = program.command()
+    ours_first = program.word()
 
     assert foreign == ("aisquare", "aisquare doctor")
     assert ours_first == "rlx", "control: ours first on PATH is ours"
@@ -105,7 +105,7 @@ def test_no_rlx_on_path_makes_hints_say_aisquare(
     answers to ``rlx``, so a hint names the command this install has always answered to."""
     _path(monkeypatch, tmp_path / "empty")
 
-    assert program.command() == "aisquare"
+    assert program.word() == "aisquare"
 
 
 def test_the_word_is_decided_once_per_process(
@@ -120,7 +120,7 @@ def test_the_word_is_decided_once_per_process(
         return which(name)
 
     monkeypatch.setattr(shutil, "which", counting)
-    words = {program.command() for _ in range(5)}
+    words = {program.word() for _ in range(5)}
 
     assert words == {"rlx"} and asked == ["rlx"]
 
@@ -131,7 +131,7 @@ def test_a_line_is_quoted_for_the_shell_it_is_pasted_into(
     _path(monkeypatch, install)
     folder = str(tmp_path / "a folder")
 
-    assert program.line("accounts", "trust", folder) == command_line(
+    assert program.words("accounts", "trust", folder) == command_line(
         ["rlx", "accounts", "trust", folder]
     )
 
@@ -192,8 +192,8 @@ def _buttons_in_each_word(
     made = {}
     for ours in (True, False):
         monkeypatch.setattr(program, "ours_on_path", lambda name, ours=ours: ours)
-        program.command.cache_clear()
-        word = program.command()
+        program.word.cache_clear()
+        word = program.word()
         fixes = onboarding.fix_commands(rows())
         assert all(fix.label.startswith(f"{word} ") for fix in fixes), (word, fixes)
         made[word] = sorted((fix.check, fix.argv) for fix in fixes)
@@ -477,7 +477,7 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
     module = (
         '"""aisquare doctor in a docstring is developer prose."""\n'
         'A = "run aisquare doctor to see"\n'
-        'B = f"`{prog.command()} accounts add` makes one"\n'
+        'B = f"`{prog.word()} accounts add` makes one"\n'
         'C = "`rlx accounts add` makes one"\n'
         'D = "rlx is quitting"\n'
         'E = "keys the CLI minted"\n'
@@ -498,7 +498,7 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
 
 def test_no_module_names_the_word_at_import(tmp_path: Path) -> None:
     """The word is the PATH's and the install's when a line is said, never frozen at import: a
-    module constant that called program.command() kept the word its import found, and on every
+    module constant that called program.word() kept the word its import found, and on every
     hook it would look up PATH and walk the install's RECORD for nothing."""
     import subprocess
 
@@ -506,8 +506,8 @@ def test_no_module_names_the_word_at_import(tmp_path: Path) -> None:
         "import importlib, pkgutil\n"
         "from aisquare.core import program\n"
         "calls = []\n"
-        "real = program.command\n"
-        "program.command = lambda: calls.append(1) or real()\n"
+        "real = program.word\n"
+        "program.word = lambda: calls.append(1) or real()\n"
         "import aisquare\n"
         "for info in pkgutil.walk_packages(aisquare.__path__, 'aisquare.'):\n"
         "    if info.name == 'aisquare.__main__':\n"

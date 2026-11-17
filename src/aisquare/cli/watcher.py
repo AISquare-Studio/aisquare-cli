@@ -42,7 +42,7 @@ def _print_tick(report: watch_service.TickReport) -> None:
     for label in report.stopped:
         console.print(f"  auto-stopped {label}", markup=False)
     for note in report.notes:
-        stderr_console().print(f"{prog.command()} watch: {note}", markup=False)
+        stderr_console().print(f"{prog.word()} watch: {note}", markup=False)
 
 
 @app.callback()
@@ -86,7 +86,7 @@ def watch(
         _say(
             {"pid": pid, "session": watch_service.DETACHED_SESSION},
             f"✓ watching (pid {pid}) in tmux session {watch_service.DETACHED_SESSION}; "
-            f"`{prog.command()} watch --stop` ends it",
+            f"`{prog.word()} watch --stop` ends it",
         )
         return
     if once:
@@ -101,7 +101,7 @@ def watch(
             interval=interval,
             on_tick=_print_tick,
             on_error=lambda said: stderr_console().print(
-                f"{prog.command()} watch: {said}", markup=False
+                f"{prog.word()} watch: {said}", markup=False
             ),
         )
     except watch_service.AlreadyWatching as exc:
@@ -125,7 +125,7 @@ def _print_watch_status() -> None:
         "last_scan_age_seconds": int(age.total_seconds()) if age is not None else None,
     }
     if found.pid is None:
-        line = f"no watcher runs: `{prog.command()} watch --detach` starts one"
+        line = f"no watcher runs: `{prog.word()} watch --detach` starts one"
     else:
         line = f"watching (pid {found.pid})"
     if age is not None:

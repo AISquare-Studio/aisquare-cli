@@ -76,14 +76,14 @@ EXTRA = "pip install 'aisquare-cli[gate]'"
 
 
 def enroll_command() -> str:
-    return f"{prog.command()} captain gate enroll"
+    return f"{prog.word()} captain gate enroll"
 
 
 def unlock_hint() -> str:
     """How a locked gate is unlocked: said to the captain, or typed."""
     return (
         "say your authenticator's code to the captain, or run: "
-        f"{prog.command()} captain gate unlock <code>"
+        f"{prog.word()} captain gate unlock <code>"
     )
 
 

@@ -1240,7 +1240,7 @@ def _emit_shutdown(report: fleet_service.ShutdownReport, target: ProjectInfo | N
     listed = (
         f"`{project_service.fleet_command('ls', target, '--all')}`"
         if target is not None
-        else f"the rlx UI (`{prog.command()}`)"
+        else f"the rlx UI (`{prog.word()}`)"
     )
     if report.interrupted:
         console.print(
@@ -2158,15 +2158,15 @@ def ui(
     if get_state().json_output:
         fail(
             "the rlx UI has no --json form — for machine-readable fleet state use "
-            f"`{prog.command()} fleet ls --json`",
+            f"`{prog.word()} fleet ls --json`",
             error="not_a_tty",
             detail="--json was given; a full-screen app has no machine-readable output",
         )
     if not interactive_terminal():
         reason = not_interactive_reason() or "not an interactive terminal"
         fail(
-            f"the rlx UI needs an interactive terminal ({reason}) — run `{prog.command()}` "
-            f"in a terminal, or use `{prog.command()} fleet ls --json`",
+            f"the rlx UI needs an interactive terminal ({reason}) — run `{prog.word()}` "
+            f"in a terminal, or use `{prog.word()} fleet ls --json`",
             error="not_a_tty",
             detail=reason,
         )

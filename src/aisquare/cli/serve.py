@@ -247,7 +247,7 @@ def serve(
     stderr_console().print(
         f"Serving the orchestrator for {project.root.name or project.id} at "
         f"{_client_url(bind, port)} "
-        f"(bearer token required — see `{prog.command()} serve --show-token`). Ctrl-C stops."
+        f"(bearer token required — see `{prog.word()} serve --show-token`). Ctrl-C stops."
     )
     _announce_open_bind(bind)
     mcp_server.run_http(bind=bind, port=port)

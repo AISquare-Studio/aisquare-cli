@@ -1798,7 +1798,7 @@ class StartCaptain(ActionRow):
     def __init__(self) -> None:
         super().__init__(action_text("▶", "Start captain"), id="captain-empty")
         self.selection_key = START_CAPTAIN_KEY
-        self.tooltip = f"No captain running — start one ({prog.command()} captain)"
+        self.tooltip = f"No captain running — start one ({prog.word()} captain)"
 
     def message(self) -> Message:
         return CaptainRequested()
@@ -1992,7 +1992,7 @@ def fleet_title_tooltip(live_total: int) -> str | None:
         return None
     return (
         f"{live_total} agent{'' if live_total == 1 else 's'} live across every project, "
-        f"the captain excluded — {prog.command()} fleet capacity"
+        f"the captain excluded — {prog.word()} fleet capacity"
     )
 
 

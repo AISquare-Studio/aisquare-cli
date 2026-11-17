@@ -120,7 +120,7 @@ def seat_rule() -> str:
     """What a seat may be: the names ``launch`` accepts, with the word hints print."""
     return (
         "a seat is a role (coder, tester, …), a numbered seat of one (coder2), or a name "
-        f"already bound — the names `{prog.command()} launch` accepts"
+        f"already bound — the names `{prog.word()} launch` accepts"
     )
 
 
@@ -729,7 +729,7 @@ class NewBindScreen(ModalScreen[str | None]):
             seat, bound = self._editing or ("", RoleLaunchProfile())
             header = Text("Edit bind" if self._editing else "New bind", style="bold")
             header.append(
-                f" — a seat `{prog.command()} team bind` pins: binary, environment, args",
+                f" — a seat `{prog.word()} team bind` pins: binary, environment, args",
                 style="dim",
             )
             yield Static(header, classes="picker-header")

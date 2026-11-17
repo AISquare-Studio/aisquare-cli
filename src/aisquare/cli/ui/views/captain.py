@@ -82,7 +82,7 @@ BAR_WORKER = "captain-bar"
 def start_command() -> str:
     """What serves the page (T3's ``captain voice``; ``--mode``/``--speaker`` write the same
     keys), with the word hints print."""
-    return prog.line("captain", "voice")
+    return prog.words("captain", "voice")
 
 
 PROBE_TIMEOUT_S = 0.3

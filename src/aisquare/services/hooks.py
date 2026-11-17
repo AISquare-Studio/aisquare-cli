@@ -423,7 +423,7 @@ def remember_the_model(
     except Exception as exc:  # the turn ended all the same; only the reading is lost
         sys.stderr.write(
             f"rlx: the agent's model was not read ({type(exc).__name__}: {exc}) — a "
-            f"restart starts the model it was launched with; run: {prog.command()} doctor\n"
+            f"restart starts the model it was launched with; run: {prog.word()} doctor\n"
         )
 
 
@@ -445,7 +445,7 @@ def remember_the_start(
     except Exception as exc:  # the session starts all the same; only the reading is lost
         sys.stderr.write(
             f"rlx: the agent's launch model was not read ({type(exc).__name__}: {exc}) "
-            f"— a restart compares with its launch flags; run: {prog.command()} doctor\n"
+            f"— a restart compares with its launch flags; run: {prog.word()} doctor\n"
         )
 
 
@@ -938,7 +938,7 @@ def check_before_limit(session_id: str, *, transcript_path: str | None = None) -
     except Exception as exc:  # the turn ended all the same; only the early move is lost
         sys.stderr.write(
             f"rlx: before-limit check failed ({type(exc).__name__}: {exc}) — the agent "
-            f"was not moved before its limit; run: {prog.command()} doctor\n"
+            f"was not moved before its limit; run: {prog.word()} doctor\n"
         )
 
 
@@ -1518,7 +1518,7 @@ def capture_prompt(
     except Exception as exc:
         sys.stderr.write(
             f"rlx: prompt not recorded — the config could not be read to check "
-            f"capture.enabled ({type(exc).__name__}); run: {prog.command()} doctor\n"
+            f"capture.enabled ({type(exc).__name__}); run: {prog.word()} doctor\n"
         )
         record = False
     text = prompt if record and prompt is not None and prompt.strip() else None
@@ -1546,7 +1546,7 @@ def capture_prompt(
         # the agent's context. Silence was the regression that doctrine fixed.
         sys.stderr.write(
             f"rlx: prompt not recorded ({type(exc).__name__}: {exc}) — this turn has no "
-            f"prompt log and no CI row; run: {prog.command()} doctor\n"
+            f"prompt log and no CI row; run: {prog.word()} doctor\n"
         )
         return ""
     block = ""

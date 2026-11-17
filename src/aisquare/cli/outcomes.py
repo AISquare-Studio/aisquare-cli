@@ -119,7 +119,7 @@ def render_outcomes(result: WeeklyOutcomes) -> list[str]:
     lines += ["", *_effort_lines(result)]
     lines += ["", *_direction_lines(result)]
     lines += ["", *_delta_lines(result)]
-    lines += ["", f"How each figure is measured: {prog.command()} outcomes --help"]
+    lines += ["", f"How each figure is measured: {prog.word()} outcomes --help"]
     return lines
 
 

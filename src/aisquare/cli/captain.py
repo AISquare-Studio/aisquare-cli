@@ -207,8 +207,8 @@ def captain(
         console.print(f"the captain is already running ({agent.id})", markup=False, highlight=False)
     if not attaching:
         console.print(
-            f"attach from a terminal with `{prog.command()} captain`; ask it with "
-            f'`{prog.command()} captain "what is up"`',
+            f"attach from a terminal with `{prog.word()} captain`; ask it with "
+            f'`{prog.word()} captain "what is up"`',
             markup=False,
             highlight=False,
         )
@@ -314,7 +314,7 @@ def serve(
     """Run the captain's Actions MCP server: the tools the captain acts through."""
     if not stdio:
         raise typer.BadParameter(
-            f"the captain's server speaks stdio only — run: {prog.command()} captain serve --stdio",
+            f"the captain's server speaks stdio only — run: {prog.word()} captain serve --stdio",
             param_hint="'--stdio'",
         )
     problem = dependency_error()

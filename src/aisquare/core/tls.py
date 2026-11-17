@@ -58,7 +58,7 @@ SOURCE_DEFAULT = "the interpreter's default CA paths"
 #: SSL_CERT_FILE replaces the default CA file, so the bundle it names holds both (m3).
 CERT_FIX = "if a proxy re-signs HTTPS, set SSL_CERT_FILE to a bundle of its CA and the public roots"
 #: The hint a certificate failure carries, short enough for a usage row. ``{program}`` is the
-#: word hints print (``core.program.command``), filled in where the hint is written
+#: word hints print (``core.program.word``), filled in where the hint is written
 #: (``services.claude_accounts.usage_fix``).
 CERT_HINT = f"{CERT_FIX}, or see `{{program}} doctor --live`"
 #: What to do about a bundle that will not load: doctor's fix line, and a usage row's hint.

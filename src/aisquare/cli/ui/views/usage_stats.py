@@ -99,7 +99,7 @@ def empty_text() -> str:
         "No usage recorded yet.\n\n"
         "The agents' transcripts are read when this page opens, and each session rlx "
         "launches adds its turns as it goes. If you use an agent and still see this, run "
-        f"`{prog.command()} metrics backfill`."
+        f"`{prog.word()} metrics backfill`."
     )
 
 

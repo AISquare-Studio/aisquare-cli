@@ -264,11 +264,9 @@ def _list_roots(name: str | None) -> None:
         label = spec.label if spec is not None else name
         others = len(every)
         if others == 1:
-            also = f" 1 is recorded for another agent: {prog.command()} agents status --roots"
+            also = f" 1 is recorded for another agent: {prog.word()} agents status --roots"
         elif others:
-            also = (
-                f" {others} are recorded for other agents: {prog.command()} agents status --roots"
-            )
+            also = f" {others} are recorded for other agents: {prog.word()} agents status --roots"
         else:
             also = ""
         console.print(f"no folder is recorded for {label}.{also}", markup=False)
@@ -301,7 +299,7 @@ def _forget_root(name: str, path: Path, *, yes: bool) -> None:
     known = next((root for root in agents_service.sandbox_roots() if root.path == real), None)
     if known is None:
         fail(
-            f"no folder is recorded at {real} — see: {prog.command()} agents status --roots",
+            f"no folder is recorded at {real} — see: {prog.word()} agents status --roots",
             error="no_such_root",
             ref=str(real),
         )

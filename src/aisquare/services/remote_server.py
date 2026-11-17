@@ -257,7 +257,7 @@ def read_only_reason() -> str:
     """Every 403 ``read_only`` says this, and so do the page and the modal: the two ways to
     turn writes on, both of which write the one switch in ``remote.json``."""
     return (
-        f"writes are off — on the machine run `{prog.command()} remote allow-write on`, "
+        f"writes are off — on the machine run `{prog.word()} remote allow-write on`, "
         "or switch Allow write actions in the R panel"
     )
 
@@ -4821,7 +4821,7 @@ def too_many_devices() -> str:
     """409 ``too_many_devices``: an unlock past :data:`DEVICES_MAX` with every device signed in."""
     return (
         f"{DEVICES_MAX} devices are signed in already — sign one out on its Devices screen, or "
-        f"revoke one on the machine ({prog.command()} remote revoke), then unlock again"
+        f"revoke one on the machine ({prog.word()} remote revoke), then unlock again"
     )
 
 
@@ -4847,7 +4847,7 @@ def revoke_unsaved() -> str:
     sentence names the command that makes the revoke hold (review of #243, round 4)."""
     return (
         "revoked on the running Remote, but the machine's ~/.aisquare/remote.json would not write "
-        f"(a full disk, or a home it may not write): once it can, run  {prog.command()} remote "
+        f"(a full disk, or a home it may not write): once it can, run  {prog.word()} remote "
         "revoke {device}  "
         "on the machine, as until it is saved a change to that file from a shell, or a Remote "
         "turned on again, would take the device back"
@@ -4868,7 +4868,7 @@ def revoke_later() -> str:
     """503 ``remote_state_unwritable`` for a revoke refused as :class:`LaterRemoteState`."""
     return (
         "revoked on the running Remote, but the machine's ~/.aisquare/remote.json was upgraded by "
-        f"a later rlx while this Remote ran, and is never written over: run  {prog.command()} "
+        f"a later rlx while this Remote ran, and is never written over: run  {prog.word()} "
         "remote "
         "revoke {device}  on the machine with that rlx, or the next Remote it starts takes "
         "the device back"
@@ -5023,14 +5023,14 @@ def locked_out() -> str:
     return (
         "too many wrong passwords in the last 30 min — new unlocks are paused; a phone that was "
         "unlocked here before can still unlock. On the machine: "
-        f"{prog.command()} remote regenerate-password --new-link"
+        f"{prog.word()} remote regenerate-password --new-link"
     )
 
 
 def lockout_alert() -> str:
     return (
         "New unlocks are paused for 30 min. If that is not you, run "
-        f"`{prog.command()} remote regenerate-password --new-link` at the machine."
+        f"`{prog.word()} remote regenerate-password --new-link` at the machine."
     )
 
 
@@ -5046,7 +5046,7 @@ def _unlock_lockout_alert(runtime: Runtime) -> None:
     until = UnlockBudget(runtime).budget_exhausted_until()
     log.warning(
         "remote: %d wrong passwords in 30 min — new unlocks are paused until %s; if that is "
-        f"not you, rotate the link: {prog.command()} remote regenerate-password --new-link",
+        f"not you, rotate the link: {prog.word()} remote regenerate-password --new-link",
         UNLOCK_GLOBAL_FAILURES,
         "?" if until is None else _iso_seconds(until),
     )
@@ -7085,7 +7085,7 @@ def _remote_quit_now(undone: str | None = None) -> NoReturn:
         if left:
             _remote_say(
                 f"Remote quit with {', '.join(left)} unfinished: "
-                f"the rlx UI (`{prog.command()}`) shows where the agent is"
+                f"the rlx UI (`{prog.word()}`) shows where the agent is"
             )
         if undone is not None:
             _remote_say(undone)
@@ -7214,12 +7214,12 @@ its own over it."""
 
 def served_by() -> dict[str, str]:
     """What :data:`SERVE_NOTE_NAME`'s ``by`` names: the process that claimed the home."""
-    return {"serve": f"`{prog.command()} remote serve`", "panel": "rlx's R panel"}
+    return {"serve": f"`{prog.word()} remote serve`", "panel": "rlx's R panel"}
 
 
 def served_by_someone() -> str:
     """Who serves, said when the note cannot be read (:func:`remote_served_by`)."""
-    return f"rlx's R panel, or `{prog.command()} remote serve` in another shell"
+    return f"rlx's R panel, or `{prog.word()} remote serve` in another shell"
 
 
 CLAIM_PATIENCE_SECONDS = 0.05
@@ -7232,7 +7232,7 @@ def remote_already_on() -> str:
     """Why Remote will not start while another process serves this home."""
     return (
         "another Remote is on for this ~/.aisquare (the rlx UI's R panel, or "
-        f"`{prog.command()} remote serve` in another shell) — turn it off first: two would share "
+        f"`{prog.word()} remote serve` in another shell) — turn it off first: two would share "
         "one link, one passphrase, one auto-off and one list of phones"
     )
 
@@ -7544,12 +7544,12 @@ PAGE_DOES_NOT_RESOLVE = (
 
 def page_dist_remedy() -> str:
     """The way out a refusal of a ``--dist`` build offers last (:func:`_page_open_to_others`)."""
-    return f"or install it with {prog.command()} remote install-page and serve without --dist"
+    return f"or install it with {prog.word()} remote install-page and serve without --dist"
 
 
 def page_installed_remedy() -> str:
     """The way out a refusal of the installed build offers last (:func:`_page_open_to_others`)."""
-    return f"or install the build again with {prog.command()} remote install-page"
+    return f"or install the build again with {prog.word()} remote install-page"
 
 
 PAGE_OPEN_TO_OTHERS = (
@@ -8499,7 +8499,7 @@ def _remote_serve_off(state: Runtime, server: Any) -> str | None:
             log.warning("remote: auto-off could not revoke the devices: %s", exc)
             failure = (
                 f"its devices could not be revoked ({exc}), so their cookies would open the "
-                f"next Remote: run `{prog.command()} remote revoke --all` once "
+                f"next Remote: run `{prog.word()} remote revoke --all` once "
                 "~/.aisquare/remote.json "
                 "can be written"
             )

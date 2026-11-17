@@ -84,7 +84,7 @@ def _cost_of_failing_open(hook: str, exc: Exception, *, cost: str | None = None)
     else:
         reason = f"{hook} failed ({type(exc).__name__}: {exc})"
     cost = cost or _COST.get(hook, "this hook did nothing")
-    typer.echo(f"rlx: {reason} — {cost}; run: {prog.command()} doctor", err=True)
+    typer.echo(f"rlx: {reason} — {cost}; run: {prog.word()} doctor", err=True)
 
 
 def _payload() -> dict[str, Any]:

@@ -154,7 +154,7 @@ def _quit_others(
     question = "Quit the other asqs?" if many else QUESTION
     if not (ask or _confirm)(question):
         raise _refuse(
-            f"Quit {'them' if many else 'it'} first — {hand} — then start {prog.command()} again."
+            f"Quit {'them' if many else 'it'} first — {hand} — then start {prog.word()} again."
         )
     for other in differing:
         _say(
@@ -172,7 +172,7 @@ def _quit_others(
                 f"rlx {other.version} (pid {other.pid}) has not quit within {wait_s:g} s: it "
                 f"may be finishing work it does not cut off (a restart of the fleet), which it "
                 f"says on its screen. Quit it there — {_by_hand(other)} — then start "
-                f"{prog.command()} again."
+                f"{prog.word()} again."
             )
         _say(f"✓ rlx {other.version} (pid {other.pid}) quit")
 
@@ -215,7 +215,7 @@ def _pass(
             # and, unregistered, unseen by every asq after it (review of #462).
             raise _refuse(
                 f"Another rlx is checking this home and has held its gate over "
-                f"{instances.GATE_WAIT_SECONDS:g} s. Start {prog.command()} again in a moment."
+                f"{instances.GATE_WAIT_SECONDS:g} s. Start {prog.word()} again in a moment."
             ) from None
         except OSError as exc:
             # A home asq cannot write in: it runs, as it did before there was a registry, and

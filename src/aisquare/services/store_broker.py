@@ -2230,7 +2230,7 @@ def _remedy(inside: Path, writes: SandboxWrites) -> str:
             )
             return (
                 f"install rlx outside {which} {elsewhere}, connect the agent's "
-                f"hooks with that install (its own `{prog.command()} agents connect codex`), "
+                f"hooks with that install (its own `{prog.word()} agents connect codex`), "
                 "then launch again"
             )
     return (
@@ -2342,7 +2342,7 @@ def sandbox_environment(
                     f"{key} names {', '.join(entries)}, which this agent's sandbox may "
                     "write, and its hooks, connected by an older rlx, would import "
                     "from there outside the sandbox: connect them again "
-                    f"(`{prog.command()} agents connect codex`), which runs them with -E"
+                    f"(`{prog.word()} agents connect codex`), which runs them with -E"
                 )
     return said
 

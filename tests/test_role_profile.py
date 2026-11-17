@@ -788,8 +788,8 @@ class TestEnvFiles:
         agent.write_text('#!/bin/sh\nprintf "[%s]" "$GH_TOKEN"\n', encoding="utf-8")
         agent.chmod(0o755)
         # The `aisquare` the role's terminal has on PATH: this checkout's; and the word the
-        # printed line names its own commands with (`core.program.command`, `rlx` here).
-        for name in {"aisquare", program.command()}:
+        # printed line names its own commands with (`core.program.word`, `rlx` here).
+        for name in {"aisquare", program.word()}:
             cli = agent.with_name(name)
             cli.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m aisquare "$@"\n')
             cli.chmod(0o755)

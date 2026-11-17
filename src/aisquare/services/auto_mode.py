@@ -304,11 +304,11 @@ def _mode_step(role: str, config: FleetSettings) -> str:
     if role in config.roles and config.roles[role].permission:
         # The role's one permission for every agent wins over its Claude Code mode.
         return (
-            f"{prog.command()} config set fleet.roles.{role}.permission workspace:ask (or "
+            f"{prog.word()} config set fleet.roles.{role}.permission workspace:ask (or "
             "workspace:never; any approvals but auto)"
         )
     if role in config.roles:
-        return f"{prog.command()} config set fleet.roles.{role}.permission_mode acceptEdits"
+        return f"{prog.word()} config set fleet.roles.{role}.permission_mode acceptEdits"
     return (
         f'add a `[fleet.roles.{role}]` table with `permission_mode = "acceptEdits"` '
         f"to {paths.config_path()}"
@@ -337,7 +337,7 @@ def _remedy(
     return (
         f"Until the proxy fix ({SDK_ISSUE_URL}), one of: {mode}; a lighter Claude config dir "
         "for the fleet's account (fewer MCP connectors — their schemas are most of the "
-        f"baseline); or run agents untraced: {prog.command()} explainability disable"
+        f"baseline); or run agents untraced: {prog.word()} explainability disable"
     )
 
 
@@ -490,7 +490,7 @@ def spawn_note(
         f"auto mode behind the explainability proxy: {why} — expect its tool calls to be refused "
         f"({SDK_ISSUE}); set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
         f"`{_restart_off_auto(project, label)}` (its session resumes), or see "
-        f"`{prog.command()} explainability doctor` ({CHECK_NAME})"
+        f"`{prog.word()} explainability doctor` ({CHECK_NAME})"
     )
 
 

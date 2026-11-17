@@ -72,10 +72,10 @@ def _typed() -> str:
     words = list(TYPED.get())
     argv = sys.argv[1:]
     if words and argv[-len(words) :] == words and "captain" in argv[: -len(words)]:
-        return install_route.command_line([prog.command(), *argv])
+        return install_route.command_line([prog.word(), *argv])
     json_root = get_state().json_output and "--json" not in words
     return install_route.command_line(
-        [prog.command(), *(["--json"] if json_root else []), "captain", *words]
+        [prog.word(), *(["--json"] if json_root else []), "captain", *words]
     )
 
 

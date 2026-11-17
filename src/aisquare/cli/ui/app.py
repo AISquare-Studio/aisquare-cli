@@ -677,7 +677,7 @@ class HelpScreen(ModalScreen[None]):
     @staticmethod
     def board_heading() -> str:
         """The help's Board heading, which names the full-screen board's command."""
-        return f"Board (a project's Board tab, and {prog.command()} board -w)"
+        return f"Board (a project's Board tab, and {prog.word()} board -w)"
 
     MAC_COPY_KEYS: ClassVar[tuple[tuple[str, str], ...]] = (
         ("ctrl+c", "copy a pane's highlight again; ⌘C stays the terminal's"),
@@ -2311,7 +2311,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 name="doctor",
                 status=CheckStatus.fail,
                 detail=f"the checks crashed: {reason}",
-                fix=f"Run it in a terminal for the full traceback: {prog.command()} doctor",
+                fix=f"Run it in a terminal for the full traceback: {prog.word()} doctor",
             )
         ]
         self.query_one("#doctor", DoctorView).show(
@@ -4489,7 +4489,7 @@ def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
 
     args = [arg for arg in hand_off if arg not in _ASQS_OWN_FLAGS]
     button = _HANDED_OVER.get(args[0], args[0]) if args else "the hand-over"
-    command = install_route.command_line([prog.command(), *selfcli.global_flags(), *args])
+    command = install_route.command_line([prog.word(), *selfcli.global_flags(), *args])
     return f"⚠ {button} did not run: rlx quit at the Ctrl-C — `{command}` runs it"
 
 

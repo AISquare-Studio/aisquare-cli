@@ -4390,7 +4390,7 @@ def _render_board(
         if len(open_tasks) > _BOARD_TASKS:
             # The human board names the command with the word hints print; an agent's
             # (`me`, its start pack) with its protocol's (Q9, brief 180).
-            word = prog.command() if me is None else prog.PROTOCOL
+            word = prog.word() if me is None else prog.PROTOCOL
             lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `{word} task list`")
     if events:
         lines.append("recent updates:")

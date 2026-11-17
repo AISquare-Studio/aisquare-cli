@@ -220,7 +220,7 @@ def serve_remote(
         console.print(f"password: {info.password}", markup=False)
         gate = "ON — writes are audited" if writes else "off (read-only)"
         console.print(
-            f"write actions: {gate}   · toggle: {prog.command()} remote allow-write on|off",
+            f"write actions: {gate}   · toggle: {prog.word()} remote allow-write on|off",
             markup=False,
         )
         if deadline is None:
@@ -377,7 +377,7 @@ def _unlock_failures_line(status: dict[str, object]) -> str:
     if until:
         line += (
             f" — new unlocks paused until {until}; if that is not you, rotate the link: "
-            f"{prog.command()} remote regenerate-password --new-link"
+            f"{prog.word()} remote regenerate-password --new-link"
         )
     return line
 

@@ -137,7 +137,7 @@ def onboard_command(root: Path) -> str:
     single quotes, which cmd.exe passes on as part of the path. Every surface that says how
     to add a directory back names it so: the refusals, the Remove dialog and its toast
     (review of #259, round 20)."""
-    return prog.line("project", "onboard", str(root))
+    return prog.words("project", "onboard", str(root))
 
 
 def forget_command(root: Path, *, purge: bool = False) -> str:
@@ -145,7 +145,7 @@ def forget_command(root: Path, *, purge: bool = False) -> str:
     :func:`onboard_command` names an add: a prune's root-gone hint, :meth:`BoardReader.frees`
     and doctor's capture-off line each built it by hand (review of #259, round 42, 8/11)."""
     purged = ["--purge"] if purge else []
-    return prog.line("project", "forget", *purged, str(root))
+    return prog.words("project", "forget", *purged, str(root))
 
 
 class NotAdded(RuntimeError):
@@ -250,7 +250,7 @@ def resolve(ref: str) -> ProjectInfo:
 
 def fleet_command(verb: str, project: ProjectInfo, *words: str, word: str | None = None) -> str:
     """``rlx fleet <verb> --project <ref> [words…]`` for ``project``, quoted for this shell
-    (review of #257). ``rlx`` is the word hints print (``core.program.command``); ``word``
+    (review of #257). ``rlx`` is the word hints print (``core.program.word``); ``word``
     names another, as the agents' role cycles do (``core.program.PROTOCOL``). Always with
     the project: alone, a fleet command acts on the active project, not on the one a message
     is about (review of #259, round 19). ``words`` (a label, a flag) come after it, quoted
@@ -263,7 +263,7 @@ def fleet_command(verb: str, project: ProjectInfo, *words: str, word: str | None
     capture-off line each built it (round 20)."""
     ref = project.codename or project.id
     if word is None:
-        return prog.line("fleet", verb, "--project", ref, *words)
+        return prog.words("fleet", verb, "--project", ref, *words)
     return command_line([word, "fleet", verb, "--project", ref, *words])
 
 
@@ -1111,7 +1111,5 @@ def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
     try:
         hooks_service.start_code_index(project, full=refresh)
     except Exception as exc:  # an index is optional; the onboard is not
-        return f"not started ({exc}) — build it with `{prog.command()} code index`"
-    return (
-        f"building in the background — `{prog.command()} code index --status` says when it is ready"
-    )
+        return f"not started ({exc}) — build it with `{prog.word()} code index`"
+    return f"building in the background — `{prog.word()} code index --status` says when it is ready"

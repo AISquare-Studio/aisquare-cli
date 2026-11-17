@@ -242,7 +242,7 @@ def _invoke(
     try:
         return run(args, cwd=cwd), None
     except Exception as exc:
-        return None, f"could not run {_typed(args)}: {exc or type(exc).__name__}"
+        return None, f"could not run {_shown_command(args)}: {exc or type(exc).__name__}"
 
 
 def _json_object(stdout: str) -> dict[str, object] | None:
@@ -351,7 +351,7 @@ def run_doctor(
     """
     args = ["--json", "doctor"]
     if on_line is not None:
-        on_line(f"$ {_typed(args)}")
+        on_line(f"$ {_shown_command(args)}")
     result, asked = _invoke(run, args, cwd)
     if result is None:
         return [], asked
@@ -396,7 +396,7 @@ def onboard(
         return OnboardOutcome(path=path, reason=reason, log=tuple(lines))
 
     init_args = ["--json", "init", *INIT_FLAGS, str(path)]
-    say(f"$ {_typed(init_args)}")
+    say(f"$ {_shown_command(init_args)}")
     result, asked = _invoke(run, init_args, path)
     if result is None:
         return failed(asked or "init could not be run")
@@ -497,7 +497,7 @@ KNOWN_FIXES: tuple[_KnownFix, ...] = (
 )
 
 _MENTION = re.compile(
-    # A hint starts its command with whichever word ``core.program.command`` gave it, ``rlx``
+    # A hint starts its command with whichever word ``core.program.word`` gave it, ``rlx``
     # or ``aisquare``: a button is read from either (#135), so a reworded hint keeps its button.
     r"(?:"
     + "|".join(re.escape(word) for word in program.PRINTED)
@@ -526,8 +526,8 @@ class FixCommand:
     @property
     def label(self) -> str:
         """The command as the fix it came from prints it, quoted for this shell, with the word
-        hints start with (``core.program.line``)."""
-        return program.line(*self.argv)
+        hints start with (``core.program.words``)."""
+        return program.words(*self.argv)
 
     @property
     def sign_in_slot(self) -> int | None:
@@ -537,10 +537,10 @@ class FixCommand:
         return int(self.argv[2])
 
 
-def _typed(args: Sequence[str]) -> str:
+def _shown_command(args: Sequence[str]) -> str:
     """``rlx <args>`` as the onboarding transcript and its errors show what ran: the words
-    joined, as they always were, with the word hints print (``core.program.command``)."""
-    return " ".join((program.command(), *args))
+    joined, as they always were, with the word hints print (``core.program.word``)."""
+    return " ".join((program.word(), *args))
 
 
 def _sign_in_tokens() -> frozenset[str]:

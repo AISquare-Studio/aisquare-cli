@@ -52,7 +52,7 @@ if TYPE_CHECKING:  # the ledger's model only, never loaded for another command
 
 
 def _default_empty() -> str:
-    return f'No context entries yet. Add one with: {prog.command()} remember "…"'
+    return f'No context entries yet. Add one with: {prog.word()} remember "…"'
 
 
 USAGE_ERROR: type[Exception] = typer.BadParameter.__bases__[0]
@@ -221,7 +221,7 @@ def emit_injection_record(record: InjectionRecord | None) -> None:
         return
     console = stdout_console()
     if record is None:
-        console.print(f"No context has been injected yet. Run: {prog.command()} inject")
+        console.print(f"No context has been injected yet. Run: {prog.word()} inject")
         return
     total = record.user_count + record.project_count
     console.print(f"Last injection: {record.injected_at.isoformat()}")
@@ -315,12 +315,12 @@ def emit_projects(
         noun = "directory" if hidden == 1 else "directories"
         stdout_console().print(
             f"No projects added yet — {hidden} captured {noun} hidden (a hooked session ran "
-            f"there): {prog.command()} project list --all; add one: {prog.command()} project "
+            f"there): {prog.word()} project list --all; add one: {prog.word()} project "
             "onboard <path>"
         )
         return
     if not projects:
-        stdout_console().print(f"No projects registered yet. Run: {prog.command()} init")
+        stdout_console().print(f"No projects registered yet. Run: {prog.word()} init")
         return
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
@@ -351,8 +351,8 @@ def emit_projects(
     if captured:
         stdout_console().print(
             "captured = a hooked session ran there; add it on purpose to list it "
-            f"({prog.command()} project onboard <path>), or drop the stale ones: "
-            f"{prog.command()} project prune --captured-only"
+            f"({prog.word()} project onboard <path>), or drop the stale ones: "
+            f"{prog.word()} project prune --captured-only"
         )
 
 
@@ -764,9 +764,9 @@ def connect_hint() -> str:
     hooked = [adapter for adapter in adapters() if adapter.capabilities.hooks]
     named = [a for a in hooked if a.release_stage == "stable" or here(a)] or hooked
     if len(named) == 1:
-        return f"Connect {named[0].label}: {prog.command()} agents connect {named[0].id}"
+        return f"Connect {named[0].label}: {prog.word()} agents connect {named[0].id}"
     return "Connect your coding agent: " + " or ".join(
-        f"{prog.command()} agents connect {agent.id}{stage_mark(agent)}" for agent in named
+        f"{prog.word()} agents connect {agent.id}{stage_mark(agent)}" for agent in named
     )
 
 
@@ -835,7 +835,7 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
     if not summary.turns_with_tokens:
         console.print(
             "note: no token counts on these turns yet — the Stop hook reads them off the "
-            f"transcript; per-session totals: {prog.command()} metrics tokens"
+            f"transcript; per-session totals: {prog.word()} metrics tokens"
         )
 
 
@@ -1022,7 +1022,7 @@ def emit_status(report: StatusReport) -> None:
     console.print(f"home:     {report.home}")
     console.print(f"project:  {project.root.name or project.id} ({project.id})")
     hidden = (
-        f" (+{report.captured_count} captured, hidden: {prog.command()} project list --all)"
+        f" (+{report.captured_count} captured, hidden: {prog.word()} project list --all)"
         if report.captured_count
         else ""
     )

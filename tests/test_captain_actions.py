@@ -686,7 +686,7 @@ def test_the_stdio_server_closes_itself_after_the_idle_deadline(
     err = proc.stderr.read()
     proc.stderr.close()
     assert proc.returncode == 0, err
-    assert b"aisquare captain serve --stdio: no client messages for 1s" in err
+    assert b"rlx captain serve --stdio: no client messages for 1s" in err
     assert time.perf_counter() - started < 30
 
 

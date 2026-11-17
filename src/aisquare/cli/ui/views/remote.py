@@ -50,14 +50,12 @@ LOCAL_ONLY = (
 
 def served_elsewhere_state() -> str:
     """The state, while another process serves Remote from this home and this one does not."""
-    return (
-        f"on in another process ({prog.command()} remote serve, or another rlx) — turn it off there"
-    )
+    return f"on in another process ({prog.word()} remote serve, or another rlx) — turn it off there"
 
 
 def served_elsewhere_link() -> str:
     """The link row, then: that Remote's link is the other process's to show."""
-    return f"its link is shown where it runs; {prog.command()} remote status prints the local one"
+    return f"its link is shown where it runs; {prog.word()} remote status prints the local one"
 
 
 LOCAL_ZONE: tzinfo | None = None
@@ -284,7 +282,7 @@ class RemotePanel(ModalScreen[None]):
             return Text(f"{failed} failed unlocks in 30 min", style="dim")
         return Text(
             f"{failed} failed unlocks in 30 min — new unlocks paused; rotate the link: "
-            f"{prog.command()} remote regenerate-password --new-link"
+            f"{prog.word()} remote regenerate-password --new-link"
         )
 
     def _paint_devices(self, devices: list[dict[str, Any]]) -> None:

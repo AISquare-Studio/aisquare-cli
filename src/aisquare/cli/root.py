@@ -90,7 +90,7 @@ def init(
             "so whether it holds this machine's explainability configuration cannot be "
             "checked. Fix the file, or re-run with --yes to replace it with the defaults.",
             error="reinit_would_discard_unreadable_config",
-            hint=f"{prog.command()} init --reinit --yes",
+            hint=f"{prog.word()} init --reinit --yes",
         )
     except lifecycle_service.ExplainabilityResetRefused as refused:
         fail(
@@ -98,7 +98,7 @@ def init(
             f"({refused.summary}) and nothing afterwards would report it missing. "
             f"Re-run with --yes if that is what you mean.",
             error="reinit_would_discard_explainability",
-            hint=f"{prog.command()} init --reinit --yes",
+            hint=f"{prog.word()} init --reinit --yes",
         )
     emit_setup(report)
 

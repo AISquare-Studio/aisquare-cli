@@ -473,7 +473,7 @@ class UpgradePlan:
             f"{self.target} reads config.toml without this release's defaults under it, so "
             f"what your file leaves to them takes {self.target}'s there: "
             f"{', '.join(self.config_defaults_lost)}. Your own settings read the same in "
-            f"both; to keep one of these there, set it after the move (`{prog.command()} config "
+            f"both; to keep one of these there, set it after the move (`{prog.word()} config "
             "set "
             f"{first} …`)"
         )
@@ -522,7 +522,7 @@ class UpgradePlan:
             f"{self.target} denies a role only the tools its extra_args name, which your "
             f"config leaves without them: {', '.join(self.tools_regained)} would launch there "
             f"with {'those tools' if one else 'theirs'}. To keep them denied there, add the "
-            f"deny to {whose} extra_args before the move (`{prog.command()} config set "
+            f"deny to {whose} extra_args before the move (`{prog.word()} config set "
             f"fleet.roles.{role}.extra_args '--disallowedTools={names}'`)"
         )
 
@@ -1241,7 +1241,7 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         held = f"{which} is {latest}; " if pypis else ""
         notes.append(f"{held}uv picks {version} here{now}")
     notes.append(
-        f"rlx, `{prog.command()} serve` and `{prog.command()} remote serve` processes that were "
+        f"rlx, `{prog.word()} serve` and `{prog.word()} remote serve` processes that were "
         "already "
         f"running keep {plan.current} until they are restarted"
     )
@@ -1464,7 +1464,7 @@ HOME_MARKERS = ("config.toml", "context.db", "agents.json")
 
 
 def fleet_shutdown() -> str:
-    return f"{prog.command()} fleet shutdown --all --yes"
+    return f"{prog.word()} fleet shutdown --all --yes"
 
 
 def fleet_forget() -> str:
@@ -1474,7 +1474,7 @@ def fleet_forget() -> str:
 def remote_off() -> str:
     """How a Remote that is on in another process is turned off (:func:`running_remote`)."""
     return (
-        f"press Ctrl-C where `{prog.command()} remote serve` runs, or turn Remote off in that "
+        f"press Ctrl-C where `{prog.word()} remote serve` runs, or turn Remote off in that "
         "rlx's R panel"
     )
 
@@ -2289,9 +2289,9 @@ def launchers_refusal(
         they=they, holds="holds" if one else "hold"
     )
     waiting = (
-        f"a session started with `{prog.command()} launch` is"
+        f"a session started with `{prog.word()} launch` is"
         if one
-        else f"{len(launchers)} sessions started with `{prog.command()} launch` are"
+        else f"{len(launchers)} sessions started with `{prog.word()} launch` are"
     )
     again = again or f"run `rlx {command}` again"
     named = ", ".join(launchers)
@@ -2724,7 +2724,7 @@ def _uninstall_notes(
     for plugin in plan.lasting_plugins if purged else plan.plugins:
         notes.append(plugin_note(plugin))
     notes.append(
-        f"a running `{prog.command()} serve` keeps running until you stop it; "
+        f"a running `{prog.word()} serve` keeps running until you stop it; "
         f"{stays_installed(plan)} stay installed"
     )
     return notes

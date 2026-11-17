@@ -52,17 +52,24 @@ def test_the_longest_hold_is_the_ceiling_and_two_ticks_of_asyncio_s_clock(
 ) -> None:
     """asyncio's wait may end up to two resolutions of its clock early: one lag, one by which
     its loop runs a timer before its time. windows-py3.12 (``GetTickCount64``, 15.625 ms) held
-    a thread 71 ms (#526's run 44083919544); within this bound, never past it."""
+    a thread 71 ms (#526's run 44083919544); within this bound, never past it.
+
+    On the running platform first, whatever its clock: windows-py3.12's own is 81.25 ms (a
+    pin that took it for CEILING could not pass there, tester 12813). Then on windows-py3.12's
+    monotonic clock alone: perf_counter's resolution, about 100 ns there, is not asyncio's
+    (mutant M11)."""
     real = time.get_clock_info
 
-    def windows_py312(name: str) -> Any:
-        info = real(name)
-        return types.SimpleNamespace(**{**vars(info), "resolution": 0.015625})
+    def windows_py312(name: Any) -> Any:
+        if name != "monotonic":
+            return real(name)
+        return types.SimpleNamespace(**{**vars(real(name)), "resolution": 0.015625})
 
     here = timers.longest_hold()
-    monkeypatch.setattr(timers.time, "get_clock_info", windows_py312)
+    resolution = time.get_clock_info("monotonic").resolution
+    monkeypatch.setattr(time, "get_clock_info", windows_py312)
 
-    assert timers.CEILING <= here < timers.CEILING + 0.001
+    assert here == pytest.approx(timers.CEILING + 2 * resolution), "this platform's own"
     assert timers.longest_hold() == pytest.approx(0.08125)
     assert timers.longest_hold() >= 0.071, "the hold measured on windows-py3.12 is within it"
 
@@ -162,6 +169,21 @@ async def _until(cond: Callable[[], bool], limit: float = 3.0) -> None:
         await asyncio.sleep(0.005)
 
 
+def _early(mode: str) -> float:
+    """How early a reset timer may fire, by its sleep.
+
+    - Off Windows, "here" is Textual's own sleep, which is asyncio's. Its wait may end up to
+      two resolutions of its clock early (``timers.longest_hold``), and a reset fires after
+      two waits: nothing on a precise clock, 62.5 ms under windows-py3.12's.
+    - Textual's on Windows, the emulated one and asq's all end on a precise sleep: 2 ms at
+      most, as Textual's own allows.
+    """
+    slack = 0.002
+    if mode == "here" and sys.platform != "win32":
+        slack += 2 * 2 * time.get_clock_info("monotonic").resolution
+    return slack
+
+
 @pytest.mark.parametrize("mode", MODES)
 def test_a_timer_reset_mid_wait_fires_at_textual_s_new_time(
     monkeypatch: pytest.MonkeyPatch, mode: str
@@ -183,9 +205,10 @@ def test_a_timer_reset_mid_wait_fires_at_textual_s_new_time(
     _run(body)
 
     # Textual's reset: the wait in flight runs out (0.3 / 0.2), then a whole interval.
-    assert len(once) == 1 and 0.6 - 0.002 <= once[0] < 0.6 + 0.12, once
-    assert 0.4 - 0.002 <= every[0] < 0.4 + 0.12, every
-    assert 0.6 - 0.002 <= every[1] < 0.6 + 0.12, every
+    early = _early(mode)
+    assert len(once) == 1 and 0.6 - early <= once[0] < 0.6 + 0.12, once
+    assert 0.4 - early <= every[0] < 0.4 + 0.12, every
+    assert 0.6 - early <= every[1] < 0.6 + 0.12, every
     if mode == "asq on windows":
         assert held and max(held) <= timers.longest_hold(), sorted(held)[-3:]
 

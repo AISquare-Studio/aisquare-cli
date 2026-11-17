@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from aisquare.core import config as core_config
 from aisquare.core import paths
 from aisquare.core.config import (
+    DONT_ASK_STOP,
     AppConfig,
     RoleLaunchProfile,
     UiSettings,
@@ -50,16 +51,65 @@ def ui_settings() -> UiSettings:
         return UiSettings()
 
 
-def stop_without_asking() -> UiSettings:
-    """Save ``[ui] confirm_stop = false`` — the Stop dialog's *Don't ask again* — and return
-    ``[ui]`` as the file now holds it.
+def asks_first(kind: str) -> bool:
+    """Whether the ``kind`` action (``stop``, ``pause``, ``restart``, or one added later) asks
+    before it acts: not when its box was ticked *Don't ask again* (``[ui] dont_ask``).
+
+    Read from the file at each press, never held: a tick in one asq is the other's answer at
+    its next press. An unreadable file asks (:func:`ui_settings` fails open to the defaults):
+    a box too many costs a click, a stop too many costs an agent."""
+    return kind not in ui_settings().dont_ask
+
+
+def stop_asking_first(kind: str) -> UiSettings:
+    """A box's *Don't ask again*, ticked at its verb: ``kind`` joins ``[ui] dont_ask`` (Stop's
+    in ``confirm_stop`` too, for older releases), and ``[ui]`` is returned as the file now
+    holds it.
 
     Raises what ``load_config`` raises on an unreadable file, having written nothing: a
     default config saved over a broken one would lose every setting it held for one
     preference.
     """
     config = load_config()
-    config.ui.confirm_stop = False
+    if kind not in config.ui.dont_ask:
+        config.ui.dont_ask.append(kind)
+    config.ui.confirm_stop = DONT_ASK_STOP not in config.ui.dont_ask
+    save_config(config)
+    return config.ui
+
+
+def ask_first_again() -> UiSettings:
+    """*Ask again before every action*: ``[ui] dont_ask`` emptied, every kind in it, those a
+    later release added included, and Stop's ``confirm_stop`` back on. Returns ``[ui]`` as the
+    file now holds it; raises, having written nothing, as :func:`stop_asking_first` does."""
+    config = load_config()
+    config.ui.dont_ask = []
+    config.ui.confirm_stop = True
+    save_config(config)
+    return config.ui
+
+
+DISPLAY_KEYS = (
+    "show_usage",
+    "show_agent_marks",
+    "show_live_count",
+    "fade_unfocused",
+    "bell",
+    "board_autoscroll",
+    "always_show_project_path",
+)
+"""The ``[ui]`` switches App settings' Display tab saves as each is toggled."""
+
+
+def set_display_choice(key: str, on: bool) -> UiSettings:
+    """One Display switch, saved alone at its toggle, and ``[ui]`` as the file now holds it.
+
+    ``KeyError`` for a key that is not one of :data:`DISPLAY_KEYS`; raises, having written
+    nothing, on an unreadable file, as :func:`stop_asking_first` does."""
+    if key not in DISPLAY_KEYS:
+        raise KeyError(key)
+    config = load_config()
+    setattr(config.ui, key, on)
     save_config(config)
     return config.ui
 
@@ -84,6 +134,7 @@ def set_value(key: str, value: str) -> str:
     """
     data = load_config().model_dump(mode="json")
     _assign(data, key, value)
+    _stop_set_in_step(data, key)
     try:
         config = AppConfig.model_validate(data)
     except ValidationError as exc:
@@ -315,6 +366,21 @@ def _assign(data: dict[str, Any], key: str, value: str) -> None:
     # prints for it — so a list can be set from a shell at all; pydantic would
     # refuse the bare string.
     node[parts[-1]] = _split_list(value) if isinstance(node[parts[-1]], list) else value
+
+
+def _stop_set_in_step(data: dict[str, Any], key: str) -> None:
+    """``config set`` of Stop's choice in either key says it in both: the one set wins.
+
+    ``UiSettings`` believes whichever of ``confirm_stop`` and ``dont_ask`` says Stop does
+    not ask, so ``confirm_stop true`` beside a ``dont_ask`` that names ``stop`` would have
+    read back false; the other key is made to agree before the two are validated."""
+    ui = data.get("ui")
+    if not isinstance(ui, dict):
+        return
+    if key == "ui.confirm_stop":
+        ui["dont_ask"] = [kind for kind in ui.get("dont_ask", []) if kind != DONT_ASK_STOP]
+    elif key == "ui.dont_ask":
+        ui["confirm_stop"] = True
 
 
 def _split_list(value: str) -> list[str]:

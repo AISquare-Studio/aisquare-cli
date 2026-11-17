@@ -27,56 +27,36 @@ Nothing here writes to the board. Ending an agent's row is the service's
 business and what it records is the service's to record; a board write from the
 UI would be a second account of one fact.
 
-**Don't ask again** (``[ui] confirm_stop``). The tick, unticked as the dialog opens,
-is saved when Stop or Force is pressed with it ticked
-(``settings_service.stop_without_asking``) — at the press, whatever the stop then
-answers: it is an answer to the question, not to the stop. Cancel and Escape save nothing. From then
-on the shell stops at once, with no dialog (``FleetApp.on_stop_agent``), through
-:func:`start_stop` and :func:`stop_answer` — the call and the reading of its answer
-this dialog makes, so the two paths cannot drift. A file that cannot be read is not
-written over: the stop goes on, and a toast says the dialog will ask again.
+**Don't ask again** is the box's own (``cli/ui/confirm_action.py``, R17): ticked at Stop or
+Force, ``stop`` joins ``[ui] dont_ask`` (and ``confirm_stop`` goes off, for older releases),
+at the press, whatever the stop then answers: it is an answer to the question, not to the
+stop. Cancel and Escape save nothing. From then on the shell stops at once, with no dialog
+(``FleetApp.on_stop_agent``), through :func:`start_stop` and :func:`stop_answer` — the call
+and the reading of its answer this dialog makes, so the two paths cannot drift. A file that
+cannot be read is not written over: the stop goes on, and a toast says the dialog will ask
+again.
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import Any, ClassVar
+from typing import Any
 
 from rich.text import Text
-from textual import on
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.app import App
 from textual.dom import DOMNode
-from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Static
+from textual.widgets import Button, Checkbox
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.confirm_action import ASK_AGAIN_WHERE, STOP, ConfirmActionScreen
 from aisquare.cli.ui.sidebar import ALIVE_STATES
-from aisquare.cli.ui.views.app_settings import UiSettingsChanged
-from aisquare.core.config import UiSettings
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from aisquare.services import settings as settings_service
 
 STOP_WORKER = "agent-stop"
 DONT_ASK = "stop-dont-ask"
-"""The dialog's *Don't ask again* tick: ``[ui] confirm_stop``."""
-ASK_AGAIN_WHERE = "⚙ Settings ▸ App settings ▸ User preferences ▸ Advanced"
-"""Where *Ask before stopping an agent* is: the toast that says the dialog will not ask
-again names it, since nothing else on screen will once the dialog has gone."""
-
-_BOX_CSS = """
-StopAgentScreen { align: center middle; }
-StopAgentScreen > Vertical { width: 72; max-width: 92%; height: auto; border: heavy $accent;
-                             background: $surface; padding: 0 1; }
-StopAgentScreen .picker-header { height: auto; padding: 1 0; }
-StopAgentScreen .picker-note { height: auto; }
-StopAgentScreen .picker-buttons { height: auto; align-horizontal: right; padding-bottom: 1; }
-StopAgentScreen .picker-buttons Button { margin-left: 2; }
-StopAgentScreen #stop-dont-ask { border: none; height: 1; padding: 0 1; margin-bottom: 1; }
-StopAgentScreen #stop-dont-ask:focus { text-style: bold reverse; }
-"""
+"""The dialog's *Don't ask again* tick: ``stop`` in ``[ui] dont_ask``."""
+__all__ = ["ASK_AGAIN_WHERE", "DONT_ASK", "StopAgentScreen"]
 
 
 def grace_seconds() -> float:
@@ -159,23 +139,18 @@ def warn_release_failed(app: App[Any], receipt: fleet_service.StopReceipt) -> No
         app.notify(f"claims: {receipt.release_failed}", severity="warning", timeout=8, markup=False)
 
 
-class StopAgentScreen(ModalScreen[FleetAgent | None]):
-    """One question before an agent is stopped; dismisses with the ended row, or ``None``."""
+class StopAgentScreen(ConfirmActionScreen[FleetAgent | None]):
+    """One question before an agent is stopped; dismisses with the ended row, or ``None``.
 
-    DEFAULT_CSS = _BOX_CSS
-    BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
-    AUTO_FOCUS = "#stop-confirm"
-    """Stop, as before *Don't ask again* came first in the box: ``x`` then Enter stops. The
-    app's ``*`` focused the first focusable, the tick, and Enter ticked it (review of #477,
-    M1)."""
+    The confirmation box every agent action shares (:class:`ConfirmActionScreen`), with
+    *Force*, and the stop run here: a refusal stays on its status line, the agent untouched.
+    Stop has the focus on open, so ``x`` then Enter stops."""
 
     def __init__(self, project: ProjectInfo, status: FleetAgentStatus) -> None:
-        super().__init__()
+        super().__init__(STOP)
         self.project = project
         self.status = status
         self._stopping = False
-        self.saved_ui: UiSettings | None = None
-        """``[ui]`` as *Don't ask again* saved it, once it has; ``None`` until then."""
 
     @property
     def label(self) -> str:
@@ -243,29 +218,17 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
             )
         return text
 
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static(self.question(), classes="picker-header", id="stop-question")
-            yield Static(id="stop-status", classes="picker-note")
-            yield Checkbox("Don't ask again", False, id=DONT_ASK)
-            with Horizontal(classes="picker-buttons"):
-                yield Button("Stop", id="stop-confirm", variant="primary")
-                force = Button("Force", id="stop-force", variant="warning")
-                force.display = self.has_process()
-                yield force
-                yield Button("Cancel", id="stop-cancel")
+    def extra_buttons(self) -> list[Button]:
+        force = Button("Force", id="stop-force", variant="warning")
+        force.display = self.has_process()
+        return [force]
 
     # Names no other function in the tree has: tests/test_config_writes_stay_in_the_cli.py
     # follows calls by NAME to ``save_config`` (*Don't ask again* reaches it), and a
     # ``_run`` here put every caller of any ``_run`` — hooks and the MCP server among them —
     # in reach of a config write.
-    @on(Button.Pressed, "#stop-confirm")
-    def _stop_pressed(self) -> None:
-        self._stop_confirmed(force=False)
-
-    @on(Button.Pressed, "#stop-force")
-    def _force_pressed(self) -> None:
-        self._stop_confirmed(force=True)
+    def confirmed(self, which: str) -> None:
+        self._stop_confirmed(force=which == "force")
 
     def _stop_confirmed(self, *, force: bool) -> None:
         """One stop at a time, off the UI thread: tmux, the grace wait and the kill all block."""
@@ -275,30 +238,6 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         self._save_dont_ask()
         start_stop(self, self.project, self.status.agent, force=force)
 
-    def _save_dont_ask(self) -> None:
-        """Ticked at a Stop or a Force: ``[ui] confirm_stop = false``, once, and the shell told
-        (``UiSettingsChanged``), which stops at once from then on and shows the Settings
-        switch off. An unreadable file is left as it is: the stop goes on regardless."""
-        if self.saved_ui is not None or not self.query_one(f"#{DONT_ASK}", Checkbox).value:
-            return
-        try:
-            self.saved_ui = settings_service.stop_without_asking()
-        except Exception as exc:
-            self.app.notify(
-                f"Don't ask again was not saved, so Stop will ask again: {refusal(exc)}",
-                severity="warning",
-                timeout=8,
-                markup=False,
-            )
-            return
-        self.app.post_message(UiSettingsChanged(self.saved_ui))
-        self.app.notify(
-            f"Stop will not ask again. {ASK_AGAIN_WHERE} turns it back on.",
-            timeout=10,
-            markup=False,
-        )
-
-    @on(Button.Pressed, "#stop-cancel")
     def action_cancel(self) -> None:
         if self._stopping:
             # The exit command is already typed and the kill is on its way: closing now
@@ -313,11 +252,6 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
             button.disabled = running
         self.query_one(f"#{DONT_ASK}", Checkbox).disabled = running or self.saved_ui is not None
         self._note(f"stopping {self.label} …" if running else None, style="dim")
-
-    def _note(self, text: str | None, *, style: str = "bold red") -> None:
-        note = self.query_one("#stop-status", Static)
-        note.update(Text(text, style=style) if text else "")
-        note.display = bool(text)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != STOP_WORKER:

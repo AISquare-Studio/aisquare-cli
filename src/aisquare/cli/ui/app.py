@@ -36,7 +36,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +62,7 @@ from textual.worker_manager import WorkerManager
 from aisquare.cli.ui.attach import NewAccountRequested, ReturnTo
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.board import BoardPanel, board_help
+from aisquare.cli.ui.confirm_action import STOP
 from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.fresh import ConfirmFresh, FreshChoice, StartFresh
 from aisquare.cli.ui.groups import (
@@ -195,6 +196,7 @@ from aisquare.core import clipboard, experimental, feature_use, instances, paths
 from aisquare.core import program as prog
 from aisquare.core import sharing as usage_share_core
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.config import UiSettings
 from aisquare.core.console import stderr_console
 from aisquare.core.feature_use import view_feature
 from aisquare.core.store import ContextStore, store_session
@@ -947,9 +949,17 @@ class Panes(Horizontal):
         )
         divider = self.divider
         divider.set_class(side is self.sidebar, "-neighbour-focused")
+        # Display ▸ *Fade the side without the keyboard* (``[ui] fade_unfocused``, R17): off,
+        # neither side fades; the divider's light still says where the keyboard is.
+        ui = getattr(self.app, "ui_shown", None)
+        fading = ui is None or ui.fade_unfocused
         for child in self.children:
             if child is not divider:
-                self._fade(child, side is not None and child is not side)
+                self._fade(child, fading and side is not None and child is not side)
+
+    def mark_focus(self) -> None:
+        """:meth:`_mark_focus`, for the shell once the fade's switch changed."""
+        self._mark_focus()
 
     def _fade(self, side: Widget, faded: bool) -> None:
         """Fade ``side`` or bring it back, restyling ``side`` alone.
@@ -1295,6 +1305,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         accounts read, handed on when it lands; a read that failed leaves it as it was."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         ui = settings_service.ui_settings()
+        self.ui_shown: UiSettings = ui
+        """``[ui]`` as the shell last applied it: Display's switches (R17) are applied again only
+        where a re-read changed them, so a board's ``a`` held is not undone by an unrelated
+        save."""
         self.always_show_project_path = ui.always_show_project_path
         """``[ui] always_show_project_path``, read once at the start and again when App
         settings saves, reloads or resets (``UiSettingsChanged``) — never on the refresh tick,
@@ -1397,6 +1411,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.watch(self.content, "current", self._content_switched, init=False)
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
         self.sidebar.set_active_only(_ui_state(ACTIVE_ONLY_KEY) == "1")
+        self._show_display_on_sidebar(self.ui_shown)
         # The first frame is read here, on the UI thread, before anything is drawn: there
         # is nothing on screen yet for the read to hold up, and what was open last time is
         # reopened from it below. Every frame after it is read in a thread (`refresh_data`).
@@ -2084,11 +2099,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             # for it. Asked of the switcher that holds the views, as `_forget_views` does,
             # whatever screen is on top (review of #267, 2).
             self.session_usage = accounts_service.limit_by_slot(s for _, s, _ in result)
-            content = self.content
-            for view in content.query(AgentView):
-                view.show_usage(self.session_usage)
-            for project_view in content.query(ProjectView):
-                project_view.show_usage(self.session_usage)
+            self._show_usage_in_views()
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
             self.refresh_headroom()
 
@@ -2447,7 +2458,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         session to attach to at once, not "no live tmux session" until the next tick
         (review of #267, 7). Not a frame whose fleet read failed open, as
         :meth:`_feed_open_views` does not push one."""
-        view = ProjectView(project, id=view_id, usage=self.session_usage, named=self.agents_named)
+        view = ProjectView(project, id=view_id, usage=self.shown_usage, named=self.agents_named)
         snapshot = self.snapshot
         if snapshot is not None and snapshot.notices.get(project.id) is None:
             view.refresh_status(
@@ -2500,10 +2511,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _agent_view(self, status: FleetAgentStatus, view_id: str) -> AgentView:
         """The view for one agent's row: the captain's has its own bar (T4)."""
         if self._is_the_captain(status.agent):
-            return CaptainView(
-                status, usage=self.session_usage, named=self.agents_named, id=view_id
-            )
-        return AgentView(status, usage=self.session_usage, named=self.agents_named, id=view_id)
+            return CaptainView(status, usage=self.shown_usage, named=self.agents_named, id=view_id)
+        return AgentView(status, usage=self.shown_usage, named=self.agents_named, id=view_id)
 
     def on_captain_requested(self, event: CaptainRequested) -> None:
         """*▶ Start captain*: the captain's view when live, else the Spawn dialog preset to it.
@@ -3332,6 +3341,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if project is None or status is None:
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return
+        # Read at the press (R17): a box ticked in another asq on this home holds here at once.
+        self.confirm_stop = settings_service.asks_first(STOP)
         if self.confirm_stop or event.ask:
             self.push_screen(StopAgentScreen(project, status), callback=self.stop_finished)
             return
@@ -4013,7 +4024,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         once from now on, and App settings, kept alive once opened, shows its switch off."""
         self.confirm_stop = event.ui.confirm_stop
         for settings in self.query(AppSettingsView):
-            settings.follow_ui(event.ui)  # the Stop dialog's save: the switch reads it now
+            settings.follow_ui(event.ui)  # a box's save: the reset's line reads it now
+        self._show_display(event.ui)
         always = event.ui.always_show_project_path
         if always != self.always_show_project_path:
             self.always_show_project_path = always
@@ -4030,6 +4042,47 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.sidebar.show_update(None)
         else:
             self.check_release()
+
+    @property
+    def shown_usage(self) -> Mapping[int, float]:
+        """The accounts' session use the info lines show: none while Display ▸ *Account usage
+        next to agents* is off (``[ui] show_usage``)."""
+        return self.session_usage if self.ui_shown.show_usage else {}
+
+    def _show_usage_in_views(self) -> None:
+        """Every open info line's use, as :attr:`shown_usage` says. Asked of the switcher that
+        holds the views, as ``_forget_views`` does, whatever screen is on top (review of #267,
+        2)."""
+        content = self.content
+        for view in content.query(AgentView):
+            view.show_usage(self.shown_usage)
+        for project_view in content.query(ProjectView):
+            project_view.show_usage(self.shown_usage)
+
+    def _show_display_on_sidebar(self, ui: UiSettings) -> None:
+        self.sidebar.show_display(
+            usage=ui.show_usage, marks=ui.show_agent_marks, live_count=ui.show_live_count
+        )
+
+    def _show_display(self, ui: UiSettings) -> None:
+        """App settings ▸ Display (R17), applied now, each switch only where ``ui`` changed it
+        from what the shell last applied: the usage after agents, their marks, the live count,
+        the fade, the bell (read as it rings), the board's autoscroll."""
+        before, self.ui_shown = self.ui_shown, ui
+        self._show_display_on_sidebar(ui)
+        if ui.show_usage != before.show_usage:
+            self._show_usage_in_views()
+        if ui.fade_unfocused != before.fade_unfocused:
+            self.query_one(Panes).mark_focus()
+        if ui.board_autoscroll != before.board_autoscroll:
+            for panel in self.query(BoardPanel):
+                if panel.autoscroll != ui.board_autoscroll:
+                    panel.action_toggle_autoscroll()
+
+    def bell(self) -> None:
+        """The terminal bell, unless Display ▸ *Bell when an agent needs you* is off."""
+        if self.ui_shown.bell:
+            super().bell()
 
     def on_usage_read(self, event: UsageRead) -> None:
         """The Accounts page read usage (a tick, or *↻ Refresh usage*): the dot reads the

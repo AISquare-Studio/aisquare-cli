@@ -20,13 +20,14 @@ from pathlib import Path
 import pytest
 from textual.notifications import Notification, Notifications
 from textual.pilot import Pilot
-from textual.widgets import Button, Checkbox, Switch
+from textual.widgets import Button, Checkbox, Static
 from textual.widgets._toast import Toast
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.sidebar import AgentSelected, AppSettingsSelected
 from aisquare.cli.ui.stop import ASK_AGAIN_WHERE, DONT_ASK, StopAgentScreen, grace_seconds
 from aisquare.cli.ui.views.agent import AgentView
+from aisquare.cli.ui.views.app_settings import NOT_ASKING_LINE
 from aisquare.core import paths
 from aisquare.core.config import load_config, overrides
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
@@ -227,8 +228,8 @@ def test_the_dialog_opens_on_stop_so_x_then_enter_stops_as_before(
 def test_ticked_stop_or_force_saves_dont_ask_again_for_good(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch, button: str, force: bool
 ) -> None:
-    """App settings is opened FIRST, so the page the switch is on was read before the save
-    and is kept alive: it must follow the dialog's save, not the file it read."""
+    """App settings is opened FIRST, so the page the reset's line is on was read before the
+    save and is kept alive: it must follow the dialog's save, not the file it read."""
     live = one_coder(tmp_path, script)
     recorder = stopper(monkeypatch, live.agent)
 
@@ -236,8 +237,8 @@ def test_ticked_stop_or_force_saves_dont_ask_again_for_good(
         app = fleet_app(pilot)
         app.post_message(AppSettingsSelected())
         await settle(app)
-        switch = app.query_one("#ui-confirm-stop", Switch)
-        seen: dict[str, object] = {"switch before": switch.value}
+        line = app.query_one(f"#{NOT_ASKING_LINE}", Static)
+        seen: dict[str, object] = {"line before": str(line.render())}
         dialog = await open_stop_dialog(pilot, app, CODER)
         dialog.query_one(f"#{DONT_ASK}", Checkbox).value = True
         dialog.query_one(button, Button).press()
@@ -245,7 +246,7 @@ def test_ticked_stop_or_force_saves_dont_ask_again_for_good(
         await pilot.pause()
         seen.update(
             {
-                "switch after": switch.value,
+                "line after": str(line.render()),
                 "app asks": app.confirm_stop,
                 "dialog open": isinstance(app.screen, StopAgentScreen),
                 "said": messages(),
@@ -255,10 +256,11 @@ def test_ticked_stop_or_force_saves_dont_ask_again_for_good(
 
     seen = drive(go)
     assert recorder.calls == [("prj_a", "coder-auth", force, CODER)], "the stop it confirmed"
-    assert seen["switch before"] is True
+    assert seen["line before"] == "Every action asks first"
     assert load_config().ui.confirm_stop is False, "saved"
+    assert load_config().ui.dont_ask == ["stop"], "in both keys"
     assert seen["app asks"] is False, "the app holds it at once"
-    assert seen["switch after"] is False, "the Settings switch reads off"
+    assert seen["line after"] == "Not asking before: Stop", "Settings' line reads it"
     assert seen["dialog open"] is False
     toasts = seen["said"]
     assert isinstance(toasts, list)
@@ -272,7 +274,7 @@ def test_ticked_stop_or_force_saves_dont_ask_again_for_good(
         await settle(app)
         return (
             app.confirm_stop,
-            app.query_one("#ui-confirm-stop", Switch).value,
+            str(app.query_one(f"#{NOT_ASKING_LINE}", Static).render()) == "Every action asks first",
             isinstance(app.screen, StopAgentScreen),
         )
 

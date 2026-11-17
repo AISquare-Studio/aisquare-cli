@@ -24,6 +24,7 @@ from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
 from tests import toast_log
@@ -315,6 +316,9 @@ def test_restarting_the_captain_selects_its_new_row_and_keeps_the_doctor_global(
     """Restart on the captain's row: the service is asked with the home's board, the
     shell follows the new row as it does any agent's (#138), and the Doctor's
     scope stays the global one — the restart path scopes it too."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     seed(tmp_path, ("prj_aaa", "alpha", None))
     home = captain_state.home_project()
     exited = status(home.id, "captain", "captain", "exited", exit_status=130)

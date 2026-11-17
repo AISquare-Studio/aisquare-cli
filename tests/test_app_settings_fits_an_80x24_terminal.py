@@ -23,12 +23,14 @@ from textual.containers import Horizontal, Vertical
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Collapsible, Static, Switch, TabbedContent
+from textual.widgets import Button, Collapsible, Static, TabbedContent
 
 from aisquare.cli.ui.sidebar import AppSettingsSelected
 from aisquare.cli.ui.views.app_settings import (
     AGENT_ADVANCED,
     AGENT_TAB,
+    DISPLAY_CHOICES,
+    DISPLAY_TAB,
     PREFERENCES_ADVANCED,
     PREFERENCES_TAB,
     REMOTE_TAB,
@@ -54,7 +56,7 @@ def _whole(widget: Widget, port: Region) -> bool:
     return widget.region.area > 0 and port.contains_region(widget.region)
 
 
-def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> None:
+def test_at_80x24_the_tabs_keep_mains_rows_and_every_preference_is_on_screen() -> None:
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)
         app.post_message(AppSettingsSelected())
@@ -79,14 +81,25 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
         app.query_one("#role-perm-manager").scroll_visible(animate=False, top=True)
         await settle(app)
         seen["agent rows"] = sum(_whole(row, agent.region) for row in agent.query(".row"))
-        app.query_one("#app-settings-tabs", TabbedContent).active = PREFERENCES_TAB
+        tabs = app.query_one("#app-settings-tabs", TabbedContent)
+        # Display (R17): every switch one line, all of them whole as the tab opens, and its
+        # project-directory switch saved by the click that ticks it.
+        tabs.active = DISPLAY_TAB
+        await settle(app)
+        display = app.query_one("#display-settings")
+        seen["display"] = [
+            _whole(app.query_one(f"#{wid}"), display.region) for wid in DISPLAY_CHOICES
+        ]
+        seen["hint"] = _whole(app.query_one("#ui-always-show-path-about", Static), display.region)
+        await pilot.click("#ui-always-show-path")  # a click lands only on what is on screen
+        await settle(app)
+        # As a person goes there, by the tab's own label: the focus leaves the ticked switch,
+        # which held its tab up under a ``tabs.active`` set beneath it.
+        await pilot.click(f"#--content-tab-{PREFERENCES_TAB}")
         await settle(app)
         prefs = app.query_one("#user-preferences")
-        switch = app.query_one("#ui-always-show-path", Switch)
-        seen["switch"] = _whole(switch, prefs.region)
-        seen["hint"] = _whole(app.query_one("#ui-always-show-path-about", Static), prefs.region)
-        # The release check's switch, below Sidebar and shown as the tab opens (the owner's
-        # choice of three, for PR #301).
+        # The release check's switch, shown as the tab opens (the owner's choice of three,
+        # for PR #301).
         seen["updates"] = [
             _whole(app.query_one(wid), prefs.region)
             for wid in ("#updates-check", "#updates-check-about")
@@ -96,7 +109,6 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
         fold = app.query_one(f"#{PREFERENCES_ADVANCED}", Collapsible)
         seen["advanced"] = _whole(fold.query_one("CollapsibleTitle"), prefs.region)
         seen["scrolled"] = prefs.scroll_y
-        await pilot.click("#ui-always-show-path")  # a click lands only on what is on screen
         await pilot.click("#updates-check")
         await pilot.click("#save-settings")
         await settle(app)
@@ -108,11 +120,12 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
     assert seen["agent rows"] >= MAIN_WHOLE_ROWS, seen
     assert seen["buttons"] == [True, True, True], "Save, Reload and Reset all, whole"
     assert seen["note lines"] == 1
-    assert seen["switch"] is True and seen["hint"] is True, seen
+    assert seen["display"] == [True] * len(DISPLAY_CHOICES), seen
+    assert seen["hint"] is True, seen
     assert seen["updates"] == [True, True], "the release check's switch and its line, whole"
     assert seen["advanced"] is True, "User preferences' Advanced, on screen as the tab opens"
     assert seen["scrolled"] == 0
-    assert load_config().ui.always_show_project_path is True, "Save was reached and saved"
+    assert load_config().ui.always_show_project_path is True, "the tick was reached and saved"
     assert load_config().updates.check is False, "the release check's switch saved off"
 
 
@@ -130,6 +143,7 @@ def _shown(widget: Widget, body: Widget) -> bool:
 TABS = {
     AGENT_TAB: "#agent-settings",
     PREFERENCES_TAB: "#user-preferences",
+    DISPLAY_TAB: "#display-settings",
     REMOTE_TAB: "#remote-settings",
 }
 

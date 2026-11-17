@@ -283,9 +283,9 @@ def test_the_coders_note_never_names_a_connect_that_refuses(
     assert "so the fleet's coders may run without rlx" in row.detail, row
     assert f"connect cannot write the hooks in {claude}: {step_two.refused}" in row.detail, row
     assert "rlx agents connect" not in row.detail, "no Connect that refuses"
-    assert "may run without rlx: rlx agents connect claude-code runs it" in (
-        writable.detail
-    ), "control: where connect can write, the note names it"
+    assert "may run without rlx: rlx agents connect claude-code runs it" in (writable.detail), (
+        "control: where connect can write, the note names it"
+    )
 
 
 @posix_route
@@ -318,9 +318,9 @@ def test_the_coders_note_is_said_on_an_amber_row_too(
 
     assert row.status is CheckStatus.warn and str(other) in row.detail, row
     assert step_two.manager_only, step_two
-    assert "so the fleet's coders may run without rlx: rlx agents connect" in (
+    assert "so the fleet's coders may run without rlx: rlx agents connect" in (row.detail), (
         row.detail
-    ), row.detail
+    )
     buttons = [fix.argv for fix in fix_commands([row])]
     assert _CONNECT in buttons, "the bare Connect step 2 offers is a button here too"
 
@@ -644,10 +644,10 @@ def test_disconnect_names_a_repository_plugin_that_keeps_aisquare_running(
         assert result.exit_code == 0, result.output
         assert f"still enabled in {repo} ({scope} scope)" in result.stderr, result.stderr
         assert f"to stop it: {remove}" in result.stderr, result.stderr
-        assert "no aisquare hooks found" not in result.stderr, result.stderr
+        assert "no rlx hooks found" not in result.stderr, result.stderr
     assert status[0]["connected"] is True, "what the note explains: the plugin runs there"
     assert gone.exit_code == 0 and "still enabled" not in gone.stderr, gone.stderr
-    assert "no aisquare hooks found" in gone.stderr, "control: nothing runs, nothing removed"
+    assert "no rlx hooks found" in gone.stderr, "control: nothing runs, nothing removed"
 
 
 def test_disconnect_without_the_plugin_says_nothing_about_it(
@@ -1042,6 +1042,6 @@ def test_on_native_windows_connect_and_disconnect_say_nothing_about_the_plugin(
     posix = runner.invoke(app, ["agents", "connect", "claude-code"])
 
     assert disconnected.exit_code == 0 and connected.exit_code == 0, connected.output
-    assert "no aisquare hooks found" in disconnected.stderr, disconnected.stderr
+    assert "no rlx hooks found" in disconnected.stderr, disconnected.stderr
     assert "plugin" not in disconnected.stderr + connected.stderr
     assert "the aisquare plugin is enabled" in posix.stderr, "control: where the route runs"

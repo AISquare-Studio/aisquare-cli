@@ -22,6 +22,7 @@ from aisquare.cli.common import (
     fail,
     resolve_pool,
 )
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import agents_named
 from aisquare.models import CheckStatus
 from aisquare.services import context as context_service
@@ -68,7 +69,7 @@ def init(
         ),
     ] = None,
 ) -> None:
-    """Set up aisquare on this machine and connect your agents."""
+    """Set up rlx on this machine and connect your agents."""
     try:
         with expected_config_write_errors():
             report = lifecycle_service.initialize(
@@ -89,7 +90,7 @@ def init(
             "so whether it holds this machine's explainability configuration cannot be "
             "checked. Fix the file, or re-run with --yes to replace it with the defaults.",
             error="reinit_would_discard_unreadable_config",
-            hint="aisquare init --reinit --yes",
+            hint=f"{prog.command()} init --reinit --yes",
         )
     except lifecycle_service.ExplainabilityResetRefused as refused:
         fail(
@@ -97,7 +98,7 @@ def init(
             f"({refused.summary}) and nothing afterwards would report it missing. "
             f"Re-run with --yes if that is what you mean.",
             error="reinit_would_discard_explainability",
-            hint="aisquare init --reinit --yes",
+            hint=f"{prog.command()} init --reinit --yes",
         )
     emit_setup(report)
 

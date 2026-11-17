@@ -30,5 +30,5 @@ def stub(command: str, tier: str = "v0") -> NoReturn:
             json.dumps({"error": "not_implemented", "command": command}, separators=(",", ":"))
         )
     else:
-        stderr_console().print(f"⚠ aisquare {command} is not implemented yet (planned: {tier})")
+        stderr_console().print(f"⚠ rlx {command} is not implemented yet (planned: {tier})")
     raise typer.Exit(code=EXIT_NOT_IMPLEMENTED)

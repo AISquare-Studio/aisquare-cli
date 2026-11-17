@@ -1819,7 +1819,7 @@ def test_a_refusal_names_its_paths_as_they_are_and_its_remedy_by_the_root_that_h
     _installed_at(monkeypatch, project / ".venv")
     with pytest.raises(store_broker.LaunchRefused) as refusal:
         store_broker.refuse_inside(writes, project, codex)
-    assert "Install aisquare outside the project" in str(refusal.value)
+    assert "Install rlx outside the project" in str(refusal.value)
     above = beyond_tmp / "Code"
     with pytest.raises(store_broker.LaunchRefused) as refusal:
         store_broker.refuse_inside(writes, above, codex)

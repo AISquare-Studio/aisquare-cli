@@ -19,6 +19,7 @@ from aisquare.cli.common import (
     emit_prune,
     fail,
 )
+from aisquare.core import program as prog
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.state_file import StateUnwritableError
@@ -91,19 +92,22 @@ def list_(
             # one" and "add one" named a step already taken, and taken again it
             # changed nothing (review of #171, round 2).
             noun = "directory" if unlisted == 1 else "directories"
-            shown = ["aisquare", "project", "list", "--all", *(["--pinned"] if pinned else [])]
+            shown = [prog.command(), "project", "list", "--all", *(["--pinned"] if pinned else [])]
             if chosen is not None:
                 shown += ["--group", chosen.name]
             filtered = (
                 f"No listed {'pinned ' if pinned else ''}projects{where} — {unlisted} captured "
                 f"{noun} hidden (a hooked session ran there): "
-                f"{install_route.command_line(shown)}; add one: aisquare project onboard <path>"
+                f"{install_route.command_line(shown)}; add one: {prog.command()} project onboard "
+                "<path>"
             )
         elif pinned:
-            filtered = f"No pinned projects{where} — pin one: aisquare project pin <project>"
+            filtered = (
+                f"No pinned projects{where} — pin one: {prog.command()} project pin <project>"
+            )
         elif chosen is not None:
             filtered = (
-                f"No projects{where} — add one: aisquare project group add "
+                f"No projects{where} — add one: {prog.command()} project group add "
                 f"{_positional(chosen.name)} <project>"
             )
     emit_projects(
@@ -785,7 +789,9 @@ def group_list() -> None:
     pinned_groups = [e for e in arrangement.pinned if isinstance(e, groups_service.GroupEntry)]
     entries = [*pinned_groups, *arrangement.groups]
     if not entries:
-        stdout_console().print("No groups yet. Create one: aisquare project group create <name>")
+        stdout_console().print(
+            f"No groups yet. Create one: {prog.command()} project group create <name>"
+        )
         return
     for entry in entries:
         pin = " 📌" if entry.group.pinned_at is not None else ""

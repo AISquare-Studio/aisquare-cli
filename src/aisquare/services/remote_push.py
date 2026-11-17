@@ -169,7 +169,7 @@ LOCKOUT_TITLE = "Someone is guessing the Remote password"
 EXPIRY_TITLE = "Notifications on this phone end in 24 h"
 EXPIRY_BODY = "Its 7-day sign-in ends then; unlock again afterwards to keep them."
 TEST_TITLE = "Notifications work"
-TEST_BODY = "This is the test you asked for from aisquare remote."
+TEST_BODY = "This is the test you asked for from rlx remote."
 
 PushTransport = Callable[[str, dict[str, str], bytes], int]
 """Endpoint, headers, encrypted body → the push service's HTTP status. Raises on a network

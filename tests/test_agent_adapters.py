@@ -80,7 +80,7 @@ def _stat_error(path: Path) -> str:
 #: shell read, set or not: never "unset it", never first.
 _REPOINT_FIX = (
     "point CLAUDE_CONFIG_DIR at another directory this user can write, "
-    "then start asq or aisquare again from that shell"
+    "then start rlx again from that shell"
 )
 
 
@@ -353,10 +353,10 @@ def test_connect_refuses_an_agent_it_has_no_hooks_for(
 
     later = f"; support is planned for {planned}" if planned else ""
     assert (human.exit_code, machine.exit_code) == (1, 1)
-    assert human.output.strip() == f"✗ aisquare can't connect {label} yet{later}"
+    assert human.output.strip() == f"✗ rlx can't connect {label} yet{later}"
     assert ("planned for" in human.output) == (planned is not None), human.output
     assert json.loads(machine.stdout) == {"error": "unsupported_agent", "ref": name}
-    assert not paths.aisquare_home().exists(), "a refusal must not build the aisquare home"
+    assert not paths.aisquare_home().exists(), "a refusal must not build the rlx home"
     assert list(agent_dir.iterdir()) == [], f"nothing may be written under ~/.{name}"
 
     (isolated_agent_home / ".claude").mkdir()
@@ -388,7 +388,7 @@ def test_init_reports_the_refusal_as_a_note_and_records_nothing(
 
     assert result.exit_code == 0, result.output
     notes = json.loads(result.stdout)["notes"]
-    assert "Could not connect cursor: aisquare can't connect Cursor yet" in " ".join(notes), notes
+    assert "Could not connect cursor: rlx can't connect Cursor yet" in " ".join(notes), notes
     listed = runner.invoke(app, ["--json", "agents", "list"])
     connected = {agent["name"]: agent["connected"] for agent in json.loads(listed.stdout)}
     assert connected == {"claude-code": False, "cursor": False, "codex": False}, connected
@@ -745,7 +745,7 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     assert row.fix == _REPOINT_FIX, "no repair of a home this machine does not have"
     assert welcome.refused == reason, welcome
     assert json.loads(clicked.stdout)["detail"] == reason, clicked.stdout
-    assert paths.aisquare_home().exists() == built, "a refusal builds no aisquare home"
+    assert paths.aisquare_home().exists() == built, "a refusal builds no rlx home"
     assert list(work.iterdir()) == [], "nothing is made in the cwd"
     import dataclasses
 
@@ -2389,7 +2389,7 @@ def test_disconnect_refuses_hooks_it_cannot_take_out_and_keeps_the_record(
 
     assert human.exit_code == 1, human.output
     assert human.output.startswith(f"✗ cannot take the hooks out of {claude_home}: its "), human
-    assert "disconnect again, or take aisquare's hooks out of it by hand" in human.output
+    assert "disconnect again, or take rlx's hooks out of it by hand" in human.output
     payload = json.loads(machine.stdout)  # exactly one object
     assert (payload["error"], payload["ref"]) == ("agent_file_unreadable", "claude-code")
     assert str(payload["detail"]).startswith(f"cannot take the hooks out of {claude_home}: ")

@@ -37,7 +37,7 @@ manager    fable→opus→sonnet    effort=high      ( 0) → fable [optimistic]
 tester     sonnet→opus          effort=high      ( 0) → sonnet [optimistic]
 reviewer   sonnet→opus          effort=high      ( 0) → sonnet [optimistic]
 ui-tester  sonnet→opus          effort=high      ( 0) → sonnet [optimistic]  role_args=--chrome
-Resolution shown without probing — `aisquare team spawn <role>` verifies live.
+Resolution shown without probing — `rlx team spawn <role>` verifies live.
 """
 
 BOUND_0_9_2 = {
@@ -132,7 +132,7 @@ manager    fable→opus→sonnet    effort=high      ( 0) → fable [optimistic]
 tester     sonnet→opus          effort=high      ( 0) → sonnet [optimistic]
 reviewer   sonnet→opus          effort=high      ( 0) → sonnet [optimistic]
 ui-tester  sonnet→opus          effort=high      ( 0) → sonnet [optimistic]  bin=claude2 [config]  role_args=--chrome
-Resolution shown without probing — `aisquare team spawn <role>` verifies live.
+Resolution shown without probing — `rlx team spawn <role>` verifies live.
 """  # noqa: E501 - 0.9.2's ui-tester line, whole
 
 #: 0.9.2's `team spawn coder` ✓ line, cut at its mission, then what follows it.

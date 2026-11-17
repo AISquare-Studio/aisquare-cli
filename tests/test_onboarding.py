@@ -546,8 +546,7 @@ def test_apply_fix_reports_a_failure_in_the_cli_words_and_never_raises(tmp_path:
     result = apply_fix(CONNECT, tmp_path, run=run)
     assert not result.ok and result.returncode == 1
     assert result.summary() == (
-        "✗ rlx agents connect claude-code: "
-        "rlx agents connect claude-code failed: not_installed"
+        "✗ rlx agents connect claude-code: rlx agents connect claude-code failed: not_installed"
     )
     crashed = apply_fix(CONNECT, tmp_path, run=_raising)
     assert not crashed.ok and crashed.returncode is None

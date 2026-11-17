@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from aisquare.core import experimental, spawn
+from aisquare.core import program as prog
 from aisquare.core.paths import aisquare_home, cache_dir, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
@@ -2023,7 +2024,8 @@ def resolve_profile(
             refusal = (
                 f"{role} reads {key} from {path}, a relative path, which each launch would "
                 f"look for in its own working directory — not launching {role} without it. "
-                f"Bind it by its full path: aisquare team bind {role} --env-file {key}=<path>"
+                f"Bind it by its full path: {prog.command()} team bind {role} --env-file "
+                f"{key}=<path>"
             )
             continue
         try:
@@ -2031,7 +2033,7 @@ def resolve_profile(
         except ValueError as exc:
             refusal = (
                 f"{role} reads {key} from {path}, which {exc} — not launching {role} without it. "
-                f"Fix the file, or unbind it: aisquare team bind {role} --unset {key}"
+                f"Fix the file, or unbind it: {prog.command()} team bind {role} --unset {key}"
             )
     return LaunchProfile(
         env=env,

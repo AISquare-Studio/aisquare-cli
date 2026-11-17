@@ -166,7 +166,7 @@ def test_a_frame_that_could_not_read_the_registry_leaves_the_chip_as_it_was(
 def test_instances_lists_nothing_on_a_home_with_no_asq(runner: CliRunner) -> None:
     result = runner.invoke(cli_app, ["instances"])
     assert result.exit_code == 0, result.output
-    assert "No asq is running on this home." in result.output
+    assert "No rlx is running on this home." in result.output
 
     as_json = runner.invoke(cli_app, ["instances", "--json"])
     assert as_json.exit_code == 0, as_json.output

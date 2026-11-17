@@ -2257,7 +2257,7 @@ def test_an_empty_list_names_the_captured_directories_it_hides(
 
     listed = " ".join(runner.invoke(app, ["project", "list"]).stdout.split())
     assert "No projects registered yet" not in listed
-    assert "1 captured directory hidden" in listed and "aisquare project list --all" in listed
+    assert "1 captured directory hidden" in listed and "rlx project list --all" in listed
     status = " ".join(runner.invoke(app, ["status"]).stdout.split())
     assert "0 project(s) registered (+1 captured, hidden" in status
     assert _json(runner.invoke(app, ["--json", "status"]).stdout)["captured_count"] == 1

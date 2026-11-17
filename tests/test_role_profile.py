@@ -29,7 +29,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
-from aisquare.core import harness, paths
+from aisquare.core import harness, paths, program
 from aisquare.core.agent_adapters import claude_code
 from aisquare.core.config import (
     FLEET_DENY_TOOLS,
@@ -710,7 +710,7 @@ class TestEnvFiles:
         assert got.refusal is not None and got.file_env == {}
         assert got.refusal.startswith(f"reviewer reads GH_TOKEN from {path}, which "), got.refusal
         assert ("cannot be read" if shape == "missing" else "is empty") in got.refusal
-        assert "aisquare team bind reviewer --unset GH_TOKEN" in got.refusal
+        assert "rlx team bind reviewer --unset GH_TOKEN" in got.refusal
 
     def test_launch_hands_the_value_to_the_agent_and_prints_none_of_it(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any], tmp_path: Path
@@ -758,7 +758,7 @@ class TestEnvFiles:
         machine = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
 
         assert human.exit_code == 0 and machine.exit_code == 0, human.output + machine.output
-        read = f"aisquare team read-env-file GH_TOKEN {shlex.quote(str(token))}"
+        read = f"rlx team read-env-file GH_TOKEN {shlex.quote(str(token))}"
         assert f'GH_TOKEN="$({read})"' in human.output
         assert "GH_TOKEN [file]" in human.output
         assert TOKEN not in human.output and TOKEN not in machine.output
@@ -787,10 +787,12 @@ class TestEnvFiles:
         agent.parent.mkdir()
         agent.write_text('#!/bin/sh\nprintf "[%s]" "$GH_TOKEN"\n', encoding="utf-8")
         agent.chmod(0o755)
-        # The `aisquare` the role's terminal has on PATH: this checkout's.
-        cli = agent.with_name("aisquare")
-        cli.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m aisquare "$@"\n')
-        cli.chmod(0o755)
+        # The `aisquare` the role's terminal has on PATH: this checkout's; and the word the
+        # printed line names its own commands with (`core.program.command`, `rlx` here).
+        for name in {"aisquare", program.command()}:
+            cli = agent.with_name(name)
+            cli.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m aisquare "$@"\n')
+            cli.chmod(0o755)
         _bind("reviewer", bin=str(agent), env_files={"GH_TOKEN": str(token)})
         monkeypatch.setenv("AISQUARE_TEAM", "1")
         result = runner.invoke(app, ["--json", "team", "spawn", "reviewer", "--no-probe"])
@@ -965,7 +967,7 @@ class TestBindEnvFile:
             got = harness.resolve_profile("reviewer")
             assert got.refusal is not None and got.file_env == {}
             assert f"reads GH_TOKEN from {token.name}, a relative path" in got.refusal
-            assert "aisquare team bind reviewer --env-file GH_TOKEN=<path>" in got.refusal
+            assert "rlx team bind reviewer --env-file GH_TOKEN=<path>" in got.refusal
 
     @pytest.mark.parametrize("flag", ["--env", "--env-file"])
     @pytest.mark.parametrize("key", ["GH-TOKEN", "GH TOKEN", "X;touch pwned", "1ST"])
@@ -1000,7 +1002,7 @@ class TestBindEnvFile:
         assert result.exit_code != 0, result.output
         said = json.loads(result.stdout)
         assert said["error"] == "bad_env_key", said
-        assert "aisquare team bind reviewer --unset GH-TOKEN" in said["detail"]
+        assert "rlx team bind reviewer --unset GH-TOKEN" in said["detail"]
         assert TOKEN not in result.output
 
     def test_a_file_it_cannot_read_is_refused_at_bind(

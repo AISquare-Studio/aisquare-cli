@@ -85,9 +85,7 @@ def test_the_refusal_says_what_to_run_where_a_person_reads_it(
 ) -> None:
     result = runner.invoke(app, ["note", "hello"])
     assert result.exit_code == 1
-    assert "repo is not one of your projects — add it first: rlx project onboard" in (
-        result.output
-    )
+    assert "repo is not one of your projects — add it first: rlx project onboard" in (result.output)
 
 
 def test_the_refusal_quotes_the_onboard_for_this_shell(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -478,9 +476,7 @@ def test_doctors_capture_off_line_for_each_count(tmp_path: Path, dropped: int, k
 
     gone, held = _captured_rows(tmp_path, "d", dropped), _captured_rows(tmp_path, "k", kept)
     plan = [PruneCandidate(project=p, reason="captured") for p in gone]
-    forgets = [
-        install_route.command_line(["rlx", "project", "forget", str(p.root)]) for p in held
-    ]
+    forgets = [install_route.command_line(["rlx", "project", "forget", str(p.root)]) for p in held]
     drop = f"drop it with {forgets[0]}" if kept == 1 else f"drop them ({'; '.join(forgets)})"
     names = ", ".join(p.root.name for p in held[:3]) + (f", +{kept - 3} more" if kept > 3 else "")
     left = "left from before project capture was turned off"
@@ -1025,9 +1021,7 @@ def test_one_helper_names_a_project_in_a_fleet_command(
 
     named = ProjectInfo(id="prj_named", root=tmp_path / "web", codename="calm-otter", nickname="w")
     plain = ProjectInfo(id="prj_plain", root=tmp_path / "web")
-    assert project_service.fleet_command("stop", named) == (
-        "rlx fleet stop --project calm-otter"
-    )
+    assert project_service.fleet_command("stop", named) == ("rlx fleet stop --project calm-otter")
     assert project_service.fleet_command("reap", plain) == "rlx fleet reap --project prj_plain"
     # Words after the project (a label, a flag) are quoted for this shell too (round 21).
     restart = project_service.fleet_command("restart", named, "coder 1", "--fresh")

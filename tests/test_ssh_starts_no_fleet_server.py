@@ -104,7 +104,7 @@ def test_an_ssh_login_does_not_start_the_fleets_server(
 
     assert fleet_service.SSH_START_REFUSAL in str(refused.value)
     assert str(refused.value).startswith(
-        "not started: start asq on the Mac first: agents started from an SSH login can't "
+        "not started: start rlx on the Mac first: agents started from an SSH login can't "
         "read the Keychain"
     )
     assert srv.opened == [], "a window opened, and with it a server"
@@ -124,7 +124,7 @@ def test_a_remote_session_joins_a_running_server_end_to_end(
     assert running.opened == ["asq-test"]
 
     none_yet = _Server(None)
-    with pytest.raises(fleet_service.FleetError, match="start asq on the Mac first"):
+    with pytest.raises(fleet_service.FleetError, match="start rlx on the Mac first"):
         _open(none_yet)
     assert none_yet.opened == []
 
@@ -170,7 +170,7 @@ def test_a_spawn_from_ssh_is_refused_before_anything_is_written(
     srv = _Server(None)
     forgot: list[object] = []
     monkeypatch.setattr(fleet_service, "_forget_an_exited_server", lambda *a: forgot.append(a))
-    with pytest.raises(fleet_service.FleetError, match="start asq on the Mac first"):
+    with pytest.raises(fleet_service.FleetError, match="start rlx on the Mac first"):
         fleet_service._before_a_server_starts(srv, fleet_service.settings())  # type: ignore[arg-type]
     assert forgot == [], "a row's server start was forgotten for a server never started"
 
@@ -247,7 +247,7 @@ def test_a_restart_from_ssh_over_a_stale_socket_refuses_before_it_records_the_de
 
     before = (row(), list(tmux.typed), len(tmux.spawned))
 
-    with pytest.raises(fleet_service.FleetError, match="start asq on the Mac first") as refused:
+    with pytest.raises(fleet_service.FleetError, match="start rlx on the Mac first") as refused:
         fleet_service.restart(project, agent.label)
 
     assert row() == (None, None), "the dead row is left for a listing, as a refusal leaves it"
@@ -290,7 +290,7 @@ def test_the_start_and_restarts_early_check_keep_one_rule_for_no_server_listens(
         try:
             check()
         except fleet_service.FleetError as exc:
-            assert "start asq on the Mac first" in str(exc)
+            assert "start rlx on the Mac first" in str(exc)
             return True
         return False
 
@@ -383,7 +383,7 @@ def test_a_claude_code_spawn_into_the_server_ssh_started_is_refused_from_anywher
 
     said = str(refused.value)
     assert said.startswith(f"not started: {fleet_service.SSH_STARTED_REFUSAL}"), said
-    assert "`aisquare fleet shutdown --all` ends that server" in said, said
+    assert "`rlx fleet shutdown --all` ends that server" in said, said
     assert len(tmux.spawned) == windows, "no window opened"
     joined = fleet_service.spawn(project, "coder", agent="codex", worktree=False).agent
     assert joined.pane_id in tmux.facts, "a Codex agent joins it"
@@ -659,7 +659,7 @@ def test_the_start_from_ssh_is_the_agents_and_a_window_of_none_is_refused_as_bef
         assert _open(srv, agent) == "window"
         assert srv.options == {fleet_service.SSH_STARTED_OPTION: "1"}
     else:
-        with pytest.raises(fleet_service.FleetError, match="start asq on the Mac first"):
+        with pytest.raises(fleet_service.FleetError, match="start rlx on the Mac first"):
             _open(srv, agent)
         assert srv.opened == [] and srv.options == {}
 

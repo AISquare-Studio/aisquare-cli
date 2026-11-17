@@ -1246,7 +1246,7 @@ def terminal(monkeypatch: pytest.MonkeyPatch) -> Terminal:
     return at
 
 
-_ENTER = "Press Enter to go back to asq "
+_ENTER = "Press Enter to go back to rlx "
 
 
 def test_reopen_waits_for_enter_then_opens_asq_after_an_upgrade_that_did_not_fail(
@@ -1263,7 +1263,7 @@ def test_reopen_waits_for_enter_then_opens_asq_after_an_upgrade_that_did_not_fai
     assert upgraded.exit_code == 0, upgraded.output
     assert len(machine.installs) == 2
     assert after_upgrade == ([_ENTER], [["ui"]])
-    assert plain.exit_code == 0 and terminal.reopened == [["ui"]], "control: no --reopen, no asq"
+    assert plain.exit_code == 0 and terminal.reopened == [["ui"]], "control: no --reopen, no rlx"
 
 
 def test_reopen_opens_asq_when_there_was_nothing_to_do_or_the_answer_was_no(

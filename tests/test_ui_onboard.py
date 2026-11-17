@@ -915,9 +915,7 @@ def test_a_failed_fix_shows_the_reason_and_keeps_the_buttons(tmp_path: Path) -> 
 
     kinds, status, buttons, report = asyncio.run(drive())
     assert kinds == ["FixApplied"], "no DoctorRefreshed when the re-check gave no answer"
-    assert (
-        status.startswith("✗ rlx agents connect claude-code: ") and "not_installed" in status
-    )
+    assert status.startswith("✗ rlx agents connect claude-code: ") and "not_installed" in status
     assert "re-check failed, showing the previous report" in status
     assert buttons == [("rlx agents connect claude-code", False)], (
         "the button is back for another try"

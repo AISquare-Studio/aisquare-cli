@@ -671,7 +671,7 @@ class Registration:
                         next_kind = time.monotonic() + KIND_SECONDS if inside else None
                     self.beat(kind=kind)
                 except Exception:  # a beat missed is one more next time, never a dead thread
-                    _log.debug("the asq instance record could not be written", exc_info=True)
+                    _log.debug("the rlx instance record could not be written", exc_info=True)
                 try:
                     mine = self._instance.id
                     read_at = time.time_ns()

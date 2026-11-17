@@ -635,7 +635,7 @@ def test_status_roots_of_an_agent_with_none_says_so_of_that_agent_alone(
     without = _cli("agents", "status", "nosuch")
 
     assert none.exit_code == 0, none.output
-    others = "2 are recorded for other agents: aisquare agents status --roots"
+    others = "2 are recorded for other agents: rlx agents status --roots"
     assert " ".join(none.stdout.split()) == f"no folder is recorded for Claude Code. {others}"
     assert " ".join(cursor.stdout.split()) == f"no folder is recorded for Cursor. {others}", (
         "by its display name (R9g2)"

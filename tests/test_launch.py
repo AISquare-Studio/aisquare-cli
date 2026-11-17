@@ -327,7 +327,7 @@ def test_launch_captain_outside_the_fleet_is_refused(
     result = runner.invoke(app, ["launch", "captain"])
 
     assert result.exit_code == 1
-    assert "`aisquare captain` starts it" in result.output
+    assert "`rlx captain` starts it" in result.output
     assert not spy, "nothing should be exec'd"
 
 
@@ -401,7 +401,7 @@ def test_launch_captain_in_a_window_that_is_not_the_captains_is_refused(
     result = runner.invoke(app, ["launch", "captain"])
 
     assert result.exit_code == 1, result.output
-    assert "`aisquare captain` starts it" in result.output
+    assert "`rlx captain` starts it" in result.output
     assert "starting anyway" not in result.output, "a refusal, never 'starting' (#274, n1)"
     assert not spy, "nothing should be exec'd"
 

@@ -342,9 +342,9 @@ class Reattached:
     def toast(self) -> str:
         """``✓ aisquare 0.8.3 — 2 agents reattached, 1 restarted (coder-1: pane gone)``."""
         head = (
-            f"✓ aisquare {self.version}"
+            f"✓ rlx {self.version}"
             if self.updated
-            else f"aisquare {self.version} is still installed: the update did not move it"
+            else f"rlx {self.version} is still installed: the update did not move it"
         )
         count = len(self.kept)
         parts = [f"{count} agent{'' if count == 1 else 's'} reattached"]

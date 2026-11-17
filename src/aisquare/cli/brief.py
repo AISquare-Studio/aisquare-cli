@@ -358,7 +358,7 @@ def evidence(
     ] = None,
     report: Annotated[
         str | None,
-        typer.Option("--report", help="The saved command report (`asq exec --project`)."),
+        typer.Option("--report", help="The saved command report (`rlx exec --project`)."),
     ] = None,
     as_session: SessionRef = None,
 ) -> None:

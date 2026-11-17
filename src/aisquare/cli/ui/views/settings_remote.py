@@ -59,7 +59,7 @@ from textual.widgets.data_table import ColumnKey
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.clipboard import copy_and_tell
-from aisquare.cli.ui.remote_control import AUTO_OFF_CHOICES, READ_ONLY_REASON, RemoteController
+from aisquare.cli.ui.remote_control import AUTO_OFF_CHOICES, RemoteController, read_only_reason
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import (
@@ -417,7 +417,7 @@ class RemoteSection(Vertical):
                 box.value = writes
             self._painted[box.id or ""] = writes
         self.query_one("#settings-remote-write-hint", Static).update(
-            Text("writes reach the fleet" if writes else READ_ONLY_REASON)
+            Text("writes reach the fleet" if writes else read_only_reason())
         )
         self.query_one("#settings-remote-regen", Button).disabled = not controller.running
         collapsed = self.query_one("#settings-remote-advanced", Collapsible).collapsed

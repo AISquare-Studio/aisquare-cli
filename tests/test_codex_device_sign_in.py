@@ -171,7 +171,7 @@ def test_what_accounts_add_prints_for_claude_code_is_byte_identical_to_before(
         "Slot 2 is ready. Claude Code opens now with its own login — sign in there, then "
         "leave it (/exit) and this command records the account.\n"
         "✓ Added Claude account 2: two@example.com\n"
-        "  open it: aisquare accounts run 2 · as a role: aisquare launch coder --account 2\n"
+        "  open it: rlx accounts run 2 · as a role: rlx launch coder --account 2\n"
     )
     assert not_landed.exit_code == 1
     assert not_landed.stderr == (
@@ -191,7 +191,7 @@ def test_the_accounts_pages_words_for_a_claude_sign_in_are_byte_identical_to_bef
         " — type /login if Claude Code does not prompt you."
     )
     assert service._log_in(CLAUDE) == (
-        "press Log in (in a terminal: aisquare accounts run {slot}, then /login)"
+        "press Log in (in a terminal: {program} accounts run {slot}, then /login)"
     )
 
 
@@ -526,7 +526,7 @@ def test_a_device_code_sign_in_with_no_login_names_where_it_is_turned_on_and_bro
     assert device.exit_code == 1
     assert device.stderr.splitlines()[-1] == (
         "✗ no sign-in landed in slot 2 (Codex exited with status 1) — nothing was added. "
-        f"{HINT}: aisquare accounts add --agent codex --browser"
+        f"{HINT}: rlx accounts add --agent codex --browser"
     )
     assert browser.exit_code == 1
     assert browser.stderr.splitlines()[-1] == (

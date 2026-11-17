@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aisquare.core import agent_adapters, agents, harness, orchestrator, paths, selfcli
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
     adapter_for_binary,
@@ -149,7 +150,7 @@ def start_broker(
         raise store_broker.LaunchRefused(
             f"{selected.adapter.label}: its launch could not work out what its sandbox may "
             f"write ({type(exc).__name__}: {exc}), so it is not started without the store's "
-            "protection; run `aisquare doctor`"
+            f"protection; run `{prog.command()} doctor`"
         ) from exc
 
 

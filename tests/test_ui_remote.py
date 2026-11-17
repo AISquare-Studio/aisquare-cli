@@ -36,7 +36,7 @@ from textual.widgets import Button, DataTable, Select, Static, Switch
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.app import FleetApp, HelpScreen
-from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController, load_remote_state
+from aisquare.cli.ui.remote_control import RemoteController, load_remote_state, read_only_reason
 from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
 from aisquare.core import clipboard, paths, state_file
@@ -291,7 +291,7 @@ def test_shift_r_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off()
         assert password == remote_server.runtime().password and len(password.split("-")) == 4
         qr = shown(modal.query_one("#remote-qr", Static))
         assert qr == qr_text(expected) and 15 <= len(qr.splitlines()) <= 22
-        assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
+        assert shown(modal.query_one("#remote-write-hint", Static)) == read_only_reason()
         assert modal.query_one("#remote-allow-write", Switch).value is False
 
         switch.toggle()
@@ -792,7 +792,7 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         assert modal.query_one("#remote-on", Switch).value is True
         assert modal.query_one("#remote-allow-write", Switch).value is False
         assert modal.query_one("#remote-auto-off", Select).value == 120
-        assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
+        assert shown(modal.query_one("#remote-write-hint", Static)) == read_only_reason()
         assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         # The persisted token is the same one, so the link the phone kept still works.
         assert remote_server.runtime().token in shown(modal.query_one("#remote-link", Static))
@@ -811,7 +811,7 @@ def test_a_fresh_home_opens_with_write_actions_off() -> None:
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-allow-write", Switch).value is False
         assert modal.query_one("#remote-on", Switch).value is False
-        assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
+        assert shown(modal.query_one("#remote-write-hint", Static)) == read_only_reason()
 
     drive(go, tunnel=missing_ngrok)
     assert not paths.state_path().exists() or "allow_write" not in json.loads(
@@ -1552,7 +1552,7 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
             await written(pilot)
             assert not app.remote.running
             status = modal.query_one("#remote-status", Static)
-            assert shown(status) == remote_control.ALREADY_ON
+            assert shown(status) == remote_control.already_on()
         finally:
             unlock(fd)
             os.close(fd)
@@ -1654,7 +1654,7 @@ def test_the_sentences_beside_the_switches_are_painted_whole_at_any_width(
             dated = f"auto-off at {deadline:%b} {deadline.day} 21:58"
             assert painted_in(app, state) == f"{remote_view.served_elsewhere_state()} · {dated}"
             hint = modal.query_one("#remote-write-hint", Static)
-            assert painted_in(app, hint) == READ_ONLY_REASON
+            assert painted_in(app, hint) == read_only_reason()
         finally:
             unlock(fd)
             os.close(fd)

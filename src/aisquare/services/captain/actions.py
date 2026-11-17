@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
@@ -979,8 +980,8 @@ def _ui(action: str, arg: str | None) -> Outcome:
     if not _UI_ACTION.fullmatch(action):
         raise Refused(f"ui action {action!r} is not an action name")
     not_running = Outcome(
-        {"delivered": False, "said": "asq is not running"},
-        said="asq is not running — nothing to do",
+        {"delivered": False, "said": "rlx is not running"},
+        said="rlx is not running — nothing to do",
     )
     if not hasattr(socket, "AF_UNIX"):
         return not_running
@@ -998,16 +999,16 @@ def _ui(action: str, arg: str | None) -> Outcome:
     except (FileNotFoundError, ConnectionRefusedError):
         return not_running
     except TimeoutError as exc:
-        raise OSError(f"asq did not answer within {UI_TIMEOUT_S:g}s") from exc
+        raise OSError(f"rlx did not answer within {UI_TIMEOUT_S:g}s") from exc
     try:
         reply = json.loads(line)
     except ValueError as exc:
-        raise OSError(f"asq answered with something that is not JSON: {line[:80]!r}") from exc
+        raise OSError(f"rlx answered with something that is not JSON: {line[:80]!r}") from exc
     if not isinstance(reply, dict):
-        raise OSError(f"asq answered with something that is not an object: {line[:80]!r}")
+        raise OSError(f"rlx answered with something that is not an object: {line[:80]!r}")
     said = str(reply.get("said", ""))
     if reply.get("ok") is not True:
-        raise Refused(f"asq said: {said or 'no'}")
+        raise Refused(f"rlx said: {said or 'no'}")
     return Outcome({"delivered": True, "said": said}, said=f"ui {action}: {said}")
 
 
@@ -2337,5 +2338,7 @@ def run_stdio(*, close_after: int) -> None:
 
     speaker.start_drainer(speaker.server_voice())
     mcp_server.run_stdio(
-        close_after=close_after, server=build_server(), command="aisquare captain serve --stdio"
+        close_after=close_after,
+        server=build_server(),
+        command=f"{prog.command()} captain serve --stdio",
     )

@@ -1259,7 +1259,7 @@ class TmuxServer:
             path = paths.ensure_home() / CONF_NAME
         except OSError as exc:
             return Path(os.devnull), (
-                f"could not create the aisquare home ({exc.strerror or exc}) — the fleet's "
+                f"could not create the rlx home ({exc.strerror or exc}) — the fleet's "
                 "tmux server starts with tmux's built-in options, not the bundled ones"
             )
         absent = False

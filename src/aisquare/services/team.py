@@ -4388,7 +4388,10 @@ def _render_board(
             link = f" {links[task.id]}" if links and task.id in links else ""
             lines.append(f"  - {task_label(task)} [{task.status}{claim}] {task.title}{waits}{link}")
         if len(open_tasks) > _BOARD_TASKS:
-            lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `aisquare task list`")
+            # The human board names the command with the word hints print; an agent's
+            # (`me`, its start pack) with its protocol's (Q9, brief 180).
+            word = prog.command() if me is None else prog.PROTOCOL
+            lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `{word} task list`")
     if events:
         lines.append("recent updates:")
         if me is None:  # the human board keeps every event's full text

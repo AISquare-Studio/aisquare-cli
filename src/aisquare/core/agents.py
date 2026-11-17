@@ -28,6 +28,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from aisquare.core import atomic, paths, selfcli
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.agent_adapters.claude_code import ClaudeCodeAdapter
 from aisquare.core.agent_adapters.types import (
@@ -770,8 +771,8 @@ def hook_trust_left_note(left: HookTrustLeft) -> str:
     )
     shown = ", ".join(left.records)
     return (
-        f"{left.file} still holds the trust aisquare recorded for its hooks, as {why}: "
-        f"{len(left.records)} {left.record}(s), {shown} — they trust hooks of aisquare's "
+        f"{left.file} still holds the trust rlx recorded for its hooks, as {why}: "
+        f"{len(left.records)} {left.record}(s), {shown} — they trust hooks of rlx's "
         "that are gone; remove them there by hand"
     )
 
@@ -1878,9 +1879,9 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
     plugin = plugin_of(spec.name) if route == ROUTE_BOTH else None
     install = plugin.installed(_hook_dir(spec)) if plugin is not None else None
     both = (
-        f"aisquare runs two ways here: the {spec.settings_path.name} hooks and "
+        f"rlx runs two ways here: the {spec.settings_path.name} hooks and "
         f"{plugin_label(install)}, whose hooks stand down beside them; keep one "
-        "(aisquare doctor says how)."
+        f"({prog.command()} doctor says how)."
         if install is not None and spec.settings_path is not None
         else ""
     )
@@ -2118,12 +2119,12 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
         return (
             "trusted",
             f"Hooks configured and trusted where {adapter.label} records a review's yes; "
-            "AISquare has not yet observed this definition run.",
+            "rlx has not yet observed this definition run.",
         )
     return (
         "unverified",
         f"Hooks configured; open /hooks in {adapter.label} to review and trust them. "
-        "AISquare has not yet observed this definition run.",
+        "rlx has not yet observed this definition run.",
     )
 
 

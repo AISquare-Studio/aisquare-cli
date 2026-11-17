@@ -1059,7 +1059,7 @@ class CodexAdapter:
             notes.append(f"Codex maps {result.effort!r} to native reasoning effort {level!r}.")
         elif level and level not in REASONING_EFFORTS:
             notes.append(
-                f"Codex reasoning effort {level!r} is not one AISquare knows "
+                f"Codex reasoning effort {level!r} is not one rlx knows "
                 f"({', '.join(REASONING_EFFORTS)}); it is passed on for Codex to validate."
             )
         return result.model_copy(update={"effort": level, "notes": notes})

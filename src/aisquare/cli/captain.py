@@ -28,6 +28,7 @@ from aisquare.cli import captain_gate, captain_verbs, captain_voice
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
 from aisquare.core import experimental
+from aisquare.core import program as prog
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 
@@ -119,7 +120,7 @@ class _Captain(TyperGroup):
 app = typer.Typer(
     cls=_Captain,
     help="The captain: the home-level agent that runs every project's fleet for you. "
-    'Bare, it starts or attaches to the captain; `aisquare captain "text"` asks it.',
+    'Bare, it starts or attaches to the captain; `rlx captain "text"` asks it.',
     invoke_without_command=True,
     no_args_is_help=False,
 )
@@ -137,7 +138,7 @@ def captain(
         bool,
         typer.Option(
             "--voice",
-            help="Serve the voice page — the plan's spelling of `aisquare captain voice`.",
+            help="Serve the voice page — the plan's spelling of `rlx captain voice`.",
         ),
     ] = False,
 ) -> None:
@@ -206,8 +207,8 @@ def captain(
         console.print(f"the captain is already running ({agent.id})", markup=False, highlight=False)
     if not attaching:
         console.print(
-            "attach from a terminal with `aisquare captain`; ask it with "
-            '`aisquare captain "what is up"`',
+            f"attach from a terminal with `{prog.command()} captain`; ask it with "
+            f'`{prog.command()} captain "what is up"`',
             markup=False,
             highlight=False,
         )
@@ -313,7 +314,7 @@ def serve(
     """Run the captain's Actions MCP server: the tools the captain acts through."""
     if not stdio:
         raise typer.BadParameter(
-            "the captain's server speaks stdio only — run: aisquare captain serve --stdio",
+            f"the captain's server speaks stdio only — run: {prog.command()} captain serve --stdio",
             param_hint="'--stdio'",
         )
     problem = dependency_error()

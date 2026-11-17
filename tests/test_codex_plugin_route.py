@@ -265,7 +265,7 @@ def test_agents_status_reports_the_route(runner: CliRunner, codex: Path) -> None
     assert alone["route"] == "plugin"
     assert both["route"] == "both"
     assert (
-        f"aisquare runs two ways here: the hooks.json hooks and the aisquare plugin "
+        f"rlx runs two ways here: the hooks.json hooks and the aisquare plugin "
         f"{_version()}, whose hooks stand down beside them" in both["detail"]
     )
     assert "two ways" in table.stdout

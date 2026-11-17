@@ -290,7 +290,7 @@ def test_a_codex_rows_fix_is_codexs_own_sign_in_never_claudes(slot: int) -> None
         assert tip is not None
         fix = tip.splitlines()[-1]
         assert fix == (
-            f"fix: press Log in (in a terminal: aisquare accounts run {slot} login --device-auth)"
+            f"fix: press Log in (in a terminal: rlx accounts run {slot} login --device-auth)"
         )
         assert "/login" not in tip and "Claude" not in tip
     claude = ClaudeAccountStatus(
@@ -299,13 +299,11 @@ def test_a_codex_rows_fix_is_codexs_own_sign_in_never_claudes(slot: int) -> None
     )
     claude_tip = problem_tooltip(claude, None, now=NOW)
     assert claude_tip is not None
-    assert claude_tip.endswith(
-        "fix: press Log in (in a terminal: aisquare accounts run 3, then /login)"
-    )
+    assert claude_tip.endswith("fix: press Log in (in a terminal: rlx accounts run 3, then /login)")
     # The same words where there is no hover (``accounts usage``, ``accounts list --usage``).
     problem = accounts_service.usage_problem(_codex_status(slot, None), None)
     assert problem is not None and accounts_service.explain_usage(problem).endswith(
-        f"aisquare accounts run {slot} login --device-auth)"
+        f"rlx accounts run {slot} login --device-auth)"
     )
 
 

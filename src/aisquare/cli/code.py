@@ -163,7 +163,7 @@ def index_command(
             if code_index.building(code_service.project_here().id):
                 _print("the code index is building in the background — ask again in a moment")
             else:
-                _print(f"no code index yet — build it: {code_service.INDEX_COMMAND}")
+                _print(f"no code index yet — build it: {code_service.index_command()}")
             return
         parsers = ", ".join(f"{p} {n}" for p, n in sorted(found.parsers.items()))
         _print(f"{found.files} files, {found.symbols} symbols, {found.refs} refs ({parsers})")

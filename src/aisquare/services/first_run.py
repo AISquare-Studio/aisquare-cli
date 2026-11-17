@@ -54,6 +54,7 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import config as config_core
 from aisquare.core import harness, orchestrator, paths, selfcli
+from aisquare.core import program as prog
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, InstallRoute, executable_name
@@ -660,7 +661,9 @@ def choose_agent(agent: str, *, run: Runner = selfcli.run) -> None:
     try:
         result = run(["--json", "agents", "use", agent], cwd=None)
     except Exception as exc:
-        raise AgentNotSaved(f"could not run aisquare agents use {agent}: {_why(exc)}") from exc
+        raise AgentNotSaved(
+            f"could not run {prog.command()} agents use {agent}: {_why(exc)}"
+        ) from exc
     if not result.ok:
         raise AgentNotSaved(onboarding.failure_reason(result, f"agents use {agent}"))
 
@@ -671,7 +674,7 @@ def connect_fix(agent: str = accounts_core.AGENT, home: Path | None = None) -> F
     from this shell reads: a role whose launch sets another ``CODEX_HOME``."""
     known = next(k for k in onboarding.KNOWN_FIXES if k.agent and k.argv == CONNECT_ARGV[:2])
     argv: tuple[str, ...] = (*known.argv, agent)
-    source = f"aisquare {' '.join(argv)}"
+    source = f"rlx {' '.join(argv)}"
     ambient = agent_core.ambient_hook_dir(agent)
     if home is not None and (ambient is None or not _same_dir(home, ambient)):
         argv = (*argv, "--config-dir", str(home))

@@ -295,7 +295,7 @@ def test_on_the_captains_refusals_stand(
 
     result = runner.invoke(app, ["launch", "captain"])
 
-    assert result.exit_code == 1 and "`aisquare captain` starts it" in result.output
+    assert result.exit_code == 1 and "`rlx captain` starts it" in result.output
     assert not spy
     with pytest.raises(fleet_service.FleetError, match="lives on the home board"):
         fleet_service.spawn(project, "captain", worktree=False)
@@ -303,7 +303,7 @@ def test_on_the_captains_refusals_stand(
 
     monkeypatch.setenv("AISQUARE_ROLE", "captain")
     text = team_service.hook_session_start("captain-on-1", project.root, "startup")
-    assert "attention()" in text and "aisquare task claim" not in text
+    assert "attention()" in text and "rlx task claim" not in text
     with store_session() as store:
         session = store.get_session("captain-on-1")
     assert session is not None and session.state == "waiting"

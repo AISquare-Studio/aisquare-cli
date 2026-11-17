@@ -33,6 +33,7 @@ import typer
 from rich.table import Table
 
 from aisquare.cli.common import fail, local_time
+from aisquare.core import program as prog
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
@@ -71,10 +72,10 @@ def _typed() -> str:
     words = list(TYPED.get())
     argv = sys.argv[1:]
     if words and argv[-len(words) :] == words and "captain" in argv[: -len(words)]:
-        return install_route.command_line(["aisquare", *argv])
+        return install_route.command_line([prog.command(), *argv])
     json_root = get_state().json_output and "--json" not in words
     return install_route.command_line(
-        ["aisquare", *(["--json"] if json_root else []), "captain", *words]
+        [prog.command(), *(["--json"] if json_root else []), "captain", *words]
     )
 
 

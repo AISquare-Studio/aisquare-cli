@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.core import program as prog
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 
@@ -219,7 +220,8 @@ def serve_remote(
         console.print(f"password: {info.password}", markup=False)
         gate = "ON — writes are audited" if writes else "off (read-only)"
         console.print(
-            f"write actions: {gate}   · toggle: aisquare remote allow-write on|off", markup=False
+            f"write actions: {gate}   · toggle: {prog.command()} remote allow-write on|off",
+            markup=False,
         )
         if deadline is None:
             console.print("auto-off: never (--auto-off 0)", markup=False)
@@ -304,7 +306,7 @@ def install_page(
     """Copy a built ``aisquare-remote`` page into ``~/.aisquare/remote-dist`` (atomic replace).
 
     A page installed here overrides the one bundled with aisquare-cli, for the
-    Remote modal (``R``) and ``asq remote serve`` alike.
+    Remote modal (``R``) and ``rlx remote serve`` alike.
     """
     from aisquare.core.paths import remote_dist_dir
     from aisquare.services import remote_server
@@ -349,7 +351,7 @@ def status_command(port: LinkPort = DEFAULT_PORT) -> None:
         typer.echo(json.dumps(payload))
         return
     console = stdout_console()
-    on = "on — a process serves this home (the fleet UI's R panel, or a serve)"
+    on = "on — a process serves this home (the rlx UI's R panel, or a serve)"
     console.print(f"remote:      {on if serving else 'off'}", markup=False)
     console.print(f"url:         {payload['url_local']}", markup=False)
     console.print(f"password:    {payload['password']}", markup=False)
@@ -375,7 +377,7 @@ def _unlock_failures_line(status: dict[str, object]) -> str:
     if until:
         line += (
             f" — new unlocks paused until {until}; if that is not you, rotate the link: "
-            "aisquare remote regenerate-password --new-link"
+            f"{prog.command()} remote regenerate-password --new-link"
         )
     return line
 
@@ -424,7 +426,7 @@ def regenerate_password(
     if new_link:
         console.print(f"✓ new link: {payload['url_local']}", markup=False)
         console.print(
-            "  the old link is dead everywhere; the R panel of a running fleet UI shows the "
+            "  the old link is dead everywhere; the R panel of a running rlx UI shows the "
             "new one, and its QR code",
             markup=False,
         )

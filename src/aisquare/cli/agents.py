@@ -17,6 +17,7 @@ from aisquare.cli.common import (
     fail,
 )
 from aisquare.core import agents as agent_core
+from aisquare.core import program as prog
 from aisquare.core.agents import AgentSettingsError
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -73,7 +74,7 @@ ConfigDir = Annotated[
 
 @app.command("connect")
 def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
-    """Connect an agent: install aisquare's hooks and ingest its existing context."""
+    """Connect an agent: install rlx's hooks and ingest its existing context."""
     try:
         connection = agents_service.connect(name, config_dir)
     except KeyError:
@@ -161,9 +162,9 @@ def use(
 
 @app.command("refresh-hooks", hidden=True)
 def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
-    """Rewrite aisquare's hooks for this version and import nothing.
+    """Rewrite rlx's hooks for this version and import nothing.
 
-    Plumbing for ``aisquare upgrade``, which runs it in the NEW install for each
+    Plumbing for ``rlx upgrade``, which runs it in the NEW install for each
     directory it re-connects. Kept hidden: ``agents connect`` is the command a
     person types. Later releases must keep it, or an upgrade from this one
     cannot refresh hooks.
@@ -185,7 +186,7 @@ def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
     except ValueError as exc:
         fail(str(exc), error="not_installed", ref=name)
     if not written:
-        fail(f"{name} has no hooks for aisquare to write", error="no_hooks", ref=name)
+        fail(f"{name} has no hooks for rlx to write", error="no_hooks", ref=name)
     # "Rewritten" only for a file that changed: one already current is left as it was, and
     # said so (SMOKE6).
     changed = before is None or before != _hooks_text(name, config_dir)
@@ -263,9 +264,11 @@ def _list_roots(name: str | None) -> None:
         label = spec.label if spec is not None else name
         others = len(every)
         if others == 1:
-            also = " 1 is recorded for another agent: aisquare agents status --roots"
+            also = f" 1 is recorded for another agent: {prog.command()} agents status --roots"
         elif others:
-            also = f" {others} are recorded for other agents: aisquare agents status --roots"
+            also = (
+                f" {others} are recorded for other agents: {prog.command()} agents status --roots"
+            )
         else:
             also = ""
         console.print(f"no folder is recorded for {label}.{also}", markup=False)
@@ -298,7 +301,7 @@ def _forget_root(name: str, path: Path, *, yes: bool) -> None:
     known = next((root for root in agents_service.sandbox_roots() if root.path == real), None)
     if known is None:
         fail(
-            f"no folder is recorded at {real} — see: aisquare agents status --roots",
+            f"no folder is recorded at {real} — see: {prog.command()} agents status --roots",
             error="no_such_root",
             ref=str(real),
         )

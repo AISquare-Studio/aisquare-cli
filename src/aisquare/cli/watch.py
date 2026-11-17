@@ -373,7 +373,7 @@ def _build_app_class(interval: float, project: ProjectInfo | None = None) -> Any
             self.dismiss(None)
 
     class BoardApp(ClipboardApp[None]):
-        TITLE = "aisquare board"
+        TITLE = "rlx board"
         BINDINGS: ClassVar = [
             ("q", "quit", "quit"),
             ("t", "pick_theme", "themes"),
@@ -409,7 +409,7 @@ def _build_app_class(interval: float, project: ProjectInfo | None = None) -> Any
             self.unsaved = Autosave.flush_all(self)
 
         def on_board_panel_refreshed(self, event: BoardPanel.Refreshed) -> None:
-            self.title = f"aisquare board — {event.project.root.name or event.project.id}"
+            self.title = f"rlx board — {event.project.root.name or event.project.id}"
 
         def action_pick_theme(self) -> None:
             self.push_screen(ThemePicker())
@@ -477,7 +477,7 @@ def board_frame(height: int, width: int, project: ProjectInfo | None = None) -> 
     )
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(
-        f"aisquare board — {project.root.name or project.id} — {datetime.now():%H:%M:%S}\n",
+        f"rlx board — {project.root.name or project.id} — {datetime.now():%H:%M:%S}\n",
         style="bold",
     )
     live_sessions = [s for s in sessions if s.ended_at is None]

@@ -29,7 +29,6 @@ from aisquare.services.remote_server import (
     COOKIE,
     LINK_GONE,
     NOT_UNLOCKED,
-    READ_ONLY_REASON,
     WRITE_ENDPOINTS,
     WRONG_PASSWORD,
     NoSuchAgent,
@@ -39,6 +38,7 @@ from aisquare.services.remote_server import (
     Sources,
     Writes,
     build_app,
+    read_only_reason,
 )
 from tests.remote_kit_helpers import frame_within, make_client, receive_within
 
@@ -449,7 +449,7 @@ def test_write_endpoints_exist_and_are_403_by_default(
     for name in WRITE_ENDPOINTS:
         response = client.post(f"{base(runtime)}/api/{name}", json={"ref": "x"})
         assert response.status_code == 403, name
-        assert response.json() == {"error": "read_only", "message": READ_ONLY_REASON}
+        assert response.json() == {"error": "read_only", "message": read_only_reason()}
     assert fake.written == []
     assert _audited() == ["unlock"], "only the unlock is on the trail"
 
@@ -1321,7 +1321,7 @@ def test_a_remote_whose_process_ended_holds_the_home_no_more(
 
 @pytest.mark.parametrize(
     ("by", "named"),
-    [("serve", "`aisquare remote serve`"), ("panel", "asq's R panel")],
+    [("serve", "`rlx remote serve`"), ("panel", "rlx's R panel")],
 )
 def test_who_serves_this_home_elsewhere_is_named_by_the_note_its_claim_wrote(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch, by: str, named: str
@@ -1369,7 +1369,7 @@ def test_who_serves_this_home_elsewhere_is_named_by_the_note_its_claim_wrote(
         time.sleep(0.05)
 
     assert served_by == f"{named} on port 8751, process {pid}"
-    assert unread == misread == remote_server.SERVED_BY_SOMEONE
+    assert unread == misread == remote_server.served_by_someone()
     assert remote_server.remote_served_by() is None, "its note names nobody once the lock goes"
 
 
@@ -1395,6 +1395,9 @@ def test_the_note_says_this_processs_latest_claim_and_goes_with_its_lock(
             [
                 sys.executable,
                 "-c",
+                # The word hints print, pinned as the suite pins it (conftest's
+                # hints_print_rlx): another process asks its own PATH otherwise.
+                "from aisquare.core import program; program.ours_on_path = lambda name: True\n"
                 "from aisquare.services import remote_server as r; print(r.remote_served_by())",
             ],
             capture_output=True,
@@ -1411,7 +1414,7 @@ def test_the_note_says_this_processs_latest_claim_and_goes_with_its_lock(
         with remote_server._lock:
             assert remote_server._claim_remote_home(state, by="serve", port=8751) is False
         assert noted() == {"pid": os.getpid(), "by": "serve", "port": 8751}, "this server's"
-        named = f"`aisquare remote serve` on port 8751, process {os.getpid()}"
+        named = f"`rlx remote serve` on port 8751, process {os.getpid()}"
         assert as_another_process_sees_it() == named
     finally:
         remote_server._release_remote_home()
@@ -1427,7 +1430,7 @@ def test_the_note_says_this_processs_latest_claim_and_goes_with_its_lock(
         with remote_server._lock:
             assert remote_server._claim_remote_home(state, by="panel", port=8750) is True
         assert not note.exists(), "the last holder's note names nobody who serves"
-        assert as_another_process_sees_it() == remote_server.SERVED_BY_SOMEONE
+        assert as_another_process_sees_it() == remote_server.served_by_someone()
     finally:
         remote_server._release_remote_home()
 

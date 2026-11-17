@@ -1300,7 +1300,7 @@ def test_the_reopen_reattaches_and_says_so(monkeypatch: pytest.MonkeyPatch) -> N
     ordinary = _drive(body, offer=None)
 
     assert asked == ["reattach"], "only the reopen looks: an ordinary start restarts nothing"
-    assert "✓ aisquare 0.9.1 — 1 agent reattached, 1 restarted (coder-2: pane gone)" in toasts
+    assert "✓ rlx 0.9.1 — 1 agent reattached, 1 restarted (coder-2: pane gone)" in toasts
     assert not any("reattached" in toast for toast in ordinary)
 
 
@@ -1360,7 +1360,7 @@ def test_a_reopen_with_no_record_to_take_says_so(monkeypatch: pytest.MonkeyPatch
 
 # --- the hidden flags -------------------------------------------------------------------------
 
-_ENTER = "Press Enter to go back to asq "
+_ENTER = "Press Enter to go back to rlx "
 
 
 def test_one_click_upgrades_without_asking_and_reopens_at_once_to_reattach(
@@ -1456,8 +1456,8 @@ def test_one_click_says_facts_and_advises_no_stop_whatever_it_finds(
 @pytest.mark.parametrize(
     ("latest", "said", "installs"),
     [
-        ("0.9.1", "✗ the update is done, but asq could not be opened again", 1),
-        ("0.9.0", "✗ nothing was installed, and asq could not be opened again", 0),
+        ("0.9.1", "✗ the update is done, but rlx could not be opened again", 1),
+        ("0.9.0", "✗ nothing was installed, and rlx could not be opened again", 0),
     ],
     ids=["installed", "nothing-newer"],
 )
@@ -1489,7 +1489,7 @@ def test_a_reopen_that_cannot_start_says_what_the_run_did(
 
     assert result.exit_code == 0, result.output
     assert len(machine.installs) == installs, "control: the run installed or did not"
-    assert f"{said} ([Errno 8] Exec format error). Type `asq` to open it." in result.stderr, (
+    assert f"{said} ([Errno 8] Exec format error). Type `rlx` to open it." in result.stderr, (
         result.stderr
     )
     assert "stopped on an error" not in result.stderr
@@ -1522,8 +1522,8 @@ def test_a_reopen_that_cannot_start_after_hooks_failed_says_the_update_is_done(
 
     assert result.exit_code == 1, result.output
     assert len(machine.installs) == 1, "control: the update was installed"
-    assert "✓ aisquare 0.9.1 (was 0.9.0)" in result.stdout
-    said = "✗ the update is done, but asq could not be opened again ([Errno 8] Exec format error)"
+    assert "✓ rlx 0.9.1 (was 0.9.0)" in result.stdout
+    said = "✗ the update is done, but rlx could not be opened again ([Errno 8] Exec format error)"
     assert said in result.stderr, result.stderr
 
 
@@ -1553,7 +1553,7 @@ def test_a_failed_one_click_waits_for_enter_then_reopens_the_old_version(
     result = runner.invoke(cli_app, ["upgrade", "--one-click"])
 
     assert result.exit_code == 1 and "the upgrade failed" in result.stderr, result.output
-    assert terminal.prompts == [_ENTER], "the failure is read before asq comes back"
+    assert terminal.prompts == [_ENTER], "the failure is read before rlx comes back"
     assert terminal.reopened == [["ui", "--after-update"]]
 
 
@@ -1617,12 +1617,12 @@ def test_a_failed_one_clicks_reopen_renews_the_press_it_was_handed(
     [
         (
             KeyboardInterrupt(),
-            "✗ the upgrade was interrupted. Run it again by hand: aisquare upgrade",
+            "✗ the upgrade was interrupted. Run it again by hand: rlx upgrade",
         ),
         (
             RuntimeError("uv vanished"),
             "✗ the upgrade stopped on an error: RuntimeError: uv vanished. Run it again by "
-            "hand: aisquare upgrade",
+            "hand: rlx upgrade",
         ),
     ],
 )
@@ -1647,7 +1647,7 @@ def test_a_one_click_cut_short_says_so_waits_for_enter_and_reopens(
 
     assert result.exit_code != 0
     assert said in result.stderr, result.output
-    assert terminal.prompts == [_ENTER], "the failure is read before asq comes back"
+    assert terminal.prompts == [_ENTER], "the failure is read before rlx comes back"
     assert terminal.reopened == [["ui", "--after-update"]]
 
 

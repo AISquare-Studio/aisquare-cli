@@ -23,6 +23,7 @@ from typing import Annotated, Any
 import typer
 
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters.types import GENERIC_HOOK, AgentAdapter
 from aisquare.services import hooks as hooks_service
 from aisquare.services.team import ManagerWakeupError, TurnEndDeliveryError
@@ -44,7 +45,7 @@ app = typer.Typer(
 #: open on its own (docs/plans/fleet-tui.md §5.5): when it does, the row IS
 #: marked waiting, so the ``stop`` line would be the wrong sentence.
 _COST = {
-    "session-start": "this session starts with no aisquare context",
+    "session-start": "this session starts with no rlx context",
     "user-prompt-submit": "no teammate updates reach this turn",
     "session-end": "the board will keep showing this session as running",
     "stop": "the board will not show this session as waiting for input",
@@ -83,7 +84,7 @@ def _cost_of_failing_open(hook: str, exc: Exception, *, cost: str | None = None)
     else:
         reason = f"{hook} failed ({type(exc).__name__}: {exc})"
     cost = cost or _COST.get(hook, "this hook did nothing")
-    typer.echo(f"aisquare: {reason} — {cost}; run: aisquare doctor", err=True)
+    typer.echo(f"rlx: {reason} — {cost}; run: {prog.command()} doctor", err=True)
 
 
 def _payload() -> dict[str, Any]:
@@ -153,7 +154,7 @@ def _installed(hook: str) -> None:
 
 @app.command("session-start")
 def session_start() -> None:
-    """Emit aisquare context for a starting session (stdout becomes context)."""
+    """Emit rlx context for a starting session (stdout becomes context)."""
     _installed("session-start")
 
 

@@ -479,7 +479,7 @@ def test_doctors_update_and_uninstall_are_refused_while_another_asq_runs(
                 await pilot.pause()
                 said = " ".join(note.message for note in app._notifications)
                 assert app.hand_off is None and not app._exit, "it stays"
-                assert f"another asq runs on this home ({other.label})" in said
+                assert f"another rlx runs on this home ({other.label})" in said
                 assert f"Quit it first (q in it), then press {button} again." in said
             await _beaten(registration, [])
             app.on_doctor_view_hand_off(DoctorView.HandOff((command, "--reopen")))

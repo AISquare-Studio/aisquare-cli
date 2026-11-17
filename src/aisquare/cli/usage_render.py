@@ -6,6 +6,7 @@ from rich.table import Table
 from rich.text import Text
 
 from aisquare.cli import usage_format as fmt
+from aisquare.core import program as prog
 from aisquare.core.console import stdout_console
 from aisquare.models import SharingStatus, ShipReport, UsageStats
 
@@ -26,7 +27,7 @@ def emit_usage_stats(stats: UsageStats) -> None:
     if not stats.turns:
         console.print(
             f"No usage recorded for {label.lower()} yet. The agents' transcripts are read "
-            "by `aisquare metrics backfill`, and each Stop hook adds its turn."
+            f"by `{prog.command()} metrics backfill`, and each Stop hook adds its turn."
         )
         return
     span = f"{stats.since} → {stats.until}" if stats.since != stats.until else stats.until
@@ -150,7 +151,7 @@ def sharing_lines(status: SharingStatus) -> list[str]:
         sent = _when(status.last_sent_at) if status.last_sent_at else "never"
         linked = "" if status.linked is None else f" (linked: {'yes' if status.linked else 'no'})"
         lines.append(f"last sent      {sent}{linked}")
-    lines.append("See what would be sent: aisquare metrics share preview")
+    lines.append(f"See what would be sent: {prog.command()} metrics share preview")
     return lines
 
 

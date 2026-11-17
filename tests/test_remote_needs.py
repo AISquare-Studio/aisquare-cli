@@ -67,10 +67,10 @@ from aisquare.services.remote_needs import (
     scan_needs_you,
 )
 from aisquare.services.remote_server import (
-    READ_ONLY_REASON,
     Runtime,
     Sources,
     build_app,
+    read_only_reason,
     remote_agent_lock,
 )
 from aisquare.services.transcript import (
@@ -7428,7 +7428,7 @@ def test_an_answer_is_refused_while_writes_are_off(live: Live) -> None:
     card = live.card("permission")
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 403
-    assert response.json() == {"error": "read_only", "message": READ_ONLY_REASON}
+    assert response.json() == {"error": "read_only", "message": read_only_reason()}
     assert live.tmux.typed == []
 
 

@@ -690,7 +690,7 @@ def test_it_is_refused_from_inside_one_of_the_projects_own_fleet_agents(
     assert refused.exit_code == 2, refused.output
     said = " ".join(refused.output.split())
     assert "can't start fresh from inside coder-1, one of alpha's own fleet agents" in said
-    assert "Run it from the UI (asq) or from a terminal of your own" in said
+    assert "Run it from the UI (rlx) or from a terminal of your own" in said
     as_json = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--yes"])
     refused_json = json.loads(as_json.stdout)
     assert {k: refused_json[k] for k in ("error", "ref")} == {
@@ -1068,9 +1068,7 @@ def test_m1_a_commit_made_before_the_stop_ended_its_agent_is_judged_after_it(
     assert "found once its fleet was stopped" in said
     # Refused there, the project is left with nothing running: the refusal says how back.
     assert "its agents are stopped. Start them again with rlx fleet restart --project " in said
-    assert (
-        "alpha-x <label> (the manager first), or a new manager with rlx fleet spawn " in said
-    )
+    assert "alpha-x <label> (the manager first), or a new manager with rlx fleet spawn " in said
     assert (tree / "late.txt").exists() and _rows(alpha.id) == before and spawned == []
 
 

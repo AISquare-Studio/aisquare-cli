@@ -56,6 +56,7 @@ from aisquare.cli.common import fail
 from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, launchers, orchestrator, paths, personas
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapter_for_binary, agents_named
 from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
 from aisquare.core.config import (
@@ -557,7 +558,7 @@ def launch(
             "--account",
             "-a",
             help="Account to run under, of the role's agent: a slot number, an alias or the "
-            "email it is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
+            "email it is signed in as (see `rlx accounts`). Sets CLAUDE_CONFIG_DIR and "
             "CLAUDE_CODE_TMPDIR (Claude Code) or CODEX_HOME (Codex) over the role's binding. "
             "Without it: the role's bound account, then the project default, then the "
             "machine default. -a is this option's, not Codex's --ask-for-approval: spell "
@@ -569,7 +570,7 @@ def launch(
         str | None,
         typer.Option(
             "--persona",
-            help="Persona this session runs as (see `aisquare persona list`): exported as "
+            help="Persona this session runs as (see `rlx persona list`): exported as "
             "AISQUARE_PERSONA and briefed once, at session start.",
             metavar="NAME",
         ),
@@ -619,7 +620,7 @@ def launch(
     Equivalent to ``AISQUARE_ROLE=<role> <command>``, plus role validation and
     an explicit opt-in for the repo. Extra arguments are passed to the agent.
 
-    The role's bound profile (``aisquare team bind``) supplies its binary, env
+    The role's bound profile (``rlx team bind``) supplies its binary, env
     and extra args. ``--command`` overrides the binary and ``--env KEY=VALUE``
     adds to or overrides the environment, both for one launch only.
 
@@ -631,7 +632,7 @@ def launch(
         fail(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
             "a numbered seat of one (coder1, coder2), a role you have "
-            f"bound with `aisquare team bind`, or {harness.PLAIN_ROLE!r} for no role",
+            f"bound with `{prog.command()} team bind`, or {harness.PLAIN_ROLE!r} for no role",
             error="unknown_role",
         )
     if experimental.captain_role(role) and not _in_the_captains_window():
@@ -639,7 +640,8 @@ def launch(
         # its one server, no other tool. By hand in a project this was plain claude
         # with every tool, briefed as the one captain that has no shell.
         fail(
-            f"the {role} lives on the home board, one per home — `aisquare captain` starts it",
+            f"the {role} lives on the home board, one per home — `{prog.command()} captain` starts "
+            "it",
             error="unknown_role",
         )
     # Resolve WHICH executable on the same ladder `team spawn` uses, so a role

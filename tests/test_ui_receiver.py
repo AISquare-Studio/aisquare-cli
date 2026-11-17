@@ -644,7 +644,7 @@ def test_the_captains_ui_tool_is_told_why_asq_said_no(
         return str(caught.value)
 
     message = drive(body)
-    assert message.startswith("refused: asq said: no project matches 'zeta'")
+    assert message.startswith("refused: rlx said: no project matches 'zeta'")
 
 
 @UNIX_SOCKETS

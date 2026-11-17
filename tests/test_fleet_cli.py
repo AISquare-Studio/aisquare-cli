@@ -2253,8 +2253,8 @@ def test_ui_refuses_without_a_tty_and_says_which_condition_failed(
     assert result.exit_code == 1, result.output
     assert result.stdout == ""
     err = _plain(result.stderr)
-    assert "✗ the fleet UI needs an interactive terminal (stdin is not a TTY)" in err
-    assert "aisquare fleet ls --json" in err
+    assert "✗ the rlx UI needs an interactive terminal (stdin is not a TTY)" in err
+    assert "rlx fleet ls --json" in err
     assert ui_spy == []
 
 
@@ -2333,7 +2333,7 @@ def test_ui_help_exists(runner: CliRunner) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Usage" in _plain(result.output)
-    assert "fleet UI" in _plain(result.output)
+    assert "rlx UI" in _plain(result.output)
 
 
 # ── markup in data ───────────────────────────────────────────────────────────

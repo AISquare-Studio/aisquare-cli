@@ -426,7 +426,7 @@ def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> Non
     assert absent["name"] == "account 3" and absent["session"] == "!"
     assert absent["email"] == absent["plan"] == absent["week"] == ""
     assert accounts_view.problem_tooltip(_status(3, None), usage) == (
-        "not signed in\nfix: press Log in (in a terminal: aisquare accounts run 3, then /login)"
+        "not signed in\nfix: press Log in (in a terminal: rlx accounts run 3, then /login)"
     )
 
     def said(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> str:

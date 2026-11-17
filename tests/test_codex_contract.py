@@ -98,7 +98,7 @@ def test_an_unknown_level_is_passed_on_with_a_note() -> None:
     selected = agent_launch.resolve(agent="codex")
     resolution = agent_launch.model_for(selected, "coder", probe=False)
     assert resolution is not None and resolution.effort == "turbo"
-    assert any("'turbo' is not one AISquare knows" in note for note in resolution.notes)
+    assert any("'turbo' is not one rlx knows" in note for note in resolution.notes)
     assert codex.model_args(None, "turbo") == ["-c", 'model_reasoning_effort="turbo"']
 
 

@@ -392,7 +392,7 @@ def test_show_stream_stderr_keeps_the_footer_off_stderr() -> None:
     result = CliRunner().invoke(cli(), ["reports", "show", report.id, "--stream", "stderr"])
     assert result.exit_code == 0
     assert result.stderr == "only this\n"
-    assert f"asq report {report.id}" in result.stdout
+    assert f"rlx report {report.id}" in result.stdout
     bad = CliRunner().invoke(cli(), ["--json", "reports", "show", report.id, "--stream", "x"])
     assert bad.exit_code == 2 and json.loads(bad.stdout)["error"] == "usage"
 
@@ -1022,7 +1022,7 @@ def test_an_interrupt_while_the_report_is_saved_still_names_it(
     assert result.exit_code == 128 + signal.SIGINT, result.output
     saved = reports.list_reports()
     assert len(saved) == 1
-    assert f"asq report {saved[0].id}" in result.stderr
+    assert f"rlx report {saved[0].id}" in result.stderr
     with pytest.raises(reports.InterruptedAfterSave) as caught:
         reports.run_command(python("print('again')"))
     assert reports.load_report(caught.value.report.id).returncode == 0

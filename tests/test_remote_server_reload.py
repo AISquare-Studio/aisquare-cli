@@ -17,13 +17,13 @@ from starlette.testclient import TestClient
 from aisquare.core.paths import remote_audit_path, remote_state_path
 from aisquare.services import remote_server
 from aisquare.services.remote_server import (
-    READ_ONLY_REASON,
     WS_CLOSE_UNAUTHORIZED,
     Device,
     LaterRemoteState,
     Runtime,
     Sources,
     build_app,
+    read_only_reason,
 )
 from tests.remote_kit_helpers import frame_within, make_client, receive_within
 
@@ -105,7 +105,7 @@ def test_allow_write_turned_off_externally_makes_the_next_write_403(
     other_process_writes(lambda raw: raw.__setitem__("allow_write", False))
     refused = client.post(f"{base(runtime)}/api/note", json={"text": "x"})
     assert refused.status_code == 403
-    assert refused.json() == {"error": "read_only", "message": READ_ONLY_REASON}
+    assert refused.json() == {"error": "read_only", "message": read_only_reason()}
 
 
 def test_revoke_from_another_process_closes_the_socket_and_the_cookie(
@@ -183,7 +183,7 @@ def test_a_later_release_s_file_under_a_running_server_is_never_written_over(
     other_process_writes(lambda raw: raw.update({"version": 3, "later": {"kept": True}}))
     later = remote_state_path().read_bytes()
     assert runtime.reload_if_changed() is False
-    with pytest.raises(LaterRemoteState, match=r"is version 3, which this aisquare does not"):
+    with pytest.raises(LaterRemoteState, match=r"is version 3, which this rlx does not"):
         _WRITES[write](runtime)
     assert remote_state_path().read_bytes() == later, "nothing was changed"
 
@@ -242,9 +242,9 @@ def test_a_phone_refused_by_a_later_release_s_file_is_told_so_not_of_a_full_disk
             "remote_state_unwritable",
         ), name
         said = response.json()["message"]
-        assert "upgraded by a later aisquare" in said and "full disk" not in said, name
+        assert "upgraded by a later rlx" in said and "full disk" not in said, name
     assert (
-        f"run  aisquare remote revoke {other_id}  on the machine"
+        f"run  rlx remote revoke {other_id}  on the machine"
         in (refused["revoke"].json()["message"])
     )
 

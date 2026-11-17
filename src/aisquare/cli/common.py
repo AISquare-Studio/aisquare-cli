@@ -20,6 +20,7 @@ from rich.text import Text
 from typer.models import TyperPath
 
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core.claude_accounts import format_reset as _format_reset
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
@@ -49,7 +50,9 @@ if TYPE_CHECKING:  # the ledger's model only, never loaded for another command
     from aisquare.core.agent_adapters.types import AgentAdapter, HookTrustLeft
     from aisquare.services.token_ledger import SessionLedger
 
-_DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
+
+def _default_empty() -> str:
+    return f'No context entries yet. Add one with: {prog.command()} remember "…"'
 
 
 USAGE_ERROR: type[Exception] = typer.BadParameter.__bases__[0]
@@ -138,13 +141,13 @@ def emit_entry(entry: ContextEntry, *, verb: str) -> None:
         stdout_console().print(f"✓ {verb} ({entry.pool}): {entry.text}")
 
 
-def emit_entries(entries: list[ContextEntry], *, empty_message: str = _DEFAULT_EMPTY) -> None:
+def emit_entries(entries: list[ContextEntry], *, empty_message: str | None = None) -> None:
     """Render a list of entries — a JSON array under ``--json``, a table otherwise."""
     if get_state().json_output:
         typer.echo(json.dumps([entry.model_dump(mode="json") for entry in entries]))
         return
     if not entries:
-        stdout_console().print(empty_message)
+        stdout_console().print(empty_message or _default_empty())
         return
     table = Table(show_header=True, header_style="bold")
     table.add_column("ID", no_wrap=True)
@@ -218,7 +221,7 @@ def emit_injection_record(record: InjectionRecord | None) -> None:
         return
     console = stdout_console()
     if record is None:
-        console.print("No context has been injected yet. Run: aisquare inject")
+        console.print(f"No context has been injected yet. Run: {prog.command()} inject")
         return
     total = record.user_count + record.project_count
     console.print(f"Last injection: {record.injected_at.isoformat()}")
@@ -312,11 +315,12 @@ def emit_projects(
         noun = "directory" if hidden == 1 else "directories"
         stdout_console().print(
             f"No projects added yet — {hidden} captured {noun} hidden (a hooked session ran "
-            "there): aisquare project list --all; add one: aisquare project onboard <path>"
+            f"there): {prog.command()} project list --all; add one: {prog.command()} project "
+            "onboard <path>"
         )
         return
     if not projects:
-        stdout_console().print("No projects registered yet. Run: aisquare init")
+        stdout_console().print(f"No projects registered yet. Run: {prog.command()} init")
         return
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
@@ -347,8 +351,8 @@ def emit_projects(
     if captured:
         stdout_console().print(
             "captured = a hooked session ran there; add it on purpose to list it "
-            "(aisquare project onboard <path>), or drop the stale ones: "
-            "aisquare project prune --captured-only"
+            f"({prog.command()} project onboard <path>), or drop the stale ones: "
+            f"{prog.command()} project prune --captured-only"
         )
 
 
@@ -537,7 +541,7 @@ def emit_setup(report: SetupReport) -> None:
         return
     console = stdout_console()
     verb = "already initialized" if report.already_initialized else "initialized"
-    console.print(f"✓ aisquare {verb} at {report.home}")
+    console.print(f"✓ rlx {verb} at {report.home}")
     console.print(
         f"  project: {report.project.root.name or report.project.id} ({report.project.id})"
     )
@@ -701,7 +705,7 @@ def emit_connected(connection: AgentConnection) -> None:
         stderr_console().print(
             f"note: {connection.hooks_off} sets "
             f"{agent_core.HOOKS_OFF_SETTINGS.get(connection.name, 'every hook off')}, so "
-            f"{spec.label if spec else connection.name} runs none of its hooks, aisquare's "
+            f"{spec.label if spec else connection.name} runs none of its hooks, rlx's "
             "included — remove that key to turn them on",
             markup=False,
         )
@@ -760,9 +764,9 @@ def connect_hint() -> str:
     hooked = [adapter for adapter in adapters() if adapter.capabilities.hooks]
     named = [a for a in hooked if a.release_stage == "stable" or here(a)] or hooked
     if len(named) == 1:
-        return f"Connect {named[0].label}: aisquare agents connect {named[0].id}"
+        return f"Connect {named[0].label}: {prog.command()} agents connect {named[0].id}"
     return "Connect your coding agent: " + " or ".join(
-        f"aisquare agents connect {agent.id}{stage_mark(agent)}" for agent in named
+        f"{prog.command()} agents connect {agent.id}{stage_mark(agent)}" for agent in named
     )
 
 
@@ -831,7 +835,7 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
     if not summary.turns_with_tokens:
         console.print(
             "note: no token counts on these turns yet — the Stop hook reads them off the "
-            "transcript; per-session totals: aisquare metrics tokens"
+            f"transcript; per-session totals: {prog.command()} metrics tokens"
         )
 
 
@@ -862,8 +866,8 @@ def emit_token_summary(summary: TokenSummary) -> None:
     table.add_row("list price", f"${summary.cost_usd:,.2f}")
     table.add_row("tool calls", f"{summary.tool_calls:,}")
     table.add_row("tool-result chars", f"{summary.tool_result_chars:,}")
-    table.add_row("aisquare lookups", f"{summary.lookup_calls:,}")
-    table.add_row("injected by aisquare", f"{summary.injected_chars:,} chars")
+    table.add_row("rlx lookups", f"{summary.lookup_calls:,}")
+    table.add_row("injected by rlx", f"{summary.injected_chars:,} chars")
     if summary.median_tokens_before_edit is not None:
         table.add_row(
             "before first edit (median)",
@@ -1014,11 +1018,11 @@ def emit_status(report: StatusReport) -> None:
         return
     console = stdout_console()
     project = report.active_project
-    console.print(f"aisquare: {'initialized' if report.initialized else 'not initialized'}")
+    console.print(f"rlx: {'initialized' if report.initialized else 'not initialized'}")
     console.print(f"home:     {report.home}")
     console.print(f"project:  {project.root.name or project.id} ({project.id})")
     hidden = (
-        f" (+{report.captured_count} captured, hidden: aisquare project list --all)"
+        f" (+{report.captured_count} captured, hidden: {prog.command()} project list --all)"
         if report.captured_count
         else ""
     )
@@ -1105,8 +1109,7 @@ def _fail_home_not_creatable(exc: OSError, blocker: Path | None = None) -> NoRet
     """
     where = blocker or exc.filename or paths.aisquare_home()
     fail(
-        f"cannot create the aisquare home: {where} is in the way "
-        f"({exc.strerror or type(exc).__name__})",
+        f"cannot create the rlx home: {where} is in the way ({exc.strerror or type(exc).__name__})",
         error="home_not_creatable",
         hint="AISQUARE_HOME must point at a directory (it may not exist yet) — "
         "move the file, or point AISQUARE_HOME elsewhere",

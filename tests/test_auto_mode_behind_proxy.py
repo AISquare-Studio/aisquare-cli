@@ -414,9 +414,7 @@ def test_the_doctor_line_names_the_agents_still_running_in_auto(
     assert check.detail.startswith("the running agent coder-auto (repo) runs in auto mode")
     assert "141k" in check.detail
     # Its own restart, naming its project: alone, the active project's (#259, round 21).
-    restart = (
-        f"rlx fleet restart --project {project.id} coder-auto --permission-mode acceptEdits"
-    )
+    restart = f"rlx fleet restart --project {project.id} coder-auto --permission-mode acceptEdits"
     assert check.fix and restart in check.fix, check.fix
     assert "config set" not in check.fix and "[fleet.roles" not in check.fix
 
@@ -445,7 +443,7 @@ def test_the_printed_mode_fix_is_one_this_config_accepts(
     _configure(tracing=True, modes={"coder": "acceptEdits"})
     check = auto_mode.doctor_check()
     assert check is not None and check.fix
-    command = "aisquare config set fleet.roles.manager.permission_mode acceptEdits"
+    command = "rlx config set fleet.roles.manager.permission_mode acceptEdits"
     assert command in check.fix and "add a `[fleet.roles" not in check.fix
     result = runner.invoke(app, command.split()[1:])
     assert result.exit_code == 0, result.output
@@ -582,7 +580,7 @@ def test_the_spawn_note_points_at_the_command_that_carries_the_line(
     note = _note("auto")
 
     assert note is not None
-    assert note.endswith(f"or see `aisquare explainability doctor` ({auto_mode.CHECK_NAME})"), note
+    assert note.endswith(f"or see `rlx explainability doctor` ({auto_mode.CHECK_NAME})"), note
     named = runner.invoke(app, ["--json", "explainability", "doctor"]).stdout
     assert auto_mode.CHECK_NAME in {row["name"] for row in json.loads(named)}
     plain = runner.invoke(app, ["--json", "doctor"]).stdout
@@ -608,7 +606,7 @@ def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
     note = _note("auto", role="coder", label="coder-auth")
 
     assert note is not None and "fleet spawn" not in note
-    command = "aisquare config set fleet.roles.coder.permission_mode acceptEdits"
+    command = "rlx config set fleet.roles.coder.permission_mode acceptEdits"
     assert (
         f"set a non-classifier mode for coder ({command}) and "
         "`rlx fleet restart --project calm-otter coder-auth --permission-mode acceptEdits` "
@@ -802,7 +800,7 @@ def test_only_a_session_launched_through_the_proxy_is_blamed_on_it(
     blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
     assert len(blocked) == 1 and "behind the explainability proxy" in blocked[0]
     # coder, a fleet role, has its table whatever the file holds: the step is `config set`.
-    assert "aisquare config set fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
+    assert "rlx config set fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
     assert "add a `[fleet.roles" not in blocked[0]
 
 

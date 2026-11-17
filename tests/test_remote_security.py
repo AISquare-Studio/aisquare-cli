@@ -832,7 +832,7 @@ def test_the_trip_is_said_once_logged_and_pushed(
         _spend_the_budget(app, runtime)
         for n in range(3):  # refused, not counted: no second trip
             unlock(_from(app, f"198.51.100.{120 + n}"), runtime, "wrong")
-    assert alerts == [([device_id], remote_server.LOCKOUT_ALERT)]
+    assert alerts == [([device_id], remote_server.lockout_alert())]
     said = [r.getMessage() for r in caplog.records if "new unlocks are paused" in r.getMessage()]
     assert len(said) == 1 and "regenerate-password --new-link" in said[0]
 
@@ -1138,7 +1138,7 @@ def test_a_revoke_that_cannot_be_saved_holds_here_and_says_it_was_not_saved(
     response = mine.delete(f"{base(runtime)}/api/devices/{other}")
     assert (response.status_code, response.json()["error"]) == (503, "remote_state_unwritable")
     assert "revoked on the running Remote" in response.json()["message"]
-    assert f"run  aisquare remote revoke {other}  on the machine" in response.json()["message"]
+    assert f"run  rlx remote revoke {other}  on the machine" in response.json()["message"]
     assert other not in runtime.device_ids()
     assert theirs.get(f"{base(runtime)}/api/board").status_code == 401
     assert _audit_lines()[-1][2:] == ["devices/revoke", f"{other} unsaved"]
@@ -1373,7 +1373,7 @@ def test_past_the_device_cap_with_every_device_signed_in_an_unlock_is_refused_40
     assert refused.status_code == 409, refused.text
     assert refused.json() == {
         "error": "too_many_devices",
-        "message": remote_server.TOO_MANY_DEVICES,
+        "message": remote_server.too_many_devices(),
     }
     assert "set-cookie" not in refused.headers
     assert runtime.device_ids() == kept and _devices_on_disk() == kept
@@ -1839,7 +1839,7 @@ def test_serves_auto_off_stops_the_server_even_when_remote_json_cannot_be_writte
     assert server.should_exit is True
     assert cleared == [None], "the deadline is still cleared"
     assert failure is not None and "could not be revoked (remote.json: read-only" in failure
-    assert "aisquare remote revoke --all" in failure
+    assert "rlx remote revoke --all" in failure
     monkeypatch.setattr(remote_server, "revoke_every_remote_device", lambda reason: None)
     assert remote_server._remote_serve_off(runtime, server) is None, "all of it done"
 
@@ -3321,7 +3321,7 @@ def test_a_command_refused_by_a_later_release_s_file_is_not_told_to_free_space(
     monkeypatch.setattr(Runtime, "_refuse_a_later_file", upgraded)
     result = CliRunner().invoke(cli, ["remote", "allow-write", "on"])
     assert result.exit_code == 1 and isinstance(result.exception, SystemExit)
-    assert "is version 3, which this aisquare does not know" in result.stderr
+    assert "is version 3, which this rlx does not know" in result.stderr
     assert "free some space" not in result.stderr
 
 

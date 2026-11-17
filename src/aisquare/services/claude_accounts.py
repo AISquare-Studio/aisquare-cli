@@ -72,6 +72,7 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths, tls
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import FolderTrust, SharePart, trusted_by
 from aisquare.core.config import AccountsSettings, FleetSettings, load_config, save_config
@@ -445,14 +446,14 @@ def _refuse_a_shared_numbers_rank(store: ContextStore, accounts: Sequence[Claude
         ]
         if not others or (account.agent, account.slot) not in unranked:
             continue
-        add = "aisquare accounts add" + (
+        add = f"{prog.command()} accounts add" + (
             "" if core.kind(account.agent).legacy_slots else f" --agent {account.agent}"
         )
         raise AccountsError(
             f"{core.agent_label(account.agent)}'s account {account.slot} shares its number with "
             f"{core.agent_label(others[0].agent)}'s, whose place in the order it is: it is listed "
             "last and cannot be moved or made the default. To give it a number of its own: "
-            f"aisquare accounts remove {core.qualified_ref(account)}, then {add}"
+            f"{prog.command()} accounts remove {core.qualified_ref(account)}, then {add}"
         )
 
 
@@ -689,7 +690,7 @@ def _resolve_in(
             message=f"{core.label(account)} (slot {account.slot}) is a "
             f"{core.agent_label(account.agent)} account, and this launch runs "
             f"{core.agent_label(agent)} — name a {core.agent_label(agent)} account "
-            "(see: aisquare accounts)",
+            f"(see: {prog.command()} accounts)",
         )
     return account
 
@@ -737,7 +738,7 @@ def _signed_in_as(
             message=reason
             + " — name one as "
             + " or ".join(core.qualified_ref(a) for a in first.values())
-            + "; see: aisquare accounts",
+            + f"; see: {prog.command()} accounts",
             accounts=list(first.values()),
             reason=reason,
         )
@@ -763,7 +764,8 @@ def _find_in(
             if plain is not None and not plain.managed and plain.agent == owner:
                 return plain
             raise NoSuchAccount(
-                f"no {core.kind(owner).noun} account in slot {slot} — see: aisquare accounts"
+                f"no {core.kind(owner).noun} account in slot {slot} — see: {prog.command()} "
+                "accounts"
             )
         return account
     number = core.slot_number(text)
@@ -780,7 +782,9 @@ def _find_in(
             plain = core.find_account(number)
             if plain is not None and not plain.managed and agent in (None, plain.agent):
                 return plain
-            raise NoSuchAccount(f"no {whose} account in slot {text} — see: aisquare accounts")
+            raise NoSuchAccount(
+                f"no {whose} account in slot {text} — see: {prog.command()} accounts"
+            )
         return account
     wanted = text.lower()
     if "@" not in wanted:
@@ -790,7 +794,8 @@ def _find_in(
                 ref=text,
                 message=f"{text!r} names "
                 + " and ".join(core.qualified_ref(a) for a in by_alias)
-                + " — name one as such, and give one another alias; see: aisquare accounts",
+                + " — name one as such, and give one another alias; see: "
+                + f"{prog.command()} accounts",
             )
         if by_alias:
             return by_alias[0]
@@ -798,11 +803,13 @@ def _find_in(
     if found is not None:
         return found
     if "@" in wanted:
-        raise NoSuchAccount(f"no {whose} account is signed in as {text!r} — see: aisquare accounts")
+        raise NoSuchAccount(
+            f"no {whose} account is signed in as {text!r} — see: {prog.command()} accounts"
+        )
     detail = f" ({note})" if note else ""
     raise NoSuchAccount(
         f"no {whose} account is called {text!r} — not a slot, an alias or a signed-in email"
-        f"{detail}; see: aisquare accounts"
+        f"{detail}; see: {prog.command()} accounts"
     )
 
 
@@ -822,7 +829,7 @@ def _two_in_one_number(number: str, accounts: Sequence[ClaudeAccount]) -> Ambigu
         "own accounts by Claude Code's alone"
     )
     return AmbiguousAccount(
-        f"{reason}. Name one as {names}; see: aisquare accounts",
+        f"{reason}. Name one as {names}; see: {prog.command()} accounts",
         ref=number,
         accounts=accounts,
         reason=reason,
@@ -1013,7 +1020,7 @@ def choose(
             if preferred is None:
                 raise NoSuchAccount(
                     f"the default account of {project.root.name or project.id} is slot {slot}, "
-                    "which no longer exists — see: aisquare accounts default --project"
+                    f"which no longer exists — see: {prog.command()} accounts default --project"
                 )
             if preferred.disabled:
                 notes.append(f"{core.label(preferred)} (project default) is disabled — skipped")
@@ -1192,7 +1199,7 @@ def set_default(
     if project is None and ref is None:
         raise AccountsError(
             "the machine default is rank 1 of the priority order and cannot be cleared — "
-            "reorder instead: aisquare accounts move <slot|alias|email> top"
+            f"reorder instead: {prog.command()} accounts move <slot|alias|email> top"
         )
     account = resolve(ref, agent=agent) if ref is not None else None
     if account is not None:
@@ -1203,7 +1210,7 @@ def set_default(
         # launch, and only doctor said so (review of #205, third round).
         raise AccountsError(
             f"{core.label(account)} (slot {account.slot}) is disabled, so no launch would "
-            f"pick it — enable it first: aisquare accounts enable {ref_for(account)}"
+            f"pick it — enable it first: {prog.command()} accounts enable {ref_for(account)}"
         )
     try:
         with store_session() as store:
@@ -1243,7 +1250,7 @@ def _vanished(account: ClaudeAccount | None, agent: str = AGENT) -> str:
     noun = core.kind(account.agent if account is not None else agent).noun
     return (
         f"no {noun} account in slot {slot} any more — it was removed meanwhile; "
-        "see: aisquare accounts"
+        f"see: {prog.command()} accounts"
     )
 
 
@@ -1295,7 +1302,7 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
             ):
                 # Every agent's slots are arranged here: one name, one account, across all.
                 raise AccountsError(
-                    f"the alias {normalised!r} is already taken — see: aisquare accounts"
+                    f"the alias {normalised!r} is already taken — see: {prog.command()} accounts"
                 )
             try:
                 if core.kind(account.agent).legacy_slots:
@@ -1304,7 +1311,7 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
                     store.set_agent_account_alias(account.agent, account.slot, normalised)
             except sqlite3.IntegrityError as exc:
                 raise AccountsError(
-                    f"the alias {normalised!r} is already taken — see: aisquare accounts"
+                    f"the alias {normalised!r} is already taken — see: {prog.command()} accounts"
                 ) from exc
             except KeyError as exc:
                 raise NoSuchAccount(_vanished(account)) from exc
@@ -1513,7 +1520,7 @@ def _log_in(agent: str | None = None) -> str:
     doctor's accounts row says it), else with what to type once its TUI opens (``relogin``: Claude
     Code's ``/login``). Never another agent's remedy (SCOPE #113 091, item 17)."""
     accounts = core.kind(agent or core.AGENT)
-    run = "aisquare accounts run {slot}"
+    run = "{program} accounts run {slot}"
     if accounts.sign_in_args():
         run = " ".join((run, *accounts.sign_in_args()))
     elif accounts.relogin:
@@ -1525,7 +1532,7 @@ def _refresh_token(agent: str | None = None) -> str:
     """How a slot of ``agent`` whose token expired or was refused gets a fresh one: the agent
     refreshes it in a session on that slot."""
     return (
-        "press Log in, or open a session on this account (aisquare accounts run {slot}): "
+        "press Log in, or open a session on this account ({program} accounts run {slot}): "
         f"{core.agent_label(agent or core.AGENT)} refreshes the token"
     )
 
@@ -1563,10 +1570,10 @@ USAGE_FIXES: dict[UsageCause, str | None] = {
     # Never an unlock asked for here: the Mac's own asq reads the Keychain and records what it
     # read, and this session shows that by itself (`_logins`).
     UsageCause.keychain_locked_ssh: (
-        "open asq on the Mac itself, which records usage for this session too; "
+        "open rlx on the Mac itself, which records usage for this session too; "
         f"or run security unlock-keychain here, {_THEN_REFRESH}"
     ),
-    UsageCause.keychain_refused: f"allow aisquare in Keychain Access, {_THEN_REFRESH}",
+    UsageCause.keychain_refused: f"allow rlx in Keychain Access, {_THEN_REFRESH}",
     UsageCause.keychain_timeout: (
         f"answer the Keychain's prompt if one is waiting, {_THEN_REFRESH}"
     ),
@@ -1580,7 +1587,8 @@ USAGE_FIXES: dict[UsageCause, str | None] = {
     UsageCause.bad_answer: None,
     UsageCause.read_failed: None,
 }
-"""What to do about each cause, ``{slot}`` and ``{at}`` filled in by :func:`usage_fix`; ``None``
+"""What to do about each cause, ``{slot}``, ``{at}`` and ``{program}`` (the word hints print,
+``core.program.command``) filled in by :func:`usage_fix`; ``None``
 where nothing done on this machine helps, which :data:`NO_FIX` says."""
 
 TLS_BUNDLE_REASON = core.TLS_BUNDLE_REASON
@@ -1608,7 +1616,7 @@ def usage_fix(
     if fix is None:
         return None
     at = f"at {until.astimezone().strftime('%H:%M')} " if until is not None else ""
-    return fix.format(slot="<slot>" if slot is None else slot, at=at)
+    return fix.format(slot="<slot>" if slot is None else slot, at=at, program=prog.command())
 
 
 def unreadable_usage(
@@ -2331,7 +2339,7 @@ def is_signed_in(account: ClaudeAccount) -> bool:
     return account.slot in signed_in_slots([account])
 
 
-VIA_THE_MAC = "via the Mac's asq"
+VIA_THE_MAC = "via the Mac's rlx"
 """What a reading this process did not take says beside its age (:func:`describe_via`)."""
 
 NO_SESSION_LIMIT = "no 5h limit"
@@ -5117,7 +5125,7 @@ def begin_sign_in(slot: int | str | None, *, agent: str = AGENT) -> ClaudeAccoun
     if found is None:
         raise NoSuchAccount(
             f"no {_whose(agent, core.list_accounts())} account in slot {slot} — "
-            "see: aisquare accounts"
+            f"see: {prog.command()} accounts"
         )
     return found
 
@@ -5405,7 +5413,7 @@ def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
     if not account.managed:
         raise AccountsError(
             f"slot {account.slot} is the {core.label(account)} of this machine, not an "
-            f"account the CLI added — sign out of it {core.kind(account.agent).sign_out} instead"
+            f"account rlx added — sign out of it {core.kind(account.agent).sign_out} instead"
         )
     identity = core.identity(account)  # read before the rename moves the directory
     # The alias too, from the registry itself: a caller holding a plain
@@ -5708,7 +5716,7 @@ def trust_command(folder: Path | None) -> str:
     ``shlex.quote`` wrapped a Windows path in single quotes, which cmd.exe passes on as part
     of the path (review of #259, round 20). ``<dir>`` for a folder not known."""
     if folder is None:
-        return "aisquare accounts trust <dir>"
+        return f"{prog.command()} accounts trust <dir>"
     return install_route.command_line(["aisquare", "accounts", "trust", str(folder)])
 
 

@@ -31,8 +31,8 @@ from textual.widgets.data_table import ColumnKey
 from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.remote_control import (
     AUTO_OFF_CHOICES,
-    READ_ONLY_REASON,
     RemoteController,
+    read_only_reason,
 )
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import program as prog
@@ -211,7 +211,7 @@ class RemotePanel(ModalScreen[None]):
             Text(controller.password() or "—", style="bold")
         )
         self.query_one("#remote-write-hint", Static).update(
-            "writes reach the fleet" if writes else READ_ONLY_REASON
+            "writes reach the fleet" if writes else read_only_reason()
         )
         self.query_one("#remote-unlocks", Static).update(self._unlocks_text(status))
         # With the token remote.json holds now: a --new-link from a shell redraws both.

@@ -21,6 +21,7 @@ import typer
 
 from aisquare.cli.common import fail
 from aisquare.core import agents as agent_core
+from aisquare.core import program as prog
 from aisquare.core import selfcli
 from aisquare.core.agent_adapters import default_adapter, get_adapter
 from aisquare.core.agent_adapters.types import LastingInstall
@@ -137,7 +138,7 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
     if get_state().json_output:
         _echo_json(_plan_json(plan))
         return
-    _say(f"aisquare {plan.current} — {plan.route.describe()}")
+    _say(f"rlx {plan.current} — {plan.route.describe()}")
     _say(_latest_line(plan))
     # A release PyPI does not list may be on an index the command reads and this CLI does
     # not: PIP_INDEX_URL, pip.conf, pipx's default index, uv.toml, UV_INDEX_URL. Every
@@ -148,7 +149,10 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
     index_only = f"({plan.pin_unmet}: the command finds it only on an index set up for it)"
     if plan.pin_unmet is not None and plan.reason == plan.pin_unmet:
         # Not "upgrade with" a pin uv refuses here (review of #257's fixes).
-        _say(f"`aisquare upgrade --version {plan.target}` cannot install it: {plan.pin_unmet}")
+        _say(
+            f"`{prog.command()} upgrade --version {plan.target}` cannot install it: "
+            f"{plan.pin_unmet}"
+        )
         return
     if plan.runnable:
         if plan.up_to_date:
@@ -159,12 +163,12 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             # Nothing to compare (an index of its own, PyPI out of reach): "upgrade with"
             # sent every run to a reinstall that changed nothing (review of #257).
             _say(
-                "can't tell whether anything is newer: `aisquare upgrade` reinstalls the "
+                f"can't tell whether anything is newer: `{prog.command()} upgrade` reinstalls the "
                 "release uv picks for this install, which may be the one you have"
             )
             return
         pin = f" --version {plan.target}" if plan.target else ""
-        _say(f"upgrade with: aisquare upgrade{pin}")
+        _say(f"upgrade with: {prog.command()} upgrade{pin}")
         if unlisted:
             _say(index_only)
     else:
@@ -181,7 +185,7 @@ def _emit_check(plan: lifecycle_service.UpgradePlan) -> None:
             _say(plan.reason or "")
         else:
             _say(f"upgrade with: {plan.command}")
-            _say(f"(`aisquare upgrade` does not run it: {plan.reason})")
+            _say(f"(`{prog.command()} upgrade` does not run it: {plan.reason})")
             if unlisted:
                 _say(index_only)
                 return
@@ -201,7 +205,7 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
         else:
             held = "latest on PyPI" if python is None else "the newest"
         where += f" ({held} for Python {python})" if python else f" ({held})"
-    _say(f"aisquare {plan.current} → {where}")
+    _say(f"rlx {plan.current} → {where}")
     if plan.target is None and plan.latest is not None and plan.latest.version is None:
         _say(
             f"  {plan.latest.error}; uv will install the release it picks for this "
@@ -292,9 +296,9 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         # Only reachable when PyPI was not asked or could not answer, or when the receipt uv
         # wrote records a setting that can hold releases back: otherwise an unchanged
         # version is a failure (lifecycle._verify). Which setting did, it does not guess.
-        _say(f"✓ aisquare {report.version} is the release uv picks for this install")
+        _say(f"✓ rlx {report.version} is the release uv picks for this install")
     else:
-        _say(f"✓ aisquare {report.version} (was {plan.current}) — checked in a new process")
+        _say(f"✓ rlx {report.version} (was {plan.current}) — checked in a new process")
     for hook in report.hooks:
         where = _place(hook.config_dir, hook.agent)
         if hook.ok and hook.hooks_off is not None:
@@ -320,7 +324,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         else:
             remedy = install_route.command_line(
                 [
-                    "aisquare",
+                    prog.command(),
                     *lifecycle_service.refresh_hooks_argv(hook.agent),
                     "--config-dir",
                     str(hook.config_dir),
@@ -339,7 +343,7 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
 def _by_hand(version: str | None) -> str:
     """The command a person runs instead of ``--one-click``: asq's own flag is never told."""
     return install_route.command_line(
-        ["aisquare", "upgrade", *(["--version", version] if version else [])]
+        [prog.command(), "upgrade", *(["--version", version] if version else [])]
     )
 
 
@@ -404,7 +408,7 @@ def _reopen(
         return
     if not one_click or failed:
         try:
-            input("Press Enter to go back to asq ")
+            input("Press Enter to go back to rlx ")
         except (EOFError, KeyboardInterrupt):
             if one_click:
                 _drop_press()
@@ -427,13 +431,13 @@ def _reopen_after_one_click(*, failed: bool, installed: bool, started: datetime 
     except OSError as exc:
         _drop_press()
         if installed:
-            said = "the update is done, but asq could not be opened again"
+            said = "the update is done, but rlx could not be opened again"
         elif failed:
-            said = "asq could not be opened again"
+            said = "rlx could not be opened again"
         else:
-            said = "nothing was installed, and asq could not be opened again"
+            said = "nothing was installed, and rlx could not be opened again"
         stderr_console().print(
-            f"✗ {said} ({exc}). Type `asq` to open it.",
+            f"✗ {said} ({exc}). Type `{prog.command()}` to open it.",
             markup=False,
         )
 
@@ -494,7 +498,7 @@ def upgrade(
         typer.Option(
             "--reopen",
             hidden=True,
-            help="Open asq again afterwards, unless something failed (asq's Update button).",
+            help="Open rlx again afterwards, unless something failed (rlx's Update button).",
         ),
     ] = False,
     one_click: Annotated[
@@ -502,12 +506,12 @@ def upgrade(
         typer.Option(
             "--one-click",
             hidden=True,
-            help="Upgrade without asking and open asq again at once, after Enter when "
-            "something failed (asq's ⬆ Restart & update).",
+            help="Upgrade without asking and open rlx again at once, after Enter when "
+            "something failed (rlx's ⬆ Restart & update).",
         ),
     ] = False,
 ) -> None:
-    """Upgrade aisquare in place, then re-connect its Claude Code and Codex hooks.
+    """Upgrade rlx in place, then re-connect its Claude Code and Codex hooks.
 
     Runs only for a uv tool install, which is what the one-line installer makes:
     it reinstalls with `uv tool install --force`, keeping the extras, the
@@ -595,7 +599,7 @@ def _upgrade(
         held = lifecycle_service.launchers_refusal("upgrade", plan.launchers, again="run it")
         command += f" {held}" if held else ""
         fail(
-            f"aisquare does not upgrade this install itself ({plan.reason}).{command}",
+            f"rlx does not upgrade this install itself ({plan.reason}).{command}",
             error="upgrade_unsupported_route",
             hint=plan.command or None,
             detail=plan.route.describe(),
@@ -609,23 +613,23 @@ def _upgrade(
                 {"dry_run": planned, "upgraded": False, "up_to_date": True, **_plan_json(plan)}
             )
         elif plan.target is not None:
-            _say(f"aisquare {plan.current} is already the version asked for — nothing to do")
+            _say(f"rlx {plan.current} is already the version asked for — nothing to do")
         elif plan.latest is not None and plan.latest.cutoff is not None:
             python = plan.latest.for_python
             held = f" for Python {python}" if python else ""
             _say(
-                f"aisquare {plan.current} is up to date ({plan.latest_version} is the newest "
+                f"rlx {plan.current} is up to date ({plan.latest_version} is the newest "
                 f"release your uv cutoff allows{held}: {plan.latest.cutoff}) — nothing to do"
             )
         elif plan.latest is not None and plan.latest.for_python is not None:
             _say(
-                f"aisquare {plan.current} is up to date (PyPI's latest is "
+                f"rlx {plan.current} is up to date (PyPI's latest is "
                 f"{plan.latest.passed_over}; {plan.latest_version} is the newest for Python "
                 f"{plan.latest.for_python}) — nothing to do"
             )
         else:
             _say(
-                f"aisquare {plan.current} is up to date (PyPI's latest is "
+                f"rlx {plan.current} is up to date (PyPI's latest is "
                 f"{plan.latest_version}) — nothing to do"
             )
         _reopen(reopen, one_click=one_click, started=started)
@@ -656,9 +660,9 @@ def _upgrade(
             busy.append("Remote is on")
         during = f" while {' and '.join(busy)}" if busy else ""
         move = (
-            f"Move aisquare {plan.current} back to {plan.destination}"
+            f"Move rlx {plan.current} back to {plan.destination}"
             if plan.backwards
-            else f"Upgrade aisquare {plan.current} → {plan.destination}"
+            else f"Upgrade rlx {plan.current} → {plan.destination}"
         )
         if not typer.confirm(f"{move}{during}?", default=False):
             _say("nothing changed")
@@ -667,9 +671,9 @@ def _upgrade(
     elif not json_output:
         _fleet_lines(plan, one_click=one_click)  # --yes skips the plan, not what it costs the fleet
         move = (
-            f"moving aisquare {plan.current} back to {plan.destination}"
+            f"moving rlx {plan.current} back to {plan.destination}"
             if plan.backwards
-            else f"upgrading aisquare {plan.current} → {plan.destination}"
+            else f"upgrading rlx {plan.current} → {plan.destination}"
         )
         _say(f"{move}: {plan.command}")
     report = lifecycle_service.upgrade(plan, to_stderr=json_output)
@@ -681,7 +685,7 @@ def _upgrade(
             report.version, plan.current
         )
         then = (
-            f"aisquare {plan.current} is still installed. Run it again by hand: {plan.command}"
+            f"rlx {plan.current} is still installed. Run it again by hand: {plan.command}"
             if kept
             else _fallback(plan)
         )
@@ -811,7 +815,10 @@ def _package_kept(report: lifecycle_service.UninstallReport) -> str | None:
     if plan.blocked:
         return _blocked_reason(plan)
     if report.failed:
-        return "a step before it failed, so it stays and `aisquare uninstall` can be run again"
+        return (
+            f"a step before it failed, so it stays and `{prog.command()} uninstall` can be run "
+            "again"
+        )
     return None
 
 
@@ -835,14 +842,14 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     if get_state().json_output:
         _echo_json({"dry_run": True, **_uninstall_plan_json(plan)})
         return
-    _say("aisquare uninstall would:")
+    _say(f"{prog.command()} uninstall would:")
     if plan.hooks:
-        _say("  remove aisquare's hooks from:")
+        _say("  remove rlx's hooks from:")
         for site in plan.hooks:
             runs = f" (they run {', '.join(site.programs)})" if site.programs else ""
             _say(f"    {_place(site.config_dir, site.agent)}{runs}")
     elif not plan.unreadable:
-        _say("  find no aisquare hooks in any Claude Code directory or Codex home")
+        _say("  find no rlx hooks in any Claude Code directory or Codex home")
     blocking = plan.blocking
     for site in plan.unreadable:
         where = _place(site.config_dir, site.agent)
@@ -867,7 +874,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         _say(f"  then remove the package: {plan.package_command}")
     else:
         _say(f"  then tell you to remove the package yourself: {plan.package_command}")
-        _say(f"    (aisquare does not run it: {plan.package_reason})")
+        _say(f"    (rlx does not run it: {plan.package_reason})")
     _say("and keep:")
     # Offered only where --purge could delete it, never for a home the guard refuses.
     offer = not plan.purge and plan.purge_refusal is None
@@ -883,7 +890,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     for agent, entries in by_agent.items():
         owner = lifecycle_service.agent_label(agent)
         files = ", ".join(dict.fromkeys(entry.file.name for entry in entries))
-        _say(f"  MCP servers that run aisquare ({owner} owns {files}; remove each with")
+        _say(f"  MCP servers that run {prog.command()} ({owner} owns {files}; remove each with")
         _say("  the command under it):")
         for entry in entries:
             _say(f"    {entry.name} in {lifecycle_service.mcp_place(entry)}")
@@ -891,7 +898,7 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
     for plugin in plan.lasting_plugins:
         # The agent's to remove, and it keeps running aisquare: said, never silent.
         where = lifecycle_service.plugin_place(plugin)
-        _say(f"  the aisquare plugin in {where}, which keeps running aisquare")
+        _say(f"  the aisquare plugin in {where}, which keeps running rlx")
         _say("  there (through uvx once the package is gone) — remove it with:")
         _say(f"    {plugin.remove}")
     _say(f"  {lifecycle_service.stays_installed(plan)}")
@@ -977,7 +984,7 @@ def _emit_uninstall_report(report: lifecycle_service.UninstallReport) -> None:
         _say(f"· {note}")
     if report.failed:
         _say(
-            "✗ the package was NOT removed, so `aisquare uninstall` can be run again once "
+            f"✗ the package was NOT removed, so `{prog.command()} uninstall` can be run again once "
             "the problems above are fixed"
         )
     elif plan.package_reason is not None:
@@ -998,7 +1005,7 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
     steps: list[str] = []
     if plan.hooks:
         count = len(plan.hooks)
-        steps.append(f"remove aisquare's hooks from {count} director{'ies' if count != 1 else 'y'}")
+        steps.append(f"remove rlx's hooks from {count} director{'ies' if count != 1 else 'y'}")
     if plan.purges:
         steps.append(f"DELETE {plan.home}")
     if plan.deletes_answers:
@@ -1017,7 +1024,7 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
         count = len(plan.lasting_plugins)
         text += (
             f" (the aisquare plugin stays enabled in {count} "
-            f"director{'ies' if count != 1 else 'y'} and keeps running aisquare)"
+            f"director{'ies' if count != 1 else 'y'} and keeps running rlx)"
         )
     return text[0].upper() + text[1:] + "?"
 
@@ -1027,7 +1034,7 @@ def uninstall(
         bool,
         typer.Option(
             "--purge",
-            help="Also delete the aisquare home (~/.aisquare): memory, boards, settings, "
+            help="Also delete the rlx home (~/.aisquare): memory, boards, settings, "
             "its Claude Code account slots (on macOS their sign-in tokens stay in the Keychain) "
             "and Codex account homes, and the Claude Code plugin's answers about uv "
             "(~/.cache/aisquare).",
@@ -1044,17 +1051,17 @@ def uninstall(
         typer.Option(
             "--reopen",
             hidden=True,
-            help="Open asq again if nothing was removed (asq's Uninstall button).",
+            help="Open rlx again if nothing was removed (rlx's Uninstall button).",
         ),
     ] = False,
 ) -> None:
-    """Remove aisquare: its Claude Code and Codex hooks, then the package. Keeps ~/.aisquare.
+    """Remove rlx: its Claude Code and Codex hooks, then the package. Keeps ~/.aisquare.
 
-    Takes aisquare's hooks out of every Claude Code directory it finds (the ones
+    Takes rlx's hooks out of every Claude Code directory it finds (the ones
     this machine connected, $CLAUDE_CONFIG_DIR, ~/.claude* and the account
     slots) and every Codex home ($CODEX_HOME, ~/.codex*, the connected ones and
     the Codex account homes), leaving every other hook as it was. MCP servers
-    and plugins that run aisquare are named with the `claude` or `codex` command
+    and plugins that run rlx are named with the `claude` or `codex` command
     that removes each; their files are never rewritten. Refuses while fleet
     agents are running. ~/.aisquare is kept unless --purge, which waits until an
     enabled aisquare plugin is removed (the plan names the command). The package goes
@@ -1095,9 +1102,7 @@ def uninstall(
                 )
                 _reopen(reopen)  # a refusal said in full, nothing removed: asq comes back
                 raise typer.Exit(1)
-            _say(
-                f"nothing for aisquare to remove here — remove the package: {plan.package_command}"
-            )
+            _say(f"nothing for rlx to remove here — remove the package: {plan.package_command}")
             _reopen(reopen)
             return
         if not typer.confirm(question, default=False):

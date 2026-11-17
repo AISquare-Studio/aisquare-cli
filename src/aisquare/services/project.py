@@ -1010,7 +1010,7 @@ def typed_root(path: Path | None) -> Path:
 
 
 HOME_WARNING = (
-    "this folder is aisquare's own home: it holds aisquare's settings, the fleet database "
+    "this folder is rlx's own home: it holds rlx's settings, the fleet database "
     "and every {accounts} account's login data, so agents working here can read and change them"
 )
 """What adding the aisquare home as a project says, once (the owner's decision D5), its
@@ -1111,5 +1111,7 @@ def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
     try:
         hooks_service.start_code_index(project, full=refresh)
     except Exception as exc:  # an index is optional; the onboard is not
-        return f"not started ({exc}) — build it with `aisquare code index`"
-    return "building in the background — `aisquare code index --status` says when it is ready"
+        return f"not started ({exc}) — build it with `{prog.command()} code index`"
+    return (
+        f"building in the background — `{prog.command()} code index --status` says when it is ready"
+    )

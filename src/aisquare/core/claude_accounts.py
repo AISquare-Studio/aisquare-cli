@@ -1087,7 +1087,7 @@ KEYCHAIN_LOCKED_SSH_REASON = "the login Keychain is locked in this SSH session"
 Keychain for its own session, not for one that came in over SSH, which is why it says locked."""
 SSH_MARKERS = ("SSH_CONNECTION", "SSH_TTY")
 """Set in an SSH login's environment (``core.clipboard``'s attach markers)."""
-KEYCHAIN_REFUSED_REASON = "macOS refused aisquare access to the Claude Code item"
+KEYCHAIN_REFUSED_REASON = "macOS refused rlx access to the Claude Code item"
 KEYCHAIN_REFUSED = f"{KEYCHAIN_REFUSED_REASON} — allow it in Keychain Access"
 """Said for errSecAuthFailed (51): the Deny button on the item's access prompt."""
 KeychainProblem = Literal["locked", "refused", "timeout", "failed"]

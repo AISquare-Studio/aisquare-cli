@@ -28,6 +28,7 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import credentials as credentials_store
 from aisquare.core import harness, paths
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import DEFAULT_AGENT, adapters, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, LastingInstall
 from aisquare.core.config import (
@@ -413,7 +414,7 @@ class UpgradePlan:
             f"{count} fleet agent{'s are' if count != 1 else ' is'} running "
             f"({', '.join(self.live_agents)}): a hook {'they fire' if count != 1 else 'it fires'} "
             "while the install is being replaced fails, and that turn's board update is lost. "
-            f"To be safe, stop {'them' if count != 1 else 'it'} first: {FLEET_SHUTDOWN}"
+            f"To be safe, stop {'them' if count != 1 else 'it'} first: {fleet_shutdown()}"
         )
 
     @property
@@ -430,7 +431,7 @@ class UpgradePlan:
             f"Remote is on ({self.remote}): while the install is being replaced, its page and "
             f"what phones ask of it can fail, and after that it runs {self.current} over the new "
             f"install's files until it is started again. To be safe, turn it off first: "
-            f"{REMOTE_OFF}"
+            f"{remote_off()}"
         )
 
     @property
@@ -461,7 +462,8 @@ class UpgradePlan:
             f"{self.target} reads config.toml without this release's defaults under it, so "
             f"what your file leaves to them takes {self.target}'s there: "
             f"{', '.join(self.config_defaults_lost)}. Your own settings read the same in "
-            f"both; to keep one of these there, set it after the move (`aisquare config set "
+            f"both; to keep one of these there, set it after the move (`{prog.command()} config "
+            "set "
             f"{first} …`)"
         )
 
@@ -509,7 +511,7 @@ class UpgradePlan:
             f"{self.target} denies a role only the tools its extra_args name, which your "
             f"config leaves without them: {', '.join(self.tools_regained)} would launch there "
             f"with {'those tools' if one else 'theirs'}. To keep them denied there, add the "
-            f"deny to {whose} extra_args before the move (`aisquare config set "
+            f"deny to {whose} extra_args before the move (`{prog.command()} config set "
             f"fleet.roles.{role}.extra_args '--disallowedTools={names}'`)"
         )
 
@@ -1028,7 +1030,7 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
                 HookSite(
                     directory,
                     programs,
-                    f"its hooks run {foreign.program}, another install of aisquare",
+                    f"its hooks run {foreign.program}, another install of rlx",
                     agent=agent,
                 )
             )
@@ -1139,7 +1141,7 @@ def settings_unreadable(directory: Path, agent: str = HOOK_AGENT) -> str | None:
         return None
     # Said by upgrade's plan and by uninstall's: both act on the hooks by rewriting the
     # file, so the ending names that, not either command's verb (review of #257).
-    return f"its {name} holds aisquare hooks but {problem}, so aisquare cannot rewrite it safely"
+    return f"its {name} holds rlx hooks but {problem}, so rlx cannot rewrite it safely"
 
 
 def hook_binaries(
@@ -1227,7 +1229,8 @@ def upgrade(plan: UpgradePlan, *, to_stderr: bool = False) -> UpgradeReport:
         held = f"{which} is {latest}; " if pypis else ""
         notes.append(f"{held}uv picks {version} here{now}")
     notes.append(
-        f"asq, `aisquare serve` and `aisquare remote serve` processes that were already "
+        f"rlx, `{prog.command()} serve` and `{prog.command()} remote serve` processes that were "
+        "already "
         f"running keep {plan.current} until they are restarted"
     )
     if unkept is not None:
@@ -1345,7 +1348,7 @@ def _verify(plan: UpgradePlan, ran: install_route.InstallRoute) -> tuple[str | N
         # it back: what uv picks, said with those settings named (upgrade()'s note).
         return found, None
     return found, (
-        f"uv reported success but aisquare still reports {found}, not {latest} — "
+        f"uv reported success but rlx still reports {found}, not {latest} — "
         "the upgrade did not take effect"
     )
 
@@ -1447,12 +1450,21 @@ def _trusted(site: HookSite) -> bool:
 #: before --purge deletes anything.
 HOME_MARKERS = ("config.toml", "context.db", "agents.json")
 
-FLEET_SHUTDOWN = "aisquare fleet shutdown --all --yes"
-FLEET_FORGET = f"{FLEET_SHUTDOWN} --forget"
-REMOTE_OFF = (
-    "press Ctrl-C where `aisquare remote serve` runs, or turn Remote off in that asq's R panel"
-)
-"""How a Remote that is on in another process is turned off (:func:`running_remote`)."""
+
+def fleet_shutdown() -> str:
+    return f"{prog.command()} fleet shutdown --all --yes"
+
+
+def fleet_forget() -> str:
+    return f"{fleet_shutdown()} --forget"
+
+
+def remote_off() -> str:
+    """How a Remote that is on in another process is turned off (:func:`running_remote`)."""
+    return (
+        f"press Ctrl-C where `{prog.command()} remote serve` runs, or turn Remote off in that "
+        "rlx's R panel"
+    )
 
 
 class UninstallRefused(RuntimeError):
@@ -1655,11 +1667,11 @@ class UninstallPlan:
                     forget = (
                         f", or, if {', '.join(self.unreached)} {'is' if one else 'are'} not "
                         f"running, end {'its row' if one else 'their rows'} on your word: "
-                        f"{FLEET_FORGET}"
+                        f"{fleet_forget()}"
                     )
                 return UninstallRefused(
                     f"{running} tmux is not usable here ({self.tmux_unusable}), so nothing can "
-                    f"stop them.{held} Once tmux is usable, run {FLEET_SHUTDOWN}{forget}",
+                    f"stop them.{held} Once tmux is usable, run {fleet_shutdown()}{forget}",
                     error="fleet_running",
                 )
             unreached = ""
@@ -1684,19 +1696,19 @@ class UninstallPlan:
                     f"be asked, or has another server on it. If {'it is' if one else 'they are'} "
                     f"still running, send that server SIGUSR1{once}, which makes tmux create "
                     f"its socket again, and run it again; if not, end "
-                    f"{'its row' if one else 'their rows'} on your word: {FLEET_FORGET}"
+                    f"{'its row' if one else 'their rows'} on your word: {fleet_forget()}"
                 )
             return UninstallRefused(
-                f"{running} Stop them first: {FLEET_SHUTDOWN}{unreached}", error="fleet_running"
+                f"{running} Stop them first: {fleet_shutdown()}{unreached}", error="fleet_running"
             )
         if self.remote is not None:
             # Refused as the fleet is: with the package gone, nothing is left to turn it off,
             # sign its phones out or switch its writes off, and its link and passphrase work
             # for as long as it runs (follow-up of #259).
             return UninstallRefused(
-                f"Remote is on ({self.remote}): with aisquare gone, nothing could turn it off, "
+                f"Remote is on ({self.remote}): with rlx gone, nothing could turn it off, "
                 f"sign its phones out or switch its writes off, and its link and passphrase "
-                f"would work for as long as it runs. Turn it off first: {REMOTE_OFF}",
+                f"would work for as long as it runs. Turn it off first: {remote_off()}",
                 error="remote_on",
             )
         refused_for_asqs = asqs_refusal("uninstall", self.asqs)
@@ -1722,7 +1734,7 @@ class UninstallPlan:
             where = ", ".join(f"{entry.name} in {mcp_place(entry)}" for entry in fetching)
             who = " or ".join(dict.fromkeys(agent_label(entry.agent) for entry in fetching))
             return UninstallRefused(
-                f"--purge would not last: the MCP server {where} runs aisquare through a "
+                f"--purge would not last: the MCP server {where} runs rlx through a "
                 f"runner that fetches it, so {who}'s next session starts it and makes "
                 f"{self.home} again. Remove it first: "
                 f"{'; '.join(entry.remove for entry in fetching)}",
@@ -1735,7 +1747,7 @@ class UninstallPlan:
             who = " or ".join(dict.fromkeys(agent_label(plugin.agent) for plugin in lasting))
             return UninstallRefused(
                 f"--purge would not last: the aisquare plugin is enabled in {where}, so "
-                f"{who}'s next session there runs aisquare and makes {self.home} again. "
+                f"{who}'s next session there runs rlx and makes {self.home} again. "
                 f"Remove the plugin first: {'; '.join(plugin.remove for plugin in lasting)}",
                 error="plugin_enabled",
             )
@@ -1860,11 +1872,11 @@ def purge_refusal(home: Path, *, custom: bool) -> str | None:
     if resolved in user_home.parents:
         return f"{home} contains your home directory"
     if not any(os.path.isfile(home / marker) for marker in HOME_MARKERS):
-        return f"{home} holds none of {', '.join(HOME_MARKERS)}, so it is not an aisquare home"
+        return f"{home} holds none of {', '.join(HOME_MARKERS)}, so it is not an rlx home"
     if custom:
         return (
             f"AISQUARE_HOME moved the home to {home}, and --purge deletes only ~/.aisquare: a "
-            "directory you chose may hold your own files under names aisquare also uses — "
+            "directory you chose may hold your own files under names rlx also uses — "
             "delete it by hand"
         )
     return None
@@ -2019,7 +2031,7 @@ def plugin_note(plugin: LastingInstall) -> str:
     """What an uninstall leaves running where an agent enables the aisquare plugin."""
     return (
         f"the aisquare plugin is still enabled in {plugin_place(plugin)}, so "
-        f"{agent_label(plugin.agent)} keeps running aisquare there (through uvx once the "
+        f"{agent_label(plugin.agent)} keeps running rlx there (through uvx once the "
         f"package is gone) — remove it: {plugin.remove}"
     )
 
@@ -2258,11 +2270,11 @@ def launchers_refusal(
         they=they, holds="holds" if one else "hold"
     )
     waiting = (
-        "a session started with `aisquare launch` is"
+        f"a session started with `{prog.command()} launch` is"
         if one
-        else f"{len(launchers)} sessions started with `aisquare launch` are"
+        else f"{len(launchers)} sessions started with `{prog.command()} launch` are"
     )
-    again = again or f"run `aisquare {command}` again"
+    again = again or f"run `rlx {command}` again"
     named = ", ".join(launchers)
     return (
         f"{waiting} waiting on {'its agent' if one else 'their agents'} on this home "
@@ -2296,9 +2308,9 @@ def asqs_refusal(command: str, asqs: Sequence[str], *, again: str | None = None)
     cost = _ASQ_COST.get(command, "{they} would be left running").format(
         it=it, they=they, runs="runs" if one else "run"
     )
-    running = "another asq runs" if one else f"{len(asqs)} other asqs run"
+    running = "another rlx runs" if one else f"{len(asqs)} other asqs run"
     each = "it" if one else "each"
-    again = again or f"run `aisquare {command}` again"
+    again = again or f"run `rlx {command}` again"
     named = ", ".join(asqs)
     return f"{running} on this home ({named}): {cost}. Quit {it} first (q in {each}), then {again}."
 
@@ -2662,7 +2674,7 @@ def _uninstall_notes(
     for plugin in plan.lasting_plugins if purged else plan.plugins:
         notes.append(plugin_note(plugin))
     notes.append(
-        "a running `aisquare serve` keeps running until you stop it; "
+        f"a running `{prog.command()} serve` keeps running until you stop it; "
         f"{stays_installed(plan)} stay installed"
     )
     return notes

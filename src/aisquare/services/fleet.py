@@ -69,6 +69,7 @@ from aisquare.core import (
 from aisquare.core import load as load_core
 from aisquare.core import memory as memory_core
 from aisquare.core import names as names_core
+from aisquare.core import program as prog
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
@@ -1299,7 +1300,7 @@ def _refused_by_the_records(rows: Sequence[FleetAgent], *, first: bool) -> dict[
         elif not first and (adapter is None or adapter.capabilities.sandboxes_tools):
             refused[row.id] = (
                 f"{launch_seal.UNRECORDED}: after the first census the census takes no row of "
-                "an agent that sandboxes its tools, or of one this aisquare does not know"
+                "an agent that sandboxes its tools, or of one this rlx does not know"
             )
     return refused
 
@@ -1484,7 +1485,7 @@ def resolve_place(
     if place is None:
         return Unplaced(
             row,
-            "its launch record does not say which pane is its (it was spawned by an aisquare "
+            "its launch record does not say which pane is its (it was spawned by an rlx "
             "that recorded none)",
         )
     if record.project_id != row.project_id:
@@ -2697,7 +2698,7 @@ def _branches_locked(common: Path, *, wait: float) -> Iterator[None]:
                 seen, deadline = now, time.monotonic() + wait  # another holder: still moving
             elif time.monotonic() >= deadline:
                 raise FleetError(
-                    f"another aisquare (a spawn or a reap) holds {path}"
+                    f"another rlx (a spawn or a reap) holds {path}"
                     + (
                         f", and has held it for {wait:g} s without letting go — it may be "
                         "stuck; try again once it ends"
@@ -4573,7 +4574,7 @@ FIRST_PROMPT_META = "first-prompt:"
 ``{"digest", "home", "cwd", "at"}``, for :func:`_first_prompt_off_its_transcript`; and, once a
 row reads ``unsent``, ``"seen"``: the digests of the prompts its agent's record held then."""
 BLIND_DETAIL = (
-    "; aisquare cannot tell which process holds a rollout here (no lsof, a hidden /proc),"
+    "; rlx cannot tell which process holds a rollout here (no lsof, a hidden /proc),"
     " so only the message itself clears this"
 )
 """What an ``unsent`` row's detail adds where its agent's record of the prompts it ran could not
@@ -4878,7 +4879,7 @@ def _require_role(role: str) -> None:
     if not _role_ok(role):
         raise FleetError(
             f"unknown role {role!r} — expected one of: {', '.join(FLEET_ROLES)}, a harness "
-            f"role, one bound with `aisquare team bind`, or {PLAIN_ROLE!r} for no role"
+            f"role, one bound with `{prog.command()} team bind`, or {PLAIN_ROLE!r} for no role"
         )
 
 
@@ -5472,7 +5473,8 @@ def spawn(
     )
     if experimental.captain_role(role) and not is_home_project(project):
         raise FleetError(
-            "the captain lives on the home board, one per home — `aisquare captain` starts "
+            f"the captain lives on the home board, one per home — `{prog.command()} captain` "
+            "starts "
             f"it; it cannot be spawned into {_name(project)}"
         )
     replayed_args = spec is not None and not agent_args
@@ -5498,7 +5500,8 @@ def spawn(
         # `fleet spawn captain` on the home was a captain with every tool, in the
         # home itself — and `aisquare captain` then attached to it and typed into it.
         raise FleetError(
-            "the captain is started by `aisquare captain`, which gives it its brain folder "
+            f"the captain is started by `{prog.command()} captain`, which gives it its brain "
+            "folder "
             "and no tool but its own server"
         )
     srv = server(config)
@@ -5820,7 +5823,7 @@ def spawn(
         if captain is not None:
             raise FleetError(
                 f"the home already has a captain ({captain.id}) — one per home; "
-                "`aisquare captain` attaches to it"
+                f"`{prog.command()} captain` attaches to it"
             )
     cap = config.max_agents_per_project
     # The agents the project runs, as the row's settlement (`_verify_cap`, `_verify_burst`),
@@ -7305,7 +7308,7 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
                         f"the previous session {_team().short_id(previous)} was not marked ended "
                         f"({type(exc).__name__}: {exc}) — it shows on the board as a live "
                         f"session, marked (stale) once it has been silent for {stale} minutes; "
-                        "from then on `aisquare team prune` retires it"
+                        f"from then on `{prog.command()} team prune` retires it"
                     )
             store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
             current = store.get_fleet_agent(agent.id)
@@ -7515,7 +7518,7 @@ def _forget_an_exited_server(
 
 
 SSH_START_REFUSAL = (
-    "start asq on the Mac first: agents started from an SSH login can't read the Keychain"
+    "start rlx on the Mac first: agents started from an SSH login can't read the Keychain"
 )
 """Why an SSH login on macOS starts no fleet tmux server (:func:`_refuse_a_server_from_ssh`)."""
 
@@ -7580,7 +7583,7 @@ def _refuse_a_server_from_ssh(agent: str | None = None) -> bool:
         others = _file_login_agents()
         raise FleetError(
             f"not started: {SSH_START_REFUSAL}. No fleet tmux server runs yet: start an agent "
-            "in asq at the Mac, and agents start from SSH after that"
+            "in rlx at the Mac, and agents start from SSH after that"
             + (f"; {others} can start it from here" if others else "")
         )
     return True
@@ -7619,8 +7622,10 @@ def _refuse_a_server_started_over_ssh(srv: TmuxServer, agent: str | None) -> Non
         return
     if _started_over_ssh(srv):
         raise FleetError(
-            f"not started: {SSH_STARTED_REFUSAL}. `aisquare fleet shutdown --all` ends that "
-            f"server; then start asq on the Mac, and {claude_accounts_core.agent_label(agent)} "
+            f"not started: {SSH_STARTED_REFUSAL}. `{prog.command()} fleet shutdown --all` ends "
+            "that "
+            f"server; then start {prog.command()} on the Mac, and "
+            f"{claude_accounts_core.agent_label(agent)} "
             "agents start from SSH after that"
         )
 
@@ -7728,7 +7733,7 @@ def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
         for row in reached
     ]
     ways = (
-        [f"`aisquare fleet reap --all` records {'it' if len(reached) == 1 else 'them'}"]
+        [f"`{prog.command()} fleet reap --all` records {'it' if len(reached) == 1 else 'them'}"]
         if reached
         else []
     )
@@ -7983,7 +7988,7 @@ def _add_named(store: ContextStore, project: ProjectInfo, codename: str) -> None
         ) from exc
     if added.codename != codename:
         raise FleetError(
-            f"{_name(project)} was named {added.codename} by another aisquare while this agent "
+            f"{_name(project)} was named {added.codename} by another rlx while this agent "
             f"was starting in session {session_name(codename)} — spawn again"
         )
 
@@ -8224,7 +8229,8 @@ def _admit(config: FleetSettings) -> list[str]:
         raise CapacityRefused(
             "capacity_fleet",
             f"{live_total} live agents across the fleet (max_agents_total = "
-            f"{config.max_agents_total}): {each} — stop one (`aisquare fleet capacity` lists "
+            f"{config.max_agents_total}): {each} — stop one (`{prog.command()} fleet capacity` "
+            "lists "
             "them), or raise the budget in [fleet]",
         )
     floor = _memory_floor(config.min_free_mb)
@@ -8692,7 +8698,8 @@ def _retry(hold: Hold, now: datetime) -> str:
     left = max(int((hold.until - now).total_seconds()), 0)
     at = hold.until.astimezone().isoformat(timespec="seconds")
     return (
-        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s); while `aisquare watch` "
+        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s); while `{prog.command()} "
+        "watch` "
         "runs, it wakes this project's manager when a seat frees up"
     )
 
@@ -8887,7 +8894,7 @@ def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
     _log_admission("capacity_memory", record)
     raise CapacityRefused(
         "capacity_memory",
-        f"not enough memory to start another agent: {why} — see `aisquare fleet capacity`, "
+        f"not enough memory to start another agent: {why} — see `{prog.command()} fleet capacity`, "
         "or lower min_free_mb in [fleet] (0 turns the floor off)",
     )
 
@@ -12469,7 +12476,7 @@ def _paused_by_the_owner(
     resume = project_service.fleet_command("resume", project)
     return FleetError(
         f"{label} is paused, and only the owner ends a pause — ask the owner: their "
-        f"`{resume}` (or Resume agents… in asq) {ends}; nothing was changed"
+        f"`{resume}` (or Resume agents… in rlx) {ends}; nothing was changed"
     )
 
 
@@ -13290,7 +13297,7 @@ def _release_or_say(
     except Exception as exc:
         return [], (
             f"could not be released ({type(exc).__name__}: {exc}) — they stay with the ended "
-            "session until the lease lapses; `aisquare task release <id>` frees one now"
+            f"session until the lease lapses; `{prog.command()} task release <id>` frees one now"
         )
     if outcome.unannounced:
         # Released — the rows say so — but the board was not told, and the
@@ -14483,7 +14490,7 @@ def switch(
             )
         raise FleetError(
             f"no other account with headroom for {label!r}{where}"
-            " — add or enable one (`aisquare accounts`), name one with --to, or wait for "
+            f" — add or enable one (`{prog.command()} accounts`), name one with --to, or wait for "
             f"the reset{said}"
         )
     target = choice.account
@@ -15160,7 +15167,7 @@ def _resumable(
     facts = record.session
     if facts is None and record.legacy:
         return None, (
-            "it was spawned before this aisquare kept launch records, and its board row names "
+            "it was spawned before this rlx kept launch records, and its board row names "
             "no session to resume"
         )
     if facts is None:
@@ -15243,11 +15250,11 @@ def _hooks_installed_first(
         return
     if agent_core.connected(adapter.id, home, cwd=cwd):
         return
-    connect = f"`aisquare agents connect {adapter.id} --config-dir {home}` installs them"
+    connect = f"`{prog.command()} agents connect {adapter.id} --config-dir {home}` installs them"
     if claude_accounts_core.managed_slot(home, adapter.id) is None:
         raise FleetError(
             f"{adapter.label}'s hooks are not installed in {home}, a home of yours that "
-            f"aisquare does not write at a launch: an agent started there would run blind, "
+            f"rlx does not write at a launch: an agent started there would run blind, "
             f"with no session on the board — {nothing}; {connect}"
         )
     try:
@@ -15405,7 +15412,8 @@ def _refuse_a_replay_spawn_refuses(project: ProjectInfo, agent: FleetAgent, role
         raise FleetError(f"{exc} — {keep}") from exc
     if experimental.captain_role(role) and not is_home_project(project):
         raise FleetError(
-            "the captain lives on the home board, one per home — `aisquare captain` starts "
+            f"the captain lives on the home board, one per home — `{prog.command()} captain` "
+            "starts "
             f"it; {agent.label!r} cannot be started again in {_name(project)}, so nothing "
             "was stopped"
         )
@@ -17187,9 +17195,12 @@ its replacement is a deliberate add, and would bring the project back to every l
 NOT_PAUSED = "not paused"
 """Why a resume by :func:`bulk` leaves a row: running, or exited (💤) without a pause — only
 the agents a ``fleet pause`` stopped come back."""
-THE_CAPTAIN = "the captain — `aisquare captain` runs it"
-"""Why a pause by :func:`bulk` leaves the captain: it is the owner's, on the home board, and
-no project's fleet."""
+
+
+def the_captain_reason() -> str:
+    """Why a pause by :func:`bulk` leaves the captain: it is the owner's, on the home board, and
+    no project's fleet."""
+    return f"the captain — `{prog.command()} captain` runs it"
 
 
 @dataclass(frozen=True)
@@ -17388,9 +17399,10 @@ def bulk_plan(
     - for a restart, a row whose task is done or dropped, which :func:`restart` refuses;
     - for a restart, a row of a forgotten project (:data:`PROJECT_FORGOTTEN`).
 
-    A pause acts on the rows a stop acts on, and leaves the captain (:data:`THE_CAPTAIN`) and
-    every paused agent besides. A resume acts on the paused agents alone (``paused``, the
-    listing's own state for them): every other row is left (:data:`NOT_PAUSED`). One whose
+    A pause acts on the rows a stop acts on, and leaves the captain
+    (:func:`the_captain_reason`) and every paused agent besides. A resume acts on the paused
+    agents alone (``paused``, the listing's own state for them): every other row is left
+    (:data:`NOT_PAUSED`). One whose
     task is done or dropped is acted on all the same, to end its pause (``BulkRow.closes``);
     a paused manager's is left, as a restart leaves it. A pause takes each project's manager
     first, as a stop does; a resume brings it back last, as a restart does.
@@ -17507,7 +17519,7 @@ def bulk_plan(
             elif action == "restart" and project.id in forgotten:
                 skip = PROJECT_FORGOTTEN
             elif action == "pause" and is_the_captains_row(agent):
-                skip = THE_CAPTAIN
+                skip = the_captain_reason()
             else:
                 skip = closed.get(agent.id)
             rows.append(BulkRow(project, status, skip, closes, refused))

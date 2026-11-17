@@ -18,6 +18,7 @@ import typer
 
 from aisquare.cli.captain_verbs import _emit_json, _perform
 from aisquare.cli.common import fail
+from aisquare.core import program as prog
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 
@@ -60,7 +61,8 @@ def enroll(
             console.print(line, markup=False, highlight=False)
     console.print(f"or add it by hand: {enrolled.uri}", markup=False, highlight=False)
     console.print(
-        "then unlock with a code: say it to the captain, or `aisquare captain gate unlock <code>`",
+        f"then unlock with a code: say it to the captain, or `{prog.command()} captain gate unlock "
+        "<code>`",
         markup=False,
     )
 
@@ -111,7 +113,7 @@ def status() -> None:
     elif found["window"]:
         console.print(f"open until {found['until']} (window {found['window']})", markup=False)
     else:
-        console.print(f"locked: {gate.UNLOCK}", markup=False)
+        console.print(f"locked: {gate.unlock_hint()}", markup=False)
     if found["failures"]:
         console.print(f"{found['failures']} wrong code(s) in a row", style="dim")
     if found["locked_until"]:

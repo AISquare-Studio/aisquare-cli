@@ -3512,7 +3512,7 @@ def test_a_local_command_after_an_esc_leaves_the_agent_at_its_prompt_for_a_tell(
 # there is no pending tool and never ``attention``, and its pane, quiet for 5 s, derives
 # ``waiting``. It read as an agent at rest.
 
-HOOKLESS = "coder-1 runs without aisquare's hooks, so nothing here shows whether it is showing"
+HOOKLESS = "coder-1 runs without rlx's hooks, so nothing here shows whether it is showing"
 
 
 def _hookless_at_a_prompt(needs: FakeNeeds, pane: FakePane, project: ProjectInfo) -> None:
@@ -3615,7 +3615,7 @@ def test_prompt_mode_types_nothing_into_an_agent_nothing_reads_and_says_to_inter
     assert response.status_code == 409
     assert response.json() == {
         "error": "agent_busy",
-        "message": "coder-1 runs without aisquare's hooks, so nothing here shows whether it is "
+        "message": "coder-1 runs without rlx's hooks, so nothing here shows whether it is "
         "at its prompt or showing one — use Interrupt & tell, whose Esc (No) goes first",
     }
     assert pane.sent == [] and pane.answered == []
@@ -3651,9 +3651,9 @@ def test_an_auto_tell_to_an_agent_nothing_reads_is_a_board_note_and_never_fleet_
     assert response.status_code == 200, response.text
     (note,) = _notes(project)
     assert response.json()["how"] == (
-        "it runs without aisquare's hooks, so nothing here shows whether it is showing a "
+        "it runs without rlx's hooks, so nothing here shows whether it is showing a "
         f"prompt, which typing would answer — filed as board note #{note.seq} to coder-1, "
-        "which it is not shown without aisquare's hooks: Interrupt & tell types it"
+        "which it is not shown without rlx's hooks: Interrupt & tell types it"
     )
     assert fleet.calls == [] and pane.sent == []
 

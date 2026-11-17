@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents, claude_accounts, harness
 from aisquare.core.agent_adapters import codex_config
+from aisquare.core.agent_adapters.claude_code import SESSION_END_TIMEOUT_SECONDS
 from aisquare.core.agent_adapters.types import LaunchPart
 from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
@@ -168,13 +169,16 @@ def test_claude_hooks_without_a_spec_timeout_keep_the_native_default(
     agents.install_hooks("claude-code", tmp_path)
     path = tmp_path / "settings.json"
     payload = json.loads(path.read_text())
-    events = ("Stop", "SessionEnd", "Notification")
-    for event in events:
+    events = ("Stop", "Notification", "StopFailure")
+    for event in (*events, "SessionEnd"):
         payload["hooks"][event][0]["hooks"][0]["timeout"] = timeout
     path.write_text(json.dumps(payload))
     agents.install_hooks("claude-code", tmp_path)
     actual = json.loads(path.read_text())
     assert all("timeout" not in actual["hooks"][event][0]["hooks"][0] for event in events)
+    # The session end has a spec timeout (R20): it reconciles to the adapter's, as Codex's
+    # bounded hooks do.
+    assert actual["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] == SESSION_END_TIMEOUT_SECONDS
 
 
 def test_group_annotations_do_not_reset_readiness_but_execution_matchers_do(tmp_path: Path) -> None:

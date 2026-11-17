@@ -1374,8 +1374,10 @@ def _misses_the_coders(config_dir: Path, plugin: agent_core.ClaudePlugin, cwd: P
 def _short_timeouts(
     product: str, short: dict[Path, list[str]], coders: tuple[str, list[str]] | None = None
 ) -> DoctorCheck:
-    """The row for hooks that run this install but give a context hook less time than the
-    CI hook may wait: ``short`` maps each directory to those events.
+    """The row for hooks that run this install but give a hook less time than it needs
+    (:func:`agent_core.required_hook_timeout`): ``short`` maps each directory to those
+    events. A context hook short of what the CI hook may wait, or a session end with no
+    timeout of its own, which Claude Code cancels after 1.5 s (a 0.10.0 install's, R20).
 
     Connect raises the timeouts, unless it refuses a file of that directory: a read-only
     settings.json (home-manager's link into the Nix store) kept a button that could never
@@ -1383,11 +1385,32 @@ def _short_timeouts(
     that file is generated, and no button (review of #257).
     """
     ceiling = agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
-    listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
-    problems = [
-        f"connected, but the context hooks allow less than {ceiling} s in: {listed} — a CI "
-        "hook still inside the run's ceiling would be cut off and its row never written"
-    ]
+    specs = {hook.event: hook for hook in get_adapter("claude-code").capabilities.hooks}
+
+    def _seconds_it_needs(event: str) -> int:
+        spec = specs.get(event)
+        return (agent_core.required_hook_timeout(spec) if spec else None) or ceiling
+
+    def _short_events_listed(*, context: bool) -> str:
+        """``short``'s directories and their context events, or their other events."""
+        return ", ".join(
+            f"{path} ({', '.join(chosen)})"
+            for path, events in short.items()
+            if (chosen := [e for e in events if (_seconds_it_needs(e) == ceiling) is context])
+        )
+
+    problems = []
+    if context := _short_events_listed(context=True):
+        problems.append(
+            f"connected, but the context hooks allow less than {ceiling} s in: {context} — a "
+            "CI hook still inside the run's ceiling would be cut off and its row never written"
+        )
+    if ends := _short_events_listed(context=False):
+        problems.append(
+            f"connected, but the session-end hook has too little time in: {ends} — Claude Code "
+            "cancels it after 1.5 s without a timeout of its own, and a session whose end is "
+            "slow (a busy store, a slow machine) stays running on the board, its tasks held"
+        )
     fixes: list[str] = []
     for directory, events in short.items():
         refusal = agents_service.access("claude-code", directory).connect
@@ -1395,7 +1418,14 @@ def _short_timeouts(
             fixes.append(agents_service.config_dir_command("connect", "claude-code", directory))
             continue
         problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
-        timeout = f"give its {' and '.join(events)} hooks a timeout of at least {ceiling}"
+        by_need: dict[int, list[str]] = {}
+        for event in events:
+            by_need.setdefault(_seconds_it_needs(event), []).append(event)
+        timeout = "give " + " and ".join(
+            f"its {' and '.join(named)} hook{'s' if len(named) > 1 else ''} a timeout of at "
+            f"least {seconds}"
+            for seconds, named in by_need.items()
+        )
         fixes.append(_refused_fix(directory, refusal, also=timeout))
     if coders is not None:  # the coders' gap, said on this branch too (_coders_missed)
         problems.append(coders[0])
@@ -4490,9 +4520,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                 continue
             short = agent_core.hook_timeout_shortfall(adapter.id, directory)
             if short:
-                checks.append(
-                    _warn(adapter.id, f"Context hook timeout too short: {', '.join(short)}", fix)
-                )
+                checks.append(_warn(adapter.id, f"Hook timeout too short: {', '.join(short)}", fix))
                 continue
             if state in {"configured", "observed", "trusted"}:
                 # Trusted: the agent's record trusts the hooks connect wrote (SMOKE12 O3), so

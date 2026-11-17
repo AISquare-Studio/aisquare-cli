@@ -97,6 +97,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the keyboard. Only colours change: nothing moves, at any width. asq cannot set your
   terminal's font. JetBrains Mono, the font on rlx's web page, is the one we recommend.
 
+### Fixed
+
+- **A session's end reaches the board on a slow machine.** Claude Code cut its hook off
+  after 1.5 s; it now has 10 s, and upgrading gives existing installs the same.
+
 ## [0.10.0] - 2026-11-16
 
 **Codex support, in beta: run OpenAI's Codex CLI beside Claude Code, or instead of it, with

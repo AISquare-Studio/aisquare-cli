@@ -36,6 +36,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.version import __version__
 from aisquare.models import CheckStatus
 from aisquare.services import diagnostics
@@ -62,12 +63,11 @@ def _write_hooks(
 
 
 def _hook_entry(command: str | Path, event: str, sub: str) -> dict[str, object]:
-    """One hook entry as connect writes it — context hooks carry the CI timeout,
-    or the doctor's shortfall check (main) would grade a healthy dir as a warning."""
-    entry: dict[str, object] = {"type": "command", "command": f"{command} hook {sub}"}
-    if event in agents._CONTEXT_HOOKS:
-        entry["timeout"] = agents.CONTEXT_HOOK_TIMEOUT_SECONDS
-    return entry
+    """One hook entry as connect writes it — each with the timeout its spec gives it (the
+    context hooks the CI ceiling, the session end its own, R20), or the doctor's shortfall
+    check (main) would grade a healthy dir as a warning."""
+    (spec,) = [s for s in get_adapter("claude-code").capabilities.hooks if s.event == event]
+    return get_adapter("claude-code").hook_entry(spec, f"{command} hook {sub}")
 
 
 def _fake_aisquare(path: Path, *, prints: str | None = None, exit_code: int = 0) -> Path:

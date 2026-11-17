@@ -79,8 +79,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or cleared and its earlier session, the live one keeps the name and the earlier one adds
   the time it started: `coder-auth (14:02)`. Two that started in the same minute add their
   short ids instead. A long name is cut short with `…`, and the sessions block no longer
-  wraps a row onto a second line. The short id is still in a line's or a task's detail, and
-  `o` still opens the right transcript. Agents still see ids, as they address each other by
+  wraps a row onto a second line. The short id is still in a line's or a task's detail,
+  once (a name that carries it already does not repeat it), and `o` still opens the right
+  transcript. Agents still see ids, as they address each other by
   them, and every `--json` is unchanged.
 - **asq opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
   blue, #2F74F0, with magenta, lime, green, amber and coral on near-black. Press `t` to
@@ -100,8 +101,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installed it. The Doctor's buttons say what they do ("Connect Claude Code", "Sign in
   account 3"). A check that needs the command line offers *Ask the manager*, which hands
   the fix to your project's manager; with no manager running, the check says one can fix
-  it. The command line keeps every command: `rlx doctor`, `--help` and the messages printed
-  in a terminal are unchanged.
+  it. The messages asq shares with the command line say no command in asq either: a spawn
+  or stop that is refused, a prompt that was not typed, an account that is not found, a
+  usage reading's fix ("press Log in"), Start fresh's refusals, the captain's replies,
+  Remote's and Explainability's states, and the Doctor's details. On the Board, a limited
+  agent's chip and the usage-limit and pause lines leave out the `fleet switch` and
+  `fleet resume` they name; the agents still read them. The command line keeps every
+  command: `rlx doctor`, `--help` and the messages printed in a terminal are unchanged,
+  byte for byte, and so is everything an agent reads.
 - **Notifications in asq are small, sit top-right and are quick to clear.** They start
   just under the top row, so they leave the agent bar's Stop and Restart clear. They are
   one width, at most 46 columns, with no empty rows around the text. The newest is on

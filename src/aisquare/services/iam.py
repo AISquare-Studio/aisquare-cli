@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import urlencode, urlparse
 
 from aisquare.core import credentials, paths
+from aisquare.core import program as prog
 from aisquare.core.config import load_config
 from aisquare.core.version import __version__
 
@@ -482,7 +483,8 @@ def fetch_userinfo(endpoints: Endpoints, token: str) -> dict[str, Any]:
     if result.status == 401:
         raise IamError(
             "session_expired",
-            "Your AISquare session has expired or was revoked. Run aisquare login.",
+            "Your AISquare session has expired or was revoked."
+            + prog.shell_advice(" Run aisquare login."),
         )
     _reject_common(result, "identify you")
     if result.status != 200 or not isinstance(result.body, dict):
@@ -679,12 +681,16 @@ def request(
     resolved = resolve_api_url(api_url)
     session = current_session(resolved)
     if session is None:
-        raise IamError("not_authenticated", "Not signed in. Run aisquare login.")
+        raise IamError(
+            "not_authenticated", "Not signed in." + prog.shell_advice(" Run aisquare login.")
+        )
     if session.source == "file" and session.api_url != resolved:
         raise IamError(
             "api_url_mismatch",
-            f"You are signed in to {session.api_url} but this command targets {resolved}. "
-            f"Run aisquare login --api-url {resolved}, or unset {API_URL_ENV_VAR}.",
+            f"You are signed in to {session.api_url} but this command targets {resolved}."
+            + prog.shell_advice(
+                f" Run aisquare login --api-url {resolved}, or unset {API_URL_ENV_VAR}."
+            ),
         )
     headers = {"Authorization": f"Bearer {session.token}"}
     if workspace:
@@ -702,7 +708,8 @@ def request(
     if result.status == 401:
         raise IamError(
             "session_expired",
-            "Your AISquare session has expired or was revoked. Run aisquare login.",
+            "Your AISquare session has expired or was revoked."
+            + prog.shell_advice(" Run aisquare login."),
         )
     if result.status == 429:
         raise IamError(

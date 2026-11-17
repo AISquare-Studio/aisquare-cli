@@ -5711,7 +5711,9 @@ def build_remote_app(
         from starlette.status import WS_1011_INTERNAL_ERROR
         from starlette.websockets import WebSocketDisconnect
     except ImportError as exc:  # pragma: no cover - only a damaged install: they are core
-        raise RemoteUnavailable(f"{DAMAGED_INSTALL} — repair it: {remote_install_hint()}") from exc
+        raise RemoteUnavailable(
+            DAMAGED_INSTALL + prog.shell_advice(f" — repair it: {remote_install_hint()}")
+        ) from exc
 
     from aisquare.services import remote_actions, remote_needs, remote_push
 
@@ -6789,7 +6791,9 @@ def _remote_dependency_error() -> str | None:
     if not missing:
         return None
     named = ", ".join(missing)
-    return f"{DAMAGED_INSTALL} ({named}) — repair it: {remote_install_hint()}"
+    return f"{DAMAGED_INSTALL} ({named})" + prog.shell_advice(
+        f" — repair it: {remote_install_hint()}"
+    )
 
 
 def runtime() -> Runtime:
@@ -7084,8 +7088,9 @@ def _remote_quit_now(undone: str | None = None) -> NoReturn:
         left = remote_writes_running()
         if left:
             _remote_say(
-                f"Remote quit with {', '.join(left)} unfinished: "
-                f"the rlx UI (`{prog.word()}`) shows where the agent is"
+                f"Remote quit with {', '.join(left)} unfinished: the rlx UI"
+                + prog.shell_advice(f" (`{prog.word()}`)")
+                + " shows where the agent is"
             )
         if undone is not None:
             _remote_say(undone)
@@ -7214,12 +7219,17 @@ its own over it."""
 
 def served_by() -> dict[str, str]:
     """What :data:`SERVE_NOTE_NAME`'s ``by`` names: the process that claimed the home."""
-    return {"serve": f"`{prog.word()} remote serve`", "panel": "rlx's R panel"}
+    return {
+        "serve": prog.shell_advice(f"`{prog.word()} remote serve`", app="Remote run from a shell"),
+        "panel": "rlx's R panel",
+    }
 
 
 def served_by_someone() -> str:
     """Who serves, said when the note cannot be read (:func:`remote_served_by`)."""
-    return f"rlx's R panel, or `{prog.word()} remote serve` in another shell"
+    return "rlx's R panel" + prog.shell_advice(
+        f", or `{prog.word()} remote serve` in another shell", app=", or Remote run from a shell"
+    )
 
 
 CLAIM_PATIENCE_SECONDS = 0.05
@@ -7231,8 +7241,9 @@ make a real claim fail. A Remote that is on holds it for as long as it serves.""
 def remote_already_on() -> str:
     """Why Remote will not start while another process serves this home."""
     return (
-        "another Remote is on for this ~/.aisquare (the rlx UI's R panel, or "
-        f"`{prog.word()} remote serve` in another shell) — turn it off first: two would share "
+        "another Remote is on for this ~/.aisquare (the rlx UI's R panel"
+        + prog.shell_advice(f", or `{prog.word()} remote serve` in another shell")
+        + ") — turn it off first: two would share "
         "one link, one passphrase, one auto-off and one list of phones"
     )
 
@@ -7544,12 +7555,18 @@ PAGE_DOES_NOT_RESOLVE = (
 
 def page_dist_remedy() -> str:
     """The way out a refusal of a ``--dist`` build offers last (:func:`_page_open_to_others`)."""
-    return f"or install it with {prog.word()} remote install-page and serve without --dist"
+    return prog.shell_advice(
+        f"or install it with {prog.word()} remote install-page and serve without --dist",
+        app="or install the page again",
+    )
 
 
 def page_installed_remedy() -> str:
     """The way out a refusal of the installed build offers last (:func:`_page_open_to_others`)."""
-    return f"or install the build again with {prog.word()} remote install-page"
+    return prog.shell_advice(
+        f"or install the build again with {prog.word()} remote install-page",
+        app="or install the page again",
+    )
 
 
 PAGE_OPEN_TO_OTHERS = (

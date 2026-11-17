@@ -661,7 +661,12 @@ def choose_agent(agent: str, *, run: Runner = selfcli.run) -> None:
     try:
         result = run(["--json", "agents", "use", agent], cwd=None)
     except Exception as exc:
-        raise AgentNotSaved(f"could not run {prog.word()} agents use {agent}: {_why(exc)}") from exc
+        raise AgentNotSaved(
+            prog.shell_advice(
+                f"could not run {prog.word()} agents use {agent}: {_why(exc)}",
+                app=f"could not choose {agent}: {_why(exc)}",
+            )
+        ) from exc
     if not result.ok:
         raise AgentNotSaved(onboarding.failure_reason(result, f"agents use {agent}"))
 

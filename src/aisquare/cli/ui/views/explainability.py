@@ -43,6 +43,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.views.doctor import names_a_command
 from aisquare.core import orchestrator, outbox, paths
 from aisquare.core.config import (
     AppConfig,
@@ -186,7 +187,9 @@ def status_report(page: ProjectInfo | None = None) -> StatusReport:
             proxy.summary
             + (
                 f"\n  → {proxy.remediation}"
-                if proxy.remediation and proxy.severity is not CheckStatus.ok
+                if proxy.remediation
+                and proxy.severity is not CheckStatus.ok
+                and not names_a_command(proxy.remediation)  # the shell's fix (R13b)
                 else ""
             ),
         ),

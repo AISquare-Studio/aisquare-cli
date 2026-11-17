@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ValidationError
 
 from aisquare.core import harness
+from aisquare.core import program as prog
 from aisquare.core.paths import aisquare_home
 from aisquare.core.personas import BODY_SOFT_CAP, SKILL_NAME_MAX
 
@@ -372,7 +373,8 @@ def draft_with_api(
         import anthropic
     except ImportError:
         raise EngineUnavailable(
-            "api engine: the anthropic SDK is not installed — pip install 'aisquare-cli[llm]'"
+            "api engine: the anthropic SDK is not installed"
+            + prog.shell_advice(" — pip install 'aisquare-cli[llm]'")
         ) from None
     if cancel is not None and cancel.is_set():
         raise ImportCancelled("the import was cancelled before the api engine started")

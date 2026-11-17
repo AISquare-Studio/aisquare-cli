@@ -242,7 +242,10 @@ def _invoke(
     try:
         return run(args, cwd=cwd), None
     except Exception as exc:
-        return None, f"could not run {_shown_command(args)}: {exc or type(exc).__name__}"
+        why = exc or type(exc).__name__
+        return None, program.shell_advice(
+            f"could not run {_shown_command(args)}: {why}", app=f"could not run it: {why}"
+        )
 
 
 def _json_object(stdout: str) -> dict[str, object] | None:

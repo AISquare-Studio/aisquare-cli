@@ -16,10 +16,13 @@ agents' protocol). The product's name in prose ("rlx is quitting") is the plain 
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 import shutil
 import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 from aisquare.core.shell_line import command_line
@@ -69,10 +72,85 @@ def ours_on_path(name: str) -> bool:
         return False
 
 
+IN_APP_ENV = "AISQUARE_IN_APP"
+"""Set to ``1`` in the environment of the ``doctor --json`` asq runs to show its report: the
+rows' details then leave out their commands (:func:`detail_advice`), while every fix stays the
+shell's, which asq hands whole to the manager. Never in an agent's environment."""
+
+_in_app = False
+_here = threading.local()
+
+
+def enter_app() -> None:
+    """asq (or ``board -w``) is up in this process: what it shows a person never names a command
+    to type (the owner, R13: "the whole purpose of TUI is to make it for users to never use the
+    command line since their manager is aware of it"). Every shared message's way out that is
+    a command, :func:`shell_advice`, goes from here until :func:`leave_app`."""
+    global _in_app
+    _in_app = True
+
+
+def leave_app() -> None:
+    """The app is down: what this process prints next is read at a shell (run_ui's hand-off)."""
+    global _in_app
+    _in_app = False
+
+
+def in_app() -> bool:
+    """Whether what this process says now is shown in asq: the app is up here
+    (:func:`enter_app`), and this thread is not building for a shell (:func:`at_a_shell`)."""
+    return _in_app and not getattr(_here, "shell", False)
+
+
+@contextlib.contextmanager
+def at_a_shell() -> Iterator[None]:
+    """What this thread builds inside is read at a shell, though asq is up: the doctor's fix,
+    which asq hands whole to the manager (R13's "Ask the manager") and reads its buttons
+    from."""
+    before = getattr(_here, "shell", False)
+    _here.shell = True
+    try:
+        yield
+    finally:
+        _here.shell = before
+
+
+def shell_advice(text: str, app: str = "") -> str:
+    """``text``, a clause of a shared message that tells a person a command to type, for a
+    shell; in asq, ``app`` instead: nothing by default, or the way in asq.
+
+    The CLI's text is byte-for-byte what it was, and asq gets the sentence without its tail:
+    nothing travels in the text to be cut out later. A message for an agent never goes
+    through here: an agent acts on the commands, wherever it is shown."""
+    return app if in_app() else text
+
+
+def detail_advice(text: str, app: str = "") -> str:
+    """:func:`shell_advice` for a clause of a doctor row's DETAIL: also dropped in the
+    ``doctor --json`` asq runs to show its report (:data:`IN_APP_ENV`). Never for a fix."""
+    shown = os.environ.get(IN_APP_ENV) == "1" and not getattr(_here, "shell", False)
+    return app if shown or in_app() else text
+
+
 def words(*args: str) -> str:
     """``rlx <args>`` (or ``aisquare <args>``, :func:`word`) as one line a person can paste
     into their shell, quoted for it (``core.shell_line.command_line``)."""
     return command_line([word(), *args])
 
 
-__all__ = ["COMMAND", "FALLBACK", "PRINTED", "PROTOCOL", "ours_on_path", "word", "words"]
+__all__ = [
+    "COMMAND",
+    "FALLBACK",
+    "IN_APP_ENV",
+    "PRINTED",
+    "PROTOCOL",
+    "at_a_shell",
+    "detail_advice",
+    "enter_app",
+    "in_app",
+    "leave_app",
+    "ours_on_path",
+    "shell_advice",
+    "word",
+    "words",
+]

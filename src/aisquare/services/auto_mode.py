@@ -488,7 +488,9 @@ def spawn_note(
         )
     return (
         f"auto mode behind the explainability proxy: {why} — expect its tool calls to be refused "
-        f"({SDK_ISSUE}); set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
+        f"({SDK_ISSUE})"
+    ) + prog.shell_advice(
+        f"; set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
         f"`{_restart_off_auto(project, label)}` (its session resumes), or see "
         f"`{prog.word()} explainability doctor` ({CHECK_NAME})"
     )

@@ -2023,17 +2023,19 @@ def resolve_profile(
             # it was refused (review of #259, round 3). `team bind` stores a full path now.
             refusal = (
                 f"{role} reads {key} from {path}, a relative path, which each launch would "
-                f"look for in its own working directory — not launching {role} without it. "
-                f"Bind it by its full path: {prog.word()} team bind {role} --env-file "
-                f"{key}=<path>"
+                f"look for in its own working directory — not launching {role} without it."
+            ) + prog.shell_advice(
+                f" Bind it by its full path: {prog.word()} team bind {role} --env-file {key}=<path>"
             )
             continue
         try:
             file_env[key] = read_env_file(path)
         except ValueError as exc:
             refusal = (
-                f"{role} reads {key} from {path}, which {exc} — not launching {role} without it. "
-                f"Fix the file, or unbind it: {prog.word()} team bind {role} --unset {key}"
+                f"{role} reads {key} from {path}, which {exc} — not launching {role} without it."
+            ) + prog.shell_advice(
+                f" Fix the file, or unbind it: {prog.word()} team bind {role} --unset {key}",
+                app=" Fix the file.",
             )
     return LaunchProfile(
         env=env,

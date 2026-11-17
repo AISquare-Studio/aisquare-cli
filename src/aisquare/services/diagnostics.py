@@ -764,7 +764,7 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
         return None
     if home.exists():
         return _ok(name, f"not evaluated — {home} is not a directory (see the `home` check)")
-    return _ok(name, f"not created yet — set it up: {prog.word()} init")
+    return _ok(name, "not created yet" + prog.detail_advice(f" — set it up: {prog.word()} init"))
 
 
 #: How many missing tables, columns, indexes or triggers the database row names before
@@ -1413,8 +1413,10 @@ def _short_timeouts(
 def _refused_fix(
     directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
 ) -> str:
-    """The remedies for ``refusal``, as every surface gives them (``agents_service.remedies``)."""
-    return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
+    """The remedies for ``refusal``, as every surface gives them (``agents_service.remedies``):
+    the doctor's fix, whole, though asq runs the doctor to show it (``program.at_a_shell``)."""
+    with prog.at_a_shell():
+        return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
 
 
 def _disconnect_fix(directory: Path, lead: str, agent: str = claude_accounts_core.AGENT) -> str:
@@ -1954,15 +1956,27 @@ def _check_captured_projects() -> list[DoctorCheck]:
     if not captured:
         return []
     if not capture:
-        return [_ok("projects", _left_from_before_capture(captured, plan, holds))]
+        return [
+            _ok(
+                "projects",
+                prog.detail_advice(
+                    _left_from_before_capture(captured, plan, holds),
+                    app=f"{len(captured)} captured {_directories(len(captured))} left from "
+                    "before project capture was turned off (a hooked session ran there; nothing "
+                    "added it on purpose)",
+                ),
+            )
+        ]
     noun = _directories(len(captured))
     return [
         _ok(
             "projects",
             f"{len(captured)} captured {noun} hidden from the sidebar and `project list` (a "
-            f"hooked session ran there; nothing added it on purpose) — see them: {prog.word()} "
-            f"project list --all; drop the stale ones: {prog.word()} project prune "
-            "--captured-only",
+            "hooked session ran there; nothing added it on purpose)"
+            + prog.detail_advice(
+                f" — see them: {prog.word()} project list --all; drop the stale ones: "
+                f"{prog.word()} project prune --captured-only"
+            ),
         )
     ]
 
@@ -3052,7 +3066,11 @@ def _check_watcher() -> DoctorCheck:
     age = found.age()
     looked = f"last look {int(age.total_seconds())} s ago" if age is not None else "no look yet"
     if found.pid is None:
-        return _ok(name, f"not running ({looked}); `{prog.word()} watch --detach` starts it")
+        return _ok(
+            name,
+            f"not running ({looked})"
+            + prog.detail_advice(f"; `{prog.word()} watch --detach` starts it"),
+        )
     if age is None or age.total_seconds() > 3 * every:
         return _warn(
             name,
@@ -3716,12 +3734,17 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
         return _ok(name, "building in the background (agents grep until it is ready)")
     if unfinished:
         return _ok(
-            name, f"none yet — `{prog.word()} code index` builds one (agents grep without it)"
+            name,
+            "none yet"
+            + prog.detail_advice(f" — `{prog.word()} code index` builds one")
+            + " (agents grep without it)",
         )
     parsers = ", ".join(f"{parser} {count}" for parser, count in sorted(found.parsers.items()))
     detail = f"{found.symbols} symbols in {found.files} files ({parsers}), built {found.built_at}"
     if found.stale:
-        detail += f" — a commit behind the checkout; `{prog.word()} code index` refreshes it"
+        detail += " — a commit behind the checkout" + prog.detail_advice(
+            f"; `{prog.word()} code index` refreshes it"
+        )
     if found.not_indexed:
         missing = ", ".join(f"{lang} {n}" for lang, n in sorted(found.not_indexed.items()))
         detail += f"; not indexed: {missing}"
@@ -3740,9 +3763,11 @@ def _captain_check() -> DoctorCheck | None:
         return None
     return _ok(
         "captain",
-        f"off (experimental) — turn it on with: {prog.word()} config set experimental.captain "
-        "true "
-        f"(or {experimental.CAPTAIN_ENV}=1)",
+        "off (experimental)"
+        + prog.detail_advice(
+            f" — turn it on with: {prog.word()} config set experimental.captain true "
+            f"(or {experimental.CAPTAIN_ENV}=1)"
+        ),
     )
 
 

@@ -53,6 +53,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from aisquare.core import outbox, paths
+from aisquare.core import program as prog
 from aisquare.core.config import (
     ExplainabilitySettings,
     ExplainabilityTarget,
@@ -332,9 +333,8 @@ def unregistered_roles_note(roles: Sequence[str], target: ResolvedTarget) -> str
     register = ["aisquare", "explainability", "register", "--target", target.name]
     register += [word for role in roles for word in ("--role", role)]
     return (
-        f"launchable but not in explainability.roles: {listed} — add them to "
-        f"config.toml or run: {install_route.command_line(register)}"
-    )
+        f"launchable but not in explainability.roles: {listed} — add them to config.toml"
+    ) + prog.shell_advice(f" or run: {install_route.command_line(register)}")
 
 
 def resolve_target(
@@ -1608,7 +1608,8 @@ def _check_switch(
             )
         return _ok(
             "explainability",
-            "tracing is off (turn it on with: aisquare explainability enable)",
+            "tracing is off"
+            + prog.detail_advice(" (turn it on with: aisquare explainability enable)"),
         )
     suffix = "" if live else " (add --live for the gateway round-trip)"
     return _ok(
@@ -1963,7 +1964,8 @@ def proxy_state(
             return ProxyState(
                 summary=(
                     f"answered at {target.proxy_url}, but tracing is off — nothing is "
-                    "being traced yet (turn it on: aisquare explainability enable)"
+                    "being traced yet"
+                    + prog.detail_advice(" (turn it on: aisquare explainability enable)")
                 ),
                 severity=CheckStatus.ok,
             )

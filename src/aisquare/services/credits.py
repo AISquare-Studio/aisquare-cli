@@ -40,6 +40,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.models import TraceDestination
 from aisquare.services import iam
 
@@ -383,9 +384,8 @@ def why_unread(session: iam.Session, destination: TraceDestination) -> str:
             f"set {iam.API_URL_ENV_VAR}={destination.api_url} and a token that API issued to "
             "read them; every command in that shell then talks to that API"
         )
-    return (
-        f"signed in to {session.api_url}, not this workspace's API — "
-        f"aisquare login --api-url {destination.api_url} to read them"
+    return (f"signed in to {session.api_url}, not this workspace's API") + prog.shell_advice(
+        f" — aisquare login --api-url {destination.api_url} to read them"
     )
 
 

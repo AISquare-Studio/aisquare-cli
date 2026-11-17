@@ -139,6 +139,9 @@ from aisquare.cli.ui.terminal import (
 from aisquare.cli.ui.theme import (
     FADE_OPACITY,
     FADE_RELABELLED,
+    HIGHLIGHT_TEXT_VARIABLE,
+    HIGHLIGHT_VARIABLE,
+    KEYBOARD_CLASS,
     RLX_CSS,
     ThemePicker,
     register_themes,
@@ -884,7 +887,15 @@ class Panes(Horizontal):
     # fade, and draws the rest of its widget's text as the fade would (``theme.MarkStatic``).
     DEFAULT_CSS = f"""
     Panes > .-unfocused {{ opacity: {FADE_OPACITY}; }}
+    Panes > .{KEYBOARD_CLASS} Activatable.selected {{
+        background: ${HIGHLIGHT_VARIABLE};
+        color: ${HIGHLIGHT_TEXT_VARIABLE};
+    }}
     """
+    # R16 (#149): the sidebar's highlighted row is a coloured bar while the sidebar holds the
+    # keyboard, and the neutral one it was otherwise: which pane has the keyboard, at a
+    # glance. The colours are the theme's (``theme.highlight_colours``), and only the shell
+    # (FleetApp) defines them, so the rule lives here, with the panes, not with the rows.
 
     MIN_CONTENT: ClassVar[int] = 40
     """The columns the content pane keeps, whatever the drag or the terminal's size."""
@@ -949,10 +960,11 @@ class Panes(Horizontal):
         divider.set_class(side is self.sidebar, "-neighbour-focused")
         for child in self.children:
             if child is not divider:
-                self._fade(child, side is not None and child is not side)
+                self._fade(child, side is not None and child is not side, holds=child is side)
 
-    def _fade(self, side: Widget, faded: bool) -> None:
-        """Fade ``side`` or bring it back, restyling ``side`` alone.
+    def _fade(self, side: Widget, faded: bool, *, holds: bool = False) -> None:
+        """Fade ``side`` or bring it back, and mark it as holding the keyboard or not
+        (:data:`theme.KEYBOARD_CLASS`, R16), restyling ``side`` alone.
 
         ``set_class`` would match the CSS again for every widget below it, and
         only ``side``'s own rules change: the fade is ``opacity``, which Textual
@@ -970,14 +982,26 @@ class Panes(Horizontal):
         light label stayed after focus came back (3.84:1 on the blue). A hidden
         page's count too: it may be shown on the faded side. A side holds a handful
         of them, not the sidebar's hundreds of rows.
+
+        And the side's highlighted row (``Activatable.selected``, one at most), when the
+        keyboard comes or goes: it is a coloured bar while its side holds the keyboard
+        (R16, #149), and the restyle of ``side`` alone never reached it either.
         """
-        if side.has_class("-unfocused") is faded:
+        fades = side.has_class("-unfocused") is not faded
+        moves = side.has_class(KEYBOARD_CLASS) is not holds
+        if not (fades or moves):
             return
         side.set_class(faded, "-unfocused", update=False)
-        relabelled = [b for b in side.query(Button) if b.variant in FADE_RELABELLED]
-        self.app.stylesheet.update_nodes([side, *relabelled])
-        for widget in side.walk_children(Widget):
-            widget.notify_style_update()
+        side.set_class(holds, KEYBOARD_CLASS, update=False)
+        nodes: list[Widget] = [side]
+        if fades:
+            nodes += [b for b in side.query(Button) if b.variant in FADE_RELABELLED]
+        if moves:
+            nodes += list(side.query("Activatable.selected"))
+        self.app.stylesheet.update_nodes(nodes)
+        if fades:
+            for widget in side.walk_children(Widget):
+                widget.notify_style_update()
 
 
 class _WorkerThreads(WorkerManager):

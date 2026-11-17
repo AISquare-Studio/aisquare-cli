@@ -27,6 +27,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **You can see which pane has the keyboard.** While the left pane has it, its highlighted
+  project, agent or setting is a bar in the theme's colour; otherwise it is the dark
+  highlight it always was.
 - **The product is named rlx, short for relax.** The README is titled rlx and opens with
   what it does for you: one place for your Claude Code and Codex agents across your
   projects, a manager you talk to in plain words, account usage managed for you, memory

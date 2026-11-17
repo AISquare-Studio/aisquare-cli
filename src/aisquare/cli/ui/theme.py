@@ -59,6 +59,19 @@ text colour. It does not raise.
 RLX_GROUND = "#08090B"
 """``rlx``'s background, near-black. #2F74F0 on it is 4.63:1, above text's 4.5:1."""
 
+HIGHLIGHT_VARIABLE = "rlx-highlight"
+"""The sidebar's highlighted row while the sidebar holds the keyboard (R16, #149): a coloured
+bar, the theme's ``primary`` (:func:`highlight_colours`), where the row is the neutral
+``$primary 35%`` otherwise. The contrast between the two is the cue for which pane has the
+keyboard."""
+
+HIGHLIGHT_TEXT_VARIABLE = "rlx-highlight-text"
+"""The text on :data:`HIGHLIGHT_VARIABLE`'s bar, which reads at 4.5:1 or more on it."""
+
+KEYBOARD_CLASS = "-keyboard"
+"""The class the shell's panes put on the side that holds the keyboard (``Panes``), beside the
+``-unfocused`` the other side takes."""
+
 FADE_OPACITY = 0.82
 """The opacity of the side that does not hold the keyboard (``Panes > .-unfocused``): its text
 is drawn at 82% over its ground. The product mark is not (:class:`MarkStatic`)."""
@@ -81,6 +94,8 @@ RLX_THEME = Theme(
     dark=True,
     variables={
         MARK_VARIABLE: RLX_BLUE,
+        HIGHLIGHT_VARIABLE: RLX_BLUE,
+        HIGHLIGHT_TEXT_VARIABLE: RLX_GROUND,  # 4.63:1 on the blue, as its buttons' labels
         # Over #2F74F0, white text is 4.31:1 and this ground is 4.63:1. A primary button's label
         # and a list's highlighted row take the ground, as nord's and gruvbox's do. Every other
         # fill is bright enough that Textual's automatic text on it is dark already.
@@ -196,13 +211,36 @@ def mark_colour(theme: Theme) -> str:
     return colours["foreground"]
 
 
+def highlight_colours(theme: Theme) -> tuple[str, str]:
+    """The sidebar's highlighted row under ``theme`` while the sidebar holds the keyboard: the
+    bar, the theme's ``primary``, and the text on it, black or white, whichever reads better
+    (WCAG: one of the two always reads at 4.58:1 or more, on any colour). A theme of the
+    terminal's own ANSI colours takes its own focused cursor's pair, whose ratio no one can
+    know."""
+    colours = theme.to_color_system().generate()
+    primary = Color.parse(colours["primary"])
+    if theme.ansi or primary.ansi is not None:
+        return colours["block-cursor-background"], colours["block-cursor-foreground"]
+    black, white = Color.parse("#000000"), Color.parse("#FFFFFF")
+    text = max((black, white), key=lambda ink: contrast_ratio(ink, primary))
+    return colours["primary"], text.hex
+
+
 def theme_variable_defaults(app: App[Any]) -> dict[str, str]:
-    """The variables our apps add to every theme: :data:`MARK_VARIABLE`, as :func:`mark_colour`.
+    """The variables our apps add to every theme: the mark's (:data:`MARK_VARIABLE`, as
+    :func:`mark_colour`) and the sidebar's highlight while it holds the keyboard
+    (:data:`HIGHLIGHT_VARIABLE`, :data:`HIGHLIGHT_TEXT_VARIABLE`, as :func:`highlight_colours`).
 
     Merge it into the app's ``get_theme_variable_defaults``, Textual's place for an app's
-    own variables. A theme that sets one (``rlx`` sets the mark) overrides it there.
+    own variables. A theme that sets one (``rlx`` sets all three) overrides it there.
     """
-    return {MARK_VARIABLE: mark_colour(app.current_theme)}
+    theme = app.current_theme
+    bar, text = highlight_colours(theme)
+    return {
+        MARK_VARIABLE: mark_colour(theme),
+        HIGHLIGHT_VARIABLE: bar,
+        HIGHLIGHT_TEXT_VARIABLE: text,
+    }
 
 
 def on_faded_side(widget: Widget) -> bool:

@@ -6,6 +6,14 @@ freezes. The token endpoint answers from ``token_script`` one entry per poll
 (the last entry repeats), so a test states the server's behaviour as data:
 ``["pending", "slow_down", "token"]``.
 
+It knows the clients in ``clients``, ``rlx`` and ``aisquare-cli`` by default, as
+the identity provider does once it serves rlx: each starts the grant at its own
+page on the web app (``/rlx``, ``/cli``), a device code is bound to the client
+that started it (another client's poll for it is ``invalid_grant``), and a
+token is revoked only by the client it was issued to. ``clients=("aisquare-cli",)``
+is a server from before that: it answers an rlx start with HTTP 401
+``invalid_client``.
+
 Same pattern as ``tests/test_explainability_ops._gateway``: a real HTTP
 server on an ephemeral port, so the code under test exercises its actual
 ``urllib`` path rather than a mock of it.
@@ -22,6 +30,10 @@ from urllib.parse import parse_qs, urlparse
 USER_CODE = "WDJB-MJHT"
 DEVICE_CODE = "dev-code-" + "x" * 21
 DISCOVERY_PATH = "/o/.well-known/openid-configuration"
+RLX = "rlx"
+CLI = "aisquare-cli"
+#: Each client's page on the web app, as the identity provider names them.
+PAGES = {RLX: "/rlx", CLI: "/cli"}
 
 
 class IdentityProviderStub:
@@ -35,6 +47,9 @@ class IdentityProviderStub:
         start_status: int = 200,
         discovery_overrides: dict[str, Any] | None = None,
         verification_uri: str | None = None,
+        clients: tuple[str, ...] = (RLX, CLI),
+        frontend: str | None = None,
+        start_error: str = "temporarily_unavailable",
     ) -> None:
         self.token_script = list(token_script or ["pending", "token"])
         self.discovery = discovery
@@ -43,9 +58,18 @@ class IdentityProviderStub:
         self.interval = interval
         self.expires_in = expires_in
         self.start_status = start_status
+        #: The ``error`` a ``start_status`` other than 200 or 429 answers with.
+        self.start_error = start_error
+        self.clients = clients
         self.requests: list[dict[str, Any]] = []
         self.issued: list[str] = []
+        #: The client each token from the token endpoint was issued to.
+        self.issued_to: dict[str, str] = {}
+        #: The client each device code was started by.
+        self.started_by: dict[str, str] = {}
         self.revoked: list[str] = []
+        #: Every revocation request, as ``(token, client_id)``, honoured or not.
+        self.revocations: list[tuple[str, str]] = []
         self.claims: dict[str, Any] = {
             "sub": "uid-123",
             "email": "anmol@example.com",
@@ -126,6 +150,8 @@ class IdentityProviderStub:
 
         self._server = HTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        #: The web app's origin, where the sign-in pages are: the API's own by default.
+        self.frontend = frontend or self.url
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
     # ---- behaviour ----------------------------------------------------------
@@ -156,17 +182,23 @@ class IdentityProviderStub:
                 )
                 return
             if self.start_status != 200:
-                handler._send(self.start_status, {"error": "temporarily_unavailable"})
+                handler._send(self.start_status, {"error": self.start_error})
                 return
+            client = record["form"].get("client_id", "")
+            if client not in self.clients:
+                handler._send(
+                    401, {"error": "invalid_client", "error_description": "Unknown client_id."}
+                )
+                return
+            self.started_by[DEVICE_CODE] = client
+            page = self.verification_uri or f"{self.frontend}{PAGES[client]}"
             handler._send(
                 200,
                 {
                     "device_code": DEVICE_CODE,
                     "user_code": USER_CODE,
-                    "verification_uri": self.verification_uri or f"{self.url}/cli",
-                    "verification_uri_complete": (
-                        f"{self.verification_uri or f'{self.url}/cli'}?code={USER_CODE}"
-                    ),
+                    "verification_uri": page,
+                    "verification_uri_complete": f"{page}?code={USER_CODE}",
                     "expires_in": self.expires_in,
                     "interval": self.interval,
                 },
@@ -183,7 +215,14 @@ class IdentityProviderStub:
                 handler._send(401, {"error": "invalid_token"})
             return
         if path == "/o/revoke_token/":
-            self.revoked.append(record["form"].get("token", ""))
+            token, client = record["form"].get("token", ""), record["form"].get("client_id", "")
+            self.revocations.append((token, client))
+            # RFC 7009 2.1: a token issued to another client is refused, and stays live.
+            # (A token the test added to ``issued`` by hand has no client and is revoked.)
+            if self.issued_to.get(token, client) != client:
+                handler._send(400, {"error": "unauthorized_client"})
+                return
+            self.revoked.append(token)
             handler._send(200)
             return
         if path == "/api/v1/ping/":
@@ -341,7 +380,9 @@ class IdentityProviderStub:
         handler._send(404, {"detail": "no route"})
 
     def _token(self, handler: Any, record: dict[str, Any]) -> None:
-        if record["form"].get("device_code") != DEVICE_CODE:
+        code, client = record["form"].get("device_code"), record["form"].get("client_id")
+        if code != DEVICE_CODE or client is None or self.started_by.get(code) != client:
+            # An unknown code, or one another client started: bound to its client.
             handler._send(400, {"error": "invalid_grant"})
             return
         step = self.token_script[min(self._polls, len(self.token_script) - 1)]
@@ -359,8 +400,7 @@ class IdentityProviderStub:
         elif step == "paused":
             handler._send(503, {"error": "temporarily_unavailable"})
         elif step == "token":
-            token = f"aisq_{len(self.issued):02d}" + "t" * 41
-            self.issued.append(token)
+            token = self.issue(client)
             handler._send(
                 200,
                 {
@@ -373,6 +413,13 @@ class IdentityProviderStub:
         else:  # pragma: no cover - a typo in a test script
             handler._send(500, {"error": f"unknown script step {step}"})
 
+    def issue(self, client_id: str) -> str:
+        """A token as the token endpoint issues one to ``client_id``: live, and that client's."""
+        token = f"aisq_{len(self.issued):02d}" + "t" * 41
+        self.issued.append(token)
+        self.issued_to[token] = client_id
+        return token
+
     # ---- introspection for assertions ---------------------------------------
 
     def paths(self) -> list[str]:
@@ -380,6 +427,18 @@ class IdentityProviderStub:
 
     def polls(self) -> int:
         return self._polls
+
+    def starts(self) -> list[str]:
+        """The client of each device-authorization request, in order."""
+        return [
+            r["form"].get("client_id", "")
+            for r in self.requests
+            if r["path"] == "/o/device-authorization/"
+        ]
+
+    def polled_as(self) -> list[str]:
+        """The client of each token-endpoint request, in order."""
+        return [r["form"].get("client_id", "") for r in self.requests if r["path"] == "/o/token/"]
 
     def close(self) -> None:
         self._server.shutdown()

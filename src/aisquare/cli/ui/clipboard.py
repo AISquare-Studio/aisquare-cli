@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, TypeVar
 
+from textual import events
 from textual.app import App
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -128,6 +129,20 @@ class ClipboardApp(App[ReturnType]):
     """
 
     DEFAULT_CSS = toasts.CSS
+
+    async def on_event(self, event: events.Event) -> None:
+        """Every event the driver hands in, on every screen, modal ones included: a press on
+        what a fast click has just closed — a toast, asq's or Textual's own — is dropped
+        before Textual builds a selection from its parent, which is gone
+        (``toasts.pressed_on_a_pruned_widget``, #517)."""
+        if isinstance(event, events.MouseDown) and not event.is_forwarded:
+            try:
+                screen = self.screen
+            except Exception:  # no screen yet
+                screen = None
+            if screen is not None and toasts.pressed_on_a_pruned_widget(screen, event):
+                return
+        await super().on_event(event)
 
     def _refresh_notifications(self) -> None:
         """Show the notifications on the current screen as asq does (``toasts.show_calm``);

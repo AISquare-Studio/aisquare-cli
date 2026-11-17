@@ -44,8 +44,9 @@ from rich.segment import Segment
 from rich.style import Style
 from textual import events
 from textual.app import App
-from textual.geometry import Region
+from textual.geometry import Offset, Region
 from textual.notifications import Notification, Notifications
+from textual.selection import Selection
 from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
@@ -294,6 +295,21 @@ class CalmToast(Toast):
         self._timer: Timer | None = None
         self._cue: str | None = None
         """The verdict of a copy just made from the text, shown in the dismiss column."""
+        self._calm_closing = False
+        """Closed by a click: what is left of it on screen until it is gone takes no press."""
+        self._press: tuple[Offset, bool] | None = None
+        """Where the press now down began on screen, and whether in the dismiss column."""
+        self._dragged = False
+        """Whether that press's release came away from where it went down: a drag, not a click."""
+        self._copy_due = False
+        """A copy of the selection waits for the screen to draw it (:meth:`_copy_soon`)."""
+
+    @property
+    def allow_select(self) -> bool:
+        """A toast closing, or gone from the rack, takes no selection: a fast click on one a
+        click before has just closed crashed Textual, which built the selection from the
+        toast's parent, gone by then (tester-rlx-calm, #517)."""
+        return not self._calm_closing and self.parent is not None and super().allow_select
 
     # --- time -------------------------------------------------------------------------
 
@@ -332,6 +348,10 @@ class CalmToast(Toast):
     def close_now(self) -> None:
         """Gone at once: the notification is forgotten, and the toast leaves the rack before
         the next click, so the one below is under the pointer for it."""
+        if self._calm_closing:
+            return  # a second click on it before it is gone: it is going already
+        self._calm_closing = True
+        self.release_mouse()
         app = self.app
         holder = self.parent if isinstance(self.parent, ToastHolder) else self
         rack = holder.parent
@@ -347,23 +367,114 @@ class CalmToast(Toast):
             rack.display = True
             rack.set_timer(GUARD_SECONDS, lambda: _drop_guard(rack, guard))
 
-    async def _on_click(self, event: events.Click) -> None:
-        """A click in the dismiss column dismisses; anywhere else it selects as text does
-        (twice a word's, the whole on a third), and never dismisses: a drag that ends on
-        the toast is a click to Textual, and it would have taken the text with it."""
-        event.prevent_default()  # Textual's own Toast is dismissed by any click at all
-        event.stop()
-        if self.in_dismiss_column(event.x):
-            self.close_now()
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """A press: where it began says what its release does. On the text it holds the
+        pointer, so the drag stays this toast's wherever it ends: a drag that left the toast
+        copied the pane under it (tester-rlx-calm, #517)."""
+        if event.button != 1 or self._calm_closing:
             return
-        if event.chain >= 2 and self.allow_select:
-            self.text_select_all()
-            self.call_after_refresh(self.copy_selection)
+        in_column = self.in_dismiss_column(event.x)
+        self._press = (event.screen_offset, in_column)
+        self._dragged = False
+        if not in_column:
+            self.capture_mouse()
+
+    def release_lost(self) -> None:
+        """The drag's release never came: the pointer left the terminal with the button down
+        (``terminal.route_lost_release``). It ends where it got to, as a release there would
+        have, and the pointer is nobody's again: held, every click in asq was this toast's."""
+        self.release_mouse()
+        press, self._press = self._press, None
+        if press is None or press[1]:
+            return
+        self._dragged = True
+        self._keep_own_selection()
+        self.copy_selection()
+
+    def on_unmount(self) -> None:
+        """Taken from the rack mid-drag (a 4th notification makes it wait): it lets go of the
+        pointer, which Textual leaves held by a widget that is gone, and every click lost."""
+        self.release_mouse()
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
-        """A drag over the text ends here: what it selected is copied."""
-        if not self.in_dismiss_column(event.x):
-            self.call_after_refresh(self.copy_selection)
+        """The release: a drag copies what it selected of this toast, wherever it ended,
+        the dismiss column included; a click copies nothing (:meth:`_on_click` says what a
+        click does)."""
+        self.release_mouse()
+        if self._press is None:
+            return
+        began, in_column = self._press
+        if in_column:  # a hand that drifts within the column, on its row, still clicks it
+            self._dragged = not (
+                self.in_dismiss_column(event.x) and event.screen_offset.y == began.y
+            )
+        else:
+            self._dragged = event.screen_offset != began
+        if self._dragged and not in_column:
+            self._keep_own_selection()
+            self._copy_soon()
+
+    async def _on_click(self, event: events.Click) -> None:
+        """A click whose press and release are both in the dismiss column, with no drag,
+        dismisses. On the text, a click selects as text does — twice the word under it, the
+        whole on a third — and that selection is copied once; never a dismissal. A drag ends
+        in a click to Textual, and a drag that ran into the dismiss column closed the toast
+        and copied nothing (tester-rlx-calm, #517)."""
+        event.prevent_default()  # Textual's own Toast is dismissed by any click at all
+        event.stop()
+        press, self._press = self._press, None
+        if self._calm_closing or press is None or self._dragged:
+            return
+        if press[1]:  # pressed and released in the column, with no drag (on_mouse_up)
+            self.close_now()
+            return
+        if not self.allow_select:
+            return
+        if event.chain == 2:
+            self._select_word_at(event)
+            self._copy_soon()
+        elif event.chain >= 3:
+            self.text_select_all()
+            self._copy_soon()
+
+    def _select_word_at(self, event: events.Click) -> None:
+        """Select the word under a double-click: the run of non-space characters around it,
+        in the toast's own text."""
+        _, offset = self.screen.get_widget_and_offset_at(event.screen_x, event.screen_y)
+        lines = self.render().plain.split("\n")
+        if offset is None or not 0 <= offset.y < len(lines):
+            return
+        line = lines[offset.y]
+        at = min(max(offset.x, 0), max(len(line) - 1, 0))
+        if not line or line[at].isspace():
+            return
+        start = at
+        while start > 0 and not line[start - 1].isspace():
+            start -= 1
+        end = at
+        while end < len(line) and not line[end].isspace():
+            end += 1
+        self.screen.selections = {self: Selection(Offset(start, offset.y), Offset(end, offset.y))}
+
+    def _keep_own_selection(self) -> None:
+        """Keep only this toast's part of a drag that ran on past it: the screen selected
+        across into the pane beneath, and only the toast's text is the drag's."""
+        own = self.text_selection
+        if own is not None:
+            self.screen.selections = {self: own}
+
+    def _copy_soon(self) -> None:
+        """Copy the selection once the screen has drawn it: one copy of where the clicks
+        ended, however many came within a frame — a fast triple click's second and third
+        each copied the whole (#517)."""
+        if self._copy_due:
+            return
+        self._copy_due = True
+        self.call_after_refresh(self._copy_now)
+
+    def _copy_now(self) -> None:
+        self._copy_due = False
+        self.copy_selection()
 
     def copy_selection(self) -> None:
         """Copy what is selected of this toast's text by the app's one copy, and cue the
@@ -416,6 +527,22 @@ class CalmToast(Toast):
             [first.crop(0, at), Strip([Segment(glyph, style)], 1), first.crop(at + 1, crop.width)]
         )
         return lines
+
+
+def pressed_on_a_pruned_widget(screen: Any, press: events.MouseDown) -> bool:
+    """Whether ``press`` lands on a widget the screen still maps that has left the DOM.
+
+    A click that closes a toast, a stock one or asq's, prunes it a moment before the
+    screen's map does; a click in that moment found it, and Textual built the press's
+    selection from its parent, gone by then: ``AttributeError: 'NoneType' object has no
+    attribute 'region'``, asq down (tester-rlx-calm, #517: 5 clicks 0-20 ms apart). asq
+    invites the spam-click, so the press is dropped instead.
+    """
+    try:
+        widget, _ = screen.get_widget_at(press.x, press.y)
+    except Exception:  # nothing there, or no map yet: Textual's own way decides
+        return False
+    return widget is not screen and not widget.is_attached
 
 
 def _drop_guard(rack: ToastRack, guard: ToastHolder) -> None:

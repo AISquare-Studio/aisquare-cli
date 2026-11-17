@@ -111,10 +111,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by itself after its own time, and that time stops while your pointer is over it. The
   right-most column of each one dismisses it at once, and its `✕` sits on the first row.
   Close the top one and the next moves up under your pointer, so clicking one spot
-  clears them all. The rest of a notification is text: drag across it to select, and
-  the selection is copied. The `✕` turns to `✓` when it is copied, `↗` when it was only
-  sent to your terminal's clipboard, and `!` when it could not be copied. A click on the
-  text no longer dismisses it.
+  clears them all, however fast you click. A press and its release both in that column,
+  with no drag, dismiss. The rest of a notification is text: drag across it to select,
+  and the selection is copied, wherever the drag ends, the `✕` column or the pane beside
+  it included; only the notification's own text is copied. Double-click copies a word,
+  and a third click the whole. The `✕` turns to `✓` when it is copied, `↗` when it was
+  only sent to your terminal's clipboard, and `!` when it could not be copied. A click on
+  the text no longer dismisses it.
 - **One copy, the same everywhere in asq, and it says what really happened.** Board,
   agent panes, notifications, Remote's link, Textual's own fields and the captain's
   row copy all go through it. A clipboard tool that fails hands the copy to the next

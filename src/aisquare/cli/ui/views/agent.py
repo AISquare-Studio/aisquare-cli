@@ -507,8 +507,7 @@ class AgentView(Vertical):
             if self.status.state in _STOPPABLE
             else "End the pause for good: its claims go back to the board, and Resume leaves it"
             if paused
-            else "Remove the dead window tmux kept for the last screen; the row leaves the "
-            "listing"
+            else "Remove the dead window tmux kept for the last screen; the row leaves the listing"
         )
         restart = self.query_one("#agent-restart", Button)
         restart.disabled = busy

@@ -256,9 +256,7 @@ def test_pressing_onboard_runs_init_and_doctor_and_posts_project_onboarded(tmp_p
     assert onboarding.DOCTOR_STEP in log
     assert any("⚠ claude-code" in line for line in log)
     assert doctor_shown, "the findings appear under the log"
-    assert fix_labels == ["Connect Claude Code"], (
-        "one button for the known fix, none for npm"
-    )
+    assert fix_labels == ["Connect Claude Code"], "one button for the known fix, none for npm"
     assert not running
 
 
@@ -918,9 +916,7 @@ def test_a_failed_fix_shows_the_reason_and_keeps_the_buttons(tmp_path: Path) -> 
     assert kinds == ["FixApplied"], "no DoctorRefreshed when the re-check gave no answer"
     assert status.startswith("✗ Connect Claude Code: ") and "not_installed" in status
     assert "re-check failed, showing the previous report" in status
-    assert buttons == [("Connect Claude Code", False)], (
-        "the button is back for another try"
-    )
+    assert buttons == [("Connect Claude Code", False)], "the button is back for another try"
     assert "⚠ claude-code: hooks are missing" in report
 
 

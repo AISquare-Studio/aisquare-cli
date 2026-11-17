@@ -68,6 +68,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import ReturnTo
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
+from aisquare.cli.ui.theme import MARK_STYLE, MarkStatic
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
 from aisquare.core.agent_adapters import adapters, get_adapter, stage_mark_of
@@ -612,7 +613,7 @@ class WelcomeView(VerticalScroll):
     # ------------------------------------------------------------------ layout
 
     def compose(self) -> ComposeResult:
-        yield Static(self._intro(), id="welcome-intro")
+        yield MarkStatic(self._intro, id="welcome-intro")
         with Vertical(id="step-project", classes="card"):
             yield Static(id="project-title", classes="card-title")
             yield Static(id="project-status")
@@ -647,14 +648,17 @@ class WelcomeView(VerticalScroll):
                 yield Button("Start the coders", id="fleet-coders", variant="primary")
         yield Static(self._keys(), id="welcome-keys")
 
-    def _intro(self) -> Text:
-        text = Text()
-        text.append("rlx\n", style="bold")
-        text.append(
-            "Every project, its manager and the agents it spawns — each a real session, "
-            "surfaced here. Three steps to your first fleet:"
+    def _intro(self, dim: str | None = None) -> Content:
+        # The heading is the product mark, in the theme's mark colour on either side; the rest
+        # fades with the page (``dim``, cli/ui/theme.py's MarkStatic).
+        return Content.assemble(
+            ("rlx\n", f"bold {MARK_STYLE}"),
+            (
+                "Every project, its manager and the agents it spawns — each a real session, "
+                "surfaced here. Three steps to your first fleet:",
+                dim or "",
+            ),
         )
-        return text
 
     def _keys(self) -> Text:
         return Text(

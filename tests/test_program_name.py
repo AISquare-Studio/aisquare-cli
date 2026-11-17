@@ -254,6 +254,71 @@ def test_the_command_hints_print_is_one_the_install_writes() -> None:
     assert program.COMMAND in install_route.NEW_COMMANDS
 
 
+def test_an_agents_board_and_the_watch_line_say_the_protocols_word() -> None:
+    """What an agent reads and runs names ``program.PROTOCOL`` whichever word hints print
+    (Q9, brief 180); only the human board's footer takes the program's word. An agent's board
+    footer and the manager's watch line on ``word()`` (the tester's X1 and X3, seq 12524)
+    fail here."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import ProjectInfo, TeamSession, TeamTask
+    from aisquare.services import team as team_service
+    from aisquare.services import watch
+
+    assert program.word() == "rlx" != program.PROTOCOL == "aisquare"  # conftest's pin
+    now = datetime(2026, 11, 16, tzinfo=UTC)
+    project = ProjectInfo(id="prj_words", root=Path("/work/words"))
+    coder = TeamSession(
+        id="sess-coder-words",
+        project_id=project.id,
+        role="coder",
+        started_at=now,
+        last_seen_at=now,
+    )
+    tasks = [
+        TeamTask(
+            id=f"tsk_{n:04d}",
+            project_id=project.id,
+            number=n,
+            key=f"task-{n}",
+            title=f"task {n}",
+            status="todo",
+            created_at=now,
+            updated_at=now,
+        )
+        for n in range(1, 12)
+    ]
+
+    agents = team_service._render_board(project, [coder], tasks, [], me=coder)
+    human = team_service._render_board(project, [coder], tasks, [], me=None)
+    assert "… 3 more — `aisquare task list`" in agents, agents
+    assert "… 3 more — `rlx task list`" in human, human
+
+    line = watch.event_text(
+        [watch.WatchItem("i1", project.id, "p", "permission", "a dialog")],
+        Path("/watch/p/20261116T000000Z.json"),
+    )
+    assert line.endswith(": aisquare watch show /watch/p/20261116T000000Z.json"), line
+
+
+def test_what_the_mcp_server_tells_its_agent_says_the_protocols_word(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP server's solo instructions and its "orchestrator is not active" tool error are
+    read by the agent, which runs what they name: the protocol's word (Q9; the tester's
+    observation, seq 12524)."""
+    from aisquare.services import mcp_server
+
+    assert program.word() == "rlx"  # conftest's pin
+    assert mcp_server.SOLO_INSTRUCTIONS.startswith("aisquare's shared task board")
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="orchestrator is not active") as refused:
+        mcp_server._ensure_virtual_session()
+    assert "start `aisquare serve` from the project" in str(refused.value)
+    assert "or run `aisquare team on` there" in str(refused.value)
+
+
 # ---------------------------------------------------------------------------- the guard
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "aisquare"

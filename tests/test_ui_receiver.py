@@ -1141,7 +1141,7 @@ def test_a_socket_that_cannot_say_whether_it_is_live_is_left_alone(
         queued.close()
         busy.close()
         ui_path.unlink(missing_ok=True)
-    assert reason is not None and reason.startswith("another asq already listens at")
+    assert reason is not None and reason.startswith("another rlx already listens at")
     assert still
 
 

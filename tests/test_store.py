@@ -797,6 +797,29 @@ def test_the_metric_table_has_no_column_that_could_name_an_arm() -> None:
         assert forbidden not in _SCHEMA_V12 and forbidden not in _SCHEMA_V13, forbidden
 
 
+def test_the_released_fleet_ddl_keeps_its_tmux_socket_default() -> None:
+    """V11 shipped in v0.6.0 and V13 after it, and neither is edited: a store migrated from any
+    release says ``DEFAULT 'asq'`` for ``fleet_agent.tmux_socket``, so a fresh one must too,
+    or two stores at the same version would differ. It is the socket's name, data and not the
+    product's name, so the rlx rename leaves it (#135, RLX R3), as it leaves config's own
+    ``tmux_socket`` default."""
+    from aisquare.core.config import FleetSettings
+    from aisquare.core.store import _SCHEMA_V11, _SCHEMA_V13
+
+    for ddl in (_SCHEMA_V11, _SCHEMA_V13):
+        assert "tmux_socket   TEXT NOT NULL DEFAULT 'asq'," in ddl
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        default = {row[1]: row[4] for row in raw.execute("PRAGMA table_info(fleet_agent)")}[
+            "tmux_socket"
+        ]
+    finally:
+        raw.close()
+    assert default == "'asq'" == f"'{FleetSettings().tmux_socket}'"
+
+
 def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_intact() -> None:
     """The migration real machines take: every row that existed before the
     metric table survives it, the table arrives with the v2 columns and

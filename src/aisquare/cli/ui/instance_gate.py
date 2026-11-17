@@ -144,9 +144,9 @@ def _quit_others(
                 f"it with `kill {stray.pid}`: {SIGTERM_LOSES}."
             )
         those = len(unaskable) + len(unreadable) + len(strays) > 1
-        raise _refuse(
-            f"Start it again once {'those rlx instances have' if those else 'that rlx has'} quit."
-        )
+        # "those have", not "those rlx instances have": no longer than base's "those asqs
+        # have", so the refusal wraps no more than it did at 60 columns (seq 12524, F3).
+        raise _refuse(f"Start it again once {'those have' if those else 'that rlx has'} quit.")
     many = len(differing) > 1
     hand = "; ".join(_by_hand(other) for other in differing)
     if not (_interactive() if interactive is None else interactive):

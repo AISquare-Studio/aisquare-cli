@@ -52,6 +52,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The one-line install is shorter: `curl -fsSL https://aisquare.studio/rlx/install.sh | sh`,
   and on Windows `irm https://aisquare.studio/rlx/install.ps1 | iex`. Both lead to the same
   installers on GitHub, and a release's own pinned URL is unchanged.
+- **rlx names itself everywhere it speaks to you.** Its messages, errors, `--help`, the
+  doctor and asq's screens say rlx where they said aisquare, asq or "the CLI": "Quit the
+  other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title. `rlx --version`
+  prints `rlx 0.10.1`; installers of earlier releases read the version from it as before.
+  No `--json` key changes, and no machine value (names, statuses, ids), the doctor's
+  `asq instances` row included; only the human text inside a value says rlx.
+- **Every command it tells you to run starts with `rlx`**: `rlx accounts add`, `rlx doctor`,
+  the doctor's one-click fixes. When another program's `rlx` comes first on your PATH, those
+  lines say `aisquare …` instead, so a line you paste always runs rlx. Your agents'
+  instructions keep `aisquare …`, the same commands.
+- **The installers say rlx too**, and end with "Open rlx with: rlx". The Remote page is
+  titled *rlx remote*; a phone that added it to its Home Screen shows the new name once it is
+  added again. The plugins describe themselves as rlx's; their install names
+  (`aisquare@aisquare-cli`) do not change.
 - The package's page on PyPI links to rlx's site and its docs, and the README links the site.
 - **The board names each agent as the left pane does, where it showed `role·<id>`.** In
   asq's board, `board -w` and `aisquare board`, a line's author, the sessions block, a
@@ -68,19 +82,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wraps a row onto a second line. The short id is still in a line's or a task's detail, and
   `o` still opens the right transcript. Agents still see ids, as they address each other by
   them, and every `--json` is unchanged.
-- **rlx names itself everywhere it speaks to you.** Its messages, errors, `--help`, the
-  doctor and asq's screens say rlx where they said aisquare, asq or "the CLI": "Quit the
-  other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title. `rlx --version`
-  prints `rlx 0.10.1`; installers of earlier releases read the version from it as before.
-  No `--json` key or value changes, the doctor's `asq instances` row included.
-- **Every command it tells you to run starts with `rlx`**: `rlx accounts add`, `rlx doctor`,
-  the doctor's one-click fixes. When another program's `rlx` comes first on your PATH, those
-  lines say `aisquare …` instead, so a line you paste always runs rlx. Your agents'
-  instructions keep `aisquare …`, the same commands.
-- **The installers say rlx too**, and end with "Open rlx with: rlx". The Remote page is
-  titled *rlx remote*; a phone that added it to its Home Screen shows the new name once it is
-  added again. The plugins describe themselves as rlx's; their install names
-  (`aisquare@aisquare-cli`) do not change.
+- **asq opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
+  blue, #2F74F0, with magenta, lime, green, amber and coral on near-black. Press `t` to
+  pick another theme, as before. A theme you picked earlier is kept, and so is one you
+  set in `TEXTUAL_THEME`. Every theme asq offered is still there. `rlx board -w`
+  shares your pick, so it opens in rlx too.
+- **The `rlx` at asq's top-left, and Welcome's heading, take their colour from the
+  theme.** Under rlx they are #2F74F0. Under any other theme they take its main colour,
+  or its text colour where the main colour is too faint to read as text (textual-dark's
+  is), so they change when you press `t`. They keep that colour while the other pane has
+  the keyboard. Only colours change: nothing moves, at any width. asq cannot set your
+  terminal's font. JetBrains Mono, the font on rlx's web page, is the one we recommend.
 - **asq never asks you to type a command.** Its screens, notifications, tooltips and
   dialogs no longer tell you to run `rlx …` or any other command. Where rlx has a button
   or a page for it, they point there instead. An agent or tmux that is not installed links

@@ -431,7 +431,7 @@ elif _runner=$(_find uvx); then
     _status=$?
 else
     if [ "$event" = "$_start" ]; then
-        printf '%s\n' '{"systemMessage": "rlx: neither rlx nor uv was found, so this session has no rlx memory. Install uv: https://docs.astral.sh/uv/"}'
+        printf '%s\n' '{"systemMessage": "rlx: neither the aisquare command nor uv was found, so this session has no rlx memory. Install uv: https://docs.astral.sh/uv/"}'
     fi
     exit 0
 fi

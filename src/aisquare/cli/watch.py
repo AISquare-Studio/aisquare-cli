@@ -354,7 +354,13 @@ def _build_app_class(interval: float, project: ProjectInfo | None = None) -> Any
     from aisquare.cli.ui.autosave import Autosave
     from aisquare.cli.ui.board import BoardHelp, BoardPanel
     from aisquare.cli.ui.clipboard import ClipboardApp
-    from aisquare.cli.ui.theme import theme_autosave
+    from aisquare.cli.ui.theme import (
+        RLX_CSS,
+        register_themes,
+        restore_theme,
+        theme_autosave,
+        theme_variable_defaults,
+    )
 
     class ThemePicker(ModalScreen[None]):
         """A theme browser that STAYS OPEN: every highlight applies (and
@@ -399,12 +405,20 @@ def _build_app_class(interval: float, project: ProjectInfo | None = None) -> Any
 
     class BoardApp(ClipboardApp[None]):
         TITLE = "rlx board"
+        CSS = RLX_CSS
         BINDINGS: ClassVar = [
             ("q", "quit", "quit"),
             ("t", "pick_theme", "themes"),
             ("s", "screenshot", "screenshot"),
             Binding("question_mark", "help", "help", key_display="?"),
         ]
+
+        def __init__(self) -> None:
+            super().__init__()
+            register_themes(self)  # rlx: the fleet UI's default, and a pick it may have saved
+
+        def get_theme_variable_defaults(self) -> dict[str, str]:
+            return {**super().get_theme_variable_defaults(), **theme_variable_defaults(self)}
 
         @property
         def board(self) -> BoardPanel:
@@ -422,9 +436,8 @@ def _build_app_class(interval: float, project: ProjectInfo | None = None) -> Any
             yield Footer()
 
         def on_mount(self) -> None:
-            saved = _load_saved_theme()
-            if saved and saved in self.available_themes:
-                self.theme = saved
+            # The fleet UI's restore, so the two apps share one default as well as the pick.
+            restore_theme(self)
             self._theme_autosave = theme_autosave(self)
             self._theme_restored = True
 

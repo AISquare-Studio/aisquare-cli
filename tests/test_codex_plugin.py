@@ -505,7 +505,8 @@ def test_with_neither_cli_nor_uv_session_start_says_so_once(machine: Machine) ->
     results = {event: _run(machine, event) for event in _EVENTS}
 
     message = json.loads(results.pop("SessionStart").stdout)
-    assert list(message) == ["systemMessage"] and "uv" in message["systemMessage"]
+    assert list(message) == ["systemMessage"]
+    assert "neither the aisquare command nor uv was found" in message["systemMessage"]
     assert {e: (r.returncode, r.stdout) for e, r in results.items()} == {
         e: (0, b"") for e in results
     }, "Stop wants JSON or nothing on stdout"

@@ -173,6 +173,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 #: was nothing to compare against. The per-role families, which no list of names
 #: can cover, are :data:`AMBIENT_ENV_PREFIXES` below.
 AMBIENT_ENV_VARS = (
+    # Textual's start theme, which asq's restore ranks between a saved pick and rlx
+    # (`cli.ui.theme.restore_theme`): left set, the tests of the default would start in
+    # the developer's theme.
+    "TEXTUAL_THEME",
     # Agent detection honours CLAUDE_CONFIG_DIR, and a developer running the
     # suite from inside a Claude session must never have tests write hooks into
     # their real config directory. In the tuple rather than on its own

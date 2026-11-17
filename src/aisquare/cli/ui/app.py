@@ -55,7 +55,7 @@ from textual.notifications import Notification, Notify, SeverityLevel
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Footer, Static, TextArea
+from textual.widgets import Button, ContentSwitcher, Footer, Static, TextArea
 from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
@@ -136,7 +136,16 @@ from aisquare.cli.ui.terminal import (
     TerminalPane,
     log_paste,
 )
-from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
+from aisquare.cli.ui.theme import (
+    FADE_OPACITY,
+    FADE_RELABELLED,
+    RLX_CSS,
+    ThemePicker,
+    register_themes,
+    restore_theme,
+    theme_autosave,
+    theme_variable_defaults,
+)
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.update import (
     CHECK_WORKER,
@@ -864,8 +873,10 @@ class Panes(Horizontal):
     # a pane keep their strength; the pane's own text, and the 256- and 24-bit
     # colours Claude Code draws in (the bundled tmux conf passes `Tc`), fade with
     # the rest.
-    DEFAULT_CSS = """
-    Panes > .-unfocused { opacity: 0.82; }
+    # One number with the theme's (``theme.FADE_OPACITY``): the product mark stays out of the
+    # fade, and draws the rest of its widget's text as the fade would (``theme.MarkStatic``).
+    DEFAULT_CSS = f"""
+    Panes > .-unfocused {{ opacity: {FADE_OPACITY}; }}
     """
 
     MIN_CONTENT: ClassVar[int] = 40
@@ -945,11 +956,19 @@ class Panes(Horizontal):
         DataTable or a Tree paints from that cache, so without this they kept
         the fade after focus came back (review of #470, M2). That call is the
         one step of a restyle the children need, and it matches no CSS.
+
+        The primary and error buttons below are the exception, matched again: under
+        rlx their label is light on the faded side and dark on the other
+        (``RLX_CSS``, #139), a rule a restyle of ``side`` alone never reached, so the
+        light label stayed after focus came back (3.84:1 on the blue). A hidden
+        page's count too: it may be shown on the faded side. A side holds a handful
+        of them, not the sidebar's hundreds of rows.
         """
         if side.has_class("-unfocused") is faded:
             return
         side.set_class(faded, "-unfocused", update=False)
-        self.app.stylesheet.update_nodes([side])
+        relabelled = [b for b in side.query(Button) if b.variant in FADE_RELABELLED]
+        self.app.stylesheet.update_nodes([side, *relabelled])
         for widget in side.walk_children(Widget):
             widget.notify_style_update()
 
@@ -1117,10 +1136,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     TITLE = "aisquare"
     COMMAND_PALETTE_BINDING = "f1"
-    CSS = """
+    CSS = (
+        """
     #main { height: 1fr; }
     #content { width: 1fr; height: 1fr; }
     """
+        + RLX_CSS
+    )
     BINDINGS: ClassVar = [
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),
@@ -1165,6 +1187,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         sharing: usage_sharing.Sharing | None = None,
     ) -> None:
         super().__init__()
+        register_themes(self)  # rlx, offered and restored like every built-in theme
         self._sharing = sharing
         """How the sharing switch, its dialogs and the shipper reach ``services.usage_share``
         (``None``: the real service); a test hands in a fake."""
@@ -1528,6 +1551,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.sidebar.focus()
 
     # --- theme ----------------------------------------------------------------------
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        # The product mark's colour, under every theme (cli/ui/theme.py's MARK_VARIABLE).
+        return {**super().get_theme_variable_defaults(), **theme_variable_defaults(self)}
 
     def action_pick_theme(self) -> None:
         self.push_screen(ThemePicker())

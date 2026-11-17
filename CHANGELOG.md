@@ -68,6 +68,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wraps a row onto a second line. The short id is still in a line's or a task's detail, and
   `o` still opens the right transcript. Agents still see ids, as they address each other by
   them, and every `--json` is unchanged.
+- **asq opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
+  blue, #2F74F0, with magenta, lime, green, amber and coral on near-black. Press `t` to
+  pick another theme, as before. A theme you picked earlier is kept, and so is one you
+  set in `TEXTUAL_THEME`. Every theme asq offered is still there. `rlx board -w`
+  shares your pick, so it opens in rlx too.
+- **The `rlx` at asq's top-left, and Welcome's heading, take their colour from the
+  theme.** Under rlx they are #2F74F0. Under any other theme they take its main colour,
+  or its text colour where the main colour is too faint to read as text (textual-dark's
+  is), so they change when you press `t`. They keep that colour while the other pane has
+  the keyboard. Only colours change: nothing moves, at any width. asq cannot set your
+  terminal's font. JetBrains Mono, the font on rlx's web page, is the one we recommend.
 
 ## [0.10.0] - 2026-11-16
 

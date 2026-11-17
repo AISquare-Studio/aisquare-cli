@@ -215,15 +215,30 @@ def highlight_colours(theme: Theme) -> tuple[str, str]:
     """The sidebar's highlighted row under ``theme`` while the sidebar holds the keyboard: the
     bar, the theme's ``primary``, and the text on it, black or white, whichever reads better
     (WCAG: one of the two always reads at 4.58:1 or more, on any colour). A theme of the
-    terminal's own ANSI colours takes its own focused cursor's pair, whose ratio no one can
-    know."""
+    terminal's own ANSI colours, whose ratios no one can know, takes :func:`_terminal_bar`."""
     colours = theme.to_color_system().generate()
     primary = Color.parse(colours["primary"])
     if theme.ansi or primary.ansi is not None:
-        return colours["block-cursor-background"], colours["block-cursor-foreground"]
+        return _terminal_bar(colours)
     black, white = Color.parse("#000000"), Color.parse("#FFFFFF")
     text = max((black, white), key=lambda ink: contrast_ratio(ink, primary))
     return colours["primary"], text.hex
+
+
+def _terminal_bar(colours: dict[str, str]) -> tuple[str, str]:
+    """An ANSI theme's bar: reverse video of the terminal's own text, its ``ansi-foreground``
+    as the bar and its ``ansi-background`` as the text, the pair the terminal draws its text
+    in. The neutral row is the theme's ``primary`` (``$primary 35%``: ANSI has no alpha), and
+    ansi-light's focused cursor is that same blue, so its pair left the two rows one colour,
+    only the text changing (#518's tester, seq 12727). ansi-dark's cursor pair IS that reverse
+    video, unchanged. A theme without the two takes its cursor's pair, reversed should its
+    ground be the neutral row's."""
+    neutral = Color.parse(colours["primary"])
+    ink, ground = colours.get("ansi-foreground"), colours.get("ansi-background")
+    if ink and ground and Color.parse(ink) != neutral:
+        return ink, ground
+    bar, text = colours["block-cursor-background"], colours["block-cursor-foreground"]
+    return (text, bar) if Color.parse(bar) == neutral else (bar, text)
 
 
 def theme_variable_defaults(app: App[Any]) -> dict[str, str]:

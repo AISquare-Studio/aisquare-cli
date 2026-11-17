@@ -22,7 +22,7 @@ from rich.segment import Segment
 from textual.color import Color
 from textual.geometry import Region
 from textual.pilot import Pilot
-from textual.theme import BUILTIN_THEMES
+from textual.theme import BUILTIN_THEMES, Theme
 from textual.widget import Widget
 
 from aisquare.cli.ui.app import FleetApp
@@ -138,6 +138,64 @@ def test_every_themes_bar_is_its_primary_and_its_text_reads(theme: str) -> None:
     primary = Color.parse(BUILTIN_THEMES[theme].to_color_system().generate()["primary"])
     assert Color.parse(bar) == primary
     assert contrast(Color.parse(text).rgb, primary.rgb) >= TEXT, (theme, bar, text)
+
+
+def _drawn(app: FleetApp) -> tuple[RichColor, RichColor]:
+    """The highlighted row's name as drawn, in the terminal's own colours: its ink and ground."""
+    row = _selected(app)
+    (strip,) = row.render_lines(Region(0, 0, row.size.width, 1))
+    segment = next(s for s in strip if s.text.strip() and "proj" in s.text)
+    assert segment.style is not None
+    assert segment.style.color is not None and segment.style.bgcolor is not None
+    return segment.style.color, segment.style.bgcolor
+
+
+@pytest.mark.parametrize("theme", sorted(TERMINALS))
+def test_under_a_terminal_theme_the_bar_is_not_the_neutral_rows_colour(
+    theme: str, tmp_path: Path, script: Script
+) -> None:
+    """#518's tester (seq 12727): under ansi-light the bar and the neutral row were the same
+    terminal blue (SGR 44), only the text changing. Under every ANSI theme the bar's ground is
+    neither the neutral row's (another pane holds the keyboard) nor the plain highlight's
+    (nobody does), and its text reads on it: reverse video of the terminal's own text."""
+    seed(tmp_path, ("prj_a", "proj", None))
+
+    async def body(pilot: Pilot[None]) -> dict[str, tuple[RichColor, RichColor]]:
+        app = fleet_app(pilot)
+        app.theme = theme
+        await _select(app)
+        seen = {}
+        for where in ("sidebar", "content"):
+            await _keyboard_on(app, where)
+            seen[where] = _drawn(app)
+        app.screen.set_focus(None)
+        await settle(app)
+        seen["nobody"] = _drawn(app)
+        return seen
+
+    seen = drive(body)
+    (ink, bar), (_, neutral), (_, plain) = seen["sidebar"], seen["content"], seen["nobody"]
+    assert bar.number is not None, f"the bar is one of the terminal's colours: {bar}"
+    assert bar.number != neutral.number and bar.number != plain.number, (bar, neutral, plain)
+    assert ink.number is not None and ink.number != bar.number, (ink, bar)
+    # In the standard palette, as no terminal's own can be known.
+    assert contrast(_rgb(ink), _rgb(bar)) >= TEXT, (theme, ink, bar)
+
+
+def test_a_terminal_theme_without_its_text_colours_takes_its_cursor_off_the_neutral_row() -> None:
+    """A terminal theme that names no ``ansi-foreground`` and ``ansi-background`` takes its
+    focused cursor's pair, reversed when the cursor's ground is the neutral row's (its
+    primary), as ansi-light's is."""
+    cursor = {"block-cursor-background": "ansi_blue", "block-cursor-foreground": "ansi_white"}
+    blue = Theme(name="t-ansi-blue", ansi=True, primary="ansi_blue", variables=cursor)
+    assert highlight_colours(blue) == ("ansi_white", "ansi_blue")
+    green = Theme(
+        name="t-ansi-green",
+        ansi=True,
+        primary="ansi_blue",
+        variables={**cursor, "block-cursor-background": "ansi_green"},
+    )
+    assert highlight_colours(green) == ("ansi_green", "ansi_white")
 
 
 def test_the_highlight_follows_the_keyboard_both_ways(tmp_path: Path, script: Script) -> None:

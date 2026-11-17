@@ -31,7 +31,8 @@ pinned to the row: it exits the agent and keeps its task, worktree and session. 
 row offers none: the captain is run by its own switch. Pause and Restart ask first in the box
 every agent action shares (``cli/ui/confirm_action.py``), unless its *Don't ask again* was
 ticked for that kind; Resume never asks, as it loses nothing. An agent's ⋯ menu in the sidebar
-runs the same presses (:meth:`AgentView.act`) when this view is open.
+runs the same presses (:meth:`AgentView.act`) when this view is open. A paused agent has no
+pane to show, and its view says so in words where the pane was (:func:`pane_words`).
 """
 
 from __future__ import annotations
@@ -367,6 +368,28 @@ INFO_ROOM = 16
 (:meth:`AgentView._fit_actions`)."""
 KEPT = "its task, worktree and session are kept"
 """What a pause keeps, in its box and its toast."""
+PAUSED_WORDS = f"Paused. {KEPT[:1].upper()}{KEPT[1:]}; Resume brings it back where it was."
+"""What a paused agent's view shows where its pane was: what a pause keeps, as its box and
+toast say it, and what Resume does."""
+
+
+def pane_words(status: FleetAgentStatus) -> str:
+    """What the view of ``status`` shows where its pane was, when it shows none
+    (:func:`shown_pane`).
+
+    A paused agent: :data:`PAUSED_WORDS`. "(pane gone)" read as if something broke to the
+    person who had just pressed Pause (brief 233). A row held as another server's: the
+    listing's own reason. Its pane may still run on that server, so "gone" would claim
+    what the listing does not know. A lost row, or one with no pane recorded: "(pane gone)",
+    which is what happened to it. A row that shows its pane keeps that pane's own notices:
+    an exited agent's ``(exited N)``, a window killed under the view ``(pane gone)``."""
+    if status.state == "paused":
+        return PAUSED_WORDS
+    if status.held:
+        return f"({fleet_service.ANOTHER_SERVER})"
+    return PANE_GONE
+
+
 SESSION_PICKED_UP = (
     "with the same role, task, worktree, account and persona, picking up its session where "
     "it left off."
@@ -561,7 +584,7 @@ class AgentView(Vertical):
             shown_pane(self.status),
             server=self.server,
             escape_key=self.escape_key,
-            placeholder=PANE_GONE,
+            placeholder=pane_words(self.status),
             key_spellings=key_spellings(self.status),
             label=self.status.agent.label,
             id="agent-pane",
@@ -583,8 +606,9 @@ class AgentView(Vertical):
     def refresh_status(self, status: FleetAgentStatus) -> None:
         """New facts about the same agent: redraw the info line, re-attach on a new pane.
 
-        Detached from a row that turned ``lost`` or was held as another server's
-        (:func:`shown_pane`), whose id may name another agent's pane by now.
+        Detached from a row that turned ``lost``, ``paused`` or was held as another server's
+        (:func:`shown_pane`), whose id may name another agent's pane by now; the pane then
+        says why in its place (:func:`pane_words`).
         """
         self.status = status
         if not self.is_mounted:
@@ -594,6 +618,9 @@ class AgentView(Vertical):
         self.pane.key_spellings = key_spellings(status)
         self.labels.ask(self)
         self.pane.label = status.agent.label
+        if (words := pane_words(status)) != self.pane.placeholder:
+            self.pane.placeholder = words
+            self.pane.refresh()
         if (wanted := shown_pane(status)) != self.pane.pane_id:
             self.pane.attach(wanted)
 

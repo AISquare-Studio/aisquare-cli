@@ -35,7 +35,13 @@ from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.confirm_action import ASK_AGAIN_WHERE, ConfirmActionScreen, ask_first
 from aisquare.cli.ui.sidebar import MENU_GLYPH, AgentRow, ProjectSelected
 from aisquare.cli.ui.stop import StopAgentScreen
-from aisquare.cli.ui.views.agent import AgentView, pause_question, restart_question
+from aisquare.cli.ui.terminal import PANE_GONE, TMUX_UNAVAILABLE
+from aisquare.cli.ui.views.agent import (
+    PAUSED_WORDS,
+    AgentView,
+    pause_question,
+    restart_question,
+)
 from aisquare.cli.ui.views.app_settings import UiSettingsChanged
 from aisquare.cli.ui.views.doctor import COMMAND
 from aisquare.cli.ui.views.fleet_bulk import BulkAsked
@@ -925,3 +931,148 @@ def test_agent_marks_off_draws_a_mixed_fleets_rows_without_them(
     marked, after, with_mark, without = drive(go)
     assert (marked, after) == (True, False)
     assert "✻" in with_mark and "✻" not in without
+
+
+# --- F. what a view with no pane says where its pane was ---------------------------------------
+
+
+def pane_said(view: AgentView) -> tuple[list[str], str]:
+    """The pane's rows as drawn, and their words run together as one reads them."""
+    pane = view.pane
+    strips = pane.render_lines(Region(0, 0, pane.size.width, pane.size.height))
+    rows = [strip.text.rstrip() for strip in strips]
+    return rows, " ".join(row.strip() for row in rows if row.strip())
+
+
+def test_the_paused_words_say_what_is_kept_and_what_resume_does_and_name_no_command() -> None:
+    assert PAUSED_WORDS == (
+        "Paused. Its task, worktree and session are kept; Resume brings it back where it was."
+    )
+
+
+@pytest.mark.parametrize("size", [(120, 40), (45, 30)], ids=["120x40", "45x30"])
+def test_a_paused_agents_view_says_it_is_paused_where_its_pane_was(
+    tmp_path: Path, script: Script, size: tuple[int, int]
+) -> None:
+    """Brief 233: a paused agent's view said "(pane gone)" where its pane was, which read as if
+    something broke. It says it is paused, what is kept and what Resume does, whole beside a
+    45-column terminal's sidebar too: wrapped over the pane's rows, never cut at its first."""
+    one_coder(tmp_path, script, "paused")
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, list[str], str]:
+        view = await open_view(pilot, fleet_app(pilot), CODER)
+        return view.pane.pane_id, *pane_said(view)
+
+    pane_id, rows, said = drive(go, size=size)
+    assert pane_id is None, "no pane: the pause killed its window"
+    assert said == PAUSED_WORDS, rows
+    assert PANE_GONE not in said
+    if size == (45, 30):
+        assert len([row for row in rows if row]) > 1, rows
+
+
+def test_pausing_from_the_view_puts_the_paused_words_where_its_pane_was(
+    tmp_path: Path, script: Script, calls: Calls
+) -> None:
+    one_coder(tmp_path, script)
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str | None, str, str]:
+        app = fleet_app(pilot)
+        view = await open_view(pilot, app, CODER)
+        before = view.pane.pane_id
+        await press(pilot, view, "pause")
+        await pilot.press("enter")
+        await settle(app)
+        return before, view.pane.pane_id, view.status.state, pane_said(view)[1]
+
+    before, after, state, said = drive(go)
+    assert calls.paused, "paused"
+    assert (before, after, state) == ("%1", None, "paused")
+    assert said == PAUSED_WORDS
+
+
+@pytest.mark.parametrize(
+    ("state", "held", "pane", "words"),
+    [
+        ("lost", False, None, PANE_GONE),
+        ("unknown", True, None, f"({fleet_service.ANOTHER_SERVER})"),
+        ("exited", False, "%1", None),
+        ("working", False, "%1", None),
+    ],
+    ids=["lost", "held", "exited", "working"],
+)
+def test_every_other_state_keeps_its_own_words(
+    tmp_path: Path, script: Script, state: str, held: bool, pane: str | None, words: str | None
+) -> None:
+    """Only a paused row's words changed. A lost row's pane is gone, and the view says so. A row
+    held as another server's says the listing's own reason: its pane may still run on that
+    server, which "gone" would deny. An exited row keeps its pane, its last screen under
+    tmux's own ``(exited N)`` (tests/test_terminal_pane.py pins that notice), as a live row
+    keeps its own."""
+    row = one_coder(tmp_path, script, state)
+    if held:
+        script["prj_a"] = [script["prj_a"][0], row.model_copy(update={"held": True})]
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str]:
+        view = await open_view(pilot, fleet_app(pilot), CODER)
+        return view.pane.pane_id, pane_said(view)[1]
+
+    pane_id, said = drive(go)
+    assert pane_id == pane
+    if words is not None:
+        assert said == words
+    assert PAUSED_WORDS not in said
+
+
+def test_an_open_view_whose_agent_was_stopped_elsewhere_keeps_its_pane_and_says_it_is_gone(
+    tmp_path: Path, script: Script
+) -> None:
+    """Stopped from another asq or a shell, the row leaves the listing and its view keeps what
+    it has: the last screen under the pane's own notice, "(pane gone)" once tmux has no window
+    for it, which is what happened (tests/test_terminal_pane.py pins that notice); here, with no
+    tmux behind the harness, that or "(tmux unavailable)" where no tmux is installed (Windows).
+    A stop from the view itself goes back to the project."""
+    one_coder(tmp_path, script)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str | None, str | None, str]:
+        app = fleet_app(pilot)
+        view = await open_view(pilot, app, CODER)
+        script["prj_a"] = script["prj_a"][:1]  # the manager alone: the coder was stopped
+        app.refresh_data()
+        await settle(app)
+        return view.status.state, view.pane.pane_id, view.pane.notice, pane_said(view)[1]
+
+    state, pane_id, notice, said = drive(go)
+    assert (state, pane_id) == ("working", "%1"), "the view keeps its pane"
+    assert notice in (PANE_GONE, TMUX_UNAVAILABLE), "the pane's own notice, never the view's words"
+    assert PAUSED_WORDS not in said
+
+
+def test_resume_from_the_paused_view_shows_the_live_pane_and_none_of_the_paused_words(
+    tmp_path: Path, script: Script, calls: Calls
+) -> None:
+    one_coder(tmp_path, script, "paused")
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str | None, str | None, bool, str]:
+        app = fleet_app(pilot)
+        view = await open_view(pilot, app, CODER)
+        paused = pane_said(view)[1]
+        await press(pilot, view, "resume")
+        await pilot.pause()
+        await settle(app)
+        shown = app.current_view()
+        assert isinstance(shown, AgentView)
+        return (
+            paused,
+            shown.status.agent.id,
+            app.content.current,
+            shown.pane.pane_id,
+            app.focused is shown.pane,
+            pane_said(shown)[1],
+        )
+
+    paused, shown_id, current, pane_id, typing, said = drive(go)
+    assert paused == PAUSED_WORDS
+    assert (shown_id, current) == (f"{CODER}-2", f"agent-{CODER}-2"), "the resumed row's view"
+    assert pane_id == "%1" and typing, "its live pane, with the keyboard"
+    assert "Paused" not in said and "Resume" not in said, said

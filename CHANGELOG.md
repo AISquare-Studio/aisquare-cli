@@ -81,6 +81,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   titled *rlx remote*; a phone that added it to its Home Screen shows the new name once it is
   added again. The plugins describe themselves as rlx's; their install names
   (`aisquare@aisquare-cli`) do not change.
+- **asq never asks you to type a command.** Its screens, notifications, tooltips and
+  dialogs no longer tell you to run `rlx …` or any other command. Where rlx has a button
+  or a page for it, they point there instead. An agent or tmux that is not installed links
+  its own install page, and an install rlx cannot update says to update it the way you
+  installed it. The Doctor's buttons say what they do ("Connect Claude Code", "Sign in
+  account 3"). A check that needs the command line offers *Ask the manager*, which hands
+  the fix to your project's manager; with no manager running, the check says one can fix
+  it. The command line keeps every command: `rlx doctor`, `--help` and the messages printed
+  in a terminal are unchanged.
 - **Notifications in asq are small, sit top-right and are quick to clear.** They start
   just under the top row, so they leave the agent bar's Stop and Restart clear. They are
   one width, at most 46 columns, with no empty rows around the text. The newest is on

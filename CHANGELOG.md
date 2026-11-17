@@ -140,6 +140,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   captain's `copy_row` no longer says "copied" before it knows: asq's own toast says
   whether it landed.
 
+### Fixed
+
+- On Windows, quitting asq no longer waits behind asq's own timers, and neither does the work
+  it runs in the background.
+
 ## [0.10.0] - 2026-11-16
 
 **Codex support, in beta: run OpenAI's Codex CLI beside Claude Code, or instead of it, with

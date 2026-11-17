@@ -1154,3 +1154,43 @@ def test_real_claude_code_fires_every_hook_aisquare_installs_and_each_reaches_th
     assert "after the compaction" in resumed.everything, "the conversation, resumed"
     seen["SessionStart"] += ", resume"
     assert set(seen) == {spec.event for spec in get_adapter(AGENT).capabilities.hooks}, seen
+
+
+#: How long the slowed session end below waits before running aisquare's hook: past Claude
+#: Code's 1.5 s default for a SessionEnd hook that names no timeout (RLX R20, #154).
+SLOW_SESSION_END_SECONDS = 2
+
+
+def test_real_claude_code_waits_for_a_slow_session_end_within_its_timeout(native: Native) -> None:
+    """RLX R20 (#154): a session end slowed past 1.5 s (a busy store, a slow Mac) still reaches
+    the board. Claude Code gives a SessionEnd hook 1.5 s unless the hook names a ``timeout``,
+    and then cancels it: the pane reads "SessionEnd hook [...] failed: Hook cancelled", and the
+    session stays running on the board. aisquare's names one. The hook installed in the config
+    dir is slowed in place, as an operator's machine would slow it."""
+    path = native.config_dir / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    [group] = settings["hooks"]["SessionEnd"]
+    [entry] = group["hooks"]
+    entry["command"] = f"sleep {SLOW_SESSION_END_SECONDS}; {entry['command']}"
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    receipt = native.spawn(prompt="a slow end")
+    row = receipt.agent
+    pane = row.pane_id
+    native.heard("a slow end")
+    native.until(lambda: native.state(row.session_id) == "waiting", 30, "Stop", pane)
+    native.ready(pane)
+    native.type(pane, "/exit")
+    typed = time.monotonic()
+    native.until(lambda: native.ended(row.session_id), 30, "SessionEnd", pane)
+    ended = time.monotonic() - typed
+    native.until(lambda: "Pane is dead" in native.screen(pane), 30, "the exit", pane)
+    # Said, not asserted (a wall clock in CI is flaky by construction): Claude Code waits as
+    # long as the hook runs, not its whole timeout.
+    print(
+        f"session end on the board {ended:.1f} s after /exit, pane dead by "
+        f"{time.monotonic() - typed:.1f} s"
+    )
+    # Flattened, wrap-proof: at the pane's width the line wraps inside its words ("…failed:
+    # Hook cance" / "lled", seen on 2.1.318), so every space and row break goes first.
+    screen = native.screen(pane)
+    assert "Hookcancelled" not in "".join(screen.split()), screen

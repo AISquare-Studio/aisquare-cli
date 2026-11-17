@@ -147,6 +147,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   captain's `copy_row` no longer says "copied" before it knows: asq's own toast says
   whether it landed.
 
+### Fixed
+
+- **A session's end reaches the board on a slow machine.** Claude Code cut its hook off
+  after 1.5 s; it now has 10 s, and upgrading gives existing installs the same.
+
 ## [0.10.0] - 2026-11-16
 
 **Codex support, in beta: run OpenAI's Codex CLI beside Claude Code, or instead of it, with

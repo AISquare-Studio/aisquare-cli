@@ -178,6 +178,9 @@ trusted, into a slot aisquare made, and refuses a home the user owns where they 
 `session_end_closes_turn` (its `SessionEnd` closes the newest open turn, Codex's, which fires
 no `Stop` for a failed turn; without it, Claude Code's, a turn with no `Stop` stays open, as
 the store's rule and 0.9.2 keep an interrupted one),
+`clamped_hook_events` (the hook events whose timeout the agent clamps at its spec's own value,
+Codex's `SessionEnd` and `Interrupt` at 3 s: a reconnect writes the spec's there; without it,
+Claude Code's, an operator's longer session end is kept),
 `limits_in_transcript` (no turn-failed event: the accounts slot's `limit_from_transcript` and `failed_turn` read it), `ambient_first_run`,
 `reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),
 `one_press_exits` (the keys, as the agent is sent them past `key_spellings`, that end it with

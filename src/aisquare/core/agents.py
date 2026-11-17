@@ -64,6 +64,13 @@ so this changes nothing for anyone who has not opted in.
 #: and keep Claude Code's default.
 _CONTEXT_HOOKS = frozenset({"SessionStart", "UserPromptSubmit"})
 
+#: Bookkeeping hooks whose agent cancels them on a short default budget, losing what they
+#: record: Claude Code gives a ``SessionEnd`` hook 1.5 s unless it names a ``timeout``, and
+#: Codex 1 s (RLX R20, #154). Installed without the ``timeout`` the adapter writes, or with
+#: less, they read as a shortfall (:func:`hook_timeout_shortfall`), as a short context hook
+#: does.
+_BUDGETED_HOOKS = frozenset({"SessionEnd"})
+
 #: Claude Code's lifecycle events → the ``aisquare hook`` subcommand, as its adapter installs
 #: them (``ClaudeCodeAdapter.capabilities.hooks``). ``StopFailure`` fires INSTEAD of Stop
 #: when the turn ends on an API error — a usage limit above all (#146); an install from
@@ -692,7 +699,11 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         if isinstance(entry.get("timeout"), int):
             # Never below the ceiling the CI hook may wait for; never *reducing*
             # a longer one the operator chose deliberately.
-            entry["timeout"] = max(entry["timeout"], _installed_timeout(groups, hook.event) or 0)
+            entry["timeout"] = max(
+                entry["timeout"],
+                _installed_timeout(groups, hook.event, adapter.capabilities.clamped_hook_events)
+                or 0,
+            )
         group: dict[str, Any] = {"hooks": [entry]}
         if hook.matcher is not None:
             group["matcher"] = hook.matcher
@@ -1093,7 +1104,9 @@ def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
 
 
 def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[str]:
-    """Context events whose installed ``timeout`` is below what the CI hook needs.
+    """Events whose installed ``timeout`` is below what they need
+    (:func:`required_hook_timeout`): a context hook short of the CI hook's ceiling, or a
+    session end without its own (a 0.10.0 install's).
 
     Empty when there is nothing to reconcile — including when the hooks are not
     installed at all, which :func:`hooks_installed` is the question for.
@@ -1250,7 +1263,7 @@ def _local_settings_root(directory: Path) -> Path:
 
 def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> list[str]:
     """Lifecycle events with no aisquare group — or, with ``reconciled``, none
-    whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`.
+    whose timeout reaches :func:`required_hook_timeout`.
 
     Read as :func:`read_json` reads, this module's rule for a file it only reads (through
     the inspection snapshot, :func:`_read_settings`): a ``settings.json`` that is missing,
@@ -1267,12 +1280,31 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
     hooks = _read_settings(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return events
-    accepts = _is_current_aisquare_group if reconciled else (lambda g, _e: _is_aisquare_group(g))
+    if not reconciled:
+        return [
+            event
+            for event in events
+            if not any(_is_aisquare_group(group) for group in _event_groups(hooks, event))
+        ]
     return [
-        event
-        for event in events
-        if not any(accepts(group, event) for group in _event_groups(hooks, event))
+        hook.event
+        for hook in spec.hooks
+        if not any(
+            _is_current_aisquare_group(group, required_hook_timeout(hook))
+            for group in _event_groups(hooks, hook.event)
+        )
     ]
+
+
+def required_hook_timeout(hook: HookSpec) -> int | None:
+    """The ``timeout`` an installed ``hook`` needs at least, in seconds, or ``None`` when any
+    will do: :data:`CONTEXT_HOOK_TIMEOUT_SECONDS` for a context hook, the adapter's own for a
+    hook its agent cancels on a short default (:data:`_BUDGETED_HOOKS`)."""
+    if hook.event in _CONTEXT_HOOKS:
+        return CONTEXT_HOOK_TIMEOUT_SECONDS
+    if hook.event in _BUDGETED_HOOKS:
+        return hook.timeout
+    return None
 
 
 def _event_groups(hooks: dict[str, Any], event: str) -> list[Any]:
@@ -1287,13 +1319,19 @@ def _event_groups(hooks: dict[str, Any], event: str) -> list[Any]:
     return groups if isinstance(groups, list) else []
 
 
-def _installed_timeout(groups: Any, event: str) -> int | None:
-    """Preserve extra headroom only for the two context-producing hooks.
+def _installed_timeout(groups: Any, event: str, clamped: frozenset[str]) -> int | None:
+    """The longest timeout one of our handlers under ``event`` already has, which the writer
+    keeps over the spec's: an operator's longer one, for the two context-producing hooks and
+    for a session end its agent honours past the spec (R20, the manager's ruling (a): drift
+    calls it sufficient, so a refresh must not cut it). ``None`` keeps nothing.
 
-    UI and decision hooks must reconcile to their adapter's bounded timeout;
-    Claude hooks without a spec timeout retain the native default.
+    UI and decision hooks, and the budgeted hooks the agent clamps at the spec's own value
+    (``clamped``: its ``AgentCapabilities.clamped_hook_events``, Codex's ``SessionEnd`` and
+    ``Interrupt``), reconcile to their adapter's bounded timeout; Claude hooks without a spec
+    timeout retain the native default.
     """
-    if event not in _CONTEXT_HOOKS or not isinstance(groups, list):
+    budgeted = event in _BUDGETED_HOOKS and event not in clamped
+    if not (event in _CONTEXT_HOOKS or budgeted) or not isinstance(groups, list):
         return None
     timeouts: list[int] = []
     for group in groups:
@@ -1304,12 +1342,15 @@ def _installed_timeout(groups: Any, event: str) -> int | None:
     return max(timeouts, default=None)
 
 
-def _is_current_aisquare_group(group: Any, event: str) -> bool:
-    """An aisquare hook group whose context events carry a sufficient timeout.
+def _is_current_aisquare_group(group: Any, needs: int | None) -> bool:
+    """An aisquare hook group whose timeout is at least ``needs`` seconds
+    (:func:`required_hook_timeout`; ``None``: any, or none).
 
     Presence alone reported a settings file written before the context hooks
     carried ``timeout`` as healthy, so ``doctor`` said the hooks were installed
-    while Claude Code cut the CI hook off at its 60 s default.
+    while Claude Code cut the CI hook off at its 60 s default; and a 0.10.0
+    session end, which carried none, as healthy while Claude Code cancelled it at
+    1.5 s (R20).
 
     "Sufficient", not "equal to ours": an operator who set 180 chose a longer
     ceiling than we need and reconciling that back down to 120 would discard
@@ -1317,12 +1358,12 @@ def _is_current_aisquare_group(group: Any, event: str) -> bool:
     """
     if not _is_aisquare_group(group):
         return False
-    if event not in _CONTEXT_HOOKS:
+    if needs is None:
         return True
     return any(
         isinstance(item.get("timeout"), int)
         and not isinstance(item.get("timeout"), bool)
-        and item["timeout"] >= CONTEXT_HOOK_TIMEOUT_SECONDS
+        and item["timeout"] >= needs
         for item in _owned_handlers(group)
     )
 

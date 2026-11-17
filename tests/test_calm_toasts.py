@@ -622,3 +622,27 @@ def test_a_closing_or_pruned_toast_offers_no_selection() -> None:
 
     before, closing, gone = drive(90, go)
     assert before and not closing and not gone
+
+
+def test_no_toast_keeps_a_timer_past_its_own_time() -> None:
+    """Textual's ``Toast._on_mount`` sets a timer for the toast's ``_timeout``, which asq set to
+    a year, beside the toast's own: on Windows a sleeping Textual timer holds a thread of
+    asyncio's default executor, the one Textual's thread workers run on (eight on CI's
+    runners), so every toast shown took one for good, and asq's workers starved — eight UI
+    tests failed on windows-latest (#517, run 44026703595). Every timer a toast keeps ends
+    by its own time, or the toast holds none while its time is stopped."""
+
+    async def go(app: Host, pilot: Pilot[None]) -> list[tuple[float, float]]:
+        for n in range(MAX_SHOWN + 1):
+            app.notify(f"toast {n}", timeout=10)
+        await settle(pilot)
+        sleeping = []
+        for toast in app.screen.query(CalmToast):
+            for timer in list(toast._timers):
+                if timer._task is not None and not timer._task.done():
+                    sleeping.append((timer._interval, toast._notification.time_left))
+        return sleeping
+
+    sleeping = drive(90, go)
+    assert sleeping, "the toasts that show keep their time"
+    assert [(interval, left) for interval, left in sleeping if interval > left + 1] == []

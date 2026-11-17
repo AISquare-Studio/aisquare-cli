@@ -44,7 +44,7 @@ from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import events
-from textual.app import ComposeResult, SystemCommand
+from textual.app import ComposeResult, ScreenStackError, SystemCommand, UnknownModeError
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.css.query import NoMatches
@@ -1611,8 +1611,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         a Remote that did not come back at start, a tunnel that did not come up, auto-off.
         Said only there, the human found out from the phone, away from the desk (sweep of
         #243). What a control's write did (a new passphrase, a revoke) is said in any case:
-        no line of the panel says it."""
-        if not news.done and isinstance(self.screen, RemotePanel):
+        no line of the panel says it.
+
+        Remote's threads post news as asq quits (its auto-off, a write landing): news that
+        arrives once the screens are gone has no one to tell, and reading the screen then
+        raised ``ScreenStackError`` out of asq's exit (#517, Windows CI)."""
+        try:
+            screen = self.screen
+        except (ScreenStackError, UnknownModeError):
+            return
+        if not news.done and isinstance(screen, RemotePanel):
             return
         severity: SeverityLevel = "warning" if news.trouble else "information"
         self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)

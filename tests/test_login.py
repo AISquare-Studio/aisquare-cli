@@ -174,7 +174,8 @@ def test_a_paused_provider_is_reported(runner: CliRunner) -> None:
     try:
         result = _login(runner, stub.url)
         assert result.exit_code == 1
-        assert "temporarily paused" in result.output
+        # rlx's own words, not "CLI sign-in" (R21, the owner, 2026-11-17).
+        assert "Sign-in from rlx is temporarily paused. Try again later." in result.output
     finally:
         stub.close()
 

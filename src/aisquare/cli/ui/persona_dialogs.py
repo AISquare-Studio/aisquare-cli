@@ -1003,7 +1003,7 @@ class ExportPersonaScreen(_Dialog):
     def _destinations(self) -> list[RadioButton]:
         """One button per agent and scope it reads skills in (``skill_target``): every
         agent's personal skills, then every agent's project skills, disabled outside a git
-        repository. Each names its agent as ``types.staged_label`` does: ``Codex (beta)``,
+        repository. Each names its agent as ``types.staged_label`` does: ``Codex``,
         ``Claude Code``."""
         buttons: list[RadioButton] = []
         for scope in ("user", "project"):

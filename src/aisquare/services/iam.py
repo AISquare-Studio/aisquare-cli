@@ -412,7 +412,7 @@ def _reject_common(result: HttpResult, what: str) -> None:
             retry_after=result.retry_after(),
         )
     if result.status == 503:
-        raise IamError("paused", "CLI sign-in is temporarily paused. Try again later.")
+        raise IamError("paused", "Sign-in from rlx is temporarily paused. Try again later.")
     if result.status >= 500:
         raise IamError("unreachable", f"The server could not {what} (HTTP {result.status}).")
 

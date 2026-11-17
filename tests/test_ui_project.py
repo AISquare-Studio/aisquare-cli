@@ -2172,7 +2172,7 @@ def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_
         return refused, kept, on_disk
 
     refused, kept, on_disk = drive_explainability(project, scenario)
-    assert any("minted by the CLI" in m and s == "warning" for m, s in refused), refused
+    assert any("minted by rlx" in m and s == "warning" for m, s in refused), refused
     assert kept == "pk-over-minted-0123456789", "refused before a write began: the field keeps it"
     assert on_disk == "AIS_minted_key"
     with store_session() as store:

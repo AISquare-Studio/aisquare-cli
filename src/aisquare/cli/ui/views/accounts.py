@@ -878,7 +878,7 @@ def _sign_in_prompt(agent: str) -> str:
 
 
 def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
-    """Another agent's section title: ``Codex (beta) 0.162.1 · /path`` (a beta agent's name
+    """Another agent's section title: ``Codex 0.162.1 · /path`` (a beta agent's name
     with its mark, ``types.stage_mark``), or how to install it."""
     if core.kind(agent).legacy_slots:
         return claude_title_text(overview)

@@ -33,7 +33,6 @@ from aisquare.cli.ui.sidebar import (
     ORANGE_RED,
     RED,
     SETTINGS_KEY,
-    STATUS_INDENT,
     TIMES,
     YELLOW,
     AgentHeadroom,
@@ -519,30 +518,85 @@ def test_the_claude_dot_follows_the_headroom_level(
     summary: HeadroomSummary | None, dot: str, colour: str
 ) -> None:
     assert headroom_dot(summary) == (dot, colour)
-    text = status_line_text(True, summary)
-    assert text.plain.split("  ")[1].startswith(dot)
+    text = status_line_text(summary)
+    assert text.plain.startswith(dot)
     if summary is not None:
         assert f"{summary.usable}{TIMES} claude" in text.plain
 
 
-@pytest.mark.parametrize(("aisquare", "colour"), [(True, GREEN), (False, RED), (None, "grey50")])
-def test_the_aisquare_dot_is_the_sign_in(aisquare: bool | None, colour: str) -> None:
-    text = status_line_text(aisquare, GOOD)
-    assert text.plain.startswith("● aisquare")
-    first = text.spans[0]
-    assert text.plain[first.start : first.end] == "● " and str(first.style) == colour
+@pytest.mark.parametrize("width", [38, 45, 60, 90, 200])
+@pytest.mark.parametrize("aisquare", ["signed in", "signed out", "unreadable"])
+def test_the_sidebar_names_no_aisquare_and_the_accounts_page_has_the_sign_in(
+    monkeypatch: pytest.MonkeyPatch, aisquare: str, width: int
+) -> None:
+    """R21, the owner (2026-11-17): "hide aisquare mention altogether in sidebar just keep it in
+    account view". The line under *⚙ Settings* was ``● aisquare  ● 3x claude 80%``: now the
+    agents' dot is its first cell, at every width and in every sign-in state, nothing in the
+    sidebar says aisquare, and the Accounts page the line opens still shows the sign-in."""
+    from aisquare.services import iam
+    from tests.test_ui_accounts import _session
+
+    def session(api_url: str | None = None) -> iam.Session | None:
+        if aisquare == "unreadable":
+            raise iam.IamError("unreadable", "the session file could not be read")
+        return _session() if aisquare == "signed in" else None
+
+    monkeypatch.setattr(iam, "current_session", session)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str]:
+        app = _app(pilot)
+        strips = app.screen._compositor.render_full_update(simplify=True).strips
+        bar = app.sidebar.region
+        sidebar = [
+            "".join(segment.text for segment in strip.crop(bar.x, bar.right))
+            for y in range(bar.y, bar.bottom)
+            for strip in strips[y]
+        ]
+        at = app.query_one(StatusLine).content_region
+        line = [
+            "".join(segment.text for segment in strip.crop(at.x, at.right))
+            for y in range(at.y, at.bottom)
+            for strip in strips[y]
+        ]
+        await pilot.click(StatusLine)
+        await settle_page(app)
+        page = app.query_one("#aisquare-status", Static)
+        return sidebar, line, _shown(page)
+
+    async def run() -> tuple[list[str], list[str], str]:
+        app = FleetApp(
+            refresh_seconds=3600,
+            doctor=lambda: [],
+            accounts=lambda: _overview(_status(1, "me@example.com")),
+            headroom=lambda accounts: GOOD,
+            headroom_seconds=3600,
+        )
+        async with app.run_test(size=(width, 40)) as pilot:
+            await settle_page(app)
+            return await go(pilot)
+
+    sidebar, line, page = asyncio.run(run())
+    assert line and line[0].startswith(f"● 3{TIMES} claude"), line  # its first cell, no gap
+    assert not [row for row in sidebar if "aisquare" in row.lower()], sidebar
+    said = {
+        "signed in": "✓ Signed in as me@aisquare.studio",
+        "signed out": "Not signed in",
+        "unreadable": "Not signed in",
+    }
+    assert page.startswith(said[aisquare]), page
 
 
 def test_a_login_due_puts_a_warning_on_the_line() -> None:
     due = HeadroomSummary(level="fair", percent_left=30.0, usable=1, needs_login=1)
-    assert status_line_text(True, due).plain == f"● aisquare  ● 1{TIMES} claude 30% ⚠"
-    assert "⚠" not in status_line_text(True, GOOD).plain
+    assert status_line_text(due).plain == f"● 1{TIMES} claude 30% ⚠"
+    assert "⚠" not in status_line_text(GOOD).plain
 
 
 def test_a_login_due_keeps_its_warning_in_the_cells_the_line_has() -> None:
-    """Review of #357: in the sidebar's 28 cells, ``2x claude 58% ⚠`` was painted
-    ``2x claude 58%…``: the warning, the one thing to do, went under the ellipsis. The
-    figure gives way where both do not fit; where they do, both show."""
+    """Review of #357: in the 16 cells the AISquare dot left of the sidebar's 28,
+    ``2x claude 58% ⚠`` was painted ``2x claude 58%…``: the warning, the one thing to do,
+    went under the ellipsis. The figure gives way where both do not fit; where they do, both
+    show, as in the sidebar's 28 cells now the line has them all (R21)."""
     due = {
         left: HeadroomSummary(level="good", percent_left=left, usable=2, needs_login=1)
         for left in (58.0, 3.0)
@@ -563,12 +617,14 @@ def test_a_login_due_keeps_its_warning_in_the_cells_the_line_has() -> None:
         return painted
 
     assert _drive(go) == [
-        f"● aisquare  ● 2{TIMES} claude ⚠",
-        f"● aisquare  ● 2{TIMES} claude 3% ⚠",
-        f"● aisquare  ● 9{TIMES} claude 100%",
+        f"● 2{TIMES} claude 58% ⚠",
+        f"● 2{TIMES} claude 3% ⚠",
+        f"● 9{TIMES} claude 100%",
     ]
-    wide = status_line_text(True, due[58.0], width=40)
-    assert wide.plain == f"● aisquare  ● 2{TIMES} claude 58% ⚠", "with room, both"
+    narrow = {left: status_line_text(due[left], width=16).plain for left in due}
+    assert narrow == {58.0: f"● 2{TIMES} claude ⚠", 3.0: f"● 2{TIMES} claude 3% ⚠"}
+    wide = status_line_text(due[58.0], width=17)
+    assert wide.plain == f"● 2{TIMES} claude 58% ⚠", "with room, both"
 
 
 def test_the_line_paints_the_injected_headroom() -> None:
@@ -577,7 +633,7 @@ def test_the_line_paints_the_injected_headroom() -> None:
     async def go(pilot: Pilot[None]) -> str:
         return _shown(_app(pilot).query_one(StatusLine))
 
-    assert _drive(go, headroom=lambda accounts: critical) == f"● aisquare  ● 2{TIMES} claude 3% ⚠"
+    assert _drive(go, headroom=lambda accounts: critical) == f"● 2{TIMES} claude 3% ⚠"
 
 
 def _delta_e(one: Color, other: Color) -> float:
@@ -605,7 +661,7 @@ def test_each_band_paints_a_dot_its_neighbours_cannot_be_taken_for() -> None:
                 app.sidebar.show_headroom(HeadroomSummary(level=level, percent_left=left, usable=2))
                 await pilot.pause()
                 (strip,) = line.render_lines(Region(0, 0, line.size.width, 1))
-                _aisquare, claude = [segment for segment in strip if "●" in segment.text]
+                (claude,) = [segment for segment in strip if "●" in segment.text]
                 assert claude.style is not None and claude.style.color is not None
                 seen.setdefault(theme, []).append(Color.from_rich_color(claude.style.color))
             app.sidebar.show_headroom(HeadroomSummary(level="empty", percent_left=0.0, usable=2))
@@ -706,9 +762,9 @@ def test_a_signed_out_account_puts_a_warning_on_the_line(
     line, headroom = _drive(
         go, headroom=accounts_service.read_fleet_headroom, accounts=accounts_service.overview
     )
-    # Slot 1 signed out, slot 2 good. In the sidebar's 28 cells the 60% gives way to the ⚠
-    # (review of #357); the summary still holds it.
-    assert line.endswith(f"● 1{TIMES} claude ⚠"), line
+    # Slot 1 signed out, slot 2 good: the 60% and the ⚠, in the sidebar's 28 cells now no
+    # AISquare dot takes 12 of them (R21; the figure gives way where both do not fit, #357).
+    assert line == f"● 1{TIMES} claude 60% ⚠", line
     assert headroom is not None and headroom.needs_login == 1 and headroom.usable == 1
     assert headroom.percent_left == 60.0
     assert calls == [good.slot], "only the signed-in slot was asked"
@@ -840,13 +896,11 @@ def _codex(slot: int, email: str | None, *, signed_in: bool | None = None) -> Cl
 
 def test_another_agents_accounts_have_a_dot_of_their_own_under_the_first() -> None:
     codex = HeadroomSummary(level="low", percent_left=10.0, usable=1, needs_login=1)
-    text = status_line_text(True, GOOD, more=[AgentHeadroom("codex", codex)])
+    text = status_line_text(GOOD, more=[AgentHeadroom("codex", codex)])
     # Each agent's line carries its share left beside the count (#287): 80 % of Claude Code's,
     # 10 % of Codex's, whose signed-out slot is the ⚠.
-    assert text.plain == (
-        f"● aisquare  ● 3{TIMES} claude 80%\n{STATUS_INDENT}● 1{TIMES} codex 10% ⚠"
-    )
-    assert status_line_text(True, GOOD).plain == f"● aisquare  ● 3{TIMES} claude 80%", "alone"
+    assert text.plain == (f"● 3{TIMES} claude 80%\n● 1{TIMES} codex 10% ⚠")
+    assert status_line_text(GOOD).plain == f"● 3{TIMES} claude 80%", "alone"
 
 
 def test_the_status_line_reads_and_names_the_codex_accounts_apart_from_claudes() -> None:
@@ -876,16 +930,16 @@ def test_the_status_line_reads_and_names_the_codex_accounts_apart_from_claudes()
 
     line, more = _drive(go, headroom=reader, accounts=overview)
 
-    assert line == f"● aisquare  ● 1{TIMES} claude 40%\n{STATUS_INDENT}● 1{TIMES} codex 70% ⚠"
+    assert line == f"● 1{TIMES} claude 40%\n● 1{TIMES} codex 70% ⚠"
     assert asked[-2:] == [[("claude-code", 1)], [("codex", 0), ("codex", 3)]]
     assert more == (AgentHeadroom("codex", codex.model_copy(update={"needs_login": 1})),)
 
 
 def test_the_line_paints_the_fleets_share_left_beside_the_count() -> None:
     """#287 slice 2a: the dot had no number. Percent LEFT, as the band means, in its colour."""
-    text = status_line_text(True, HeadroomSummary(level="fair", percent_left=41.6, usable=3))
-    assert text.plain == f"● aisquare  ● 3{TIMES} claude 42%"
+    text = status_line_text(HeadroomSummary(level="fair", percent_left=41.6, usable=3))
+    assert text.plain == f"● 3{TIMES} claude 42%"
     figure = next(span for span in text.spans if text.plain[span.start : span.end] == " 42%")
     assert str(figure.style) == headroom_dot(HeadroomSummary(level="fair", percent_left=41.6))[1]
-    unread = status_line_text(True, HeadroomSummary(level="unknown"))
-    assert unread.plain == f"● aisquare  ● 0{TIMES} claude", "no reading, no number"
+    unread = status_line_text(HeadroomSummary(level="unknown"))
+    assert unread.plain == f"● 0{TIMES} claude", "no reading, no number"

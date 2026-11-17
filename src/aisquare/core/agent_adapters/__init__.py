@@ -495,7 +495,7 @@ def mark_of(name: str) -> AgentMark | None:
 
 
 def agents_named() -> str:
-    """Every agent by its id, a beta one's with its mark: ``claude-code, codex (beta)``. What
+    """Every agent by its id, a beta one's with its mark: ``claude-code, codex``. What
     an ``--agent`` option's help lists, so a person choosing an agent sees its stage."""
     return ", ".join(f"{adapter.id}{stage_mark(adapter)}" for adapter in adapters())
 

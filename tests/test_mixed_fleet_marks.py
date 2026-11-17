@@ -6,7 +6,7 @@ The live mixed Claude + Codex run (LIVE PASS 11884, the owner's rig at 5e652590)
   ``account 3`` and ``account 4`` and not whose agent, and asq's sidebar rows drew the same
   role icons with no ``✻`` or ``>_``: "hard to tell apart", the owner's complaint (#127).
   Now, in a fleet of more than one agent's alone, ``fleet ls`` names each row's agent in
-  the words ``aisquare accounts`` uses (``Claude Code``, ``Codex (beta)``), and each sidebar
+  the words ``aisquare accounts`` uses (``Claude Code``, ``Codex``), and each sidebar
   row carries its agent's mark after its icon. A fleet of one agent's lists as before.
 - F4: a signed-in Codex account with no reading yet (no Codex session has recorded a
   rate-limit window on it) showed the ``!`` of a broken login. It reads ``no reading yet``,
@@ -79,13 +79,13 @@ def test_a_mixed_fleets_ls_names_each_rows_agent_in_the_accounts_words_aligned()
         _row("old-row", None, slot=2),  # a record from before adapters: Claude Code's
     ]
     words = fleet_cli.agent_words(rows)
-    assert words == {
-        "agt_hello-claude": "Claude Code ",
-        "agt_hello-codex": "Codex (beta)",
-        "agt_old-row": "Claude Code ",
+    assert words == {  # padded to the widest, Claude Code's (Codex's was, with its mark)
+        "agt_hello-claude": "Claude Code",
+        "agt_hello-codex": "Codex      ",
+        "agt_old-row": "Claude Code",
     }
     lines = [fleet_cli._agent_line(row, {}, words[row.agent.id]) for row in rows]
-    for line, said in zip(lines, ("Claude Code", "Codex (beta)", "Claude Code"), strict=True):
+    for line, said in zip(lines, ("Claude Code", "Codex", "Claude Code"), strict=True):
         assert f" coder      {said}" in line, line
     # The words are ASCII: a pipe and a narrow terminal read them as they are.
     assert all(said.isascii() for said in words.values())
@@ -110,7 +110,7 @@ def test_fleet_ls_prints_the_agents_words_only_for_a_mixed_fleet(
     fleet_cli._emit_agents(project, [_row("a", "claude-code"), _row("b", "codex")])
     mixed = capsys.readouterr().out
     assert "Claude Code" not in alone and "Codex" not in alone
-    assert "Claude Code" in mixed and "Codex (beta)" in mixed
+    assert "Claude Code" in mixed and "Codex" in mixed and "(beta)" not in mixed
 
 
 # --- F3: the sidebar's agent rows ----------------------------------------------------------

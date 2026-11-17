@@ -787,8 +787,8 @@ def _revoke(
 
 
 def describe_owed(owed: list[PendingRevocation]) -> str:
-    """``1 key the CLI minted is still live on the server — acme for web (signed out)``."""
-    noun = "key the CLI minted is" if len(owed) == 1 else "keys the CLI minted are"
+    """``1 key rlx minted is still live on the server — acme for web (signed out)``."""
+    noun = "key rlx minted is" if len(owed) == 1 else "keys rlx minted are"
     which = "; ".join(
         f"{record.workspace_name} for {record.project_name} "
         f"({record.last_error or 'not tried yet'})"
@@ -804,7 +804,7 @@ def describe_revocations(report: Revocations) -> str | None:
         which = ", ".join(
             f"{record.workspace_name} for {record.project_name}" for record in report.revoked
         )
-        parts.append(f"revoked {len(report.revoked)} key(s) the CLI minted ({which})")
+        parts.append(f"revoked {len(report.revoked)} key(s) rlx minted ({which})")
     if report.owed:
         parts.append(f"{describe_owed(report.owed)} — {revoke_retry()}")
     return "; ".join(parts) or None
@@ -869,7 +869,7 @@ def mint_key(
     if binding is not None and not destination.key_uid and binding.key_path.is_file():
         raise DestinationError(
             "hand_key_attached",
-            f"the project has a key attached by hand for target {binding.target}, and the CLI "
+            f"the project has a key attached by hand for target {binding.target}, and rlx "
             "does not overwrite it"
             + prog.shell_advice(
                 " — `aisquare explainability key set --target "
@@ -1085,7 +1085,7 @@ def describe(destination: TraceDestination | None, *, key_source: str | None = N
         parts.append(f"chosen by {destination.set_by}")
     text = " · ".join(parts)
     if destination.key_uid:
-        text += " — key minted by the CLI"
+        text += " — key minted by rlx"
     elif key_source == "project":
         text += " — key attached by hand"
     elif key_source in ("env", "file"):

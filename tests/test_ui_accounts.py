@@ -513,17 +513,19 @@ def test_grant_text_puts_the_code_first_and_says_what_the_browser_did() -> None:
     assert "Waiting for the approval" in grant_text(grant, opened=None).plain
 
 
-def test_the_status_line_says_aisquare_and_opens_the_page_with_settings_selected(
+def test_the_status_line_opens_the_page_with_settings_selected_and_the_sign_in_is_there(
     no_network: dict[str, Any],
 ) -> None:
     """The human: "clicking on that should directly take me to accounts page but still that
-    line wont be highlighted/in focus, still settings would be in focus"."""
+    line wont be highlighted/in focus, still settings would be in focus". The AISquare sign-in
+    is on that page alone: the owner, R21, "hide aisquare mention altogether in sidebar just
+    keep it in account view"."""
     no_network["session"] = _session()
     overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
 
     async def go(pilot: Pilot[None]) -> tuple[Any, ...]:
         app = fleet_app(pilot)
-        signed_in = app.sidebar.aisquare
+        signed_in = shown(app.query_one(StatusLine))
         before = app.content.current
         view = await open_accounts(pilot)
         rows = [line(view, 1), line(view, 2)]
@@ -532,7 +534,8 @@ def test_the_status_line_says_aisquare_and_opens_the_page_with_settings_selected
         return signed_in, before, rows, status, claude, app.sidebar.selected_key, app.focused
 
     signed_in, before, rows, status, claude, selected, focused = drive(go, overview=overview)
-    assert signed_in is True  # the AISquare dot is green
+    assert "aisquare" not in signed_in.lower(), signed_in  # the sidebar's line names no sign-in
+    assert "Signed in as" in status, status  # the page does
     assert before == "welcome"
     assert selected == SETTINGS_KEY  # Settings is the highlighted row, not the line
     assert not isinstance(focused, StatusLine)
@@ -1117,13 +1120,13 @@ def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
 def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() -> None:
     overview = _overview(_status(1, None, signed_in=False), installed=False)
 
-    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool | None]:
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         return (
             shown(view.query_one("#claude-title", Static)),
             view.query_one("#claude-add", Button).disabled,
-            app.sidebar.aisquare,
+            shown(app.query_one(StatusLine)) + shown(view.query_one("#aisquare-status", Static)),
         )
 
     claude, disabled, signed_in = drive(go, overview=overview)
@@ -1132,7 +1135,8 @@ def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() 
     assert "install it from https://code.claude.com/docs/en/setup" in claude
     assert core.INSTALL_COMMAND not in claude
     assert disabled
-    assert signed_in is False  # the status line's AISquare dot is red
+    line, page = signed_in.split("Not signed in", 1)  # the page's, never the sidebar's (R21)
+    assert "aisquare" not in line.lower() and "AISquare" in page, signed_in
 
 
 def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(
@@ -1390,7 +1394,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
         monkeypatch, no_network, outcome={"access_token": "aisq_new", "expires_in": 1}
     )
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str, bool, bool | None]:
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         assert not view.query_one("#aisquare-sign-out", Button).display  # nobody to sign out
@@ -1402,7 +1406,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
             shown(view.query_one("#aisquare-status", Static)),
             notice(view),
             view.query_one("#aisquare-code", Static).display,
-            app.sidebar.aisquare,
+            shown(app.query_one(StatusLine)),
         )
 
     status, said, code_shown, signed_in = drive(go)
@@ -1413,7 +1417,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
     assert "Signed in as new@aisquare.studio" in status
     assert said == "✓ Signed in to AISquare as new@aisquare.studio"
     assert not code_shown  # the card folds away once the session is stored
-    assert signed_in is True  # the status line was re-read from the stored session
+    assert "aisquare" not in signed_in.lower(), signed_in  # the sign-in is the page's (R21)
 
 
 def test_a_sign_in_whose_token_could_not_be_restricted_says_so_on_the_page(
@@ -1581,7 +1585,7 @@ def test_sign_out_takes_the_keys_the_cli_minted_with_it_as_logout_does(
     said = drive(go)
     assert sorted(order[:2]) == ["key-api", "key-web"], order
     assert order[2:] == ["session"], "the keys go before the session: their revoke takes it"
-    assert said.startswith("✓ Signed out of AISquare; 1 key the CLI minted is still live"), said
+    assert said.startswith("✓ Signed out of AISquare; 1 key rlx minted is still live"), said
     assert "acme for api (the API answered HTTP 403: not yours)" in said
     assert not any(
         explainability_service.project_key_path(project.id).exists() for project in projects
@@ -3674,7 +3678,7 @@ def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
     assert out["right"] <= out["screen"]
     table_width, shown_width = out["width"]
     assert out["scrolls"] == 0 and table_width <= shown_width and out["whole"]
-    assert out["marks"] == {1: "✻ ", 4: ">_"} and out["tip"] == "Codex (beta)"
+    assert out["marks"] == {1: "✻ ", 4: ">_"} and out["tip"] == "Codex"
     assert out["marked"] == [True] * 4  # rows mounted into a table of both agents carry the mark
 
 

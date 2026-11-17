@@ -25,7 +25,7 @@ from textual.pilot import Pilot
 from textual.theme import BUILTIN_THEMES, Theme
 from textual.widget import Widget
 
-from aisquare.cli.ui.app import FleetApp
+from aisquare.cli.ui.app import FleetApp, Panes
 from aisquare.cli.ui.sidebar import Activatable, ProjectSelected
 from aisquare.cli.ui.terminal import EscapeToSidebar
 from aisquare.cli.ui.theme import (
@@ -37,6 +37,7 @@ from aisquare.cli.ui.theme import (
     RLX_THEME,
     highlight_colours,
 )
+from aisquare.services import settings as settings_service
 from tests import test_ui_shell as ui_suite
 from tests.test_ui_agent_mark_contrast import contrast
 from tests.test_ui_shell import Script, drive, fleet_app, seed, settle
@@ -198,20 +199,27 @@ def test_a_terminal_theme_without_its_text_colours_takes_its_cursor_off_the_neut
     assert highlight_colours(green) == ("ansi_green", "ansi_white")
 
 
-def test_the_highlight_follows_the_keyboard_both_ways(tmp_path: Path, script: Script) -> None:
+@pytest.mark.parametrize("fade", [True, False], ids=["fade on", "fade off"])
+def test_the_highlight_follows_the_keyboard_both_ways(
+    fade: bool, tmp_path: Path, script: Script
+) -> None:
     """Tab and Shift+Tab, F12, a click on either pane, a dialog opened and closed: the bar
-    is there exactly while the sidebar holds the keyboard."""
+    is there exactly while the sidebar holds the keyboard. With Display's fade switch off
+    (R17) too: the switch is the fade's alone, never the bar's."""
     seed(tmp_path, ("prj_a", "proj", None))
+    if not fade:
+        settings_service.set_display_choice("fade_unfocused", False)
 
-    async def body(pilot: Pilot[None]) -> list[tuple[str, bool, bool]]:
+    async def body(pilot: Pilot[None]) -> list[tuple[str, bool, bool, bool]]:
         app = fleet_app(pilot)
         await _select(app)
-        seen: list[tuple[str, bool, bool]] = []
+        seen: list[tuple[str, bool, bool, bool]] = []
 
         def look(step: str) -> None:
             bar = Color.parse(app.get_css_variables()[HIGHLIGHT_VARIABLE]).rgb
             holds = app.sidebar.has_focus_within
-            seen.append((step, holds, _label(app)[1] == bar))
+            faded = any(side.has_class("-unfocused") for side in app.query_one(Panes).children)
+            seen.append((step, holds, _label(app)[1] == bar, faded))
 
         await _keyboard_on(app, "sidebar")
         look("sidebar focused")
@@ -243,9 +251,11 @@ def test_the_highlight_follows_the_keyboard_both_ways(tmp_path: Path, script: Sc
 
     seen = drive(body)
     # Where each step leaves the keyboard: the sidebar (True) or the page (False).
-    assert [holds for _, holds, _ in seen] == [True, False, True, False, True, False, True, True]
-    wrong = [step for step, holds, bar in seen if holds is not bar]
+    assert [holds for _, holds, _, _ in seen] == [True, False, True, False, True, False, True, True]
+    wrong = [step for step, holds, bar, _ in seen if holds is not bar]
     assert not wrong, seen
+    # The switch was read: one side fades at every step with it on, none with it off.
+    assert [faded for *_, faded in seen] == [fade] * len(seen), seen
 
 
 def _screen(app: FleetApp) -> list[list[Segment]]:

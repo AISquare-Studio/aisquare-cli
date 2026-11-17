@@ -265,14 +265,28 @@ DISPLAY_CHOICES = {
 """*Display*'s switches, by id → ``[ui]`` field, in the tab's order."""
 DISPLAY_LABELS = {
     "ui-show-usage": "Account usage next to agents",
-    "ui-show-agent-marks": "Agent marks (✻ >_) in a mixed fleet",
+    "ui-show-agent-marks": "Agent marks in a mixed fleet",
     "ui-show-live-count": "Live count in the sidebar's title",
     "ui-fade-unfocused": "Fade the side without the keyboard",
     "ui-bell": "Bell when an agent needs you",
     "ui-board-autoscroll": "Follow the board's live feed",
     "ui-always-show-path": "Always show project directory",
 }
-"""Each *Display* switch's words: what it shows, said on."""
+"""Each *Display* switch's words: what it shows, said on. The marks' switch names the marks
+themselves, the adapters' own (:func:`display_label`), never spelled here."""
+
+
+def display_label(wid: str) -> str:
+    """A *Display* switch's words: *Agent marks* with the marks each adapter declares
+    (``AgentAdapter.mark``: ``✻ >_`` today), so a new agent's mark is named with no edit
+    here (tests/test_no_agent_literals.py's rule)."""
+    words = DISPLAY_LABELS[wid]
+    if wid != "ui-show-agent-marks":
+        return words
+    glyphs = " ".join(adapter.mark.glyph for adapter in adapters() if adapter.mark is not None)
+    return f"Agent marks ({glyphs}) in a mixed fleet" if glyphs else words
+
+
 ASK_AGAIN_BUTTON = "ui-ask-again"
 """*Ask again before every action*'s id."""
 NOT_ASKING_LINE = "ui-not-asking"
@@ -1198,7 +1212,7 @@ class AppSettingsView(Vertical):
         yield Static(section_title(*self.DISPLAY_SECTION), classes="section")
         for wid, key in DISPLAY_CHOICES.items():
             yield Checkbox(
-                DISPLAY_LABELS[wid], getattr(self.ui, key), id=wid, classes="display-choice"
+                display_label(wid), getattr(self.ui, key), id=wid, classes="display-choice"
             )
         yield Static(
             Text(self.ALWAYS_SHOW_PATH_ABOUT), id="ui-always-show-path-about", classes="about"

@@ -4598,6 +4598,7 @@ def _writing_workers() -> dict[str, str]:
         captain.VOICE_WORKER: "the captain's speaker switch",
         settings_remote.TOKEN_WORKER: "Settings ▸ Remote's save of the ngrok token",
         agent.RESTART_WORKER: "an agent's restart",
+        agent.PAUSE_WORKER: "an agent's pause",
         fleet_bulk.BULK_WORKER: "a restart, stop, pause or resume of many agents",
         accounts.SIGN_OUT_WORKER: "an AISquare sign-out",
         accounts.COMPLETE_WORKER: "a Claude sign-in",

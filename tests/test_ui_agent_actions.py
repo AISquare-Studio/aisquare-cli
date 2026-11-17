@@ -33,7 +33,7 @@ from aisquare.cli.ui.agent_menu import AgentMenu
 from aisquare.cli.ui.app import FleetApp, Panes
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.confirm_action import ASK_AGAIN_WHERE, ConfirmActionScreen, ask_first
-from aisquare.cli.ui.sidebar import MENU_GLYPH, AgentRow
+from aisquare.cli.ui.sidebar import MENU_GLYPH, AgentRow, ProjectSelected
 from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.views.agent import AgentView, pause_question, restart_question
 from aisquare.cli.ui.views.app_settings import UiSettingsChanged
@@ -705,6 +705,61 @@ def test_the_menus_restart_with_the_view_open_is_the_views_own_press(
     assert size is not None, "the view's own press, with its pane's size"
 
 
+@pytest.mark.parametrize(("kind", "entry"), [("pause", "Pause"), ("restart", "Restart")])
+def test_the_menus_ticked_action_with_no_view_open_acts_at_once(
+    tmp_path: Path, script: Script, calls: Calls, kind: str, entry: str
+) -> None:
+    """Don't ask again holds on the menu's own path too (tester-rlx-quiet's K1, K2): with no
+    view of the agent open, a ticked kind acts on the one click, pinned to the row."""
+    one_coder(tmp_path, script)
+    settings_service.stop_asking_first(kind)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, int]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await choose(pilot, app, await right_click(pilot, app, CODER), entry)
+        return isinstance(app.screen, ConfirmActionScreen), len(list(app.query(AgentView)))
+
+    assert drive(go) == (False, 0), "no box, and the menu opened no view"
+    done = calls.paused if kind == "pause" else calls.restarted
+    assert [(call[1], call[2]) for call in done] == [("coder-auth", CODER)]
+
+
+def test_the_menus_resume_with_no_view_open_never_asks(
+    tmp_path: Path, script: Script, calls: Calls
+) -> None:
+    """Q1 on the menu's own path (K6): Resume acts on its click, box or no box."""
+    one_coder(tmp_path, script, "paused")
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, int]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await choose(pilot, app, await right_click(pilot, app, CODER), "Resume")
+        return isinstance(app.screen, ConfirmActionScreen), len(list(app.query(AgentView)))
+
+    assert drive(go) == (False, 0), "no box, and the menu opened no view"
+    assert [(call[1], call[2]) for call in calls.restarted] == [("coder-auth", CODER)]
+
+
+def test_a_restart_asked_of_a_paused_rows_view_resumes_it_without_asking(
+    tmp_path: Path, script: Script, calls: Calls
+) -> None:
+    """K7: a Restart that reaches a view whose row is paused by then (the press before the
+    repaint hid the button, or the menu's) is its Resume, which never asks."""
+    one_coder(tmp_path, script, "paused")
+
+    async def go(pilot: Pilot[None]) -> bool:
+        app = fleet_app(pilot)
+        view = await open_view(pilot, app, CODER)
+        view.act("restart")
+        await pilot.pause()
+        await settle(app)
+        return isinstance(app.screen, ConfirmActionScreen)
+
+    assert drive(go) is False
+    assert [(call[1], call[2]) for call in calls.restarted] == [("coder-auth", CODER)]
+
+
 def test_the_menus_stop_is_the_stop_box_and_rename_the_rows_field(
     tmp_path: Path, script: Script
 ) -> None:
@@ -824,6 +879,28 @@ def test_the_board_opens_following_its_feed_as_display_says() -> None:
     assert BoardPanel(None).autoscroll is True
     settings_service.set_display_choice("board_autoscroll", False)
     assert BoardPanel(None).autoscroll is False
+
+
+def test_an_open_board_follows_display_at_the_tick(tmp_path: Path, script: Script) -> None:
+    """K8: the board already open turns its autoscroll off and on with Display's *Follow the
+    board's live feed*, not only the next one opened."""
+    one_coder(tmp_path, script)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await app.on_project_selected(ProjectSelected("prj_a"))
+        await settle(app)
+        board = app.query_one(BoardPanel)
+        before = board.autoscroll
+        _display(app, "board_autoscroll", False)
+        await settle(app)
+        off = board.autoscroll
+        _display(app, "board_autoscroll", True)
+        await settle(app)
+        return before, off, board.autoscroll
+
+    assert drive(go) == (True, False, True)
 
 
 def test_agent_marks_off_draws_a_mixed_fleets_rows_without_them(

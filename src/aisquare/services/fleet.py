@@ -17298,6 +17298,10 @@ its replacement is a deliberate add, and would bring the project back to every l
 NOT_PAUSED = "not paused"
 """Why a resume by :func:`bulk` leaves a row: running, or exited (💤) without a pause — only
 the agents a ``fleet pause`` stopped come back."""
+NOT_CHOSEN = "not chosen"
+"""Why :func:`bulk` leaves a row the plan it was shown would have acted on: the person
+unticked it in asq's dialog (R17, its pick-list). A pause that leaves one of a project's
+agents so does not fleet-pause the project (:func:`_fully_picked`)."""
 
 
 def the_captain_reason() -> str:
@@ -17875,6 +17879,13 @@ def bulk(
     there (:class:`FleetError`, as :func:`pause` refuses it), before any agent is touched;
     the projects whose signal was written are on the report (:attr:`BulkReport.signals`).
     ``projects`` keeps it to those projects, as for :func:`bulk_plan`.
+
+    A ``shown`` plan whose person unticked some of its rows in asq's pick-list carries them
+    as skipped, :data:`NOT_CHOSEN`, and they are reported so and never acted on. A pause
+    sets the signal only of a project none of whose agents was unticked
+    (:func:`_fully_picked`): a partial pick pauses just those agents, its manager left free
+    to spawn (R17, Q-E1). A resume's partial pick leaves its project fleet-paused, since an
+    agent of it stays paused (:func:`_resumes_clear`).
     """
     only = frozenset(project.id for project in projects) if projects is not None else None
     if shown is not None and (shown.action, shown.managers_only, shown.only) != (
@@ -17899,7 +17910,9 @@ def bulk(
         unread, owners = now.unread, now.owners
         rows = now.rows if shown is None else _as_shown(shown, now)
         if action == "pause":
-            signals = _set_pauses(now.projects, on=True, session_ref=acting_session)
+            signals = _set_pauses(
+                _fully_picked(now.projects, shown), on=True, session_ref=acting_session
+            )
         elif action == "resume":
             # Cleared only where the resume leaves no agent paused (m2): the manager it brings
             # back then spawns again, its team back beside it.
@@ -17958,6 +17971,17 @@ def bulk(
         kept=tuple(kept),
         owners=owners,
     )
+
+
+def _fully_picked(projects: Sequence[ProjectInfo], shown: BulkPlan | None) -> list[ProjectInfo]:
+    """The projects a pause sets the ``fleet-paused`` signal of: every one it covers, or, for
+    a plan a person picked from (``shown``), those of which no agent was unticked
+    (:data:`NOT_CHOSEN`). A partial pick leaves the signal off, so the manager left running
+    can still spawn; the agents paused keep their claims for a resume (R17, Q-E1)."""
+    if shown is None:
+        return list(projects)
+    unticked = {row.project.id for row in shown.rows if row.skip == NOT_CHOSEN}
+    return [project for project in projects if project.id not in unticked]
 
 
 def _resumes_clear(
@@ -19110,11 +19134,15 @@ def _renamed_from(store: ContextStore, project: ProjectInfo, label: str) -> str 
 
 def _renamed_hint(store: ContextStore, project: ProjectInfo, label: str) -> str:
     """`` (renamed: it is login-fix now)``, for a refusal by a label :func:`relabel` took from
-    an agent; empty for any other."""
+    an agent; empty for any other. A paused agent is not an ended one: its row ended at the
+    pause, and a resume brings it back under the new label (``which is paused``, R17's G: it
+    read ``which has since ended`` and sent the person looking for an agent that was gone)."""
     agent_id = _renamed_from(store, project, label)
     agent = store.get_fleet_agent(agent_id) if agent_id is not None else None
     if agent is None:
         return ""
+    if _paused_row(agent):
+        return f" (renamed {agent.label}, which is paused)"
     if agent.ended_at is not None:
         return f" (renamed {agent.label}, which has since ended)"
     return f" (renamed: it is {agent.label} now)"

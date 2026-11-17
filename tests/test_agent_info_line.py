@@ -28,6 +28,7 @@ from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import (
     BADGE_KEEP,
     GREEN,
+    MENU_GLYPH,
     RED,
     YELLOW,
     agent_row_text,
@@ -683,5 +684,7 @@ def test_the_sidebar_and_the_info_line_show_a_codex_rows_figure_beside_claudes(
 
     manager, coder, header = asyncio.run(run())
     assert manager.rstrip().endswith("⏸ #2·87%"), manager
-    assert coder.rstrip().endswith("▶ #5·42%"), coder
+    # The highlighted row ends in its ⋯ (R17's agent menu), after the figure it shows.
+    assert coder.rstrip().removesuffix(MENU_GLYPH.strip()).rstrip().endswith("▶ #5·42%"), coder
+    assert coder.rstrip().endswith(MENU_GLYPH), coder
     assert "account 5 · 42%" in header, header

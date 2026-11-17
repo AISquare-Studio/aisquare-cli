@@ -394,13 +394,32 @@ def test_config_get_and_set_cover_asking_before_a_stop(runner: CliRunner) -> Non
     result = runner.invoke(app, ["config", "set", "ui.confirm_stop", "false"])
     assert result.exit_code == 0, result.output
     assert load_config().ui.confirm_stop is False
-    assert tomllib.loads(config_path().read_text(encoding="utf-8"))["ui"] == {"confirm_stop": False}
+    # Kept in step with R17's [ui] dont_ask, which names the Stop box's kind for this release.
+    assert tomllib.loads(config_path().read_text(encoding="utf-8"))["ui"] == {
+        "confirm_stop": False,
+        "dont_ask": ["stop"],
+    }
 
     back_on = runner.invoke(app, ["config", "set", "ui.confirm_stop", "true"])
     assert back_on.exit_code == 0, back_on.output
     assert "ui" not in tomllib.loads(config_path().read_text(encoding="utf-8")), (
-        "on is the default, which the file leaves out"
+        "on is the default, which the file leaves out, dont_ask's stop with it"
     )
+
+
+def test_config_set_of_dont_ask_says_stop_in_confirm_stop_too(runner: CliRunner) -> None:
+    """R17: ``[ui] dont_ask`` lists the actions whose box does not ask, and ``config set``
+    reaches it, comma-separated; Stop's choice follows into ``confirm_stop`` for the releases
+    before it, and back out when the list leaves it out. A kind this release does not know is
+    kept as it was typed."""
+    result = runner.invoke(app, ["config", "set", "ui.dont_ask", "pause,stop,later"])
+    assert result.exit_code == 0, result.output
+    assert load_config().ui.dont_ask == ["pause", "stop", "later"]
+    assert load_config().ui.confirm_stop is False
+
+    runner.invoke(app, ["config", "set", "ui.dont_ask", "pause"])
+    assert load_config().ui.confirm_stop is True
+    assert tomllib.loads(config_path().read_text(encoding="utf-8"))["ui"] == {"dont_ask": ["pause"]}
 
 
 def test_experiment_is_off_by_default() -> None:

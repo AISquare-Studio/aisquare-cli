@@ -73,6 +73,7 @@ from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
 from aisquare.cli.ui.groups import DropProject, GroupPicker
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import (
+    MENU_GLYPH,
     RESIZE_STEP,
     STATE_CHIP,
     STOP_STATES,
@@ -132,6 +133,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
+from aisquare.services import settings as settings_service
 from aisquare.services.captain import state as captain_state
 from tests import guard_paint, toast_log
 from tests.fleet_fakes import list_agents_as
@@ -675,7 +677,8 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The owner's rulings 2 and 3 on #267, in the real app in a 90-column terminal: the Agent
-    view's info line gets about 37 cells. The account and its use come right after the state,
+    view's info line gets about 37 cells (35 beside R17's Pause). The account and its use come
+    right after the state,
     and when the line does not fit, the LABEL gives way first — the labels ``fleet spawn``
     gives (``<role>-<task id[:8]>``) pushed ``work · 42%`` off the line — so ``<icon>
     <label…>  <chip> <state>  <account> · <pct>%`` stays whole and the rest is cut after it.
@@ -742,12 +745,14 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         go, headroom=session_use((1, 42.0), (2, 42.0), (3, 42.0), (4, 42.0)), size=(90, 30)
     )
     widths = {width for agent_id, (width, _) in seen.items() if agent_id != "wide"}
-    assert widths == {37}, seen  # about 38 cells, as the owner measured
-    assert seen["agt_a_coder-01k8zq7m"][1] == "🔨 coder-01k8…  ▶ working  max · 42%…"
-    assert seen["agt_b_coder-01m5d34v"][1] == "🔨 coder-…  🔔 attention  work · 42%…"
+    # About 38 cells as the owner measured, less the 2 R17's Pause takes (each button as wide
+    # as its label, side by side): the design gave it 8.
+    assert widths == {35}, seen
+    assert seen["agt_a_coder-01k8zq7m"][1] == "🔨 coder-01…  ▶ working  max · 42%…"
     # Too narrow even at the label's floor: the floor, then the line cut at its end.
-    assert seen["agt_a_coder-01m5d34v"][1] == "🔨 coder-…  ▶ working  plain claude …"
-    assert seen["agt_a_tester-01m5d34v"][1] == "🧪 tester…  ⏸ waiting  account 4 · 4…"
+    assert seen["agt_b_coder-01m5d34v"][1] == "🔨 coder-…  🔔 attention  work · 4…"
+    assert seen["agt_a_tester-01m5d34v"][1] == "🧪 tester…  ⏸ waiting  account 4 ·…"
+    assert seen["agt_a_coder-01m5d34v"][1] == "🔨 coder-…  ▶ working  plain claud…"
     width, wide = seen["wide"]
     assert width > 60 and wide.startswith("🔨 coder-01k8zq7m  ▶ working  max · 42%  claude"), wide
 
@@ -841,7 +846,7 @@ def test_the_headers_name_the_agent_only_beside_another_agents_accounts_and_afte
 ) -> None:
     """C1 (tester's seq 11708 on #120), mounted in a 90-column terminal: with Claude Code's
     accounts alone, the Agent view's header and the Manager tab's are 0.9.2's, so the
-    account and its use stay whole in the Agent view's 37 cells. #113 had put
+    account and its use stay whole in the Agent view's 35 cells. #113 had put
     ``claude-code`` before the state and cut them off. Once the accounts read lists another
     agent's accounts (``marks_shown``, the Accounts page's test), the open headers name the
     agent after the use, and stop naming it when the read lists one agent's again."""
@@ -881,12 +886,13 @@ def test_the_headers_name_the_agent_only_beside_another_agents_accounts_and_afte
         go, headroom=session_use((2, 42.0)), accounts=lambda: frame[0], size=(90, 30)
     )
     named, agent_width, agent_line, manager_width, manager_line = alone
-    assert (named, agent_width, manager_width) == (False, 37, 57)
-    assert agent_line == ["🧭 manager  ⏸ waiting  work · 42%  %1"], agent_line  # 0.9.2's
-    assert manager_line == ["🧭 manager  ⏸ waiting  work · 42%  %1"], manager_line
+    # 37 cells before R17's Pause took 2: the account and its use whole all the same.
+    assert (named, agent_width, manager_width) == (False, 35, 57)
+    assert agent_line == ["🧭 manager  ⏸ waiting  work · 42% …"], agent_line
+    assert manager_line == ["🧭 manager  ⏸ waiting  work · 42%  %1"], manager_line  # 0.9.2's
     named, _, agent_line, _, manager_line = mixed
     assert named is True
-    assert agent_line == ["🧭 manager  ⏸ waiting  work · 42%  c…"], agent_line
+    assert agent_line == ["🧭 manager  ⏸ waiting  work · 42% …"], agent_line
     assert manager_line == ["🧭 manager  ⏸ waiting  work · 42%  claude-code  %1"], manager_line
     assert alone_again == alone
 
@@ -2877,7 +2883,8 @@ def test_rebuilds_update_in_place_and_keep_the_selection(tmp_path: Path, script:
     same_card, same_row, still_selected, coder_text, labels, manager_gone = drive(go)
     assert same_card and same_row  # updated in place — the widgets were not re-created
     assert still_selected
-    assert coder_text.rstrip().endswith("⏸")  # …yet the new state is painted
+    # …yet the new state is painted, the highlighted row's ⋯ after it (R17)
+    assert coder_text.rstrip().removesuffix(MENU_GLYPH.strip()).rstrip().endswith("⏸")
     assert labels == ["coder-auth", "tester-1"]  # the newcomer mounted, in order
     assert manager_gone
 
@@ -5543,6 +5550,9 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
     the service is called with the row's project and the pane's size, the frame is
     re-read, and the NEW row is what the shell shows and highlights — with its pane
     holding the keyboard, as a selected agent's does (#147)."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
     exited = status("prj_a", "manager", "manager", "exited", exit_status=130)
     script["prj_a"] = [exited]
@@ -5602,7 +5612,8 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
     assert any("✓ restarted manager (alpha) — resumed its session" in toast for toast in toasts), (
         toasts
     )
-    assert len(rows) == 1 and rows[0].rstrip().endswith("⏸")  # the old 💤 exited row is gone
+    assert len(rows) == 1  # the old 💤 exited row is gone; the new one highlighted, its ⋯ last
+    assert rows[0].rstrip().removesuffix(MENU_GLYPH.strip()).rstrip().endswith("⏸")
 
 
 def _replacement(old: FleetAgentStatus, agent_id: str) -> FleetAgentStatus:
@@ -5631,6 +5642,9 @@ def test_a_restart_that_ends_after_the_user_moved_on_leaves_them_where_they_are(
     1's, and the shell showed, highlighted, remembered and focused the new manager 0 all
     the same. Now nothing of the user's moves: the restart is a toast naming its project,
     and the sidebar lists the new row."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
     zero = status("prj_a", "manager", "manager", "working")
     one = status("prj_b", "manager", "manager", "working")
@@ -5808,6 +5822,9 @@ def test_a_press_waiting_as_the_view_switches_in_acts_on_nothing_and_one_after_i
     painted before the app reads them, its buttons under them. They start no worker, say
     nothing and leave the keyboard on the pane. A click once the view is on screen acts at
     once: there is no time to wait out (user, 2026-10-30)."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
     script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
     one = status("prj_b", "manager", "manager", "working")
@@ -5864,6 +5881,9 @@ def test_a_press_before_the_terminal_shows_the_switched_in_view_acts_on_nothing(
     would have restarted it. Here the terminal is that far behind when manager 1's view is
     drawn: presses on both start nothing, ask nothing and leave the keyboard on the pane.
     Once the terminal has caught up, a click acts at once."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
     script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
     one = status("prj_b", "manager", "manager", "working")
@@ -5955,6 +5975,9 @@ def test_enter_on_a_focused_restart_is_not_guarded(
 ) -> None:
     """A key is a deliberate gesture: Enter on the focused Restart acts at once, however
     recently the view came up."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     seed(tmp_path, ("prj_b", "beta", "brave-lynx"))
     one = status("prj_b", "manager", "manager", "working")
     script["prj_b"] = [one]

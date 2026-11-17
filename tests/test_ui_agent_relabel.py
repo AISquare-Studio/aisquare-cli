@@ -33,6 +33,7 @@ from textual.widgets._toast import Toast
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.sidebar import (
+    MENU_TIP,
     RENAME_TIP,
     AgentLabelInput,
     AgentRow,
@@ -482,7 +483,8 @@ def test_the_managers_row_offers_no_rename_and_f2_says_why(
 
     seen = drive(go, notifications=True)
     assert seen["double"] and seen["f2"] and seen["ended"], "no field on either row"
-    assert seen["tips"] == (None, RENAME_TIP, None), "only the coder's row offers it"
+    # Every row offers its menu (R17); only the coder's offers the rename too.
+    assert seen["tips"] == (MENU_TIP, f"{RENAME_TIP} · {MENU_TIP}", MENU_TIP)
     toasts = str(seen["toasts"])
     assert "not renamed: the manager is always labelled 'manager'" in toasts
     assert "not renamed: tester-1 has ended — only a running agent is renamed" in toasts
@@ -512,7 +514,7 @@ def test_the_tooltip_the_second_click_and_f2_ask_one_rule(
         return tip, double, _field(app) is None, await _toasts(app)
 
     tip, double, f2, toasts = drive(go, notifications=True)
-    assert tip is None, "no rename offered"
+    assert tip == MENU_TIP, "no rename offered, only the menu"
     assert double and f2, "neither gesture opens a field"
     assert "not renamed: refused for this test" in toasts
     assert relabels.calls == []

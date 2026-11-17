@@ -1,24 +1,27 @@
 """App settings: the machine-wide settings, whatever project is open.
 
-Three tabs. *Agent settings* (shown first) is everything ``~/.aisquare/config.toml``
+Four tabs. *Agent settings* (shown first) is everything ``~/.aisquare/config.toml``
 holds that is not about one project: the user's coding agent, then the agent,
 permission, worktree, persona and account per role, the fleet's escape key, agent cap,
 worktree root and native-teams switch, how launches pick an account, what a usage limit
 does, what the accounts share and each role's binding (``team bind``). *User preferences*
-is ``[ui]``, how ``asq`` shows things to the person at it: today *Always show project
-directory* (``ui.always_show_project_path``); below it ``[updates]``, *Check for a new
-release daily* (``updates.check``); and in its *Advanced*, *Ask before stopping an agent*
-(``ui.confirm_stop``, which the Stop dialog's *Don't ask again* turns off). *Remote* is
+holds ``[updates]``, *Check for a new release daily* (``updates.check``), and in its
+*Advanced*, *Confirmations*: the actions whose box was ticked *Don't ask again*
+(``ui.dont_ask``, R17), and *Ask again before every action*, which empties it at once.
+*Display* (R17) is ``[ui]``'s on/off switches for what ``asq`` shows (account usage, agent
+marks, the live count, the fade, the bell, the board's autoscroll, the project directory):
+each applies and is saved as it is ticked (``settings.set_display_choice``). *Remote* is
 Remote control (``views.settings_remote``). Save, Reload and Reset all sit under the tabs
-and act on the first two; they hide on *Remote*, whose every control acts at once.
+and act on the first two; they hide on *Display* and *Remote*, whose every control acts at
+once.
 
 **What shows, and what is folded** (#41, the owner's D8: the bare minimum that works in
 view, the rest a click away). *Agent settings* shows the *Captain (experimental)* box on
 top (``views.settings_captain``: it saves at once, as it did on the hub) and how launches
 pick an account and what a usage limit does; its *Advanced* holds the user's coding
 agent, the roles, the fleet, the rest of the accounts' rules and the role bindings. *User
-preferences* shows its two switches, and folds *Ask before stopping an agent* (a third
-switch in view pushed the fold off an 80x24 tab) and the note on setting one from a shell.
+preferences* shows its switch, and folds *Confirmations* and the note on setting one from a
+shell. *Display*'s rows are one line each, so all of them fit an 80x24 tab.
 *Remote* shows Turn on/off, the token field when one is needed and the link, QR and password
 while on; its own
 *Advanced* holds the rest. A Save refused for a folded field opens that *Advanced*, so
@@ -101,6 +104,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Checkbox,
     Collapsible,
     Input,
     Label,
@@ -115,6 +119,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.attach import NewBindScreen
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.confirm_button import ConfirmButton
+from aisquare.cli.ui.dont_ask import ASK_AGAIN, EVERY_ACTION_ASKS, said_not_asking
 from aisquare.cli.ui.sidebar import short_path
 from aisquare.cli.ui.views.settings_captain import CaptainToggle
 from aisquare.cli.ui.views.settings_remote import RemoteSection
@@ -245,22 +250,60 @@ own agent's accounts are all full (``services.handoff``), and what the accounts 
 (``core.claude_sharing``)."""
 UPDATES_CHECK = "updates-check"
 """``[updates] check``'s switch: asq's daily release check (``services.updates``)."""
-_UI_SWITCHES = {
+_UI_SWITCHES: dict[str, str] = {}
+"""*User preferences*' ``[ui]`` switches saved by Save, by id → field: none since R17, whose
+*Display* tab saves each of its own as it is ticked (:data:`DISPLAY_CHOICES`)."""
+DISPLAY_CHOICES = {
+    "ui-show-usage": "show_usage",
+    "ui-show-agent-marks": "show_agent_marks",
+    "ui-show-live-count": "show_live_count",
+    "ui-fade-unfocused": "fade_unfocused",
+    "ui-bell": "bell",
+    "ui-board-autoscroll": "board_autoscroll",
     "ui-always-show-path": "always_show_project_path",
-    "ui-confirm-stop": "confirm_stop",
 }
-"""*User preferences*' switches, by id → ``[ui]`` field."""
+"""*Display*'s switches, by id → ``[ui]`` field, in the tab's order."""
+DISPLAY_LABELS = {
+    "ui-show-usage": "Account usage next to agents",
+    "ui-show-agent-marks": "Agent marks in a mixed fleet",
+    "ui-show-live-count": "Live count in the sidebar's title",
+    "ui-fade-unfocused": "Fade the side without the keyboard",
+    "ui-bell": "Bell when an agent needs you",
+    "ui-board-autoscroll": "Follow the board's live feed",
+    "ui-always-show-path": "Always show project directory",
+}
+"""Each *Display* switch's words: what it shows, said on. The marks' switch names the marks
+themselves, the adapters' own (:func:`display_label`), never spelled here."""
+
+
+def display_label(wid: str) -> str:
+    """A *Display* switch's words: *Agent marks* with the marks each adapter declares
+    (``AgentAdapter.mark``: ``✻ >_`` today), so a new agent's mark is named with no edit
+    here (tests/test_no_agent_literals.py's rule)."""
+    words = DISPLAY_LABELS[wid]
+    if wid != "ui-show-agent-marks":
+        return words
+    glyphs = " ".join(adapter.mark.glyph for adapter in adapters() if adapter.mark is not None)
+    return f"Agent marks ({glyphs}) in a mixed fleet" if glyphs else words
+
+
+ASK_AGAIN_BUTTON = "ui-ask-again"
+"""*Ask again before every action*'s id."""
+NOT_ASKING_LINE = "ui-not-asking"
+"""The line beside it: which actions no longer ask."""
 AGENT_TAB = "tab-agent-settings"
 """The *Agent settings* tab's pane id: roles, the fleet, accounts. Shown first."""
 PREFERENCES_TAB = "tab-user-preferences"
 """The *User preferences* tab's pane id: ``[ui]``, and ``[updates]`` below it."""
 REMOTE_TAB = "tab-remote"
+DISPLAY_TAB = "tab-display"
+"""The *Display* tab's pane id: ``[ui]``'s switches, each saved as it is ticked (no Save)."""
 """The *Remote* tab's pane id: Remote control, which acts at once (no Save)."""
 AGENT_ADVANCED = "agent-settings-advanced"
 """*Agent settings*' fold: the roles, the fleet and the rest of the accounts' rules."""
 PREFERENCES_ADVANCED = "user-preferences-advanced"
-"""*User preferences*' fold: *Ask before stopping an agent* (``[ui] confirm_stop``), and the
-note on setting a preference from a shell."""
+"""*User preferences*' fold: *Confirmations* (``[ui] dont_ask`` and its reset), and the note
+on setting a preference from a shell."""
 
 
 BINDING_ID_PREFIX = "binding-"
@@ -629,6 +672,12 @@ class AppSettingsView(Vertical):
     AppSettingsView .launch-line { height: auto; margin-bottom: 1; }
     AppSettingsView #settings-config-error { color: $error; height: auto; }
     AppSettingsView .row.preference { margin-bottom: 0; }
+    AppSettingsView .display-choice { border: none; height: 1; padding: 0 1; }
+    AppSettingsView .display-choice:focus { text-style: bold reverse; }
+    AppSettingsView #ui-not-asking {
+        height: 1; padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
+    AppSettingsView #ui-ask-again { min-width: 0; margin: 0 0 1 1; }
     AppSettingsView .row .preference-label { width: 32; max-width: 32; }
     AppSettingsView .about { color: $text-muted; height: auto; margin-bottom: 1; }
     AppSettingsView .advanced { margin-top: 1; padding: 0; border: none; }
@@ -672,15 +721,15 @@ class AppSettingsView(Vertical):
         """The Role bindings section's title and line."""
         return ("Role bindings", "binary, environment and args per role, each written at once")
 
-    SIDEBAR_SECTION: ClassVar[tuple[str, str]] = ("Sidebar", "how the project list reads")
     ALWAYS_SHOW_PATH_ABOUT: ClassVar[str] = (
         "Show each project's path under its name in the sidebar. "
         "Off: shown only when two projects share a name."
     )
-    STOPPING_SECTION: ClassVar[tuple[str, str]] = ("Agents", "what Stop and x do")
-    CONFIRM_STOP_ABOUT: ClassVar[str] = (
-        "Off: they stop it at once, gracefully (no Force), the manager too."
+    CONFIRMATIONS_SECTION: ClassVar[tuple[str, str]] = (
+        "Confirmations",
+        "the actions whose box says Don't ask again",
     )
+    DISPLAY_SECTION: ClassVar[tuple[str, str]] = ("Display", "each applies as you tick it")
     UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether rlx looks for a new release")
     # One line: at 80x24, beside the sidebar, three pushed the tab's Advanced one scroll down.
     UPDATES_CHECK_ABOUT: ClassVar[str] = "Off: no PyPI lookup, no ⬆ row in the sidebar."
@@ -856,6 +905,11 @@ class AppSettingsView(Vertical):
                 VerticalScroll(id="user-preferences", classes="tab-body"),
             ):
                 yield from self._compose_preferences()
+            with (
+                TabPane("Display", id=DISPLAY_TAB),
+                VerticalScroll(id="display-settings", classes="tab-body"),
+            ):
+                yield from self._compose_display()
             with (
                 TabPane("Remote", id=REMOTE_TAB),
                 VerticalScroll(id="remote-settings", classes="tab-body"),
@@ -1129,13 +1183,6 @@ class AppSettingsView(Vertical):
         )
 
     def _compose_preferences(self) -> ComposeResult:
-        yield Static(section_title(*self.SIDEBAR_SECTION), classes="section")
-        with Horizontal(classes="row preference"):
-            yield Label("Always show project directory", classes="preference-label")
-            yield Switch(self.ui.always_show_project_path, id="ui-always-show-path")
-        yield Static(
-            Text(self.ALWAYS_SHOW_PATH_ABOUT), id="ui-always-show-path-about", classes="about"
-        )
         yield Static(section_title(*self.UPDATES_SECTION), classes="section")
         with Horizontal(classes="row preference"):
             yield Label("Check for a new release daily", classes="preference-label")
@@ -1144,19 +1191,32 @@ class AppSettingsView(Vertical):
         with Collapsible(
             title="Advanced", collapsed=True, id=PREFERENCES_ADVANCED, classes="advanced"
         ):
-            # Folded, not beside the two above: at 80x24 a third switch pushed this fold's
-            # title off the tab as it opens (the gate in test_app_settings_fits_an_80x24).
-            # The Stop dialog's toast names the way here when Don't ask again is saved.
-            yield Static(section_title(*self.STOPPING_SECTION), classes="section")
-            with Horizontal(classes="row preference"):
-                yield Label("Ask before stopping an agent", classes="preference-label")
-                yield Switch(self.ui.confirm_stop, id="ui-confirm-stop")
-            yield Static(Text(self.CONFIRM_STOP_ABOUT), id="ui-confirm-stop-about", classes="about")
+            # Folded: a box's toast names the way here when Don't ask again is saved.
+            yield Static(section_title(*self.CONFIRMATIONS_SECTION), classes="section")
+            # The line on its own row, the button under it: beside each other in a narrow pane
+            # the line gave its every cell to the button and read "…".
+            yield Static(Text(said_not_asking(self.ui.dont_ask)), id=NOT_ASKING_LINE)
+            yield Button(
+                ASK_AGAIN,
+                id=ASK_AGAIN_BUTTON,
+                compact=True,
+                disabled=not self.ui.dont_ask,
+            )
             yield Static(
                 Text(self.PREFERENCES_FROM_OUTSIDE),
                 id="preferences-from-a-shell",
                 classes="about",
             )
+
+    def _compose_display(self) -> ComposeResult:
+        yield Static(section_title(*self.DISPLAY_SECTION), classes="section")
+        for wid, key in DISPLAY_CHOICES.items():
+            yield Checkbox(
+                display_label(wid), getattr(self.ui, key), id=wid, classes="display-choice"
+            )
+        yield Static(
+            Text(self.ALWAYS_SHOW_PATH_ABOUT), id="ui-always-show-path-about", classes="about"
+        )
 
     def on_mount(self) -> None:
         self._shown = self._field_values()
@@ -1241,8 +1301,9 @@ class AppSettingsView(Vertical):
     @on(TabbedContent.TabActivated, "#app-settings-tabs")
     def _tab_shown(self, event: TabbedContent.TabActivated) -> None:
         """Save, Reload and Reset all, and the note on what Save writes, are the first two
-        tabs': *Remote* acts as each control is used, and has nothing for them to do."""
-        forms = event.pane.id != REMOTE_TAB
+        tabs': *Display* and *Remote* act as each control is used, and have nothing for them
+        to do."""
+        forms = event.pane.id not in (REMOTE_TAB, DISPLAY_TAB)
         self.query_one("#settings-buttons").display = forms
         self.query_one("#settings-note").display = forms
 
@@ -1330,6 +1391,7 @@ class AppSettingsView(Vertical):
         self.ui = config.ui
         for wid, key in _UI_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.ui, key)
+        self._show_ui(self.ui)
         self.query_one(CaptainToggle).reread(config)
         for role in self._roles:
             row = self._role_row(role)
@@ -1377,6 +1439,49 @@ class AppSettingsView(Vertical):
             self.query_one(f"#{wid}", Switch).value = value
             self._shown[wid] = value
         self.ui = ui
+        self._show_ui(ui)
+
+    def _show_ui(self, ui: UiSettings) -> None:
+        """*Display*'s switches and *Confirmations*' line as ``ui`` says: the file's, re-read
+        or saved elsewhere. Set here, a switch's own change saves nothing (it equals ``ui``)."""
+        for wid, key in DISPLAY_CHOICES.items():
+            box = self.query_one(f"#{wid}", Checkbox)
+            if box.value != getattr(ui, key):
+                box.value = getattr(ui, key)
+        self.query_one(f"#{NOT_ASKING_LINE}", Static).update(Text(said_not_asking(ui.dont_ask)))
+        self.query_one(f"#{ASK_AGAIN_BUTTON}", Button).disabled = not ui.dont_ask
+
+    @on(Checkbox.Changed, ".display-choice")
+    def _display_ticked(self, event: Checkbox.Changed) -> None:
+        """A *Display* switch, saved alone at once and applied (``UiSettingsChanged``); one set
+        to what the file already holds (a re-read's) writes nothing. An unreadable file is not
+        written over: the switch goes back, and a toast says why."""
+        event.stop()
+        key = DISPLAY_CHOICES.get(event.checkbox.id or "")
+        if key is None or getattr(self.ui, key) == event.value:
+            return
+        try:
+            self.ui = settings_service.set_display_choice(key, event.value)
+        except Exception as exc:
+            with event.checkbox.prevent(Checkbox.Changed):
+                event.checkbox.value = not event.value
+            self.notify(f"not saved: {exc}", severity="warning", timeout=8, markup=False)
+            return
+        self.post_message(UiSettingsChanged(self.ui))
+
+    @on(Button.Pressed, f"#{ASK_AGAIN_BUTTON}")
+    def _ask_again_pressed(self, event: Button.Pressed) -> None:
+        """*Ask again before every action*: every kind leaves ``[ui] dont_ask`` at once, those
+        a later release added too; the shell is told, and the line says every action asks."""
+        event.stop()
+        try:
+            self.ui = settings_service.ask_first_again()
+        except Exception as exc:
+            self.notify(f"not saved: {exc}", severity="warning", timeout=8, markup=False)
+            return
+        self._show_ui(self.ui)
+        self.post_message(UiSettingsChanged(self.ui))
+        self.notify(f"{EVERY_ACTION_ASKS} again.", timeout=6, markup=False)
 
     # --- writing -----------------------------------------------------------------------
 

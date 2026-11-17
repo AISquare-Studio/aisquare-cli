@@ -69,6 +69,7 @@ from aisquare.cli.ui.views.agent import AgentView, info_line
 from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, PASTE_BUFFER, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
+from aisquare.services import settings as settings_service
 from tests import toast_log
 from tests.pane_harness import (
     FakePane,
@@ -4362,7 +4363,8 @@ def test_a_long_detail_is_what_the_agent_view_cuts_never_the_account_or_its_use(
     assert "🔔 attention  dev · 87%  claude-opus-5-5 high  " in shown, shown  # all whole
     assert shown.rstrip().endswith("…"), shown  # the cut is said, and it falls in the detail
     detail_start = shown.index("claude-opus-5-5 high") + len("claude-opus-5-5 high  ")
-    assert shown[detail_start:].startswith("waiting"), shown
+    # The detail's first word, cut: R17's Pause beside Stop and Restart took 4 of its cells.
+    assert shown[detail_start:].startswith("wait"), shown
     assert "%1" not in shown and "trust <" not in shown
 
 
@@ -5465,6 +5467,9 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     fresh frame — the view guesses nothing. Stop only ASKS: it posts ``StopAgent``
     and the shell's dialog owns the service call (P21, ``cli/ui/stop.py``), so the
     view never calls ``stop`` itself."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     from textual.widgets import Button
 
     from aisquare.cli.ui.sidebar import StopAgent
@@ -5565,6 +5570,9 @@ def test_agent_view_buttons_come_back_when_their_own_worker_ends_whatever_other_
     between the steps, which is what hid it. Since P21 a stop runs inside its own
     modal dialog and greys nothing here, so the rule is Restart's: a view's OWN
     running restart greys its buttons, another view's does not."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     import threading
 
     from textual.containers import Vertical

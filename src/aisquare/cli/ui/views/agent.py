@@ -23,16 +23,27 @@ row, whose dead window `remain-on-exit` kept for the last screen (#138) — Stop
 there removes it and the row leaves the listing. A ✗ lost row offers no Stop:
 it is ``fleet reap``'s business. **Restart** (#138) runs the service off the
 UI thread; the shell's next frame is what repaints, never an optimistic guess.
+
+**Pause** (R17) sits before Stop while the agent has a process, and a paused row shows
+**Resume** in its place, with Restart hidden (restarting a paused row IS its resume): ``[ Pause
+][ Stop ][ Restart ]``, paused ``[ Resume ][ Stop ]``. Pause is ``fleet_service.pause_agent``,
+pinned to the row: it exits the agent and keeps its task, worktree and session. The captain's
+row offers none: the captain is run by its own switch. Pause and Restart ask first in the box
+every agent action shares (``cli/ui/confirm_action.py``), unless its *Don't ask again* was
+ticked for that kind; Resume never asks, as it loses nothing. An agent's ⋯ menu in the sidebar
+runs the same presses (:meth:`AgentView.act`) when this view is open.
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from typing import Any
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import on
-from textual.app import ComposeResult
+from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widget import Widget
@@ -41,6 +52,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.click_guard import GuardedButton
+from aisquare.cli.ui.confirm_action import PAUSE, RESTART, ConfirmActionScreen, ask_first
 from aisquare.cli.ui.sidebar import (
     BADGE_KEEP,
     ROLE_ICON,
@@ -345,9 +357,108 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
 
 
 RESTART_WORKER = "agent-restart"
+PAUSE_WORKER = "agent-pause"
 #: States in which there is a process to stop; anything else is a row to restart. The
 #: service's own set, which `fleet restart|stop --all` acts on.
 _STOPPABLE: frozenset[str] = fleet_service.PROCESS_STATES
+
+INFO_ROOM = 16
+"""The info line's cells the header keeps beside padded buttons; with less, the buttons go tight
+(:meth:`AgentView._fit_actions`)."""
+KEPT = "its task, worktree and session are kept"
+"""What a pause keeps, in its box and its toast."""
+SESSION_PICKED_UP = (
+    "with the same role, task, worktree, account and persona, picking up its session where "
+    "it left off."
+)
+
+
+def pause_question(status: FleetAgentStatus) -> Text:
+    """The Pause box's question, the label as data, and what happens in plain words."""
+    text = Text("Pause ")
+    text.append(status.agent.label, style="bold")
+    text.append("?\n")
+    text.append(
+        "It exits now and keeps its task, worktree and session. Resume brings it back where "
+        "it was.",
+        style="dim",
+    )
+    if status.agent.label == fleet_service.MANAGER_LABEL:
+        text.append(
+            "\nThis is the project's manager; the agents it started keep running.",
+            style="yellow",
+        )
+    return text
+
+
+def restart_question(status: FleetAgentStatus) -> Text:
+    """The Restart box's question: of a running agent, or of one with no process to end."""
+    running = status.state in _STOPPABLE
+    text = Text("Restart " if running else "Start ")
+    text.append(status.agent.label, style="bold")
+    text.append("?\n" if running else " again?\n")
+    then = "It exits and starts again " if running else "It starts again "
+    text.append(then + SESSION_PICKED_UP, style="dim")
+    return text
+
+
+def pausable(status: FleetAgentStatus) -> bool:
+    """Whether Pause is offered for ``status``: a process to exit, and not the captain's row,
+    which its own switch runs (and a pause of many leaves too)."""
+    return status.state in _STOPPABLE and not fleet_service.is_the_captains_row(status.agent)
+
+
+def start_pause(
+    node: Widget | App[Any], agent: FleetAgent, *, group: str = PAUSE_WORKER
+) -> Worker[Any]:
+    """Pause ``agent`` on a thread worker of ``node``: the exit command, the grace and the kill
+    all block. Pinned to THIS row (``agent_id``), as Stop is: the view outlives its row."""
+    label, agent_id = agent.label, agent.id
+    return node.run_worker(
+        lambda: fleet_service.pause_agent(
+            fleet_service.project_of(agent), label, agent_id=agent_id, actor="user"
+        ),
+        name=PAUSE_WORKER,
+        group=group,
+        thread=True,
+        exit_on_error=False,  # a refusal is an answer to show, not a crash
+    )
+
+
+def start_restart(
+    node: Widget | App[Any],
+    agent: FleetAgent,
+    size: tuple[int, int] | None = None,
+    *,
+    group: str = RESTART_WORKER,
+) -> Worker[Any]:
+    """Restart (or resume) ``agent`` on a thread worker of ``node``, pinned to its row."""
+    return node.run_worker(
+        lambda: fleet_service.restart(
+            fleet_service.project_of(agent), agent.label, size=size, agent_id=agent.id
+        ),
+        name=RESTART_WORKER,
+        group=group,
+        exclusive=group == RESTART_WORKER,
+        thread=True,
+        exit_on_error=False,
+    )
+
+
+def said_paused(node: Widget | App[Any], agent: FleetAgent, event: Worker.StateChanged) -> None:
+    """A pause worker that finished, toasted from ``node``: paused, with what is kept, or why
+    not in the service's words. A stop that typed no exit command says why first."""
+    if event.state is WorkerState.SUCCESS and isinstance(
+        event.worker.result, fleet_service.StopReceipt
+    ):
+        receipt = event.worker.result
+        if receipt.killed:
+            node.notify(receipt.killed, severity="warning", timeout=8, markup=False)
+        node.notify(f"⏸ {agent.label} paused: {KEPT}.", timeout=6, markup=False)
+    elif event.state is WorkerState.ERROR:
+        error = event.worker.error
+        why = str(error) if isinstance(error, fleet_service.FleetError) else repr(error)
+        node.notify(f"{agent.label} not paused: {why}", severity="error", timeout=8, markup=False)
 
 
 class AgentView(Vertical):
@@ -374,12 +485,16 @@ class AgentView(Vertical):
     # Text's own ``no_wrap`` and ellipsis (see ``sidebar.Activatable``), and a line wider
     # than the bar word-wrapped onto a second row its height clipped — the account and its
     # use vanished with no ``…``. Cut at the end, the info line gives way from its detail.
+    # Each button as wide as its label, none between them: R17's Pause cost the info line 10
+    # cells at min-width 9, which cut the account and its use at 90 columns. Their colours
+    # tell them apart (Pause warning, Stop plain, Restart and Resume primary).
     DEFAULT_CSS = """
     AgentView #agent-bar { height: 1; }
     AgentView #agent-header {
         width: 1fr; height: 1; padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis;
     }
-    AgentView #agent-bar Button { min-width: 9; margin: 0 1 0 0; }
+    AgentView #agent-bar Button { min-width: 0; margin: 0; }
+    AgentView #agent-bar.-tight Button { padding: 0; height: 1; }
     AgentView #agent-pane { height: 1fr; }
     """
 
@@ -437,6 +552,8 @@ class AgentView(Vertical):
             # Guarded (``click_guard``): a click that was aimed at what this view replaced,
             # made before the view was painted, must not stop or restart the agent it shows
             # instead.
+            yield GuardedButton("Pause", id="agent-pause", compact=True, variant="warning")
+            yield GuardedButton("Resume", id="agent-resume", compact=True, variant="primary")
             yield GuardedButton("Stop", id="agent-stop", compact=True)
             yield GuardedButton("Restart", id="agent-restart", compact=True, variant="primary")
         yield from self.compose_bars()
@@ -481,24 +598,30 @@ class AgentView(Vertical):
             self.pane.attach(wanted)
 
     def _paint_actions(self) -> None:
-        """Stop where ``STOP_STATES`` says — a process, a dead window, or a pause to end;
-        Restart always (an exited row is exactly its case), named *Resume* on a paused row.
+        """Pause while there is a process (not on the captain's row), Resume in its place on a
+        paused row; Stop where ``STOP_STATES`` says — a process, a dead window, or a pause to
+        end; Restart on every row but a paused one (an exited row is exactly its case).
 
-        Greyed while THIS view's own restart runs, and only then (a stop runs inside its
-        own modal dialog): ``self.workers``
+        Greyed while THIS view's own restart or pause runs, and only then (a stop runs inside
+        its own modal dialog): ``self.workers``
         is the app's whole list, and a finished worker is still in it when its
         ``StateChanged`` arrives — nothing else repaints the buttons afterwards (the shell
         feeds a view only when its status changed), so a failed restart would otherwise
         stay greyed with no way to retry it.
         """
-        busy = any(
-            worker.node is self and worker.name == RESTART_WORKER and not worker.is_finished
-            for worker in self.workers
-        )
+        busy = self._busy()
+        paused = self.status.state == "paused"
+        pause = self.query_one("#agent-pause", Button)
+        pause.display = self._pausable()
+        pause.disabled = busy
+        pause.tooltip = "It exits now and keeps its task, worktree and session for Resume"
+        resume = self.query_one("#agent-resume", Button)
+        resume.display = paused
+        resume.disabled = busy
+        resume.tooltip = "Start it again where it was: same role, task, worktree and account"
         stop = self.query_one("#agent-stop", Button)
         stop.display = self.status.state in STOP_STATES
         stop.disabled = busy
-        paused = self.status.state == "paused"
         # What the stop types is asked of the service (`exit_command_for`, the call
         # `fleet stop` types), never spelled here: a future agent's own command (#60).
         stop.tooltip = (
@@ -510,18 +633,77 @@ class AgentView(Vertical):
             else "Remove the dead window tmux kept for the last screen; the row leaves the listing"
         )
         restart = self.query_one("#agent-restart", Button)
+        restart.display = not paused
         restart.disabled = busy
-        restart.label = (
-            "Restart"
-            if self.status.state in _STOPPABLE
-            else "Resume"
-            if paused
-            else "Restart (resume)"
-        )
+        self._restart_words = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
+        restart.label = self._restart_words
         restart.tooltip = (
             "Start it again under this label — same role, task, worktree, account and "
             "persona; its session is resumed from the transcript when that is on disk"
         )
+        self._fit_actions()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._fit_actions)  # the bar is laid out after the view
+
+    def _fit_actions(self) -> None:
+        """The buttons whole in a narrow bar: below the room their padded labels and
+        :data:`INFO_ROOM` cells of info line take, they lose their padding and stand one cell
+        apart (``-tight``). Three padded buttons needed 22 cells beside a 45-column terminal's
+        sidebar, which leaves 21, and Restart was cut to ``Rest``."""
+        if not self.is_mounted:
+            return
+        bar = self.query_one("#agent-bar", Horizontal)
+        width = bar.size.width
+        if not width:
+            return
+        shown = [button for button in bar.query(Button) if button.display]
+        restart = self.query_one("#agent-restart", Button)
+        words = {button: str(button.label) for button in shown}
+        words[restart] = self._restart_words
+        roomy = sum(cell_len(said) + 2 for said in words.values()) + INFO_ROOM
+        tight = width < roomy
+        bar.set_class(tight, "-tight")
+        # ``Restart (resume)`` beside Stop is 21 cells alone: tight, it is ``Restart``, which
+        # its tooltip says resumes the session.
+        if restart.display and str(restart.label) != (
+            short := "Restart" if tight else words[restart]
+        ):
+            restart.label = short
+        for index, button in enumerate(shown):
+            # Textual sizes a button at its label and its 2 cells of ``line-pad``: tight, it
+            # is the label's own width, the cell before it the gap (the first one's is the
+            # header's own padding).
+            button.styles.width = cell_len(str(button.label)) if tight else None
+            button.styles.margin = (0, 0, 0, 1 if index else 0) if tight else None
+            # Inline: Textual's CSS refuses a ``line-pad`` of 0, which only a style set here holds.
+            button.styles.line_pad = 0 if tight else None
+
+    _restart_words = "Restart"
+    """Restart's label as the row's state words it, before a tight bar shortens it."""
+
+    _captains: tuple[str, bool] | None = None
+    """The row :meth:`_pausable` last asked ``is_the_captains_row`` of, and its answer: a path
+    read, asked again only when the row changed."""
+
+    def _pausable(self) -> bool:
+        agent = self.status.agent
+        if self._captains is None or self._captains[0] != agent.id:
+            self._captains = (agent.id, fleet_service.is_the_captains_row(agent))
+        return self.status.state in _STOPPABLE and not self._captains[1]
+
+    def act(self, kind: str) -> None:
+        """What the header's button for ``kind`` does — ``pause``, ``resume``, ``stop`` or
+        ``restart`` — as an agent's ⋯ menu asks it of the view that is open."""
+        if kind == PAUSE:
+            self._ask_pause()
+        elif kind == "resume":
+            self._start_restart(self.status.agent)
+        elif kind == RESTART:
+            self._ask_restart()
+        elif kind == "stop":
+            agent = self.status.agent
+            self.post_message(StopAgent(agent.project_id, agent.id))
 
     @on(Button.Pressed, "#agent-stop")
     def _stop(self, event: Button.Pressed) -> None:
@@ -531,31 +713,70 @@ class AgentView(Vertical):
         # holds the label now — the view outlives its row.
         self.post_message(StopAgent(agent.project_id, agent.id))
 
+    @on(Button.Pressed, "#agent-pause")
+    def _pause(self, event: Button.Pressed) -> None:
+        event.stop()
+        self._ask_pause()
+
+    @on(Button.Pressed, "#agent-resume")
+    def _resume(self, event: Button.Pressed) -> None:
+        event.stop()
+        self._start_restart(self.status.agent)  # Resume never asks: it loses nothing (Q1)
+
     @on(Button.Pressed, "#agent-restart")
     def _restart(self, event: Button.Pressed) -> None:
         event.stop()
-        agent = self.status.agent
-        width, height = self.pane.content_size
-        size = (width, height) if width > 0 and height > 0 else None
-        self.run_worker(
-            lambda: fleet_service.restart(
-                fleet_service.project_of(agent), agent.label, size=size, agent_id=agent.id
-            ),
-            name=RESTART_WORKER,
-            group=RESTART_WORKER,
-            exclusive=True,
-            thread=True,
-            exit_on_error=False,
-        )
+        self._ask_restart()
+
+    def _ask_pause(self) -> None:
+        """The Pause box, or the pause at once when it does not ask; the row is the one shown at
+        the press, whatever the box's time open brings."""
+        status = self.status
+        if not self._pausable():
+            return
+        box: ConfirmActionScreen[bool] = ConfirmActionScreen(PAUSE, pause_question(status))
+        ask_first(self.app, box, lambda: self._start_pause(status.agent))
+
+    def _ask_restart(self) -> None:
+        status = self.status
+        if status.state == "paused":
+            self._start_restart(status.agent)
+            return
+        box: ConfirmActionScreen[bool] = ConfirmActionScreen(RESTART, restart_question(status))
+        ask_first(self.app, box, lambda: self._start_restart(status.agent))
+
+    def _start_pause(self, agent: FleetAgent) -> None:
+        if self._busy():
+            return
+        start_pause(self, agent)
         self._paint_actions()
 
+    def _start_restart(self, agent: FleetAgent) -> None:
+        if self._busy():
+            return
+        width, height = self.pane.content_size
+        size = (width, height) if width > 0 and height > 0 else None
+        start_restart(self, agent, size)
+        self._paint_actions()
+
+    def _busy(self) -> bool:
+        """Whether this view's restart or pause still runs: a second press does nothing."""
+        return any(
+            worker.node is self
+            and worker.name in (RESTART_WORKER, PAUSE_WORKER)
+            and not worker.is_finished
+            for worker in self.workers
+        )
+
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.name != RESTART_WORKER:
+        if event.worker.name not in (RESTART_WORKER, PAUSE_WORKER):
             return
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
         label = self.status.agent.label
-        if event.state is WorkerState.ERROR:
+        if event.worker.name == PAUSE_WORKER:
+            said_paused(self, self.status.agent, event)
+        elif event.state is WorkerState.ERROR:
             self.notify(
                 f"could not restart {label}: {event.worker.error}",
                 severity="error",

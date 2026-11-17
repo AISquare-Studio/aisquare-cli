@@ -86,9 +86,8 @@ FLEET_ACTIONS: tuple[tuple[fleet_service.BulkAction, str], ...] = (
 )
 """The Fleet section's buttons, ``#fleet-<action>-all``: each action and its label."""
 FLEET_ABOUT = (
-    "every running agent in every project, or the managers alone; exited (💤) agents are "
-    "left as they are. Pause keeps each agent's claim, worktree and session, and Resume "
-    "brings back exactly the paused ones"
+    "each lists every project's agents, all ticked: untick the ones to leave. Pause keeps "
+    "each one's claim, worktree and session; Resume brings back exactly the paused ones"
 )
 
 

@@ -22,14 +22,14 @@ import pytest
 from textual.containers import VerticalScroll
 from textual.geometry import Offset
 from textual.pilot import Pilot
-from textual.widgets import Button, Static, Switch
+from textual.widgets import Button, Static
 
 from aisquare.cli.ui import sidebar
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.sidebar import SettingsRow, SettingsSelected
 from aisquare.cli.ui.views.agent import AgentView
-from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, TITLE, ConfirmBulk
+from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, TITLE, ConfirmBulk, PickRow
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.core import tmux as tmux_core
 from aisquare.core.store import store_session
@@ -181,7 +181,37 @@ async def _open(pilot: Pilot[None], action: str) -> ConfirmBulk:
 
 
 def _listed(dialog: ConfirmBulk) -> list[str]:
-    return shown(dialog.query_one("#bulk-list", Static)).splitlines()
+    """What the dialog lists, a line each, as ``plan_text`` reads the plan: each project's
+    name (a blank line before each but the first), then ``  <row>`` per agent, its checkbox's
+    label or the row the plan leaves, and the notes."""
+    lines: list[str] = []
+    for child in dialog.query_one("#bulk-list").children:
+        if isinstance(child, PickRow):
+            lines.append("  " + child.label.plain)
+        elif child.has_class("bulk-project"):
+            if lines:
+                lines.append("")
+            lines.append(shown(child))  # type: ignore[arg-type]
+        elif child.has_class("bulk-left"):
+            lines.append("  " + shown(child))  # type: ignore[arg-type]
+        else:
+            lines.append(shown(child))  # type: ignore[arg-type]
+    return lines
+
+
+def _ticks(dialog: ConfirmBulk) -> dict[str, bool]:
+    """Each agent's checkbox, by its row id: ticked or not."""
+    return {pick.row.agent.id: pick.value for pick in dialog.picks if pick.row is not None}
+
+
+def _untick(dialog: ConfirmBulk, *agent_ids: str) -> None:
+    for pick in dialog.picks:
+        if pick.row is not None and pick.row.agent.id in agent_ids:
+            pick.value = False
+
+
+def _select_all(dialog: ConfirmBulk) -> PickRow:
+    return dialog.query_one("#bulk-all", PickRow)
 
 
 def _confirm(dialog: ConfirmBulk) -> Button:
@@ -258,29 +288,100 @@ def test_each_dialog_lists_its_agents_by_project_with_cancel_focused(
     assert title == TITLE["restart" if action == "restart" else "stop"]
 
 
-def test_the_managers_only_switch_redraws_the_list_and_the_count(two_projects: Script) -> None:
-    async def go(pilot: Pilot[None]) -> list[tuple[list[str], str]]:
+def test_every_agent_is_picked_on_open_and_unticking_some_renames_confirm(
+    two_projects: Script,
+) -> None:
+    """R17 (the owner, 2026-11-16): "select/unselect agents, having a select all at top, so
+    the user can decide how many". Each agent the action would act on is a checkbox, every
+    one ticked on open; the exited tester is a row the plan leaves, with no checkbox; Confirm
+    and *Select all* count what is picked."""
+
+    async def go(pilot: Pilot[None]) -> list[tuple[dict[str, bool], str, str, bool, bool]]:
         dialog = await _open(pilot, "restart")
         seen = []
-        switch = dialog.query_one("#bulk-managers", Switch)
-        for value in (True, False):
-            switch.value = value
-            await settle(_app(pilot))
-            seen.append((_listed(dialog), str(_confirm(dialog).label)))
+
+        def look() -> None:
+            every = _select_all(dialog)
+            seen.append(
+                (
+                    _ticks(dialog),
+                    str(every.label),
+                    str(_confirm(dialog).label),
+                    every.value,
+                    _confirm(dialog).disabled,
+                )
+            )
+
+        look()
+        _untick(dialog, "agt_a_coder-1", "agt_b_coder-1")
+        await settle(_app(pilot))
+        look()
         return seen
 
-    managers, everyone = drive(go)
-    assert managers == (
-        [
-            "alpha",
-            "  manager · manager · ⏸ waiting",
-            "",
-            "beta",
-            "  manager · manager · ▶ working",
-        ],
-        "Restart 2 managers",
+    opened, picked = drive(go)
+    assert opened == (
+        {
+            "agt_a_coder-1": True,
+            "agt_a_manager": True,
+            "agt_b_coder-1": True,
+            "agt_b_manager": True,
+        },
+        "Select all (4 of 4)",
+        "Restart 4 agents",
+        True,
+        False,
     )
-    assert everyone[1] == "Restart 4 agents" and len(everyone[0]) == 8
+    assert picked[1:] == ("Select all (2 of 4)", "Restart 2 agents", False, False)
+    assert [k for k, ticked in picked[0].items() if ticked] == ["agt_a_manager", "agt_b_manager"]
+
+
+def test_select_all_ticks_and_unticks_every_agent_and_nobody_picked_greys_confirm(
+    two_projects: Script,
+) -> None:
+    """*Select all* ticked ticks every agent and unticked unticks them all, and with nobody
+    picked Confirm reads the bare verb, greyed: an Enter on a checkbox then acts on nobody."""
+
+    async def go(pilot: Pilot[None]) -> list[tuple[set[bool], str, bool, str]]:
+        app = _app(pilot)
+        dialog = await _open(pilot, "stop")
+        seen = []
+
+        async def toggle(value: bool) -> None:
+            _select_all(dialog).value = value
+            await settle(app)
+            confirm = _confirm(dialog)
+            seen.append(
+                (
+                    set(_ticks(dialog).values()),
+                    str(_select_all(dialog).label),
+                    confirm.disabled,
+                    str(confirm.label),
+                )
+            )
+
+        await toggle(False)
+        _select_all(dialog).focus()
+        await pilot.press("enter")  # nobody picked: the Enter confirms nothing
+        await settle(app)
+        seen.append(({isinstance(app.screen, ConfirmBulk)}, "", False, ""))
+        await toggle(True)
+        return seen
+
+    off, still_open, on = drive(go)
+    assert off == ({False}, "Select all (0 of 4)", True, "Stop")
+    assert still_open[0] == {True}, "an Enter with nobody picked left the dialog open"
+    assert on == ({True}, "Select all (4 of 4)", False, "Stop 4 agents")
+
+
+def test_a_row_the_plan_leaves_has_no_checkbox(two_projects: Script) -> None:
+    async def go(pilot: Pilot[None]) -> tuple[set[str], list[str]]:
+        dialog = await _open(pilot, "stop")
+        left = [shown(w) for w in dialog.query(".bulk-left").results(Static)]
+        return set(_ticks(dialog)), left
+
+    picks, left = drive(go)
+    assert "agt_b_tester-1" not in picks and len(picks) == 4
+    assert left == ["tester-1 · tester · 💤 exited — left: exited"]
 
 
 def test_the_confirm_button_is_as_wide_as_the_count_it_names(
@@ -306,16 +407,17 @@ def test_the_confirm_button_is_as_wide_as_the_count_it_names(
         dialog = app.screen
         assert isinstance(dialog, ConfirmBulk) and str(_confirm(dialog).label) == "Restart"
         read.set()
+        await settle(app)
         seen = []
-        for value in (False, True):
-            dialog.query_one("#bulk-managers", Switch).value = value
+        for untick in ((), ("agt_a_coder-1", "agt_b_coder-1")):
+            _untick(dialog, *untick)
             await settle(app)
             confirm = _confirm(dialog)
             seen.append((str(confirm.label), confirm.content_size.width))
         return seen
 
     seen = drive(go)
-    assert [label for label, _ in seen] == ["Restart 4 agents", "Restart 2 managers"]
+    assert [label for label, _ in seen] == ["Restart 4 agents", "Restart 2 agents"]
     for label, width in seen:
         assert width >= len(label), f"{label!r} is cut to {width} cells"
 
@@ -338,63 +440,139 @@ def test_escape_and_cancel_close_the_dialog_and_act_on_nobody(acted: Acted) -> N
     assert acted.calls == []
 
 
-def test_the_keys_scroll_a_list_of_thirty_while_tab_still_skips_it(
+def test_the_keys_move_through_a_list_of_thirty_and_scroll_it_as_they_go(
     tmp_path: Path, script: Script
 ) -> None:
-    """r37 finding 6 of #113: the list left Tab's order (SMOKE12 O2), and twenty rows high it
-    then scrolled by the wheel alone, so a keyboard user confirmed agents past the twentieth
-    unread. The dialog takes the list's keys: ↑ ↓, PgUp PgDn, Home and End scroll it from
-    whichever of the switch and the buttons has the focus, and Tab still goes switch →
-    Confirm → Cancel."""
+    """r37 finding 6 of #113: twenty rows high, a longer list scrolled by the wheel alone, so a
+    keyboard user confirmed agents past the twentieth unread. R17's pick-list: ↓ from Cancel
+    goes to *Select all*, ↓ and ↑ move through the agents' checkboxes and the list scrolls to
+    the one focused, Space unticks it; PgUp PgDn, Home and End scroll the list with the focus
+    left where it is; ↑ from a button goes to the last agent; Tab still reaches Confirm and
+    Cancel, the list itself never a stop."""
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
     script["prj_a"] = [
         status("prj_a", f"coder-{n}", "coder", "working", minute=n) for n in range(1, 31)
     ]
 
-    async def go(pilot: Pilot[None]) -> tuple[list[Any], list[str | None]]:
+    async def go(pilot: Pilot[None]) -> tuple[list[Any], list[str | None], dict[str, bool]]:
         dialog = await _open(pilot, "stop")
         app = _app(pilot)
         listing = dialog.query_one("#bulk-scroll", VerticalScroll)
         rows = _listed(dialog)
-        last = rows.index("  coder-30 · coder · ▶ working")
         seen: list[Any] = [len(rows), listing.size.height, listing.max_scroll_y]
+
+        def where() -> str | None:
+            focused = app.focused
+            if isinstance(focused, PickRow):
+                return focused.row.agent.label if focused.row is not None else "select-all"
+            return focused.id if focused is not None else None
+
+        def in_sight() -> bool:
+            focused = app.focused
+            assert focused is not None
+            return listing.region.contains_region(focused.region)
 
         async def press(*keys: str) -> None:
             await pilot.press(*keys)
             await settle(app)
-            seen.append((keys, listing.scroll_y, app.focused.id if app.focused else None))
+            seen.append((keys, where()))
 
+        await press("down")  # Cancel → Select all
+        await press("down")  # → coder-1
+        await press("space")  # unticks coder-1
+        for _ in range(24):
+            await pilot.press("down")
+        await settle(app)
+        seen.append((where(), listing.scroll_y > 0, in_sight()))  # coder-25, scrolled to
         await press("end")
-        bottom = listing.scroll_y
-        seen.append(bottom <= last < bottom + listing.size.height)  # the thirtieth is read
+        seen.append(listing.scroll_y == listing.max_scroll_y)
         await press("home")
-        await press("pagedown")
-        await press("pageup")
-        await press("tab")  # Cancel → the switch, and the keys still go to the list
-        await press("down")
-        await press("down")
+        seen.append(listing.scroll_y)
+        await press("tab")  # Tab goes on to the next checkbox, as ↓ does
+        await press("tab")
         await press("up")
-        await press("tab")  # → Confirm
-        await press("end")
-        return seen, [widget.id for widget in dialog.focus_chain]
+        seen.append(in_sight())
+        return seen, [widget.id for widget in dialog.focus_chain], _ticks(dialog)
 
-    seen, chain = drive(go)
+    seen, chain, ticks = drive(go)
     count, height, most = seen[:3]
-    assert count == 31 and 0 < height < count and most == count - height, seen[:3]
+    assert count == 31 and 0 < height < count and most > 0, seen[:3]
     assert seen[3:] == [
-        (("end",), most, "bulk-cancel"),
+        (("down",), "select-all"),
+        (("down",), "coder-1"),
+        (("space",), "coder-1"),
+        ("coder-25", True, True),
+        (("end",), "coder-25"),
         True,
-        (("home",), 0, "bulk-cancel"),
-        (("pagedown",), min(height, most), "bulk-cancel"),
-        (("pageup",), 0, "bulk-cancel"),
-        (("tab",), 0, "bulk-managers"),
-        (("down",), 1, "bulk-managers"),
-        (("down",), 2, "bulk-managers"),
-        (("up",), 1, "bulk-managers"),
-        (("tab",), 1, "bulk-confirm"),
-        (("end",), most, "bulk-confirm"),
+        (("home",), "coder-25"),
+        0,
+        (("tab",), "coder-26"),
+        (("tab",), "coder-27"),
+        (("up",), "coder-26"),
+        True,
     ]
-    assert chain == ["bulk-managers", "bulk-confirm", "bulk-cancel"]
+    assert chain[0] == "bulk-all" and chain[-2:] == ["bulk-confirm", "bulk-cancel"]
+    assert len(chain) == 33, "Select all, the thirty agents, Confirm and Cancel"
+    assert [label for label, ticked in ticks.items() if not ticked] == ["agt_a_coder-1"]
+
+
+def test_up_from_a_button_goes_to_the_last_agent_and_enter_on_a_checkbox_confirms(
+    acted: Acted,
+) -> None:
+    async def go(pilot: Pilot[None]) -> tuple[str | None, bool]:
+        app = _app(pilot)
+        await _open(pilot, "stop")
+        await pilot.press("up")  # Cancel → the last agent
+        await settle(app)
+        focused = app.focused
+        last = focused.row.agent.id if isinstance(focused, PickRow) and focused.row else None
+        await pilot.press("space", "enter")  # untick it, and confirm the rest
+        await settle(app)
+        return last, isinstance(app.screen, ConfirmBulk)
+
+    last, still_open = drive(go)
+    assert last == "agt_b_coder-1"
+    assert not still_open
+    assert [agent_id for _, _, agent_id in acted.calls] == [
+        "agt_a_manager",
+        "agt_a_coder-1",
+        "agt_b_manager",
+    ], "Enter on a checkbox confirmed, without the agent it unticked"
+
+
+def test_the_box_fits_an_80x24_terminal_with_agents_in_sight_above_the_buttons(
+    two_projects: Script,
+) -> None:
+    """The 80x24 gate: the box, its Confirm and Cancel inside the screen, and at least three
+    agents' checkboxes in sight above them. The about text is one line there, the whole of it
+    its tooltip."""
+
+    async def run() -> tuple[bool, int, bool, bool, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [])
+        async with app.run_test(size=(80, 24), notifications=True) as pilot:
+            await pilot.pause()
+            await settle(app)
+            await pilot.click(app.query_one(SettingsRow))
+            await settle(app)
+            dialog = await _open(pilot, "restart")
+            screen = dialog.region
+            box = dialog.query_one("#bulk-box").region
+            listing = dialog.query_one("#bulk-scroll", VerticalScroll).region
+            seen = [pick for pick in dialog.picks if listing.contains_region(pick.region)]
+            buttons = [dialog.query_one(f"#bulk-{b}", Button).region for b in ("confirm", "cancel")]
+            about = dialog.query_one("#bulk-about", Static)
+            return (
+                screen.contains_region(box),
+                len(seen),
+                all(screen.contains_region(b) and b.height > 0 for b in buttons),
+                about.has_class("-short") and about.region.height == 1,
+                str(about.tooltip),
+            )
+
+    fits, in_sight, buttons, short, tip = asyncio.run(run())
+    assert fits and buttons
+    assert in_sight >= 3, in_sight
+    assert short and tip.startswith("Each one is started again"), tip
 
 
 def test_restart_all_takes_a_click_as_soon_as_the_hub_is_drawn(acted: Acted) -> None:
@@ -542,7 +720,7 @@ def test_a_restart_of_all_is_told_per_agent_and_never_moves_the_view(acted: Acte
         app = _app(pilot)
         told = toast_log.record(app)
         dialog = await _open(pilot, "restart")
-        dialog.query_one("#bulk-managers", Switch).value = True
+        _untick(dialog, "agt_a_coder-1", "agt_b_coder-1")
         await settle(app)
         _confirm(dialog).press()
         await settle(app)
@@ -556,7 +734,13 @@ def test_a_restart_of_all_is_told_per_agent_and_never_moves_the_view(acted: Acte
     ]
     assert "✓ restarted manager (alpha) — resumed its session" in toasts
     assert "✓ restarted manager (beta) — resumed its session" in toasts
-    assert "restarted 2 · skipped 0 · failed 0" in toasts
+    [summary] = [t for t in toasts if t.startswith("restarted ")]
+    assert summary.splitlines() == [
+        "restarted 2 · skipped 3 · failed 0",
+        f"skipped: coder-1 (alpha) — {fleet_service.NOT_CHOSEN}; "
+        f"coder-1 (beta) — {fleet_service.NOT_CHOSEN}; "
+        f"tester-1 (beta) — {fleet_service.ENDED_CLEANLY}",
+    ], "the unticked coders are named, never restarted"
 
 
 def test_confirm_acts_on_the_agents_shown_and_skips_one_that_ended_since(

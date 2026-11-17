@@ -79,6 +79,7 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 
 OPEN_STATUSES = ("todo", "doing", "review", "blocked")
@@ -636,7 +637,9 @@ class BoardPanel(Vertical):
         """The board the last refresh read: ``project``, or the one it resolved to."""
         self.needs = NeedsYou()
         """What the strip shows, from the last refresh (:func:`needs_you`)."""
-        self.autoscroll = True
+        # Display ▸ *Follow the board's live feed* (``[ui] board_autoscroll``, R17) says how it
+        # opens, in asq and in ``board -w``; ``a`` toggles it from there.
+        self.autoscroll = settings_service.ui_settings().board_autoscroll
         self.detail_text = ""
         """The plain text of the detail pane (what a test reads)."""
         self.detail_moment: tuple[str | None, datetime] | None = None

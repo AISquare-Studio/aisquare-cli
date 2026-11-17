@@ -288,6 +288,17 @@ class OpenProjectMenu(Message):
         super().__init__()
 
 
+class OpenAgentMenu(Message):
+    """⋯ on an agent's row, a right-click on it, or ``.`` on it (R17): the agent's menu
+    (``cli/ui/agent_menu.py``), under ``anchor``."""
+
+    def __init__(self, project_id: str, agent_id: str, anchor: Region) -> None:
+        self.project_id = project_id
+        self.agent_id = agent_id
+        self.anchor = anchor
+        super().__init__()
+
+
 RESIZE_STEP = 4
 """Columns one keyboard step moves the partition (#137)."""
 
@@ -398,6 +409,7 @@ def agent_row_text(
     *,
     width: int | None = None,
     mark: Text | None = None,
+    usage: bool = True,
 ) -> Text:
     """``🧭 manager       ⏸ #1·42% · skeptic`` — icon, label, state chip, the account's slot
     and the session use on it, exit status when exited, persona.
@@ -428,6 +440,9 @@ def agent_row_text(
     (an exited row, ``💤 exited(0)``, or ``🔔 #1·100%``, in a 24-cell sidebar) is drawn with
     none, so the chip and the figure are never cut; the rows it fits keep theirs. ``None``
     draws the row as before (live mixed run, LIVE PASS 11884 F3).
+
+    ``usage`` off (Display ▸ *Account usage next to agents*, ``[ui] show_usage``, R17) leaves
+    the ``#N·NN%`` out, slot and use both; the label has its cells.
     """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
@@ -442,7 +457,7 @@ def agent_row_text(
     elif status.state == "paused":
         # Not exited: `fleet pause` stopped it, and `fleet resume` brings it back.
         tail.append(" paused", style="dim")
-    elif agent.account_slot is not None:
+    elif agent.account_slot is not None and usage:
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:
             tail.append_text(used_percent_text(percent))
@@ -1149,6 +1164,23 @@ class AgentLabelInput(InPlaceField, Input):
 RENAME_TIP = "double-click or F2 to rename"
 
 
+def rename_refusal_words(agent: FleetAgent) -> str | None:
+    """Why asq offers no rename for ``agent``, said with no command (R13): the service's rule
+    (``fleet_service.relabel_refusal``) and its words, but for a paused agent's, which name
+    the command that resumes it (R17's agent menu put them on screen)."""
+    refusal = fleet_service.relabel_refusal(agent)
+    if refusal is not None and agent.ended_at is not None and agent.paused_at is not None:
+        return f"{agent.label} is paused; once it is resumed it can be renamed"
+    return refusal
+
+
+MENU_TIP = "right-click, ⋯ or . for its menu"
+"""How an agent row's menu opens (R17): every row offers one, its ⋯ shown while the row is
+hovered or highlighted."""
+MENU_GLYPH = " ⋯"
+"""The row's menu, in its last two cells, on the hovered row and the highlighted one."""
+
+
 class AgentRow(Activatable):
     """One fleet agent under its project. Click → Agent view; a second click → rename it.
 
@@ -1173,7 +1205,9 @@ class AgentRow(Activatable):
         super().__init__(agent_row_text(status), id=f"agent-row-{status.agent.id}")
         self.status = status
         self.selection_key = f"agent:{status.agent.id}"
-        self._painted: tuple[FleetAgentStatus, float | None, int, bool, bool] | None = None
+        self._painted: tuple[FleetAgentStatus, float | None, int, bool, bool, bool, bool] | None = (
+            None
+        )
         self.prefill = ""
         """What the name field said when it opened: leaving it so is no change."""
         self._field: AgentLabelInput | None = None
@@ -1200,7 +1234,8 @@ class AgentRow(Activatable):
         if agent == self._tipped:
             return
         self._tipped = agent
-        tip = RENAME_TIP if fleet_service.relabel_refusal(agent) is None else None
+        renames = fleet_service.relabel_refusal(agent) is None
+        tip = f"{RENAME_TIP} · {MENU_TIP}" if renames else MENU_TIP
         if self.tooltip != tip:
             self.tooltip = tip
 
@@ -1320,6 +1355,12 @@ class AgentRow(Activatable):
             event.prevent_default()
             return
         sidebar = self._sidebar()
+        if sidebar is not None and (event.button == 3 or self._on_menu(event)):
+            # Its menu (R17): a right-click anywhere on the row, or a click on its ⋯.
+            event.stop()
+            event.prevent_default()
+            sidebar.open_agent_menu(self.status.agent.id)
+            return
         if (
             sidebar is not None
             and event.button == 1
@@ -1346,16 +1387,47 @@ class AgentRow(Activatable):
         percent = usage.get(slot) if slot is not None else None
         width = self.content_size.width
         marked = sidebar is not None and sidebar.agents_marked
+        shown = sidebar is None or sidebar.usage_shown
+        menu = self.menu_shown
         # The mark takes the theme's darkness's colour (``AgentMark.colour``). A theme change
         # renders every widget again, and :meth:`render` paints: the darkness is in the key.
         dark = self.app.current_theme.dark
-        wanted = (self.status, percent, width, marked, dark)
+        wanted = (self.status, percent, width, marked, dark, shown, menu)
         if wanted != self._painted:
             self._painted = wanted
             mark = agent_mark(agent_kind(self.status), dark) if marked else None
-            self.update(
-                agent_row_text(self.status, percent, width=width or None, mark=mark), layout=False
-            )
+            room = width - len(MENU_GLYPH) if menu and width else width
+            text = agent_row_text(self.status, percent, width=room or None, mark=mark, usage=shown)
+            if menu and width:
+                # The label gave way for it: the chip and ``#N·NN%`` stay whole.
+                text.truncate(room, pad=True)
+                text.append(MENU_GLYPH, style="bold")
+            self.update(text, layout=False)
+
+    @property
+    def menu_shown(self) -> bool:
+        """Whether the row draws its ⋯: while hovered, or highlighted (Q-F2). Every other row
+        is drawn as before, with no cell given up."""
+        return self._hovered or self.has_class("selected")
+
+    _hovered = False
+
+    def on_enter(self, event: events.Enter) -> None:
+        if not self._hovered:
+            self._hovered = True
+            self.paint()
+
+    def on_leave(self, event: events.Leave) -> None:
+        if self._hovered:
+            self._hovered = False
+            self.paint()
+
+    def _on_menu(self, event: events.Click) -> bool:
+        """Whether ``event`` is a plain click on the row's ⋯, its last two cells."""
+        if event.button != 1 or not self.menu_shown:
+            return False
+        offset = event.get_content_offset(self)
+        return offset is not None and offset.x >= self.content_size.width - len(MENU_GLYPH)
 
     def on_resize(self) -> None:
         self.paint()
@@ -2089,7 +2161,16 @@ class Sidebar(Vertical):
         self.agents_marked = False
         """Whether the agent rows carry their agent's mark (:func:`agent_row_text`'s ``mark``):
         exactly while the frame's projects list agents of more than one agent
-        (:func:`agent_kind`). A fleet of Claude Code's alone is drawn as before."""
+        (:func:`agent_kind`), and Display ▸ *Agent marks* is on. A fleet of Claude Code's alone
+        is drawn as before."""
+        self._mixed = False
+        """Whether the last frame listed agents of more than one agent."""
+        self.marks_shown = True
+        """Display ▸ *Agent marks (✻ >_) in a mixed fleet* (``[ui] show_agent_marks``)."""
+        self.usage_shown = True
+        """Display ▸ *Account usage next to agents* (``[ui] show_usage``): the rows' ``#N·NN%``."""
+        self.live_count_shown = True
+        """Display ▸ *Live count in the sidebar's title* (``[ui] show_live_count``)."""
         self._prev_states: dict[str, str] = {}
         self._anchor_key: str | None = None
         """The last row highlighted: where the arrows go on from while none is. Clearing the
@@ -2122,7 +2203,9 @@ class Sidebar(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
-            yield MarkStatic(lambda dim: fleet_title(self.live_total, dim=dim), id="fleet-title")
+            yield MarkStatic(
+                lambda dim: fleet_title(self._title_count(), dim=dim), id="fleet-title"
+            )
             yield AddButton()
             yield ActiveOnlyButton()
         yield ActionsSection(captain=self.captain, id="actions")
@@ -2205,8 +2288,9 @@ class Sidebar(Vertical):
         self._frame_rest = (notices, groups, live)
         self._always_show_paths = always_show_paths
         kinds = {agent_kind(status) for statuses in agents.values() for status in statuses}
-        remark = (len(kinds) > 1) != self.agents_marked
-        self.agents_marked = len(kinds) > 1
+        self._mixed = len(kinds) > 1
+        remark = (self._mixed and self.marks_shown) != self.agents_marked
+        self.agents_marked = self._mixed and self.marks_shown
         listed = {project.id for project in projects}
         passing = (
             {
@@ -2364,7 +2448,7 @@ class Sidebar(Vertical):
         self.live_total = live_total
         title = self.query_one("#fleet-title", MarkStatic)
         title.rebuild()  # from `self.live_total`, on the side's fade as it stands
-        title.tooltip = fleet_title_tooltip(live_total)
+        title.tooltip = fleet_title_tooltip(self._title_count())
 
     def show_paths(self, always: bool) -> None:
         """``[ui] always_show_project_path`` changed (App settings saved, reloaded or reset):
@@ -2506,7 +2590,7 @@ class Sidebar(Vertical):
         row = self._agent_row(agent_id)
         if row is None or not self._on_screen(row):
             return None
-        refusal = fleet_service.relabel_refusal(row.status.agent)
+        refusal = rename_refusal_words(row.status.agent)
         if refusal is not None:
             return refusal
         for card in self.query(ProjectCard):
@@ -2538,10 +2622,23 @@ class Sidebar(Vertical):
             self.open_rename(target[1])
 
     def action_project_menu(self) -> None:
-        """``.``: the menu of the highlighted card, as its ⋯ opens it."""
+        """``.``: the menu of what is highlighted — an agent's row, its agent's (Q-F1); a card,
+        or any other row of it, the card's, as its ⋯ opens it."""
+        kind, _, ident = (self.selected_key or "").partition(":")
+        row = self._agent_row(ident) if kind == "agent" else None
+        if row is not None and self._on_screen(row):
+            self.open_agent_menu(ident)
+            return
         target = self._cursor_target()
         if target is not None and target[0] == "project":
             self.open_menu(target[1])
+
+    def open_agent_menu(self, agent_id: str) -> None:
+        """Ask the shell for ``agent_id``'s menu, under its row."""
+        row = self._agent_row(agent_id)
+        if row is not None:
+            agent = row.status.agent
+            self.post_message(OpenAgentMenu(agent.project_id, agent.id, row.region))
 
     # drag and drop: press on a title or a group header, move past its row, release on a target
 
@@ -2709,6 +2806,28 @@ class Sidebar(Vertical):
             for row in self.query(AgentRow):
                 row.paint()
 
+    def _title_count(self) -> int:
+        """The live count the title shows: none while Display ▸ *Live count* is off."""
+        return self.live_total if self.live_count_shown else 0
+
+    def show_display(self, *, usage: bool, marks: bool, live_count: bool) -> None:
+        """Display's switches for the sidebar (``[ui]``, R17), applied now: the rows'
+        ``#N·NN%``, their agent marks, and the title's live count."""
+        changed = (usage, marks) != (self.usage_shown, self.marks_shown)
+        self.usage_shown, self.marks_shown = usage, marks
+        self.agents_marked = self._mixed and marks
+        if changed:
+            for row in self.query(AgentRow):
+                row.paint()
+        if live_count != self.live_count_shown:
+            self.live_count_shown = live_count
+            try:
+                title = self.query_one("#fleet-title", MarkStatic)
+            except NoMatches:
+                return
+            title.rebuild()
+            title.tooltip = fleet_title_tooltip(self._title_count())
+
     def show_update(self, version: str | None, *, runnable: bool = True) -> None:
         """The ⬆ row for a newer release (``services.updates.check_for_release``); ``None``
         hides it."""
@@ -2776,6 +2895,8 @@ class Sidebar(Vertical):
         # the class while hidden was a second highlight the moment it came back.
         for row in self.query(Activatable):
             row.set_class(row.selection_key == self.selected_key, "selected")
+            if isinstance(row, AgentRow):
+                row.paint()  # its ⋯ follows the highlight (R17)
         self._show_active_menus()
 
     def _show_active_menus(self) -> None:

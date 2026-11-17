@@ -1602,6 +1602,10 @@ class AgentAdapter(Protocol):
     settings_name: str
     capabilities: AgentCapabilities
     install_hint: str
+    install_page: str
+    """The agent's own install page (``https://…``): what asq links where it would have named an
+    install command, which asq never asks a person to type (R13, #146). The shell's surfaces
+    keep ``install_routes``."""
     install_routes: tuple[InstallRoute, ...]
     """Every way to install the agent, best first (:class:`InstallRoute`): its own installer,
     a package manager's, ``install_hint`` among them. At least one."""

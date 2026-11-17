@@ -676,8 +676,8 @@ class HelpScreen(ModalScreen[None]):
 
     @staticmethod
     def board_heading() -> str:
-        """The help's Board heading, which names the full-screen board's command."""
-        return f"Board (a project's Board tab, and {prog.word()} board -w)"
+        """The help's Board heading: asq's own Board tab. asq names no command to type (R13)."""
+        return "Board (a project's Board tab)"
 
     MAC_COPY_KEYS: ClassVar[tuple[tuple[str, str], ...]] = (
         ("ctrl+c", "copy a pane's highlight again; ⌘C stays the terminal's"),
@@ -2804,17 +2804,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         after = result.after
         if after.codename is not None and after.codename != result.before:
-            was = ""
-            if result.before:
-                was = (
-                    f" — was {result.before}, and --project {result.before} still works"
-                    if result.old_works
-                    else f" — was {result.before}; --project {result.before} names another "
-                    f"project too, so use --project {after.codename}"
-                )
+            # The new codename, and the old one it replaced; the tmux session and the
+            # `--project` spellings are the shell's to know, not asq's to say (R13).
+            was = f" — was {result.before}" if result.before else ""
             self.notify(
-                f"✓ {project_service.display_name(after)} · fleet codename {after.codename} "
-                f"(tmux {fleet_service.session_name(after.codename)}){was}",
+                f"✓ {project_service.display_name(after)} · fleet codename {after.codename}{was}",
                 timeout=8,
                 markup=False,
             )
@@ -3121,10 +3115,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         result = event.worker.result
         if event.state is WorkerState.SUCCESS and isinstance(result, ProjectForgetReport):
             removed = result.project
-            back = project_service.onboard_command(removed.root)
             self.notify(
                 f"✓ {project_service.display_name(removed)} removed from the fleet — "
-                f"its folder and history are kept; {back} brings it back",
+                "its folder and history are kept; + in the sidebar adds it back",
                 timeout=8,
                 markup=False,
             )

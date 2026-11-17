@@ -480,8 +480,9 @@ def test_an_install_asq_does_not_update_shows_the_command_and_no_restart(
 
     said, buttons, hand_off = _drive(body)
 
-    assert "brew upgrade aisquare-cli" in said
+    assert "brew upgrade" not in said, "asq names no command to type (R13)"
     assert said.startswith("rlx does not update this install itself (Homebrew installs are")
+    assert "Update it the way you installed it, then start rlx again." in said
     assert buttons == ["Close"]
     assert hand_off is None and updates.take_press() is None
 

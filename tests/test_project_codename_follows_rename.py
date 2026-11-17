@@ -621,7 +621,8 @@ def test_the_card_says_the_codename_when_its_name_does_not_give_it(
     tooltip = project_title_tooltip(shown)
     assert "double-click or F2 to rename" in tooltip
     if codename:
-        assert f"fleet codename {codename} (tmux asq-{codename}, --project {codename})" in tooltip
+        assert f"fleet codename {codename} · " in tooltip
+        assert "tmux" not in tooltip and "--project" not in tooltip, "asq names no command (R13)"
     else:
         assert tooltip.startswith("no fleet codename yet")
 

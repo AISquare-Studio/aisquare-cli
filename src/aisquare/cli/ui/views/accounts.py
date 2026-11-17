@@ -88,7 +88,6 @@ from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
-from aisquare.core import program as prog
 from aisquare.core.agent_adapters import get_adapter, mark_of, stage_mark_of
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
@@ -157,12 +156,7 @@ def machine_sessions_text(sessions: Sequence[StatuslineSession], now: datetime) 
     and ones outside any project too; with none, how to make them report."""
     text = Text("Sessions on this machine", style="bold")
     if not sessions:
-        text.append(
-            f" — none reported in the last 15 min; `{prog.word()} accounts statusline "
-            "--install` "
-            "adds the status line that reports them",
-            style="dim",
-        )
+        text.append(" — none reported in the last 15 min", style="dim")
         return text
     for session in sessions:
         age = max(int((now - session.updated_at).total_seconds()), 0)
@@ -859,18 +853,13 @@ def problem_tooltip(
     return f"{said}\n{accounts_service.fix_line(problem)}"
 
 
-def _sign_in_command(agent: str) -> str:
-    """The agent's own sign-in command line, as a hint shows it (``codex login``)."""
-    return " ".join((get_adapter(agent).binary, *core.kind(agent).sign_in_args()))
-
-
 def _sign_in_opens(agent: str) -> str:
-    """What a *Log in* window opens, for its tooltip: the agent's sign-in command, or the
-    agent itself where it signs in from its TUI, with what to type there if it does not
-    ask (``AgentAccounts.relogin``)."""
+    """What a *Log in* window opens, for its tooltip: the agent's sign-in, or the agent itself
+    where it signs in from its TUI, with what to type there if it does not ask
+    (``AgentAccounts.relogin``). Never the command line: asq names none (R13)."""
     accounts = core.kind(agent)
     if accounts.sign_in_args():
-        return f"`{_sign_in_command(agent)}` opens below"
+        return f"{core.agent_label(agent)}'s sign-in opens below"
     asks = f"; type {accounts.relogin} if it does not ask" if accounts.relogin else ""
     return f"{core.agent_label(agent)} opens below{asks}"
 
@@ -880,7 +869,9 @@ def _sign_in_prompt(agent: str) -> str:
     what the human does in it (``AgentAccounts.sign_in_steps``: Codex's device code)."""
     accounts = core.kind(agent)
     if accounts.sign_in_args():
-        return f" — `{_sign_in_command(agent)}` runs in this pane: {accounts.sign_in_steps}."
+        return (
+            f" — {core.agent_label(agent)}'s sign-in runs in this pane: {accounts.sign_in_steps}."
+        )
     if accounts.relogin:
         return f" — type {accounts.relogin} if {core.agent_label(agent)} does not prompt you."
     return f" — sign in to {core.agent_label(agent)} in this pane."
@@ -896,7 +887,7 @@ def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
     text = Text()
     if found is None or not found.installed:
         text.append(f"{name} is not installed", style="bold red")
-        text.append(f"\n  install it: {core.kind(agent).install_command}", style="dim")
+        text.append(f"\n  install it from {get_adapter(agent).install_page}", style="dim")
         return text
     text.append(name, style="bold")
     if found.version:
@@ -928,8 +919,7 @@ def claude_title_text(overview: AccountsOverview) -> Text:
     text = Text()
     if not claude.installed:
         text.append("Claude Code is not installed", style="bold red")
-        text.append(f"\n  install it: {core.INSTALL_COMMAND}", style="dim")
-        text.append(f"\n  or: {core.INSTALL_ALTERNATIVE}", style="dim")
+        text.append(f"\n  install it from {get_adapter(core.AGENT).install_page}", style="dim")
         return text
     text.append("Claude Code", style="bold")
     if claude.version:
@@ -979,7 +969,7 @@ def _hooks_did_not_install(error: object, agent: str = core.AGENT) -> str:
     ``agent`` is the slot's, whose ``agents connect`` the line names."""
     return (
         f"⚠ signed in, but rlx's hooks did not install: {error} — "
-        f"run: {prog.word()} agents connect {agent} --config-dir <the slot's directory>"
+        f"Settings ▸ Doctor offers to connect {core.agent_label(agent)}"
     )
 
 
@@ -2537,15 +2527,10 @@ class AccountsView(Vertical):
         the browser's sign-in run on the slot for a *Log in*. ``""`` for an agent with one
         sign-in (Claude Code's)."""
         accounts = core.kind(login.account.agent)
-        args = accounts.browser_sign_in_args()
-        if not args:
+        if not accounts.browser_sign_in_args():
             return ""
-        command = (
-            f"{prog.word()} accounts add --agent {login.account.agent} --browser"
-            if login.fresh
-            else " ".join((f"{prog.word()} accounts run", self._ref_of(login.account), *args))
-        )
-        return f"{accounts.browser_sign_in_hint}: {command}"
+        # The hint alone: the browser's sign-in is a command to type, which asq names none of.
+        return accounts.browser_sign_in_hint
 
     def _close_login_window(self) -> _ClaudeLogin | None:
         login = self.login

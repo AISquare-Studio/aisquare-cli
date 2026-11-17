@@ -592,7 +592,7 @@ def test_asq_add_codex_runs_login_device_auth_and_says_what_to_do_with_the_code(
     [window] = windows
     assert window["command"][-5:] == ["accounts", "run", str(account.slot), *DEVICE]
     assert header == (
-        f"Logging in to account {account.slot} — `codex login --device-auth` runs in this "
+        f"Logging in to account {account.slot} — Codex's sign-in runs in this "
         f"pane: {STEPS}. This pane closes by itself once the login is recorded; F12 hands "
         "focus back to the sidebar."
     )
@@ -622,7 +622,7 @@ def test_asq_log_in_on_a_codex_slot_runs_login_device_auth_there(
     assert drive(go, overview=_real_overview())
     [window] = windows
     assert window["command"][-5:] == ["accounts", "run", str(account.slot), *DEVICE]
-    assert accounts_view._sign_in_opens(CODEX) == "`codex login --device-auth` opens below"
+    assert accounts_view._sign_in_opens(CODEX) == "Codex's sign-in opens below"  # no command (R13)
     assert _replay(window, runner, monkeypatch) == 0
     assert codex.argvs() == [DEVICE]
     assert core.identity(account) is not None
@@ -685,11 +685,12 @@ def test_a_codex_pane_that_closes_with_no_login_names_the_browser_sign_in(
             said[key] = notice(view)
 
     drive(go, overview=_real_overview())
+    # asq says where the browser's sign-in is turned on, and names no command (R13); the
+    # shell's `accounts add` still prints it.
     assert said["fresh"] == (
         "sign-in cancelled — Codex closed before a sign-in landed; the new slot was "
-        f"discarded. {HINT}: rlx accounts add --agent codex --browser"
+        f"discarded. {HINT}"
     )
     assert said["existing"] == (
-        "sign-in cancelled — Codex closed before a sign-in landed; nothing changed. "
-        f"{HINT}: rlx accounts run {existing.slot} login"
+        f"sign-in cancelled — Codex closed before a sign-in landed; nothing changed. {HINT}"
     )

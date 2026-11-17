@@ -17,6 +17,7 @@ the slot that must not be discarded.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
@@ -59,7 +60,7 @@ from aisquare.cli.ui.views.accounts import (
     needs_login,
     usage_bar,
 )
-from aisquare.core import browser, credentials, paths
+from aisquare.core import browser, credentials, paths, program
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import adapters
@@ -967,6 +968,17 @@ def test_a_backed_off_row_with_no_reading_repaints_when_its_wait_ends(
     clock, during, after = drive(go, overview=overview)
     assert during.startswith(f"rate-limited until {clock}"), during
     assert "until" not in after and after.startswith("the rate limit has ended"), after
+
+
+@contextlib.contextmanager
+def in_asq() -> Iterator[None]:
+    """What a shared message says while asq is up (``core.program.shell_advice``, R13b): the
+    page shows it so, and a test compares the page with it said so."""
+    program.enter_app()
+    try:
+        yield
+    finally:
+        program.leave_app()
 
 
 @pytest.fixture
@@ -2932,8 +2944,8 @@ def test_a_name_the_service_refuses_is_said_and_the_field_stays_open_to_correct_
     core.create_account()
     core.create_account()
     accounts_service.set_alias("3", "work")
-    with pytest.raises((ValueError, accounts_service.AccountsError)) as refused:
-        accounts_service.set_alias("2", typed)  # what the service says, to compare the page with
+    with in_asq(), pytest.raises((ValueError, accounts_service.AccountsError)) as refused:
+        accounts_service.set_alias("2", typed)  # what the service says in asq, to compare
     before = aliases()
 
     async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, str, bool]:
@@ -2949,6 +2961,7 @@ def test_a_name_the_service_refuses_is_said_and_the_field_stays_open_to_correct_
 
     said, still_open, value, focused = drive_registry(go)
     assert said == [(f"✗ {refused.value}", "error")]
+    assert "rlx accounts" not in said[0][0], "asq names no command (R13b)"
     assert (still_open, value, focused) == (True, typed, True)  # as typed, ready to fix
     assert aliases() == before == {1: None, 2: None, 3: "work"}  # nothing written
 
@@ -3183,10 +3196,11 @@ def test_a_slot_removed_while_its_field_is_open_is_said_and_its_row_leaves(
         return said, before, [r.slot for r in view.rows()]
 
     said, before, after = drive_registry(go)
-    with pytest.raises(accounts_service.NoSuchAccount) as vanished:
-        accounts_service.set_alias("2", "work")  # what the service says, to compare the page with
+    with in_asq(), pytest.raises(accounts_service.NoSuchAccount) as vanished:
+        accounts_service.set_alias("2", "work")  # what the service says in asq, to compare
     assert before == [1, 2]
     assert said == [(f"✗ {vanished.value}", "error")]
+    assert "rlx accounts" not in said[0][0], "asq names no command (R13b)"
     assert after == [1]  # the next frame took the row away, and its field with it
     assert aliases() == {1: None}  # the name landed nowhere else
 

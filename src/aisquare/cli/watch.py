@@ -23,6 +23,7 @@ by the fleet UI, which reuses the theme persistence verbatim (the saver itself i
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -34,6 +35,7 @@ from rich.text import Text
 from aisquare.cli import board_names
 from aisquare.cli.common import format_reset, local_time
 from aisquare.core import harness, paths
+from aisquare.core import program as prog
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state_file import read_state
 from aisquare.core.store import unmet_needs
@@ -100,7 +102,40 @@ def _named(session_id: str, names: Mapping[str, str] | None) -> str:
     id reachable (#140)."""
     short = team_service.short_id(session_id)
     name = (names or {}).get(session_id)
+    if name and name.endswith(f"({short})"):
+        return name  # told apart by its short id already: said once (#140's nit, R13b)
     return f"{name} ({short})" if name else short
+
+
+SWITCH_TAIL = re.compile(
+    r"(?: — |; )`[^`]*\bfleet switch [^`]*` moves it"
+    r"(?: again| by hand| to the account with the most headroom \(or wait for the reset\))?"
+    r"(?: \(`before_limit = \"warn\"`\))?"
+)
+"""The ``fleet switch`` a stored usage-limit line names: ``limited``, ``before_limit`` and
+``handover_failed`` (``services.hooks``, ``team._limited_text``)."""
+
+RESUME_TAIL = re.compile(r"; `[^`]*\bfleet resume\b[^`]*` brings it back")
+"""The ``fleet resume`` a stored ``agent_paused`` line names (``fleet.pause_agent``)."""
+
+STORED_TAILS: dict[str, re.Pattern[str]] = {
+    "limited": SWITCH_TAIL,
+    team_service.BEFORE_LIMIT_KIND: SWITCH_TAIL,
+    "handover_failed": SWITCH_TAIL,
+    "agent_paused": RESUME_TAIL,
+}
+"""The stored lines that name a command, by kind, and the command's clause in each. Agents act
+on it, so the stored text keeps it; asq's board leaves it out (:func:`shown_text`, R13 design
+A.3)."""
+
+
+def shown_text(event: TeamEvent) -> str:
+    """``event``'s text as this board shows it: in asq, and ``board -w``, without the command
+    its kind's line names (:data:`STORED_TAILS`); whole at a shell."""
+    tail = STORED_TAILS.get(event.kind)
+    if tail is None:
+        return event.text
+    return prog.shell_advice(event.text, app=tail.sub("", event.text))
 
 
 def feed_line(
@@ -113,7 +148,7 @@ def feed_line(
     line.append(f"{local_time(event.created_at):%H:%M} ", style="dim")
     line.append(f"{emoji} {name} ", style=style)
     line.append(f"{verb_emoji} {verb}: ", style="bold")
-    line.append(event.text)
+    line.append(shown_text(event))
     if event.to_role:
         line.append(f" → {event.to_role}", style="italic yellow")
     return line
@@ -129,7 +164,7 @@ def _event_detail(
     text.append(f"{event.kind}", style="bold")
     text.append(f" by {name}", style=style)
     text.append(f" at {local_time(event.created_at):%H:%M:%S} (seq {event.seq})\n", style="dim")
-    text.append(event.text)
+    text.append(shown_text(event))
     if event.task_id:
         text.append(f"\ntask: {event.task_id}", style="dim")
     if event.to_role:
@@ -221,8 +256,8 @@ def _session_lines(
         chip, chip_style = _STATE_CHIP.get(session.state, (session.state, "dim"))
         text.append(f"  {chip}", style=chip_style)
         switch = (switches or {}).get(session.id) if session.state == "limited" else None
-        if switch is not None:
-            text.append(f" — `{switch}`", style=chip_style)
+        if switch is not None and (said := prog.shell_advice(f" — `{switch}`")):
+            text.append(said, style=chip_style)  # a shell's: asq and board -w leave it out
         if session.state == "limited" and session.limit_resets_at is not None:
             text.append(f" (resets {format_reset(session.limit_resets_at)})", style="magenta")
         label = team_service.account_label(session.account, labels)

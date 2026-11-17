@@ -262,7 +262,7 @@ def _explainability_step(decision: bool | None) -> list[str]:
         return [
             "Explainability: this machine can ship "
             f"{explainability_service.ShippingOffer.CAPTURES} to {offer.gateway_url}. "
-            "Off until you ask for it: aisquare init --explainability"
+            "Off until you ask for it" + prog.shell_advice(": aisquare init --explainability")
         ]
     if not offer.available:
         return [f"Explainability not configured — {offer.reason}"]
@@ -271,7 +271,7 @@ def _explainability_step(decision: bool | None) -> list[str]:
         return [f"Explainability not configured — {state.reason}"]
     return [
         f"Explainability on: shipping {explainability_service.ShippingOffer.CAPTURES} "
-        f"to {state.gateway_url}. Drain with: aisquare explainability ship"
+        f"to {state.gateway_url}." + prog.shell_advice(" Drain with: aisquare explainability ship")
     ]
 
 
@@ -882,6 +882,8 @@ def _env_file_bindings() -> tuple[str, ...]:
 def _left_by_move_back(site: HookSite, target: str) -> HookSite:
     """``site`` left as it is by a move back to ``target``, a release that
     :func:`lacks_refresh_hooks`, with the command that rewrites its hooks for that release."""
+    # Run after the move, by ``target``: a release that predates refresh-hooks predates the rlx
+    # rename too, and answers only to aisquare (tests/test_program_name.py keeps it).
     rewrite = install_route.command_line(
         ["aisquare", "agents", "connect", site.agent, "--config-dir", str(site.config_dir)]
     )
@@ -896,8 +898,9 @@ def _left_without_agent_hooks(site: HookSite, target: str) -> HookSite:
     """``site`` left as it is by a move back to ``target``, which has no hooks for its agent
     (:func:`lacks_agent_hooks`): they then run a program that does not know them, so the
     command that takes them out is named, to run before the move."""
+    # Run before the move, by this install: the word hints print.
     remove = install_route.command_line(
-        ["aisquare", "agents", "disconnect", site.agent, "--config-dir", str(site.config_dir)]
+        [prog.word(), "agents", "disconnect", site.agent, "--config-dir", str(site.config_dir)]
     )
     why = (
         f"{target} has no {agent_label(site.agent)} hooks: the move back leaves them as they "
@@ -1474,8 +1477,8 @@ def fleet_forget() -> str:
 def remote_off() -> str:
     """How a Remote that is on in another process is turned off (:func:`running_remote`)."""
     return (
-        f"press Ctrl-C where `{prog.word()} remote serve` runs, or turn Remote off in that "
-        "rlx's R panel"
+        prog.shell_advice(f"press Ctrl-C where `{prog.word()} remote serve` runs, or ")
+        + "turn Remote off in that rlx's R panel"
     )
 
 
@@ -2289,9 +2292,15 @@ def launchers_refusal(
         they=they, holds="holds" if one else "hold"
     )
     waiting = (
-        f"a session started with `{prog.word()} launch` is"
+        prog.shell_advice(
+            f"a session started with `{prog.word()} launch` is",
+            app="a session rlx started in a terminal is",
+        )
         if one
-        else f"{len(launchers)} sessions started with `{prog.word()} launch` are"
+        else prog.shell_advice(
+            f"{len(launchers)} sessions started with `{prog.word()} launch` are",
+            app=f"{len(launchers)} sessions rlx started in terminals are",
+        )
     )
     again = again or f"run `rlx {command}` again"
     named = ", ".join(launchers)

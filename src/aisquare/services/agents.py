@@ -130,7 +130,7 @@ def plugin_beside_note(name: str, config_dir: Path | None = None) -> str | None:
         return None
     return (
         f"the aisquare plugin is enabled in {plugin.config_dir} too — its hooks stand down "
-        f"while these run; keep one route ({prog.word()} doctor says how)"
+        "while these run; keep one route" + prog.shell_advice(f" ({prog.word()} doctor says how)")
     )
 
 
@@ -404,9 +404,8 @@ def access(name: str, config_dir: Path | None = None) -> DirAccess:
 def _repoint() -> str:
     """For the directory sessions from this shell read: rlx reads the variable only when it
     starts (review of #257), so it is started again, by the word hints print."""
-    return (
-        "point CLAUDE_CONFIG_DIR at another directory this user can write, "
-        f"then start {prog.word()} again from that shell"
+    return "point CLAUDE_CONFIG_DIR at another directory this user can write" + prog.shell_advice(
+        f", then start {prog.word()} again from that shell"
     )
 
 
@@ -439,7 +438,6 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
             found[0] += f", or {also} where that file is generated"
     key = agent_core.dir_identity(directory)
     recorded = key in {agent_core.dir_identity(p) for p in agent_core.connected_dirs(name)}
-    disconnect = config_dir_command("disconnect", name, directory)
     if refusal.this_shell and not (recorded or agent_core.found_on_disk(directory)):
         found.append(_repoint())
     elif (
@@ -448,8 +446,21 @@ def remedies(name: str, directory: Path, refusal: Refusal, *, also: str | None =
         # Disconnect takes the hooks and the record out, and leaves a plugin to grade.
         and not ((plugin := agent_core.plugin_of(name)) and plugin.installed(directory))
     ):
-        this = f"{_repoint()}, and disconnect this one: {disconnect}"
-        found.append(this if refusal.this_shell else f"forget it: {disconnect}")
+        if refusal.this_shell:
+            found.append(
+                _repoint()
+                + prog.shell_advice(
+                    ", and disconnect this one: "
+                    + config_dir_command("disconnect", name, directory)
+                )
+            )
+        else:
+            found.append(
+                prog.shell_advice(
+                    f"forget it: {config_dir_command('disconnect', name, directory)}",
+                    app="forget it",
+                )
+            )
     return found
 
 

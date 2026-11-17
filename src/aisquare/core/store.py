@@ -7716,7 +7716,9 @@ def damaged_store_message(exc: sqlite3.Error) -> str:
     via ``_fail_team`` — and three copies of a sentence is how doctor's
     remediation drifted from a working one in the first place.
     """
-    return f"the context store cannot be opened: {paths.db_path()} ({exc}). {store_recovery(exc)}"
+    return f"the context store cannot be opened: {paths.db_path()} ({exc})." + prog.shell_advice(
+        f" {store_recovery(exc)}"
+    )
 
 
 def damaged_data_message(exc: sqlite3.Error) -> str:
@@ -7730,7 +7732,9 @@ def damaged_data_message(exc: sqlite3.Error) -> str:
     The recovery is the same function, because the two sentences drifting apart
     is the defect this whole family exists to prevent.
     """
-    return f"the context store is damaged: {paths.db_path()} ({exc}). {damaged_store_recovery()}"
+    return f"the context store is damaged: {paths.db_path()} ({exc})." + prog.shell_advice(
+        f" {damaged_store_recovery()}"
+    )
 
 
 def _statements(script: str) -> Iterator[str]:

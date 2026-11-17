@@ -10,7 +10,7 @@ import shlex
 import shutil
 import string
 import sys
-from collections.abc import Callable, Collection, Container, Mapping, Sequence
+from collections.abc import Callable, Collection, Container, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from importlib import metadata
 from pathlib import Path, PurePath
@@ -147,7 +147,14 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
     """
     from aisquare.services import agent_launch
 
-    with agent_launch.selection_snapshot(cwd), agent_core.inspection_snapshot():
+    # Every fix as a shell has it, though asq runs this in its own process: asq hands a fix
+    # whole to the manager and reads its buttons from it. A detail's command still goes in
+    # asq (``program.detail_advice``, R13b).
+    with (
+        prog.at_a_shell(),
+        agent_launch.selection_snapshot(cwd),
+        agent_core.inspection_snapshot(),
+    ):
         return [
             _check_python(),
             _check_install(),
@@ -764,7 +771,7 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
         return None
     if home.exists():
         return _ok(name, f"not evaluated — {home} is not a directory (see the `home` check)")
-    return _ok(name, f"not created yet — set it up: {prog.word()} init")
+    return _ok(name, "not created yet" + prog.detail_advice(f" — set it up: {prog.word()} init"))
 
 
 #: How many missing tables, columns, indexes or triggers the database row names before
@@ -780,22 +787,22 @@ _ISSUES_URL = "https://github.com/AISquare-Studio/rlx/issues"
 #: of step in its own way, measured with it dropped (the tests repeat each measurement);
 #: the ``team_meta_*`` ones date the launch metadata its cleanup reads (#113). One per
 #: trigger the ladder makes, in its order (pinned by the tests), so a trigger added
-#: without its sentence fails a test, not the operator. ``{program}`` is the command's
-#: word (``core.program.word``), filled in where the row is written.
+#: without its sentence fails a test, not the operator. ``{search}`` is the search, filled
+#: in where the row is written: ``rlx context search`` at a shell, "the notes' search" in asq.
 _TRIGGER_COSTS = {
     "entry_ai": (
-        "without trigger entry_ai a new note is not indexed: `{program} context search` "
+        "without trigger entry_ai a new note is not indexed: {search} "
         "misses it, and editing or removing it, or purging its project, fails as "
         "'database disk image is malformed', which rlx calls a damaged store though "
         "the notes are intact"
     ),
     "entry_ad": (
         "without trigger entry_ad a note purged with its project stays indexed, and "
-        "`{program} context search` can match a later note on the purged one's words"
+        "{search} can match a later note on the purged one's words"
     ),
     "entry_au": (
         "without trigger entry_au an edited note stays indexed under its old text, so "
-        "`{program} context search` matches what it said, not what it says"
+        "{search} matches what it said, not what it says"
     ),
     "team_meta_insert_time": (
         "without trigger team_meta_insert_time a new launch binding or replay record is "
@@ -875,22 +882,25 @@ def _check_database() -> DoctorCheck:
                 "a command that reads a missing table or column fails with 'no such "
                 "table' or 'no such column'"
             )
+        # The search a missing piece breaks: a fact, but a command all the same, which asq
+        # names as its own (R13b, tester 12783).
+        search = prog.detail_advice(f"`{prog.word()} context search`", app="the notes' search")
         if "shadow table" in kinds:
             costs.append(
                 "without a shadow table the notes' full-text index can be neither written "
-                f"nor searched: adding a note and `{prog.word()} context search` fail, with an "
+                f"nor searched: adding a note and {search} fail, with an "
                 "error that reads as a damaged store or, without entry_fts_config, a "
                 "traceback ending 'vtable constructor failed', though the notes are intact"
             )
         if "unreadable table" in kinds:
             costs.append(
                 "FTS5 cannot open an unreadable table, the notes' full-text index, so it can "
-                f"be neither written nor searched: adding a note and `{prog.word()} context "
-                "search` fail with a traceback ending in SQLite's error, though the notes "
+                f"be neither written nor searched: adding a note and {search} "
+                "fail with a traceback ending in SQLite's error, though the notes "
                 "are intact"
             )
         costs += [
-            cost.format(program=prog.word())
+            cost.format(search=search)
             for trigger, cost in _TRIGGER_COSTS.items()
             if f"trigger {trigger}" in missing
         ]
@@ -1351,7 +1361,10 @@ def _coders_missed(
         "without rlx"
     )
     if connects:
-        clause += f": {' or '.join(connects)} runs it in every folder"
+        clause += prog.detail_advice(
+            f": {' or '.join(connects)} runs it in every folder",
+            app=": Connect, on Welcome, runs it in every folder",
+        )
     refused = {d: refusal for d, refusal in missed.items() if refusal is not None}
     clause += "".join(
         f", and connect cannot write the hooks in {directory}: {refusal.why}"
@@ -1413,7 +1426,8 @@ def _short_timeouts(
 def _refused_fix(
     directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
 ) -> str:
-    """The remedies for ``refusal``, as every surface gives them (``agents_service.remedies``)."""
+    """The remedies for ``refusal``, as every surface gives them (``agents_service.remedies``):
+    the doctor's fix, whole (:func:`doctor` builds every fix at a shell)."""
     return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
 
 
@@ -1791,7 +1805,6 @@ def _check_resumable_agents() -> list[DoctorCheck]:
         return []
     try:
         cutoff = datetime.now(tz=UTC) - fleet_service.RECENTLY_ENDED
-        resumable: list[str] = []
         exited: list[tuple[ProjectInfo, FleetAgent, TeamSession | None]] = []
         with store_session() as store:
             for project in store.list_projects(all=True):
@@ -1807,27 +1820,45 @@ def _check_resumable_agents() -> list[DoctorCheck]:
                         continue
                     exited.append((project, agent, store.get_session(agent.session_id)))
         records = fleet_service.records_as_read([agent for _, agent, _ in exited])
-        for project, agent, session in exited:
-            if fleet_service.restart_resumes(project, agent, records[agent.id], session):
-                # Its own restart, naming its project: alone, `fleet restart <label>`
-                # restarted the active project's (review of #259, round 21).
-                restart = project_service.fleet_command("restart", project, agent.label)
-                resumable.append(f"`{restart}`")
+        resumable = [
+            (project, agent)
+            for project, agent, session in exited
+            if fleet_service.restart_resumes(project, agent, records[agent.id], session)
+        ]
     except Exception:  # the database line reports a broken store
         return []
     if not resumable:
         return []
-    shown = ", ".join(resumable[:6])
-    if len(resumable) > 6:
-        shown += f", +{len(resumable) - 6} more"
     noun = "agent" if len(resumable) == 1 else "agents"
     return [
         _ok(
             "fleet-resume",
             f"{len(resumable)} exited {noun} can be resumed — the transcript is on disk, so "
-            f"Restart continues the session instead of starting over: {shown}",
+            "Restart"
+            + prog.detail_advice(
+                # Each its own restart, naming its project: alone, `fleet restart <label>`
+                # restarted the active project's (review of #259, round 21).
+                " continues the session instead of starting over: "
+                + _first_six(
+                    f"`{project_service.fleet_command('restart', project, agent.label)}`"
+                    for project, agent in resumable
+                ),
+                # asq names no command (R13b, tester 12783): the agents, and their Restart.
+                app=" on the agent continues the session instead of starting over: "
+                + _first_six(
+                    f"{agent.label} in {project.codename or project.root.name or project.id}"
+                    for project, agent in resumable
+                ),
+            ),
         )
     ]
+
+
+def _first_six(items: Iterable[str]) -> str:
+    """``items`` as one list, the first six of them and how many more."""
+    listed = list(items)
+    shown = ", ".join(listed[:6])
+    return shown + (f", +{len(listed) - 6} more" if len(listed) > 6 else "")
 
 
 #: How far back ``fleet-delivery`` counts first messages.
@@ -1954,15 +1985,27 @@ def _check_captured_projects() -> list[DoctorCheck]:
     if not captured:
         return []
     if not capture:
-        return [_ok("projects", _left_from_before_capture(captured, plan, holds))]
+        return [
+            _ok(
+                "projects",
+                prog.detail_advice(
+                    _left_from_before_capture(captured, plan, holds),
+                    app=f"{len(captured)} captured {_directories(len(captured))} left from "
+                    "before project capture was turned off (a hooked session ran there; nothing "
+                    "added it on purpose)",
+                ),
+            )
+        ]
     noun = _directories(len(captured))
     return [
         _ok(
             "projects",
             f"{len(captured)} captured {noun} hidden from the sidebar and `project list` (a "
-            f"hooked session ran there; nothing added it on purpose) — see them: {prog.word()} "
-            f"project list --all; drop the stale ones: {prog.word()} project prune "
-            "--captured-only",
+            "hooked session ran there; nothing added it on purpose)"
+            + prog.detail_advice(
+                f" — see them: {prog.word()} project list --all; drop the stale ones: "
+                f"{prog.word()} project prune --captured-only"
+            ),
         )
     ]
 
@@ -2727,7 +2770,7 @@ def _check_role_bindings() -> list[DoctorCheck]:
                         f"{role}: {variable} {path} has no rlx hooks, so its "
                         "sessions never reach the board"
                     )
-                    connect = ["aisquare", "agents", "connect", adapter.id, "--config-dir"]
+                    connect = [prog.word(), "agents", "connect", adapter.id, "--config-dir"]
                     fixes.append(f"{line([*connect, str(config_dir)])} (or {unset(variable)})")
                 else:
                     fine.append(f"{role} → {path}")
@@ -2949,7 +2992,10 @@ def _check_fleet_terminal(
                 f"{fleet_service.settings().tmux_socket} kill-server",
             )
         parts.append(
-            "server prefix None (every key reaches the agent in fleet attach; F12 detaches)"
+            "server prefix None (every key reaches the agent"
+            + prog.detail_advice(
+                " in fleet attach; F12 detaches)", app=" in its pane; F12 returns to the sidebar)"
+            )
         )
         return _ok(name, "; ".join(parts))
     except Exception as exc:  # diagnostics must never crash
@@ -3052,7 +3098,11 @@ def _check_watcher() -> DoctorCheck:
     age = found.age()
     looked = f"last look {int(age.total_seconds())} s ago" if age is not None else "no look yet"
     if found.pid is None:
-        return _ok(name, f"not running ({looked}); `{prog.word()} watch --detach` starts it")
+        return _ok(
+            name,
+            f"not running ({looked})"
+            + prog.detail_advice(f"; `{prog.word()} watch --detach` starts it"),
+        )
     if age is None or age.total_seconds() > 3 * every:
         return _warn(
             name,
@@ -3716,12 +3766,17 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
         return _ok(name, "building in the background (agents grep until it is ready)")
     if unfinished:
         return _ok(
-            name, f"none yet — `{prog.word()} code index` builds one (agents grep without it)"
+            name,
+            "none yet"
+            + prog.detail_advice(f" — `{prog.word()} code index` builds one")
+            + " (agents grep without it)",
         )
     parsers = ", ".join(f"{parser} {count}" for parser, count in sorted(found.parsers.items()))
     detail = f"{found.symbols} symbols in {found.files} files ({parsers}), built {found.built_at}"
     if found.stale:
-        detail += f" — a commit behind the checkout; `{prog.word()} code index` refreshes it"
+        detail += " — a commit behind the checkout" + prog.detail_advice(
+            f"; `{prog.word()} code index` refreshes it"
+        )
     if found.not_indexed:
         missing = ", ".join(f"{lang} {n}" for lang, n in sorted(found.not_indexed.items()))
         detail += f"; not indexed: {missing}"
@@ -3740,9 +3795,11 @@ def _captain_check() -> DoctorCheck | None:
         return None
     return _ok(
         "captain",
-        f"off (experimental) — turn it on with: {prog.word()} config set experimental.captain "
-        "true "
-        f"(or {experimental.CAPTAIN_ENV}=1)",
+        "off (experimental)"
+        + prog.detail_advice(
+            f" — turn it on with: {prog.word()} config set experimental.captain true "
+            f"(or {experimental.CAPTAIN_ENV}=1)"
+        ),
     )
 
 

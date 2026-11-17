@@ -4170,7 +4170,7 @@ def test_a_move_back_to_a_release_without_codex_hooks_leaves_them_and_names_the_
     result = runner.invoke(app, ["upgrade", "--version", "0.8.0", "--yes"])
 
     remove = install_route.command_line(
-        ["aisquare", "agents", "disconnect", "codex", "--config-dir", str(codex)]
+        ["rlx", "agents", "disconnect", "codex", "--config-dir", str(codex)]
     )
     assert planned["refresh_hooks"] == [str(claude)], planned
     [left] = planned["hooks_left"]
@@ -4218,7 +4218,7 @@ def test_a_move_back_to_0_9_2_leaves_a_codex_accounts_hooks_and_ends_well(
     result = runner.invoke(app, ["upgrade", "--version", "0.9.2", "--yes"])
 
     remove = install_route.command_line(
-        ["aisquare", "agents", "disconnect", "codex", "--config-dir", str(codex)]
+        ["rlx", "agents", "disconnect", "codex", "--config-dir", str(codex)]
     )
     assert planned["refresh_hooks"] == [str(claude)], planned
     [left] = planned["hooks_left"]

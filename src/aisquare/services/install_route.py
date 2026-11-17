@@ -69,6 +69,7 @@ from typing import Any, NoReturn
 from urllib.parse import parse_qsl, unquote, urlparse, urlsplit, urlunsplit
 
 from aisquare.core import agents as agent_core
+from aisquare.core import program as prog
 from aisquare.core.shell_line import command_line as command_line  # pasted lines, everywhere
 from aisquare.core.shell_line import split_line as split_line  # a fix line read back
 from aisquare.core.version import DISTRIBUTION, __version__
@@ -1249,9 +1250,14 @@ def not_automated(route: InstallRoute) -> str | None:
     if route.kind == EDITABLE:
         # First on every platform: the pull is the step the printed reinstall
         # cannot carry, and Windows only changes WHEN the reinstall can run.
-        pull = command_line(["git", "-C", route.source or ".", "pull"])
         reason = (
-            f"an editable install follows its checkout — pull it first ({pull}), then reinstall it"
+            "an editable install follows its checkout — pull it first"
+            # Not in an f-string, whose single quotes would respell the argv the git guard
+            # reads as written (tests/test_ci_snapshot.py).
+            + prog.shell_advice(
+                " (" + command_line(["git", "-C", route.source or ".", "pull"]) + ")"
+            )
+            + ", then reinstall it"
         )
         if windows is not None:
             reason += _AFTER_AISQUARE_EXITS

@@ -946,3 +946,19 @@ def test_a_word_to_the_author_after_its_move_leaves_the_echo(board: str) -> None
     _say(board, "note", by=MANAGER, to="coder", text="thanks, a tester is on it")
     _say(board, "task_reopened", by="tester", task=task.id)
     assert _echo(review)
+
+
+def test_a_task_less_note_naming_two_tasks_is_no_echo(board: str) -> None:
+    """The ruling's tightening: "DONE #134; #135 is next", then #135's review (or #134's), wakes.
+    Its #N must be the ONLY task number the note names; a pull request's number is none."""
+    first, second = _real_task(board, "the work"), _real_task(board, "the next work")
+    for moved in (second, first):
+        text = f"DONE #{first.number}; #{second.number} is next"
+        _say(board, "note", by="coder", to="manager", text=text)
+        _read_all(board)
+        assert not _echo(_say(board, "task_review", by="coder", task=moved.id))
+        assert _wakes()
+        _read_all(board)
+    _say(board, "note", by="coder", to="manager", text=f"DONE #{first.number}, PR #507 is up")
+    _read_all(board)
+    assert _echo(_say(board, "task_review", by="coder", task=first.id)), "#507 is no task"

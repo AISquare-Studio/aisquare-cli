@@ -376,10 +376,13 @@ _TASK_NUMBER = re.compile(r"#(\d+)\b")
 
 
 def _about_the_task(store: ContextStore, said: TeamEvent, move: TeamEvent) -> bool:
-    """Whether the word ``said`` is about the task ``move`` moved: filed with that task
-    (``--task``), or filed with none and naming its number (``#N``). Agents write "DONE #134
-    …" far more often than they pass ``--task``: of the 70 such pairs on cli-next-release's
-    board, 20 were filed with the task and 49 named it (#145's reopen, F1)."""
+    """Whether the word ``said`` is about the task ``move`` moved, and that task alone: filed
+    with it (``--task``), or filed with none and naming its number (``#N``) as the ONLY task
+    number it names. A number that is no task on the board (a pull request's ``#507``) is not
+    a task number. Agents write "DONE #134 …" far more often than they pass ``--task``: of the
+    70 such pairs on cli-next-release's board, 20 were filed with the task, 25 named it alone,
+    and 24 named other tasks too ("DONE #134; #135 is next"), which wake (the manager's ruling
+    on #145's reopen)."""
     if move.task_id is None:
         return False
     if said.task_id is not None:
@@ -387,7 +390,13 @@ def _about_the_task(store: ContextStore, said: TeamEvent, move: TeamEvent) -> bo
     task = store.get_task(move.task_id, project_ids=(move.project_id,))
     if task is None or task.number is None:
         return False
-    return str(task.number) in _TASK_NUMBER.findall(said.text or "")
+    named = {int(number) for number in _TASK_NUMBER.findall(said.text or "")}
+    tasks_named = {
+        number
+        for number in named
+        if number == task.number or store.task_by_number(move.project_id, number) is not None
+    }
+    return tasks_named == {task.number}
 
 
 def _board_act(event: TeamEvent) -> bool:

@@ -38,7 +38,6 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from aisquare.core import program as prog
 from aisquare.services.lifecycle import UpgradePlan
 
 PLAN_WORKER = "update-plan"
@@ -141,11 +140,12 @@ class UpdateScreen(ModalScreen[bool]):
         """What the dialog says, above its buttons."""
         text = Text()
         if not self.plan.runnable:
+            # The way it was installed updates it; asq names no command to type (R13).
             text.append(f"rlx does not update this install itself ({self.plan.reason}).")
-            if self.plan.command:
-                text.append(" Update it with:\n\n")
-                text.append(self.plan.command, style="bold")
-                text.append(f"\n\nthen start {prog.word()} again. The agents keep running.")
+            text.append(
+                " Update it the way you installed it, then start rlx again. "
+                "The agents keep running."
+            )
             if self.status is not None:
                 text.append("\n")
                 text.append(self.status, style="dim")

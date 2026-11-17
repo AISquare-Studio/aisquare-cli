@@ -217,7 +217,7 @@ def _credits_row(target: ops.ResolvedTarget) -> str:
     except iam.IamError:
         session = None
     if session is None:
-        return "(sign in to read them — aisquare login)"
+        return "(sign in to read them on the Accounts page)"
     reading = credits_service.for_destination(session, destination)
     if reading is None:  # the session belongs to another API than the workspace's
         # For an AISQUARE_TOKEN session the fix is the environment's, with a token
@@ -253,8 +253,7 @@ def _unused_page_key(page: ProjectInfo | None, project: ProjectInfo) -> str:
         return ""
     return (
         f"\n  {page.root.name or page.id}: its own key for target {binding.target} is not used — "
-        f"its launches join {project.root.name or project.id}; remove it with: aisquare "
-        f"explainability key clear --project {page.id}"
+        f"its launches join {project.root.name or project.id}"
     )
 
 
@@ -286,8 +285,8 @@ def _key_origin_row(
 
 
 _MINTED_KEY_REFUSAL = Notice(
-    "this project's key was minted by the CLI — replace it with "
-    "aisquare explainability key set, which revokes the minted one",
+    "this project's key was minted by the CLI — ask your manager to replace it, which "
+    "revokes the minted one",
     "warning",
 )
 
@@ -412,14 +411,14 @@ def register_roster(page: ProjectInfo | None = None) -> Notice:
     )
     if not target.gateway_url:
         return Notice(
-            f"target '{target.name}' has no gateway URL — set one with: "
-            f"{ops.deployment_fix(target)}",
+            f"target '{target.name}' has no gateway URL — fill in Setup ▸ gateway URL, then "
+            "Save setup",
             "error",
         )
     if not target.api_key:
         return Notice(
-            f"${target.api_key_env} is not set in this environment — export the workspace key "
-            "there (it is never stored by the CLI) and start the UI again",
+            f"${target.api_key_env} is not set in this environment — paste the workspace key in "
+            "Setup ▸ workspace key, with 'key variable' blank, then Save setup",
             "error",
         )
     names = target.agent_names
@@ -475,7 +474,7 @@ def routing_leftovers() -> Notice | None:
     named = "; ".join(f"{s.where}" for s in files)
     return Notice(
         f"still routing to a proxy of ours: {named} — agents launched with it fail once the "
-        f"proxy stops. Reset removes them ({ops.RESET_COMMAND})",
+        "proxy stops. Reset routing removes them",
         "warning",
         timeout=12,
     )
@@ -493,7 +492,8 @@ def reset_routing() -> Notice:
     if report.backups:
         done += f"; backups beside each settings file ({report.backups[0].name}…)"
     if report.shell_unset:
-        done += f"; the shell that started the UI still needs: {report.shell_unset}"
+        # The variable is a fact worth knowing; unsetting it is the shell's (R13).
+        done += "; this rlx still carries the proxy's address until it starts again without it"
     return Notice(done, "warning" if report.shell_unset else "information", timeout=12)
 
 
@@ -567,9 +567,8 @@ def save_setup(form: SetupForm, page: ProjectInfo | None) -> SetupOutcome:
         )
         return _refused(
             f"target '{name}' reads its key from ${reads_from}, and the key file is read "
-            f"only for ${KEY_ENV_VAR} — a key typed here would never be used. Export "
-            f"${reads_from} in the shell instead, or leave 'key variable' blank to use "
-            f"the file{own_key}"
+            f"only for ${KEY_ENV_VAR} — a key typed here would never be used. Leave "
+            f"'key variable' blank to use the file{own_key}"
         )
     # Offered, not imposed -- and only where nothing was CHOSEN. `chosen_proxy`
     # is the resolver's own fold minus the shipped default: the target's
@@ -754,8 +753,7 @@ class ExplainabilityView(VerticalScroll):
             Text(
                 "Enable is the consent: sessions launched after it are traced through the "
                 "proxy. Ship drains the insights this CLI buffered (prompts, board notes, task "
-                "events — no file contents, no model traffic). The shell exports for a terminal "
-                "stay in `aisquare explainability env <role>`: they carry a key.",
+                "events — no file contents, no model traffic).",
             ),
             id="explainability-note",
         )
@@ -1026,8 +1024,7 @@ class ExplainabilityView(VerticalScroll):
             return
         resolved = ops.resolve_target(config.explainability, None)
         self.notify(
-            f"✓ tracing enabled for target '{resolved.name}' — "
-            "next: aisquare explainability doctor --live",
+            f"✓ tracing enabled for target '{resolved.name}' — next: Register roster",
             timeout=6,
             markup=False,
         )
@@ -1050,9 +1047,8 @@ class ExplainabilityView(VerticalScroll):
         stale = stale_shell_export(config)
         if stale is not None:
             self.notify(
-                f"this process still exports {RESERVED_ENV_VARS[0]}={stale} — launches from "
-                f"here keep using the proxy and will fail once it stops; unset "
-                f"{' '.join(RESERVED_ENV_VARS)} in the shell that started the UI",
+                f"rlx was started with {RESERVED_ENV_VARS[0]}={stale} — launches from it keep "
+                "using the proxy and will fail once it stops; start rlx again without it",
                 severity="warning",
                 timeout=10,
                 markup=False,

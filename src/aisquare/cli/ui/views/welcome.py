@@ -71,13 +71,11 @@ from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
 from aisquare.cli.ui.theme import MARK_STYLE, MarkStatic
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
-from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, get_adapter, stage_mark_of
 from aisquare.core.agent_adapters.types import staged_label
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
-from aisquare.services import first_run, onboarding
-from aisquare.services import project as project_service
+from aisquare.services import diagnostics, first_run, onboarding
 from aisquare.services.first_run import (
     Candidate,
     Candidates,
@@ -244,12 +242,15 @@ def step_two_name(claude: ClaudeState | None) -> str:
     return claude.label
 
 
-def _routes(text: Text, agent: str, platform: str, indent: str) -> None:
-    for index, route in enumerate(first_run.install_routes(platform, agent=agent)):
-        text.append(f"\n{indent}")
-        if index:
-            text.append(f"or ({route.how}): ", style="dim")
-        text.append(route.command, style="bold")
+TMUX_INSTALL_PAGE = diagnostics.TMUX_INSTALL_PAGE
+"""tmux's own install page, which step 3 links where tmux is missing (R13, ruled Q1)."""
+
+
+def _page(text: Text, agent: str, indent: str) -> None:
+    """The agent's own install page (``AgentAdapter.install_page``): asq links it, and names
+    no command to type (R13, ruled Q1). The shell's ``first_run.install_routes`` keep them."""
+    text.append(f"\n{indent}")
+    text.append(get_adapter(agent).install_page, style="bold")
 
 
 def _install_text(text: Text, claude: ClaudeState, platform: str) -> None:
@@ -266,12 +267,12 @@ def _install_text(text: Text, claude: ClaudeState, platform: str) -> None:
             text.append(
                 f"No coding agent is installed. The fleet runs inside WSL2; install {names}"
             )
-            text.append(" there:")
+            text.append(" there, as its install page says:")
         else:
-            text.append(f"No coding agent is installed. Install {names} in a terminal:")
+            text.append(f"No coding agent is installed. Install {names}, as its page says:")
         for adapter in every:
             text.append(f"\n  {staged_label(adapter)}:")
-            _routes(text, adapter.id, platform, "    ")
+            _page(text, adapter.id, "    ")
         text.append(
             "\nThis page notices it within a few seconds; with more than one installed, it "
             "asks which the fleet uses.",
@@ -280,11 +281,12 @@ def _install_text(text: Text, claude: ClaudeState, platform: str) -> None:
         return
     if platform == "win32":
         text.append(
-            f"{claude.label} is not installed. The fleet runs inside WSL2; install it there:"
+            f"{claude.label} is not installed. The fleet runs inside WSL2; install it there, "
+            "as its install page says:"
         )
     else:
-        text.append(f"{claude.label} is not installed. Install it in a terminal:")
-    _routes(text, claude.agent, platform, "    ")
+        text.append(f"{claude.label} is not installed. Install it as its page says:")
+    _page(text, claude.agent, "    ")
     text.append("\nThis page notices it within a few seconds.", style="dim")
 
 
@@ -296,7 +298,7 @@ def _sign_in_opens(agent: str) -> str:
     args = adapter.accounts.sign_in_args() if adapter.accounts is not None else ()
     if not args:
         return "Sign in opens Accounts"
-    return f"Sign in opens `{' '.join((adapter.binary, *args))}` on the Accounts page"
+    return f"Sign in opens {adapter.label}'s sign-in on the Accounts page"
 
 
 def _other_agent_text(text: Text, claude: ClaudeState) -> Text:
@@ -363,15 +365,14 @@ def choice_text(claude: ClaudeState | None) -> Text:
     if claude.chosen_by == "default" and len(labels) > 1:
         text.append(f"{' and '.join(labels)} are both installed. ")
         text.append(
-            f"The fleet uses {claude.label} until you pick one; the pick becomes your default "
-            f"({prog.word()} agents use).",
+            f"The fleet uses {claude.label} until you pick one; the pick becomes your default.",
             style="dim",
         )
     else:
         names = " and ".join(first_run.agent_label(agent) for agent in others)
         text.append(f"{names} {'is' if len(others) == 1 else 'are'} installed too. ")
         text.append(
-            f"Your default is {claude.label}; a pick here changes it ({prog.word()} agents use).",
+            f"Your default is {claude.label}; a pick here changes it.",
             style="dim",
         )
     return text
@@ -1444,12 +1445,12 @@ class WelcomeView(VerticalScroll):
         elif manager is not None and not up:
             if "coders" in self.busy:
                 status.append("\nStarting the coders…", style="dim")
-            elif stuck is not None and (listed := self._listed_project()) is not None:
-                status.append(f"\n{stuck} could not be restarted: ", style="dim")
-                status.append(project_service.fleet_command("reap", listed), style="bold")
+            elif stuck is not None and self._listed_project() is not None:
+                # No reap in asq: the manager, which knows the command line, clears the rows
+                # (R13); then Start the coders starts new ones.
                 status.append(
-                    " ends the rows of agents whose windows are gone, and Start the coders then "
-                    "starts new ones in their place.",
+                    f"\n{stuck} could not be restarted: its window is gone. Ask the manager to "
+                    "reap its row; Start the coders then starts a new one in its place.",
                     style="dim",
                 )
             else:
@@ -1637,7 +1638,7 @@ class WelcomeView(VerticalScroll):
         )
         tmux = self.tmux
         if tmux is not None and not tmux.ok:
-            fix = f" — install it: {tmux.hint}" if tmux.hint else ""
+            fix = f" — install it as {TMUX_INSTALL_PAGE} says"
             line = (line + "\n" if line else "") + f"✗ {tmux.problem}{fix}"
         return line or "Checking this machine…"
 

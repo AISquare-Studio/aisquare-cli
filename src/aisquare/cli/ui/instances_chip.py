@@ -17,7 +17,6 @@ from collections.abc import Sequence
 from rich.text import Text
 from textual.widgets import Static
 
-from aisquare.core import program as prog
 from aisquare.core.instances import Instance, host_name
 
 HERE = "here"
@@ -78,7 +77,6 @@ def chip_tooltip(live: Sequence[Instance], this_id: str | None) -> str:
         lines.append(f"• rlx {instance.version} — {instance.where}{mark}")
     if differ(live):
         lines.append("They run different releases: quit the older one (q in it).")
-    lines.append(f"`{prog.word()} instances` lists them.")
     return "\n".join(lines)
 
 

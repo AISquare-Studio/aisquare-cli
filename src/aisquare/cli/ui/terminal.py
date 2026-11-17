@@ -230,6 +230,7 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
+from aisquare.cli.ui import toasts
 from aisquare.cli.ui.clipboard import ClipboardApp, characters, copy_and_tell
 from aisquare.core import instances, procs
 from aisquare.core.clipboard import in_wsl
@@ -805,6 +806,10 @@ def route_selection_gesture(app: App[Any], button: int | None, *, moved: bool = 
     drifted was told "nothing to copy" (review of the #167 fold, F3). Such a
     gesture asked for no copy: its blank highlight still goes, without a word.
     """
+    if isinstance(app.mouse_captured, toasts.CalmToast):
+        # A drag that began on a toast is the toast's (it holds the pointer): its release
+        # copies the toast's text, never a pane's that the drag ran over (#517).
+        return
     ended: list[GestureEnd | None] = []
     _tell_panes(
         app, "selection gesture", lambda pane: ended.append(pane.selection_gesture_ended(button))
@@ -813,7 +818,7 @@ def route_selection_gesture(app: App[Any], button: int | None, *, moved: bool = 
         app.notify(NOTHING_TO_COPY, markup=False)
 
 
-def route_lost_release(app: App[Any]) -> None:
+def route_lost_release(app: App[Any]) -> bool:
     """The gesture's release was lost: every pane on the active screen ends the
     part of it the pane runs itself (see :meth:`TerminalPane.gesture_release_lost`).
 
@@ -822,8 +827,17 @@ def route_lost_release(app: App[Any]) -> None:
     gestures — a press forwarded to the program, a shift+drag (#148) — are the
     three things a release would have ended, and the app is the only place
     that learns it never came.
+
+    A drag begun on a toast holds the pointer: it ends as the toast's
+    (``CalmToast.release_lost``), and True says so — the gesture was not the
+    panes' to copy (#517).
     """
     _tell_panes(app, "lost release", TerminalPane.gesture_release_lost)
+    held = app.mouse_captured
+    if isinstance(held, toasts.CalmToast):
+        held.release_lost()  # its drag ends as the toast's, and lets go of the pointer
+        return True
+    return False
 
 
 def copy_pane_selection(app: App[Any]) -> bool:
@@ -1033,8 +1047,8 @@ class SelectionHost(ClipboardApp[None]):
             # the gestures a pane runs itself (#148), which hold the pointer.
             lost, self._pressed = self._pressed, None
             self._end_screen_drag()
-            route_lost_release(self)
-            route_selection_gesture(self, lost)
+            if not route_lost_release(self):  # a toast's drag is the toast's (#517)
+                route_selection_gesture(self, lost)
         # ONE gesture at a time. A second button pressed while one is down is
         # not a new gesture — and it is not the screen's to see either. Recording
         # it overwrote ``_pressed`` and re-baselined every pane to the selection

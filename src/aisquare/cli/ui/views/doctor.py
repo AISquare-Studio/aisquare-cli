@@ -23,7 +23,8 @@ UI it replaces, and asq comes back after it.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import re
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 from rich.text import Text
@@ -34,7 +35,6 @@ from textual.message import Message
 from textual.widgets import Button, Static
 
 from aisquare.cli.ui.sidebar import AccountsSelected
-from aisquare.core import program as prog
 from aisquare.core import selfcli
 from aisquare.core.agent_adapters import stage_mark_of
 from aisquare.models import CheckStatus, DoctorCheck
@@ -45,15 +45,17 @@ _SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "�
 _STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
 FIX_WORKER = "doctor-fix"
 """The worker a one-click fix runs in (and the doctor after it): it writes."""
+ASK_WORKER = "doctor-ask-manager"
+"""The worker *Ask the manager* hands a row to the manager in (``fleet.tell``): it writes."""
 ROUTE_WORKER = "doctor-update-route"
 """The worker the machine Doctor reads how rlx was installed in, for Update."""
 
 
 def _update_tooltip() -> str:
-    """What Update does, for its tooltip."""
+    """What Update does, for its tooltip: what happens, never the command (R13)."""
     return (
-        f"Quits rlx and runs `{prog.word()} upgrade` here: it shows what it will do and asks "
-        "first. rlx opens again when it is done."
+        "Quits rlx and updates it here: it shows what it will do and asks first. rlx opens "
+        "again when it is done."
     )
 
 
@@ -79,18 +81,79 @@ class FixApplied(Message):
         super().__init__()
 
 
-def render_checks(checks: list[DoctorCheck]) -> Text:
-    """The `aisquare doctor` output as rich text (fixes indented under their check)."""
+_SUBCOMMANDS = (
+    "fleet|team|accounts|agents|project|doctor|config|remote|explainability|metrics|captain|"
+    "upgrade|uninstall|instances|launch|init|login|logout|board|watch|persona|task|note|hook|code"
+)
+COMMAND = re.compile(
+    rf"\b(?:rlx|aisquare|asq|relax) (?:{_SUBCOMMANDS})\b"
+    r"|`--[a-z][\w-]*"
+    r"|\btmux -[LS]\b|\bnpm install\b|\bpip install\b|\bbrew install\b|\buv tool\b"
+    r"|curl -fsSL|\bpipx (?:install|inject|upgrade)\b"
+)
+"""What a command to type looks like in text asq would show (R13): ours, a package manager's,
+tmux's, a backticked flag. ``tests/test_asq_names_no_command.py`` sweeps asq's strings with it."""
+
+
+def names_a_command(text: str) -> bool:
+    """Whether ``text`` tells its reader a command to type (:data:`COMMAND`)."""
+    return COMMAND.search(text) is not None
+
+
+NO_MANAGER_WAY = "a project's manager can fix this: start one, then ask it here"
+"""What a row says whose fix rlx has no button for, while no manager runs to ask (ruling Q2)."""
+
+
+def ui_way(
+    check: DoctorCheck, buttons: Mapping[str, str], *, manager: str | None = None
+) -> str | None:
+    """What asq's Doctor says under a row in place of its shell ``fix`` (R13, #146): the row's
+    own ``ui_fix``; else the one-click button its fix makes (``buttons``: check name → its
+    title); else, when a manager runs, the Ask button beside it; else plain words. ``None``
+    for a row that is ok or has no fix. Never a command: the manager, asked, is handed it."""
+    if check.status is CheckStatus.ok or not (check.fix or check.ui_fix):
+        return None
+    if check.ui_fix:
+        return check.ui_fix
+    if check.fix and not names_a_command(check.fix):
+        return check.fix  # plain words already: the dashboard, a reset to wait for
+    if check.name in buttons:
+        return f"{buttons[check.name]} below fixes it"
+    if manager is not None:
+        return f"Ask {manager} below to fix it"
+    return NO_MANAGER_WAY
+
+
+def render_checks(
+    checks: list[DoctorCheck],
+    buttons: Mapping[str, str] | None = None,
+    *,
+    manager: str | None = None,
+) -> Text:
+    """The doctor's report as asq shows it: each row, and under one that is not ok what
+    rlx itself has for it (:func:`ui_way`), never the shell's command."""
     text = Text()
     for check in checks:
         name = check.name + stage_mark_of(check.name)  # a beta agent's row, as the CLI's
         text.append(f"{_SYMBOL[check.status]} {name}: ", style=_STYLE[check.status])
         text.append(f"{check.detail}\n")
-        if check.fix and check.status is not CheckStatus.ok:
-            text.append(f"    → {check.fix}\n", style="dim")
+        way = ui_way(check, buttons or {}, manager=manager)
+        if way is not None:
+            text.append(f"    → {way}\n", style="dim")
     if not checks:
         text.append("(no checks yet)", style="dim")
     return text
+
+
+def ask_text(check: DoctorCheck) -> str:
+    """What a manager is handed when asked to fix ``check`` (ruling Q2): the row and its shell
+    fix, which the manager, unlike asq's person, runs."""
+    said = "fails" if check.status is CheckStatus.fail else "warns"
+    return (
+        f"rlx's doctor: its {check.name} check {said}: {check.detail}\n"
+        f"Its fix: {check.fix}\n"
+        "Please fix it, then tell me what you did."
+    )
 
 
 def _doctor_via_cli(run: Runner) -> Refresh:
@@ -125,10 +188,12 @@ def _update_refusal() -> str | None:
         reason = install_route.not_automated(route)
         if reason is None:
             return None
-        command = install_route.command_line(install_route.upgrade_argv(route, None))
     except Exception:  # the Doctor view must keep its buttons whatever this finds
         return None
-    return f"rlx does not upgrade this install itself ({reason}). Upgrade it with: {command}"
+    # The way it was installed updates it; asq names no command to type (R13).
+    return (
+        f"rlx does not upgrade this install itself ({reason}). Update it the way you installed it."
+    )
 
 
 class DoctorView(VerticalScroll):
@@ -163,6 +228,15 @@ class DoctorView(VerticalScroll):
             self.args = args
             super().__init__()
 
+    class AskManager(Message):
+        """Ask the manager: hand ``check``'s fix to the manager the app finds for ``cwd``,
+        which knows the command line asq never asks its person to use (ruling Q2)."""
+
+        def __init__(self, check: DoctorCheck, cwd: Path | None) -> None:
+            self.check = check
+            self.cwd = cwd
+            super().__init__()
+
     def __init__(
         self,
         *,
@@ -173,8 +247,14 @@ class DoctorView(VerticalScroll):
         classes: str | None = None,
         machine: bool = False,
         update_refusal: Callable[[], str | None] | None = None,
+        manager: Callable[[Path | None], str | None] | None = None,
     ) -> None:
         super().__init__(id=id, classes=classes)
+        self._manager = manager
+        """Who *Ask the manager* asks for a report about ``cwd`` (``"coder's manager"``), from
+        what the app already holds; ``None`` (or no seam): no manager runs, and a row says so."""
+        self.asks: dict[str, DoctorCheck] = {}
+        """Button id → the row its *Ask the manager* hands to the manager."""
         self.machine = machine
         """asq's own Doctor: also Update and Uninstall, which act on the whole install."""
         self._update_refusal = update_refusal
@@ -209,8 +289,8 @@ class DoctorView(VerticalScroll):
                 yield update
                 uninstall = Button("Uninstall rlx…", id="doctor-uninstall", variant="error")
                 uninstall.tooltip = (
-                    f"Quits rlx and runs `{prog.word()} uninstall` here: it lists what goes and "
-                    "what stays, and asks first. rlx opens again if nothing is removed."
+                    "Quits rlx and uninstalls it here: it lists what goes and what stays, and "
+                    "asks first. rlx opens again if nothing is removed."
                 )
                 yield uninstall
 
@@ -283,9 +363,19 @@ class DoctorView(VerticalScroll):
             self._set_status(Text(status, style="dim"))
             self._show_about()
 
+    def _manager_name(self) -> str | None:
+        try:
+            return self._manager(self.cwd) if self._manager is not None else None
+        except Exception:  # what the app holds could not say: no Ask, plain words
+            return None
+
     def _redraw(self) -> None:
         self._show_about()
-        self.query_one("#doctor-report", Static).update(render_checks(self.checks))
+        buttons: dict[str, str] = {}
+        for fix in onboarding.fix_commands(self.checks):
+            buttons.setdefault(fix.check, fix.title)
+        report = render_checks(self.checks, buttons, manager=self._manager_name())
+        self.query_one("#doctor-report", Static).update(report)
         self.call_later(self._rebuild_fixes)
 
     def _show_about(self) -> None:
@@ -307,23 +397,38 @@ class DoctorView(VerticalScroll):
         for index, fix in enumerate(onboarding.fix_commands(self.checks)):
             button_id = f"fix-{index}"
             fixes[button_id] = fix
-            # ``Text``, never the str: a Button parses a str label as markup, and a
-            # ``--config-dir /home/me/[archive]/.claude`` would lose its bracketed
-            # segment on screen and read as a different directory (measured:
-            # ``Content.from_text`` turns ``/home/me/[archive]/repo`` into
-            # ``/home/me//repo``). Same rule for the tooltip; it carries the hint.
+            # ``Text``, never the str: a Button parses a str label as markup. What it does,
+            # never its command line (R13): ``Connect Claude Code``, ``Sign in account 3``.
             slot = fix.sign_in_slot
-            label = f"Sign in account {slot}" if slot is not None else fix.label
-            button = Button(Text(label), variant="warning", id=button_id)
-            tooltip = Text(fix.source)
+            button = Button(Text(fix.title), variant="warning", id=button_id)
+            tooltip = Text(f"Fixes the {fix.check} check.")
             if slot is not None:
-                tooltip.append(f"\nOpens the Accounts page with {fix.label} in its pane.")
+                tooltip = Text(f"Opens the Accounts page to sign in to account {slot}.")
             if fix.scope == "project" and self.cwd is None:
                 button.disabled = True
                 tooltip.append("\n(select a project first — this runs in its root)")
             button.tooltip = tooltip
             buttons.append(button)
         self.fixes = fixes
+        asks: dict[str, DoctorCheck] = {}
+        manager = self._manager_name()
+        fixed = {fix.check for fix in fixes.values()}
+        for index, check in enumerate(self.checks):
+            if (
+                manager is None
+                or check.status is CheckStatus.ok
+                or not check.fix
+                or not names_a_command(check.fix)  # said as it is: nothing to hand over
+                or check.ui_fix
+                or check.name in fixed
+            ):
+                continue
+            button_id = f"ask-{index}"
+            asks[button_id] = check
+            button = Button(Text(f"Ask the manager: {check.name}"), id=button_id)
+            button.tooltip = Text(f"Hands the {check.name} check's fix to {manager}.")
+            buttons.append(button)
+        self.asks = asks
         if buttons:
             await container.mount(*buttons)
 
@@ -344,6 +449,11 @@ class DoctorView(VerticalScroll):
             event.stop()
             self.post_message(self.HandOff(hand_off))
             return
+        asked = self.asks.get(event.button.id or "")
+        if asked is not None:
+            event.stop()
+            self.post_message(self.AskManager(asked, self.cwd))
+            return
         fix = self.fixes.get(event.button.id or "")
         if fix is None:
             return
@@ -358,7 +468,7 @@ class DoctorView(VerticalScroll):
         self.busy = True
         for button in self.query("#doctor-fixes Button").results(Button):
             button.disabled = True
-        self._set_status(Text(f"… running {fix.label}", style="dim"))
+        self._set_status(Text(f"… {fix.title}", style="dim"))
         self._apply(fix)
 
     @work(thread=True, exclusive=True, name=FIX_WORKER, group=FIX_WORKER, exit_on_error=False)
@@ -378,7 +488,7 @@ class DoctorView(VerticalScroll):
         self, result: FixResult, checks: list[DoctorCheck] | None, recheck_error: str | None
     ) -> None:
         self.busy = False
-        status = Text(result.summary(), style="green" if result.ok else "bold red")
+        status = Text(result.said(), style="green" if result.ok else "bold red")
         if recheck_error is not None:
             status.append(f"\n⚠ re-check failed, showing the previous report: {recheck_error}")
         self._set_status(status)

@@ -39,7 +39,6 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.click_guard import GuardedButton
-from aisquare.core import program as prog
 from aisquare.models import SharingStatus, ShipReport
 from aisquare.services import usage_share
 
@@ -79,8 +78,7 @@ def consent_text() -> str:
         "We never collect repository names, paths or remotes, prompts, file names, emails, account "
         "aliases or command arguments. If you are signed in to AISquare, it is linked to your "
         "account; if not, it is anonymous. Only days from the moment you say yes are sent, nothing "
-        "from before. Turn it off at any time: Settings ▸ Usage & stats, or "
-        f"`{prog.word()} metrics share off`."
+        "from before. Turn it off at any time: Settings ▸ Usage & stats."
     )
 
 

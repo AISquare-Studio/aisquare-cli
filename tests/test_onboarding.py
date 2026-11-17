@@ -134,15 +134,16 @@ def test_onboard_runs_init_then_doctor_in_the_path(tmp_path: Path) -> None:
         (["--json", "init", "--no-explainability", str(tmp_path)], tmp_path),
         (["--json", "doctor"], tmp_path),
     ]
-    # The log tells the story in order: the command, its result, the doctor, the warning + fix.
+    # The log tells the story in order: each step as it does it (never its command: R13),
+    # its result, the doctor, the warning; its way is the Doctor's, shown below the log.
     log = "\n".join(outcome.log)
     assert (
-        log.index("$ rlx --json init")
+        log.index(onboarding.INIT_STEP.format(path=tmp_path))
         < log.index("✓ initialized")
-        < log.index("$ rlx --json doctor")
+        < log.index(onboarding.DOCTOR_STEP)
     )
     assert "note: connected claude-code" in log
-    assert "⚠ claude-code: hooks are missing" in log and "→ (Re)connect it" in log
+    assert "⚠ claude-code: hooks are missing" in log and "rlx " not in log
 
 
 def test_onboard_streams_every_line_as_it_happens(tmp_path: Path) -> None:

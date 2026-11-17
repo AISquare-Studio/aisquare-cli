@@ -1132,7 +1132,7 @@ def test_run_ui_hands_over_only_once_the_copy_made_before_the_press_is_written(
         written.append(text)
         return True
 
-    monkeypatch.setattr(clipboard, "_resolve", lambda: clipboard.Writer(("pbcopy",)))
+    monkeypatch.setattr(clipboard, "_resolve", lambda: (clipboard.Writer(("pbcopy",)),))
     monkeypatch.setattr(clipboard, "write", slow_write)
     told: list[bool] = []
     clipboard.submit("a long pane selection", told.append)

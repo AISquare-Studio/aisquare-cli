@@ -503,13 +503,11 @@ class AgentView(Vertical):
         # `fleet stop` types), never spelled here: a future agent's own command (#60).
         stop.tooltip = (
             f"{fleet_service.exit_command_for(self.status.agent)}, a grace period, then the "
-            "window is killed (as `fleet stop` does)"
+            "window is killed"
             if self.status.state in _STOPPABLE
-            else "End the pause for good: its claims go back to the board, and `fleet resume` "
-            "leaves it (as `fleet stop` does)"
+            else "End the pause for good: its claims go back to the board, and Resume leaves it"
             if paused
-            else "Remove the dead window tmux kept for the last screen; the row leaves the "
-            "listing (as `fleet stop` does)"
+            else "Remove the dead window tmux kept for the last screen; the row leaves the listing"
         )
         restart = self.query_one("#agent-restart", Button)
         restart.disabled = busy
@@ -522,8 +520,7 @@ class AgentView(Vertical):
         )
         restart.tooltip = (
             "Start it again under this label — same role, task, worktree, account and "
-            "persona; its session is resumed from the transcript when that is on disk (as "
-            "`fleet restart` does)"
+            "persona; its session is resumed from the transcript when that is on disk"
         )
 
     @on(Button.Pressed, "#agent-stop")

@@ -500,7 +500,7 @@ class BoardHelp(ModalScreen[None]):
         self._extra = extra
 
     def compose(self) -> ComposeResult:
-        text = Text("rlx board — keys\n\n", style="bold")
+        text = Text("Board — keys\n\n", style="bold")  # no command to type (R13)
         text.append_text(board_help())
         if self._extra:
             text.append("\n")

@@ -31,7 +31,7 @@ from textual.widgets.directory_tree import DirEntry
 from textual.widgets.tree import TreeNode
 
 from aisquare.cli.ui import app as ui_app
-from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView, FixApplied
+from aisquare.cli.ui.views.doctor import NO_MANAGER_WAY, DoctorRefreshed, DoctorView, FixApplied
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded, ProjectTree
 from aisquare.core.selfcli import CliResult
 from aisquare.core.workspace import project_id_for
@@ -251,13 +251,12 @@ def test_pressing_onboard_runs_init_and_doctor_and_posts_project_onboarded(tmp_p
     onboarded = received[0]
     assert isinstance(onboarded, ProjectOnboarded)
     assert onboarded.project_id == project_id_for(proj) and onboarded.path == proj
-    assert log[0] == f"$ rlx --json init --no-explainability {proj}"
-    assert "$ rlx --json doctor" in log
+    # What each step does, never the command it runs (R13).
+    assert log[0] == onboarding.INIT_STEP.format(path=proj)
+    assert onboarding.DOCTOR_STEP in log
     assert any("⚠ claude-code" in line for line in log)
     assert doctor_shown, "the findings appear under the log"
-    assert fix_labels == ["rlx agents connect claude-code"], (
-        "one button for the known fix, none for npm"
-    )
+    assert fix_labels == ["Connect Claude Code"], "one button for the known fix, none for npm"
     assert not running
 
 
@@ -628,7 +627,7 @@ def test_a_reload_while_onboarding_leaves_the_run_its_log_and_its_button(tmp_pat
     assert during["run disabled"], "nor its button, which stays off until the run ends"
     assert not during["reload disabled"], "↻ is allowed during a run"
     assert seen["received"] == ["ProjectOnboarded"]
-    assert "$ rlx --json doctor" in list(seen["log"])  # type: ignore[call-overload]
+    assert onboarding.DOCTOR_STEP in list(seen["log"])  # type: ignore[call-overload]
     assert not seen["run disabled"], "the run's end arms the button as ever"
 
 
@@ -783,11 +782,14 @@ def test_doctor_view_renders_a_button_only_for_known_fixes(tmp_path: Path) -> No
             return _text(view.query_one("#doctor-report", Static)), buttons
 
     report, buttons = asyncio.run(drive())
-    assert "⚠ claude-code: hooks are missing" in report and "→ (Re)connect it" in report
-    assert "→ Install it: brew install tmux" in report, "an unknown fix stays text"
+    # Under each row, what rlx has for it, never the shell's command (R13): the button below;
+    # with no button and no manager, plain words (ruled Q2).
+    assert "⚠ claude-code: hooks are missing" in report
+    assert "→ Connect Claude Code below fixes it" in report
+    assert f"→ {NO_MANAGER_WAY}" in report and "brew install" not in report
     assert buttons == [
-        ("rlx agents connect claude-code", False),
-        ("rlx project onboard --refresh", False),
+        ("Connect Claude Code", False),
+        ("Refresh this project", False),
     ]
 
 
@@ -813,14 +815,11 @@ def test_a_bracketed_config_dir_survives_into_the_button(tmp_path: Path) -> None
             button = view.query_one("#fix-0", Button)
             return str(button.label), str(button.tooltip)
 
-    from aisquare.services import install_route
-
     label, tooltip = asyncio.run(drive())
-    # The label names the command as a shell would read it, quoted where its path needs it.
-    argv = ["rlx", "agents", "connect", "claude-code", "--config-dir"]
-    expected = install_route.command_line([*argv, "/home/me/[archive]/.claude"])
+    # The label says what it does and which home, never the command (R13): the path whole.
+    expected = "Connect Claude Code (/home/me/[archive]/.claude)"
     assert label == expected
-    assert "[archive]" in label and "[archive]" in tooltip
+    assert tooltip == "Fixes the claude-code check."
     # Control: the same string handed to Textual AS A STR loses the segment — this
     # is the failure the assertion above exists to catch, and it is real.
     assert Content.from_text(expected).plain == expected.replace("[archive]", "")
@@ -839,8 +838,8 @@ def test_doctor_view_without_a_cwd_disables_project_scoped_fixes() -> None:
             ]
 
     assert asyncio.run(drive()) == [
-        ("rlx agents connect claude-code", False),
-        ("rlx project onboard --refresh", True),
+        ("Connect Claude Code", False),
+        ("Refresh this project", True),
     ]
 
 
@@ -882,7 +881,7 @@ def test_clicking_a_fix_runs_it_in_the_cwd_then_refreshes_the_doctor(tmp_path: P
         "python",
         "claude-code",
     ] and refreshed.cwd == tmp_path
-    assert status == "✓ rlx agents connect claude-code"
+    assert status == "✓ Connect Claude Code"
     assert "✓ claude-code: connected" in report, "the report is the re-run's, not the old one"
     assert buttons == 0, "a fixed check has no button left"
 
@@ -915,11 +914,9 @@ def test_a_failed_fix_shows_the_reason_and_keeps_the_buttons(tmp_path: Path) -> 
 
     kinds, status, buttons, report = asyncio.run(drive())
     assert kinds == ["FixApplied"], "no DoctorRefreshed when the re-check gave no answer"
-    assert status.startswith("✗ rlx agents connect claude-code: ") and "not_installed" in status
+    assert status.startswith("✗ Connect Claude Code: ") and "not_installed" in status
     assert "re-check failed, showing the previous report" in status
-    assert buttons == [("rlx agents connect claude-code", False)], (
-        "the button is back for another try"
-    )
+    assert buttons == [("Connect Claude Code", False)], "the button is back for another try"
     assert "⚠ claude-code: hooks are missing" in report
 
 

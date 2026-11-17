@@ -436,7 +436,7 @@ def test_add_codex_account_opens_codex_login_in_a_new_slot_and_records_it(
     assert window["socket"] == PRIVATE_SOCKET and window["session"] == "asq-accounts"
     assert window["command"][-5:] == ["accounts", "run", str(account.slot), *DEVICE_AUTH]
     assert "CLAUDE_CONFIG_DIR" not in window["env"]  # a Codex window carries Codex's own
-    assert "`codex login --device-auth`" in seen["header"]
+    assert "Codex's sign-in runs in this pane" in seen["header"]  # never its command (R13)
     assert "Claude Code's login" not in seen["header"]
     assert seen["still_open"] and not seen["box"]
     assert completed == [(account.slot, CODEX)]

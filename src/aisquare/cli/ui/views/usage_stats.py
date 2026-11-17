@@ -42,7 +42,6 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import usage_format as fmt
 from aisquare.cli.ui.views.usage_sharing import Sharing, SharingBox
-from aisquare.core import program as prog
 from aisquare.models import USAGE_RANGES, UsageRange, UsageStats
 from aisquare.services import usage_stats as usage_service
 
@@ -94,12 +93,12 @@ def longer_ranges_hint(range_: UsageRange) -> str:
 
 
 def empty_text() -> str:
-    """The page with no usage yet, which names the command that reads the transcripts."""
+    """The page with no usage yet, and how to read the transcripts again: its own ``r``."""
     return (
         "No usage recorded yet.\n\n"
         "The agents' transcripts are read when this page opens, and each session rlx "
-        "launches adds its turns as it goes. If you use an agent and still see this, run "
-        f"`{prog.word()} metrics backfill`."
+        "launches adds its turns as it goes. If you use an agent and still see this, press "
+        "r to read them again."
     )
 
 

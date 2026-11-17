@@ -219,6 +219,11 @@ class DoctorCheck(BaseModel):
     status: CheckStatus
     detail: str
     fix: str | None = None  # actionable guidance when not ok
+    ui_fix: str | None = None
+    """What asq's Doctor page says in place of ``fix``, where rlx itself has the way: the
+    button, the page, the row to press (R13, #146). ``fix`` stays the shell's: the CLI prints
+    it, its commands make the page's buttons, and a manager asked to fix the row is handed
+    it. ``None``: the page says the button or the manager that fixes it, never a command."""
 
 
 class PromptRecord(BaseModel):

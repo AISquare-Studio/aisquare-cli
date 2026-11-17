@@ -15,6 +15,14 @@ it — runs on one worker thread (:func:`submit`), the newest waiting copy first
 write bounded by :data:`WRITE_TIMEOUT`; a failure is logged and told to the caller,
 never raised.
 
+A tool that fails is not the end of the copy: the next one the platform has is tried
+(:func:`fallback_writers`, at most :data:`MAX_TRIES` a copy), and a tool that failed is
+passed over for :data:`RECHECK`. Inside the user's own tmux, tmux itself is one more
+route (:func:`relay_writer`, ``tmux load-buffer -w``): the one that can reach a terminal
+over SSH, where tmux keeps an app's own OSC 52 to itself by default. What became of a
+copy is told as a :class:`CopyResult` — copied, only sent, or failed, and why
+(:func:`verdict`) — so every surface says what is true (R13, #146).
+
 Nothing here knows Textual: the app half, OSC 52 and the toast, is
 ``aisquare.cli.ui.clipboard``.
 """
@@ -22,6 +30,7 @@ Nothing here knows Textual: the app half, OSC 52 and the toast, is
 from __future__ import annotations
 
 import atexit
+import base64
 import contextlib
 import logging
 import os
@@ -75,6 +84,25 @@ _BINFMT = Path("/proc/sys/fs/binfmt_misc")
 _WINDOWS_CLIP = Path("/mnt/c/Windows/System32/clip.exe")
 """Where WSL reaches ``clip.exe`` when ``appendWindowsPath`` keeps Windows off PATH."""
 
+_WINDOWS_POWERSHELL = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+"""Where WSL reaches Windows PowerShell when ``appendWindowsPath`` keeps Windows off PATH."""
+
+POWERSHELL_SET = (
+    "[Console]::InputEncoding = [Text.Encoding]::UTF8; "
+    "Set-Clipboard -Value ([Console]::In.ReadToEnd())"
+)
+"""What Windows PowerShell runs to put its stdin, read as UTF-8, on the clipboard: the route
+after ``clip.exe``, which a stale WSL interop or a broken console can fail."""
+
+MAX_TRIES = 2
+"""Tools one copy may try, in the platform's order, before it is OSC 52's alone: two writes'
+worth of waiting at most, and a tool that failed is passed over for :data:`RECHECK`, so the
+next copy starts at the next one."""
+
+OSC52_LIMIT = 100_000
+"""The most base64 one OSC 52 write carries. Terminals and tmux drop a longer one without a
+word, so a copy past it is not sent at all, and says so (:func:`verdict`)."""
+
 Osc52Fate = Literal["accepts", "drops", "asks", "unknown"]
 """What becomes of an OSC 52 write here (:func:`osc52_terminal`): ``core.terminal.Osc52``
 for a terminal it names, ``"unknown"`` where nothing says."""
@@ -91,6 +119,14 @@ class Writer:
     the console's codepage, which mangles every character outside it."""
     env: tuple[tuple[str, str], ...] = ()
     """Set in the tool's environment over this process's own."""
+    relay: bool = False
+    """It hands the text to a multiplexer (``tmux load-buffer -w``), which passes it on to
+    the terminal by its own settings: taken, the copy was SENT, not known to be copied."""
+
+    @property
+    def name(self) -> str:
+        """The tool's own name, as a copy's outcome says it: ``pbcopy``, ``clip.exe``."""
+        return os.path.basename(self.argv[0])
 
     def payload(self, text: str) -> bytes:
         """``text`` as this tool reads it from stdin."""
@@ -217,14 +253,29 @@ def pick_writer(
     wsl: bool | None = None,
     interop: bool | None = None,
 ) -> Writer | None:
-    """The native tool that writes the clipboard here, or ``None`` when there is none.
+    """The native tool that writes the clipboard here first, or ``None`` when there is none:
+    the first of :func:`pick_writers`."""
+    found = pick_writers(env, platform=platform, which=which, wsl=wsl, interop=interop)
+    return found[0] if found else None
+
+
+def pick_writers(
+    env: Mapping[str, str],
+    *,
+    platform: str,
+    which: Callable[[str], str | None] | None = None,
+    wsl: bool | None = None,
+    interop: bool | None = None,
+) -> tuple[Writer, ...]:
+    """Every native tool that writes the clipboard here, in the order a copy tries them.
 
     ``pbcopy`` reads stdin in the locale's encoding, which is MacRoman with no locale
     set, so it is run under a UTF-8 one. ``clip.exe`` — native Windows, where
     ``aisquare watch`` and asq's Welcome page run in a conhost that knows no OSC 52,
     and WSL — gets UTF-16LE after a BOM
     (:attr:`Writer.bom`), when WSL can run it (:func:`wsl_interop`, or ``interop`` when
-    given); without it a WSLg session still has the Linux tools.
+    given); after it Windows PowerShell's ``Set-Clipboard`` (:data:`POWERSHELL_SET`).
+    Without them a WSLg session still has the Linux tools.
     ``wl-copy`` and ``xclip`` stay alive after the write to serve the selection, which
     is why :func:`write` never reads their output. ``wsl`` is :func:`in_wsl`'s answer,
     asked only when this is Linux and the caller did not give it. ``which`` is
@@ -236,27 +287,62 @@ def pick_writer(
     which = shutil.which if which is None else which
     if platform == "darwin":
         found = which("pbcopy")
-        return Writer((found,), env=(("LC_ALL", "en_US.UTF-8"),)) if found else None
+        return (Writer((found,), env=(("LC_ALL", "en_US.UTF-8"),)),) if found else ()
+    writers: list[Writer] = []
     if platform == "win32":
-        found = which("clip.exe")
-        return Writer((found,), encoding="utf-16-le", bom=True) if found else None
+        if found := which("clip.exe"):
+            writers.append(Writer((found,), encoding="utf-16-le", bom=True))
+        if found := which("powershell.exe"):
+            writers.append(_powershell(found))
+        return tuple(writers)
     if (
         platform.startswith("linux")
         and (in_wsl(env) if wsl is None else wsl)
         and (wsl_interop(env) if interop is None else interop)
     ):
-        found = which("clip.exe") or (str(_WINDOWS_CLIP) if _WINDOWS_CLIP.is_file() else None)
-        if found:
-            return Writer((found,), encoding="utf-16-le", bom=True)
+        if found := which("clip.exe") or _on_disk(_WINDOWS_CLIP):
+            writers.append(Writer((found,), encoding="utf-16-le", bom=True))
+        if found := which("powershell.exe") or _on_disk(_WINDOWS_POWERSHELL):
+            writers.append(_powershell(found))
     # Linux, WSLg, the BSDs and the other unixes: the Wayland tool, else the X ones.
     if env.get("WAYLAND_DISPLAY") and (found := which("wl-copy")):
-        return Writer((found, "--type", "text/plain"))
+        writers.append(Writer((found, "--type", "text/plain")))
     if env.get("DISPLAY"):
         if found := which("xclip"):
-            return Writer((found, "-selection", "clipboard"))
+            writers.append(Writer((found, "-selection", "clipboard")))
         if found := which("xsel"):
-            return Writer((found, "--clipboard", "--input"))
-    return None
+            writers.append(Writer((found, "--clipboard", "--input")))
+    return tuple(writers)
+
+
+def _on_disk(path: Path) -> str | None:
+    return str(path) if path.is_file() else None
+
+
+def _powershell(found: str) -> Writer:
+    return Writer((found, "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_SET))
+
+
+def fallback_writers(first: Writer, *, remote: bool = False) -> tuple[Writer, ...]:
+    """The tools a copy tries after ``first``, should it fail: the rest of
+    :func:`pick_writers`, none on a remote session. It scans PATH, so it runs on the
+    clipboard thread only."""
+    if remote:
+        return ()
+    found = pick_writers(os.environ, platform=sys.platform)
+    return tuple(writer for writer in found if writer.argv[0] != first.argv[0])
+
+
+def relay_writer() -> Writer | None:
+    """Inside the user's own tmux, tmux itself: ``tmux load-buffer -w -`` puts the text in
+    a tmux buffer and sends it to the terminal of the client attached (tmux 3.2 and later),
+    which an app's own OSC 52 does not reach under tmux's default ``set-clipboard
+    external``. ``None`` outside tmux, or with no ``tmux`` on PATH. It scans PATH, so it
+    runs on the clipboard thread only."""
+    if not os.environ.get("TMUX"):
+        return None
+    found = shutil.which("tmux")
+    return Writer((found, "load-buffer", "-w", "-"), relay=True) if found else None
 
 
 def local_writer() -> Writer | None:
@@ -298,9 +384,13 @@ _KEY_VARIABLES = (
 """Every variable :func:`local_writer`'s answer depends on: a change to one asks again.
 ``TMUX`` too, since inside tmux the cache holds another question's answer (:func:`_resolve`)."""
 
-_cache: tuple[tuple[str, ...], Writer | None, float] | None = None
-"""``(environment key, writer, when found)``, the last answer :func:`_resolve` found: outside
-tmux :func:`local_writer`'s, inside it :func:`native_writer`'s."""
+_cache: tuple[tuple[str, ...], tuple[Writer, ...], float] | None = None
+"""``(environment key, writers, when found)``, the last answer :func:`_resolve` found, in the
+order a copy tries them: outside tmux :func:`local_writer`'s tool and its
+:func:`fallback_writers`, inside it :func:`native_writer`'s and theirs, then
+:func:`relay_writer`'s."""
+_failed: dict[str, float] = {}
+"""When each tool's write last failed, by its path: passed over for :data:`RECHECK`."""
 _cache_lock = threading.Lock()
 _clock = time.monotonic
 
@@ -315,7 +405,7 @@ def cached_writer() -> Writer | Ask | None:
     No PATH scan, no file read, no process: the event loop calls this at every copy,
     and a ``which`` there cost a drag release several to tens of milliseconds on WSL,
     where every Windows PATH directory is a stat over 9p (review of #266, round 1).
-    ``None`` when there is no tool, or the last write failed (:func:`_writer_failed`).
+    ``None`` when there is no tool, or every tool's last write failed (:func:`_tool_failed`).
     :attr:`Ask.WORKER` when nothing is known for the environment as it is now (a
     variable in :data:`_KEY_VARIABLES` changed, or a "no tool" answer is older than
     :data:`RECHECK`), and inside the user's tmux whenever there is a tool, since its
@@ -325,65 +415,92 @@ def cached_writer() -> Writer | Ask | None:
 
 
 def _known() -> Writer | Ask | None:
-    """:func:`cached_writer`'s answer, which the clipboard thread asks under its own name."""
+    """:func:`cached_writer`'s answer, which the clipboard thread asks under its own name: the
+    first tool not passed over, ``None`` for none, :attr:`Ask.WORKER` when the search is
+    due again (the environment changed, a "no tool" answer or a tool's failure is older
+    than :data:`RECHECK`, or this is the user's tmux, where whose clipboard a tool writes is
+    asked at each copy)."""
+    if _due():
+        return Ask.WORKER
+    with _cache_lock:
+        writers = _cache[1] if _cache is not None else ()
+        usable = [w for w in writers if w.argv[0] not in _failed]
+    if not usable:
+        return None
+    if os.environ.get("TMUX"):
+        return Ask.WORKER  # the tools are known; whose clipboard they write is asked per copy
+    return usable[0]
+
+
+def _due() -> bool:
+    """Whether the tools are to be looked for again: nothing is known for the environment as
+    it is now, a "no tool" answer is older than :data:`RECHECK`, or so is a tool's failure."""
     key = _writer_key()
     with _cache_lock:
         if _cache is None or _cache[0] != key:
-            return Ask.WORKER
-        _, writer, found = _cache
-    if writer is None:
-        return Ask.WORKER if _clock() - found > RECHECK else None
-    if os.environ.get("TMUX"):
-        return Ask.WORKER  # the tool is known; whose clipboard it writes is asked per copy
-    return writer
+            return True
+        _, writers, found = _cache
+        failed = dict(_failed)
+    now = _clock()
+    if not writers:
+        return now - found > RECHECK
+    return any(now - failed[w.argv[0]] > RECHECK for w in writers if w.argv[0] in failed)
 
 
 def forget_writer() -> None:
-    """Drop the cached answer: the next copy's writer is looked for again."""
+    """Drop the cached answer and every failure held: the next copy looks for its tools again."""
     global _cache
     with _cache_lock:
         _cache = None
+        _failed.clear()
 
 
-def _writer_failed() -> None:
-    """Hold a tool whose write failed as no tool, for :data:`RECHECK`: the copies meanwhile
-    are OSC 52's alone, told at once, and the search runs again after that.
+def _tool_failed(writer: Writer) -> None:
+    """Pass ``writer`` over for :data:`RECHECK`: the copies meanwhile start at the next tool,
+    or are OSC 52's alone, told at once, when it was the last.
 
     Only dropped from the cache, a broken tool was found again by the next copy and run
     again. An ``xclip`` that hangs on a stale ``DISPLAY`` then held every copy's toast
     for :data:`WRITE_TIMEOUT` and :data:`KILL_WAIT` more, for as long as the app ran
     (review of #266, round 2).
     """
-    global _cache
     with _cache_lock:
-        _cache = (_writer_key(), None, _clock())
+        _failed[writer.argv[0]] = _clock()
 
 
-def _resolve() -> Writer | None:
-    """On the clipboard thread: the writer for this environment, cached or found now.
+def _resolve() -> tuple[Writer, ...]:
+    """On the clipboard thread: the tools to try for this copy, in order, cached or found now.
 
-    Inside the user's tmux the cache keeps the tool (:func:`native_writer`), and only
-    tmux's own word on its last attach is asked at each copy (:func:`session_is_remote`):
-    the rest of the search cannot change on a reattach, and run at every copy it cost
-    each toast a ``which`` per tool, on WSL a scan of the Windows PATH over 9p (review of
-    #266, round 2). Outside tmux nothing in this process changes whether the session is
-    remote, so the cache keeps :func:`local_writer`'s whole answer.
+    Inside the user's tmux the cache keeps the machine's tools (:func:`native_writer`) and
+    tmux's own route (:func:`relay_writer`), and only tmux's word on its last attach is
+    asked at each copy (:func:`session_is_remote`): the rest of the search cannot change on
+    a reattach, and run at every copy it cost each toast a ``which`` per tool, on WSL a
+    scan of the Windows PATH over 9p (review of #266, round 2). A remote attach leaves
+    tmux's route alone. Outside tmux nothing in this process changes whether the session
+    is remote, so the cache keeps :func:`local_writer`'s whole answer.
     """
     global _cache
-    known = _known()
-    if not isinstance(known, Ask):
-        return known
     tmux = bool(os.environ.get("TMUX"))
-    key = _writer_key()
-    with _cache_lock:
-        writer = _cache[1] if _cache is not None and _cache[0] == key else None
-    if writer is None:
-        writer = native_writer() if tmux else local_writer()
+    if _due():
+        key = _writer_key()
         with _cache_lock:
-            _cache = (key, writer, _clock())
-    if writer is not None and tmux and session_is_remote(os.environ):
-        return None
-    return writer
+            now = _clock()
+            for path, when in list(_failed.items()):
+                if now - when > RECHECK:
+                    del _failed[path]
+        first = native_writer() if tmux else local_writer()
+        found: tuple[Writer, ...] = () if first is None else (first, *fallback_writers(first))
+        relay = relay_writer() if tmux else None
+        if relay is not None:
+            found = (*found, relay)
+        with _cache_lock:
+            _cache = (key, found, _clock())
+    with _cache_lock:
+        writers = _cache[1] if _cache is not None else ()
+        usable = tuple(w for w in writers if w.argv[0] not in _failed)
+    if tmux and session_is_remote(os.environ):
+        return tuple(w for w in usable if w.relay)
+    return usable
 
 
 def write(writer: Writer, text: str, *, timeout: float | None = None) -> bool:
@@ -490,21 +607,116 @@ def osc52_terminal(env: Mapping[str, str]) -> Osc52Fate:
     return "unknown" if sign is None or sign.osc52 is None else sign.osc52
 
 
+def osc52_writes(text: str, env: Mapping[str, str]) -> tuple[str, ...]:
+    """The escape sequences that carry ``text`` to the terminal's clipboard by OSC 52, as
+    the app writes them: none for ``""`` (an empty OSC 52 CLEARS the clipboard) or past
+    :data:`OSC52_LIMIT`.
+
+    Outside a multiplexer, the sequence alone. Inside tmux, the sequence (which tmux keeps
+    or passes by its ``set-clipboard``) and the same wrapped for tmux's passthrough, which
+    reaches the terminal where ``allow-passthrough`` is on (tmux 3.3 and later). Inside
+    GNU screen, which keeps an app's OSC 52 to itself, the sequence wrapped in screen's
+    passthrough, cut in 76-character pieces as screen takes them.
+    """
+    payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    if not payload or len(payload) > OSC52_LIMIT:
+        return ()
+    raw = f"\x1b]52;c;{payload}\a"
+    if env.get("TMUX"):
+        return (raw, "\x1bPtmux;" + raw.replace("\x1b", "\x1b\x1b") + "\x1b\\")
+    if env.get("STY"):
+        pieces = [raw[start : start + 76] for start in range(0, len(raw), 76)]
+        return ("\x1bP" + "\x1b\\\x1bP".join(pieces) + "\x1b\\",)
+    return (raw,)
+
+
+Verdict = Literal["copied", "sent", "failed"]
+"""What a copy can say of itself: ``copied`` when a tool took it, or OSC 52 went to a
+terminal known to take it; ``sent`` when it went where nobody can say what becomes of it
+(a terminal no sign names, iTerm2's setting, a multiplexer); ``failed`` when nothing could
+carry it."""
+
+
+@dataclass(frozen=True)
+class CopyResult:
+    """What became of one copy, for the surface that made it to say (:func:`verdict`)."""
+
+    verdict: Verdict
+    route: Literal["native", "tmux", "osc52"] | None = None
+    tool: str | None = None
+    fate: Osc52Fate | None = None
+    """What the terminal makes of OSC 52 (:func:`osc52_terminal`), when the copy rests on it."""
+    reason: str | None = None
+    """One line on why it is not ``copied``."""
+
+    @property
+    def ok(self) -> bool:
+        return self.verdict == "copied"
+
+
+TOO_LARGE = "too large for the terminal's clipboard, and no clipboard tool took it"
+NO_ROUTE = "no clipboard tool took it, and there is no terminal to send it to"
+
+
+def osc52_fits(text: str) -> bool:
+    """Whether ``text`` is within what one OSC 52 write carries (:data:`OSC52_LIMIT`)."""
+    return len(base64.b64encode(text.encode("utf-8"))) <= OSC52_LIMIT
+
+
+def verdict(
+    written: Written, *, osc52: bool, fate: Osc52Fate, too_large: bool = False
+) -> CopyResult:
+    """What one copy says, from its native write (``written``), whether an OSC 52 write went
+    out (``osc52``), what the terminal makes of one (``fate``), and whether the text was
+    past :data:`OSC52_LIMIT` (``too_large``).
+
+    A tool that took it is a copy, unless it was a multiplexer's, which passes it on by its
+    own settings. Else the copy rests on OSC 52: a copy when the terminal is known to take
+    it, sent where nobody can say, failed on Terminal.app (which drops it), past
+    :data:`OSC52_LIMIT`, or with no terminal to send it to.
+    """
+    if written.landed and not written.relayed:
+        return CopyResult("copied", "native", written.tool)
+    if written.landed:
+        return CopyResult("sent", "tmux", written.tool, "unknown")
+    if not osc52:
+        return CopyResult("failed", reason=TOO_LARGE if too_large else NO_ROUTE)
+    if fate == "accepts":
+        return CopyResult("copied", "osc52", fate=fate)
+    if fate == "drops":
+        return CopyResult("failed", "osc52", fate=fate, reason="the terminal ignores OSC 52")
+    return CopyResult("sent", "osc52", fate=fate)
+
+
 Done = Callable[[bool], None]
 """Told, on the worker thread, whether the native write took the text."""
 
-_jobs: queue.SimpleQueue[tuple[str, Done]] = queue.SimpleQueue()
+
+@dataclass(frozen=True)
+class Written:
+    """What became of a copy's native write: which tool took it, if one did."""
+
+    landed: bool
+    tool: str | None = None
+    """The tool that took the text (:attr:`Writer.name`)."""
+    relayed: bool = False
+    """The tool was a multiplexer's (:attr:`Writer.relay`): passed on, not known to be copied."""
+    tried: tuple[str, ...] = ()
+    """Every tool this copy ran, in order."""
+
+
+_jobs: queue.SimpleQueue[tuple[str, Callable[[Written], None]]] = queue.SimpleQueue()
 _worker: threading.Thread | None = None
 _worker_lock = threading.Lock()
 _pending = 0
 """Copies submitted and not yet told: what :func:`flush` waits for."""
 _idle = threading.Condition()
 
-FLUSH_TIMEOUT = 2 * (ASK_TIMEOUT + WRITE_TIMEOUT + KILL_WAIT)
+FLUSH_TIMEOUT = 2 * (ASK_TIMEOUT + MAX_TRIES * (WRITE_TIMEOUT + KILL_WAIT))
 """Seconds :func:`flush` waits at exit: the longest two batches can take, each a question
-about the session (:data:`ASK_TIMEOUT`, ``tmux`` or ``ps`` in :func:`_resolve`) and one
-write. The copy made at quit can wait behind the write in progress, so it is in the
-second; one write's worth gave up before it was made (review of #266, round 2)."""
+about the session (:data:`ASK_TIMEOUT`, ``tmux`` or ``ps`` in :func:`_resolve`) and up to
+:data:`MAX_TRIES` writes. The copy made at quit can wait behind the write in progress, so
+it is in the second; one write's worth gave up before it was made (review of #266, round 2)."""
 
 
 def submit(text: str, done: Done) -> None:
@@ -519,6 +731,11 @@ def submit(text: str, done: Done) -> None:
     is, since it is what the clipboard ends with, and the ones it overtook are told
     its outcome (:func:`_drain`). ``done`` is called on that thread once it is known.
     """
+    copy_later(text, lambda written: done(written.landed))
+
+
+def copy_later(text: str, done: Callable[[Written], None]) -> None:
+    """:func:`submit`, told the whole outcome: which tool took the text, if one did."""
     global _worker, _pending
     with _idle:
         _pending += 1
@@ -547,7 +764,7 @@ def _drain() -> None:
     """
     global _worker
     while True:
-        batch: list[tuple[str, Done]] = []
+        batch: list[tuple[str, Callable[[Written], None]]] = []
         with _worker_lock:
             with contextlib.suppress(queue.Empty):
                 while True:
@@ -556,20 +773,28 @@ def _drain() -> None:
                 _worker = None
                 return
         text, _ = batch[-1]
-        try:
-            writer = _resolve()
-            landed = writer is not None and write(writer, text)
-            if writer is not None and not landed:
-                _writer_failed()  # gone, or broken: not run again until it is looked for
-        except Exception:
-            log.warning("clipboard: a write failed unexpectedly", exc_info=True)
-            landed = False
+        written = _write_any(text)
         for _, done in batch:
             try:
-                done(landed)
+                done(written)
             except Exception:
                 log.warning("clipboard: the copy's outcome could not be told", exc_info=True)
         _settled(len(batch))
+
+
+def _write_any(text: str) -> Written:
+    """On the clipboard thread: ``text`` to the first tool that takes it, of at most
+    :data:`MAX_TRIES`; each that fails is passed over (:func:`_tool_failed`). Never raises."""
+    tried: list[str] = []
+    try:
+        for writer in _resolve()[:MAX_TRIES]:
+            tried.append(writer.name)
+            if write(writer, text):
+                return Written(True, writer.name, writer.relay, tuple(tried))
+            _tool_failed(writer)  # gone, or broken: passed over until it is looked for
+    except Exception:
+        log.warning("clipboard: a write failed unexpectedly", exc_info=True)
+    return Written(False, tried=tuple(tried))
 
 
 def _settled(count: int) -> None:

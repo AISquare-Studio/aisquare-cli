@@ -639,6 +639,7 @@ class FakeAgentAdapter:
     home_name = ".fakeagent"
     settings_name = "hooks.json"
     install_hint = "pipx install fake-agent"
+    install_page = "https://fake-agent.invalid/install"
     #: Its own route alone, unlike both real agents' installer, cask and npm.
     install_routes: tuple[InstallRoute, ...] = (InstallRoute("pipx", "pipx install fake-agent"),)
     version_args: tuple[str, ...] = ("version",)

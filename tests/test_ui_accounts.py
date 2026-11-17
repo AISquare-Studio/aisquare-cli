@@ -1115,7 +1115,10 @@ def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() 
         )
 
     claude, disabled, signed_in = drive(go, overview=overview)
-    assert "Claude Code is not installed" in claude and core.INSTALL_COMMAND in claude
+    assert "Claude Code is not installed" in claude
+    # Its install page, linked; asq names no command to type (R13, ruled Q1).
+    assert "install it from https://code.claude.com/docs/en/setup" in claude
+    assert core.INSTALL_COMMAND not in claude
     assert disabled
     assert signed_in is False  # the status line's AISquare dot is red
 

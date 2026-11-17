@@ -385,8 +385,10 @@ def _copy_row(app: FleetApp, arg: str | None) -> str:
     else:
         name = row.agent.label
         parts = (name, row.agent.role, row.state, row.agent.pane_id)
-    app.copy_to_clipboard("  ".join(part for part in parts if part))
-    return f"copied {name}'s row"
+    # The copy's outcome comes after this reply, so the owner's toast says it, as it
+    # happened; the reply never claims a copy that may not have landed (R13, #146).
+    app.copy_to_clipboard("  ".join(part for part in parts if part), toast=f"copied {name}'s row")
+    return f"copying {name}'s row; asq's toast says whether it reached the clipboard"
 
 
 def _focus_project(app: FleetApp, arg: str | None) -> str:

@@ -11,20 +11,30 @@ Elsewhere it says the text was sent through the terminal and what an empty paste
 mean: on iTerm2, whose own setting decides and cannot be seen from here, which setting
 to turn on; on a terminal nobody can name — over SSH, behind a multiplexer — that the
 terminal ignores it (:func:`copy_toast`). The native half is ``aisquare.core.clipboard``.
+
+ONE copy (R13, #146): :meth:`ClipboardApp.copy_text` is what every copy in the app runs —
+Textual's own (``Input``, ``TextArea``, a screen's ctrl+c, through
+:meth:`ClipboardApp.copy_to_clipboard`), the toasts', the board's, the panes', Remote's —
+and it tells its caller a ``core.clipboard.CopyResult``: copied, only sent, or failed and
+why, so no surface says "copied" for a copy that did not land.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, TypeVar
 
 from textual.app import App
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.notifications import SeverityLevel
+from textual.widgets._toast import ToastRack
 
+from aisquare.cli.ui import toasts
 from aisquare.core import clipboard
 
 ReturnType = TypeVar("ReturnType")
@@ -82,6 +92,23 @@ def copy_toast(fate: clipboard.Osc52Fate, toast: str, sent: str, timeout: float 
     )
 
 
+def result_toast(
+    result: clipboard.CopyResult, toast: str, sent: str, timeout: float | None
+) -> Toast:
+    """What a copy that asked for ``toast`` says, once ``result`` is known: ``toast`` when it
+    was copied; what the terminal makes of OSC 52 when it rests on that (:func:`copy_toast`);
+    else that it could not copy, and why."""
+    if result.ok:
+        return Toast(toast, "information", timeout)
+    if result.fate is not None:
+        return copy_toast(result.fate, toast, sent, timeout)
+    return Toast(f"could not copy {sent}: {result.reason}", "warning", MISSED_TIMEOUT)
+
+
+Cue = Callable[[clipboard.CopyResult], None]
+"""Told, on the event loop, what became of a copy."""
+
+
 def characters(text: str) -> str:
     """``"N characters"``, or ``"1 character"``."""
     return f"{len(text)} character{'s' if len(text) != 1 else ''}"
@@ -95,16 +122,37 @@ class ClipboardApp(App[ReturnType]):
     native tool runs too, off the event loop (``core.clipboard.submit``). The loop
     neither scans PATH nor starts a process: the clipboard thread finds the tool, and
     the loop reads only what it found (``core.clipboard.cached_writer``).
+
+    Its notifications are asq's (``cli.ui.toasts``): top-right, three at a time, each
+    with a dismiss column and text that copies on a drag (R13, #146).
     """
+
+    DEFAULT_CSS = toasts.CSS
+
+    def _refresh_notifications(self) -> None:
+        """Show the notifications on the current screen as asq does (``toasts.show_calm``);
+        Textual's own way, should the hooks that reads have moved (``toasts.CALM``)."""
+        if not toasts.CALM:
+            super()._refresh_notifications()
+            return
+        try:
+            screen = self.screen
+        except Exception:  # no screen yet, or none left: one will turn up, or never
+            return
+        try:
+            rack = screen.get_child_by_type(ToastRack)
+        except NoMatches:
+            return
+        self.call_later(toasts.show_calm, rack, self._notifications)
 
     @dataclass
     class Copied(Message):
-        """A native write is over: raise the copy's toast with what became of it."""
+        """A native write is over: tell the copy's caller what became of it."""
 
-        toast: str | None
-        sent: str
-        timeout: float | None
-        landed: bool
+        written: clipboard.Written
+        osc52: bool
+        too_large: bool
+        cue: Cue | None
 
     def copy_to_clipboard(
         self,
@@ -123,44 +171,76 @@ class ClipboardApp(App[ReturnType]):
         so the rule holds for the pane's own paths and Textual's alike.
 
         ``toast`` (with ``timeout``) is raised once, when the native write is over, or
-        at once with none to wait for (:meth:`_tell_copy`). Without one nothing is said
+        at once with none to wait for (:meth:`copy_text`). Without one nothing is said
         either way, as Textual's own copies say nothing. ``sent`` names the text where
         "copied" cannot be said (:func:`copy_toast`): its length, unless given.
         """
         if not text:
             return
-        super().copy_to_clipboard(text)
-        told = (toast, characters(text) if sent is None else sent, timeout)
-        if clipboard.cached_writer() is None:  # known: no native route here
-            self._tell_copy(*told, landed=False)
+        said = characters(text) if sent is None else sent
+        cue = None if toast is None else partial(self._tell_copy, toast, said, timeout)
+        self.copy_text(text, cue=cue)
+
+    def copy_text(self, text: str, *, cue: Cue | None = None) -> None:
+        """THE copy: ``text`` to the terminal's clipboard by OSC 52 at once, and to the
+        native tools on the clipboard thread; ``cue`` told, on the loop, what became of it
+        (``core.clipboard.verdict``). Nothing is written, or told, for ``""``.
+
+        The OSC 52 goes at the gesture, as Textual's own did: ``App.clipboard`` (which
+        ``Input``'s paste reads) holds the text, and the driver writes the sequence —
+        wrapped for tmux's or screen's passthrough when one sits between
+        (``core.clipboard.osc52_writes``), and none past what a terminal takes.
+        """
+        if not text:
             return
-        clipboard.submit(text, partial(self._native_done, *told))
+        osc52 = self._send_osc52(text)
+        too_large = not clipboard.osc52_fits(text)
+        if clipboard.cached_writer() is None:  # known: no native route here
+            self._settle(clipboard.Written(False), osc52=osc52, too_large=too_large, cue=cue)
+            return
+        clipboard.copy_later(text, partial(self._native_done, osc52, too_large, cue))
+
+    def _send_osc52(self, text: str) -> bool:
+        """Hold ``text`` as ``App.clipboard`` and write its OSC 52; whether one went out."""
+        self._clipboard = text
+        writes = clipboard.osc52_writes(text, os.environ)
+        driver = self._driver
+        if driver is None or not writes:
+            return False
+        for sequence in writes:
+            driver.write(sequence)
+        return True
 
     def _native_done(
-        self, toast: str | None, sent: str, timeout: float | None, landed: bool
+        self, osc52: bool, too_large: bool, cue: Cue | None, written: clipboard.Written
     ) -> None:
         """On the clipboard thread: hand the outcome to the event loop, if the app is still
         there to hear it. ``post_message`` is thread-safe, and says ``False`` once the app
-        has closed; a loop that closed in between raises, and the toast goes with it."""
+        has closed; a loop that closed in between raises, and the cue goes with it."""
         with contextlib.suppress(RuntimeError):
-            self.post_message(self.Copied(toast, sent, timeout, landed))
+            self.post_message(self.Copied(written, osc52, too_large, cue))
 
     def on_clipboard_app_copied(self, message: ClipboardApp.Copied) -> None:
-        self._tell_copy(message.toast, message.sent, message.timeout, landed=message.landed)
+        self._settle(
+            message.written, osc52=message.osc52, too_large=message.too_large, cue=message.cue
+        )
+
+    def _settle(
+        self, written: clipboard.Written, *, osc52: bool, too_large: bool, cue: Cue | None
+    ) -> None:
+        """Tell ``cue`` what became of the copy: a tool that took it is a copy; else it rests
+        on OSC 52, and only a terminal known to take it makes that a copy
+        (``core.clipboard.osc52_terminal``)."""
+        if cue is None:
+            return
+        fate = clipboard.osc52_terminal(os.environ)
+        cue(clipboard.verdict(written, osc52=osc52, fate=fate, too_large=too_large))
 
     def _tell_copy(
-        self, toast: str | None, sent: str, timeout: float | None, *, landed: bool
+        self, toast: str, sent: str, timeout: float | None, result: clipboard.CopyResult
     ) -> None:
-        """Raise ``toast``, or what became of the copy instead, when one was asked for.
-
-        A copy the native tool did not take had OSC 52 alone, and only a terminal known
-        to take it (``core.clipboard.osc52_terminal``) makes that "copied"; the rest is
-        :func:`copy_toast`'s.
-        """
-        if toast is None:
-            return
-        fate = "accepts" if landed else clipboard.osc52_terminal(os.environ)
-        told = copy_toast(fate, toast, sent, timeout)
+        """Raise ``toast``, or what became of the copy instead (:func:`result_toast`)."""
+        told = result_toast(result, toast, sent, timeout)
         self.notify(told.message, severity=told.severity, timeout=told.timeout, markup=False)
 
 

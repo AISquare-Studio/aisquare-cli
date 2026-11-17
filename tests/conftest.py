@@ -1111,6 +1111,10 @@ def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
     clipboard.forget_writer()
     monkeypatch.setattr(clipboard, "local_writer", lambda: None)
     monkeypatch.setattr(clipboard, "native_writer", lambda: None)
+    # The next tools after the first, and the user's tmux (``tmux load-buffer -w``): never
+    # the machine's own, here. The tests of those routes put their own in (R13, #146).
+    monkeypatch.setattr(clipboard, "fallback_writers", lambda first, **_: ())
+    monkeypatch.setattr(clipboard, "relay_writer", lambda: None)
     monkeypatch.setattr(clipboard, "cached_writer", lambda: None)
     monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
 

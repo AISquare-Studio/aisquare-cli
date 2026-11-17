@@ -68,6 +68,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wraps a row onto a second line. The short id is still in a line's or a task's detail, and
   `o` still opens the right transcript. Agents still see ids, as they address each other by
   them, and every `--json` is unchanged.
+- **Notifications in asq are small, sit top-right and are quick to clear.** They start
+  just under the top row, so they leave the agent bar's Stop and Restart clear. They are
+  one width, at most 46 columns, with no empty rows around the text. The newest is on
+  top, and at most three show at once. When a fourth arrives, the oldest one shown
+  waits, with its time stopped, and comes back when a slot frees. A `+N more` line
+  counts the ones waiting, and a click on it clears them. Each notification still goes
+  by itself after its own time, and that time stops while your pointer is over it. The
+  right-most column of each one dismisses it at once, and its `✕` sits on the first row.
+  Close the top one and the next moves up under your pointer, so clicking one spot
+  clears them all. The rest of a notification is text: drag across it to select, and
+  the selection is copied. The `✕` turns to `✓` when it is copied, `↗` when it was only
+  sent to your terminal's clipboard, and `!` when it could not be copied. A click on the
+  text no longer dismisses it.
+- **One copy, the same everywhere in asq, and it says what really happened.** Board,
+  agent panes, notifications, Remote's link, Textual's own fields and the captain's
+  row copy all go through it. A clipboard tool that fails hands the copy to the next
+  one: Windows PowerShell after `clip.exe`, and `xsel` after `xclip`. A tool that
+  failed is skipped for a minute. Inside your own tmux, tmux now carries the copy to
+  your terminal (`tmux load-buffer -w`). An app's own copy never reached the terminal
+  there under tmux's default settings, over SSH included. The copy also goes through
+  tmux's and GNU screen's passthrough, for terminals that allow it. A copy too large
+  for a terminal's clipboard is not cut short: it says it could not be copied. The
+  captain's `copy_row` no longer says "copied" before it knows: asq's own toast says
+  whether it landed.
 
 ## [0.10.0] - 2026-11-16
 

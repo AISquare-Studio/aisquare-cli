@@ -8,27 +8,24 @@
 **One terminal over your projects and your coding agents: task a manager in
 plain words, and it runs the coders, testers and reviewers for you.**
 
-[rlx](https://aisquare.studio/rlx) is short for relax: a tool made by a developer, for
-developers. Type `rlx` and you get one full-screen, mouse-driven view of your projects
-and their agents.
+[rlx](https://aisquare.studio/rlx) is made by a developer, for developers. Type `rlx`
+for one full-screen, mouse-driven view of your projects and their agents.
 
-- **One simple place for your coding agents.** Claude Code and Codex (beta),
-  across all your projects. Click any agent and you are inside its *real*
-  session, typing at it directly; nothing is relayed or re-rendered as a chat.
-- **Talk to the manager, and it takes care of the rest.** Tell it the goal in
-  plain words. It plans the work, starts the coders, testers and reviewers, and
-  keeps going until the goal is met. It never writes code and never pushes, and
-  it merges a PR only when a person approved it on GitHub and every CI check on
-  its head is green.
+- **One place for your coding agents.** Claude Code and Codex (beta), across
+  all your projects. Click an agent and you are in its *real* session, typing
+  at it directly; nothing is relayed or re-rendered as a chat.
+- **Talk to the manager; it does the rest.** Tell it the goal in plain words.
+  It plans the work, starts the coders, testers and reviewers, and keeps going
+  until the goal is met. It never writes code or pushes, and merges a PR only
+  once a person approved it on GitHub and every CI check on its head is green.
 - **Account usage, managed for you.** Sign in several accounts per agent. Each
-  new agent starts on an account with room left, and an agent whose account
-  hits its usage limit is moved to another one and carries on. Plans with only
-  a weekly limit count too.
+  new agent starts on an account with room left; one that hits its limit moves
+  to another and carries on. Plans with only a weekly limit count too.
 - **Memory that carries across sessions.** Your preferences and each project's
-  conventions reach every new session, so it starts oriented instead of cold.
+  conventions reach every new session, so it starts oriented, not cold.
 - **Everything is also a command**, for your scripts and for the agents.
-- **Local-first.** Your memory, boards and fleet live on your machine, in a
-  SQLite store under `~/.aisquare`. rlx runs no daemon (the agents run in a tmux
+- **Local-first.** Your memory, boards and fleet live in a SQLite store under
+  `~/.aisquare` on your machine. rlx runs no daemon (the agents run in a tmux
   server) and needs no cloud service of its own.
 
 ## Install
@@ -37,21 +34,20 @@ and their agents.
 curl -fsSL https://aisquare.studio/rlx/install.sh | sh
 ```
 
-On macOS, Linux and WSL2, that one line works out what your machine already
-has and installs only what is missing: uv, a Python 3.13 of its own, rlx, tmux,
-gh, git and Claude Code, and Node for browser tools if you want them. It
-registers the git repo you ran it from, wires your agent's hooks so every
-session gets its memory, and ends by offering to open rlx. Running it again is a
-no-op. For Codex too, end the line with `| sh -s -- --agent both` instead of
-`| sh` (`| sh -s -- --agent codex` for Codex alone). To read it before you run
-it, it is `install.sh` at the root of this repository.
+On macOS, Linux and WSL2, it installs only what your machine is missing: uv, a
+Python of its own, rlx, tmux, gh, git and Claude Code, and Node for browser tools
+if you want them. It registers the git repo you run it from, wires your agent's
+hooks so every session gets its memory, and offers to open rlx. Running it again
+is a no-op. For Codex too, end the line with `| sh -s -- --agent both` instead of
+`| sh` (`| sh -s -- --agent codex` for Codex alone). To read it first, it is
+`install.sh` at the root of this repository.
 
-That installs the latest release. To pin one, every release from 0.9.0 on
-carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/rlx/releases/download/v0.10.0/install.sh | sh`.
+That installs the latest release. To pin one, run the `install.sh` attached to it on
+[Releases](https://github.com/AISquare-Studio/rlx/releases): `curl -fsSL https://github.com/AISquare-Studio/rlx/releases/download/vX.Y.Z/install.sh | sh`.
 
 On Windows, run `irm https://aisquare.studio/rlx/install.ps1 | iex`
 in PowerShell: it runs that installer inside your WSL2 distribution, or prints the
-one command that installs WSL2 if there is none.
+command that installs WSL2 if you have none.
 
 The package is `aisquare-cli`. Its command is `rlx`; `relax`, `asq` and
 `aisquare` start it too.
@@ -61,20 +57,19 @@ The package is `aisquare-cli`. Its command is `rlx`; `relax`, `asq` and
 `rlx` opens on Welcome, three steps to a running fleet:
 
 1. **Project:** use the folder you are in, or choose another.
-2. **Coding agent:** Claude Code, or Codex. Connect it: if it is missing,
-   Welcome names the install command, and if it is signed out, it offers the
-   sign-in.
+2. **Coding agent:** Claude Code or Codex. Connect it: Welcome names the
+   install command if it is missing, and offers the sign-in if it is signed out.
 3. **Fleet:** press *Start manager*, then *Open the manager* and answer the
    agent's one-time question about trusting the folder, then *Start the
    coders*: a manager and two coders, each a real session. **Type your goal to
    the manager in plain words.**
 
-Click any agent to see and drive its session. **Press `F12`** to hand focus
-back to the sidebar, where `w` returns to Welcome and `q` quits. **The agents
-keep running**; open `rlx` again and it re-attaches to what it finds. To stop
-them spending tokens without losing them, *⚙ Settings ▸ Fleet ▸ Pause all…*
-exits each one and keeps its task, worktree and session; *Resume all…* brings
-each back where it was.
+Click an agent to drive its session. **Press `F12`** to hand focus back to the
+sidebar, where `w` returns to Welcome and `q` quits. **The agents keep
+running**; open `rlx` again and it re-attaches to what it finds. To stop them
+spending tokens without losing them, *⚙ Settings ▸ Fleet ▸ Pause all…* exits
+each one and keeps its task, worktree and session; *Resume all…* brings each
+back where it was.
 
 ## Accounts
 
@@ -97,15 +92,15 @@ start fresh on the other agent's, with a brief of the work.
 ## Over SSH
 
 You can open `rlx` over SSH into the same Mac while the Mac's own is open: both
-show the same fleet, and a line in the sidebar says where each one runs. If your
-fleet runs Claude Code, start its first agent at the Mac: on macOS Claude Code's
-login is in the Keychain, which no agent in a tmux server started over SSH can
-read. Codex's login is a file, so a fleet of Codex agents can start over SSH.
-A Codex account signs in with a device code, so `rlx accounts add --agent codex`
-works over SSH too: open the link it prints on any device and enter the code
-(`--browser` signs in with this machine's browser instead).
+show the same fleet, and the sidebar says where each one runs. If your fleet
+runs Claude Code, start its first agent at the Mac: Claude Code's login is in
+the macOS Keychain, which an agent in a tmux server started over SSH cannot
+read. Codex's login is a file, so Codex agents can start over SSH, and
+`rlx accounts add --agent codex` signs in there with a device code: open the
+link it prints on any device and enter the code (`--browser` uses this
+machine's browser instead).
 [Running more than one rlx](https://github.com/AISquare-Studio/rlx/blob/main/docs/multi-instance.md)
-has the rest, including what happens when the two run different releases.
+has the rest, including when the two run different releases.
 
 ## Memory on its own
 

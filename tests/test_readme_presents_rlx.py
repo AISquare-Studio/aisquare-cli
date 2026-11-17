@@ -1,18 +1,24 @@
 """The README presents rlx: the product's name, what is live, and nothing defensive.
 
-The owner's ruling of 2026-11-16: the product is named rlx, short for relax; `rlx`, `relax`,
-`asq` and `aisquare` all start it; the README never says "CLI", says nothing of pricing or of
+The owner's ruling of 2026-11-16: the product is named rlx; `rlx`, `relax`, `asq` and
+`aisquare` all start it; the README never says "CLI", says nothing of pricing or of
 what "stays free" (everything is free, and such lines read as a price to come), and names
 only what is live, so nothing experimental. The AISquare integration is AISquare's and keeps
 its name (the owner's ruling, also 2026-11-16): the sign-in (``aisquare login``, ``logout``,
 ``whoami``, ``auth``), ``aisquare init --api-key``, Explainability (``aisquare
 explainability …``) and the connectors' sync stub (``aisquare connectors …``) are never
-written as rlx.
+written as rlx. And the owner's rules for marketing copy, also 2026-11-16 (RLX R14): "stop
+saying short for relax, dont treat the consumer as stupid, use less words", and "Never print a
+version number in marketing copy."
 
-Six rules, each a callable the controls below reach with known input (CONTRIBUTING,
+Seven rules, each a callable the controls below reach with known input (CONTRIBUTING,
 "Writing a guard that still guards"):
 
-- ``_title`` — the page opens with ``# rlx``, and says once that the name is short for relax.
+- ``_title`` — the page opens with ``# rlx``, and never explains the name ("short for relax").
+  Nor does any page the README links, or PyPI's summary (``NAMED_PAGES``).
+- ``_versions`` — no version number (``v0.10.0``, ``0.9.0``) outside the Requirements section
+  and fenced code: a pin is written ``vX.Y.Z``. Requirements' minimums (Codex, tmux, Node,
+  Python) are what a machine needs, not copy, and a fence is a command as it is typed.
 - ``_says_cli`` — no line says "cli" as a word, in any case. URLs and the package name
   ``aisquare-cli`` are taken out of the line first: the package and the repository keep that
   name until the owner renames them, and their links must keep working.
@@ -56,6 +62,14 @@ RENAMED_PAGES = (
     "docs/usage-telemetry.md",
     "plugins/codex/README.md",
 )
+
+#: Where the name could be explained: every renamed page, and PyPI's summary in pyproject.
+NAMED_PAGES = (*RENAMED_PAGES, "pyproject.toml")
+_SHORT_FOR = re.compile(r"short\s+for\s+relax", re.IGNORECASE)
+
+#: A version number. Copy names none; the one section that may is Requirements.
+_VERSION = re.compile(r"(?<![\w.])v?\d+\.\d+\.\d+\b")
+_VERSIONS_KEPT_IN = "## Requirements"
 
 #: What a line keeps of the old name until the owner renames them: URLs and the package.
 _KEPT_NAMES = re.compile(r"https?://\S+|aisquare-cli")
@@ -134,10 +148,29 @@ def _title(markdown: str) -> list[str]:
     first = markdown.splitlines()[0] if markdown else ""
     if first != "# rlx":
         problems.append(f"the page opens with {first!r}, not '# rlx'")
-    said = len(re.findall(r"short for relax", markdown, re.IGNORECASE))
-    if said != 1:
-        problems.append(f"'short for relax' is said {said} times, not once")
+    said = len(_SHORT_FOR.findall(markdown))
+    if said:
+        problems.append(f"'short for relax' is said {said} times: the name needs no explaining")
     return problems
+
+
+def _versions(markdown: str) -> list[str]:
+    """Every version number outside fenced code and the Requirements section."""
+    found: list[str] = []
+    inside = False
+    section = ""
+    for number, line in enumerate(markdown.splitlines(), start=1):
+        if _FENCE.match(line):
+            inside = not inside
+            continue
+        if inside:
+            continue
+        if line.startswith("#"):
+            section = line.strip()
+        if section == _VERSIONS_KEPT_IN:
+            continue
+        found.extend(f"line {number}: {v!r} in {line.strip()!r}" for v in _VERSION.findall(line))
+    return found
 
 
 def _says_cli(markdown: str) -> list[str]:
@@ -193,8 +226,24 @@ def _readme() -> str:
     return README.read_text(encoding="utf-8")
 
 
-def test_the_readme_is_titled_rlx_short_for_relax() -> None:
+def test_the_readme_is_titled_rlx_and_does_not_explain_the_name() -> None:
     assert not _title(_readme())
+
+
+def test_no_page_explains_the_name() -> None:
+    offending = [page for page in NAMED_PAGES if _SHORT_FOR.search((REPO / page).read_text())]
+    assert not offending, f"'short for relax' (the owner: say less): {offending}"
+
+
+def test_the_readme_names_no_version_outside_requirements_and_code() -> None:
+    text = _readme()
+    offending = _versions(text)
+    assert not offending, (
+        "README.md prints a version number in its copy (the owner: never); a pin is "
+        "written vX.Y.Z:\n  " + "\n  ".join(offending)
+    )
+    # The rule still sees: Requirements' own minimums are found once it is not exempt.
+    assert _versions(text.replace(_VERSIONS_KEPT_IN, "## Needs")), "Requirements went unseen"
 
 
 def test_the_readme_says_nothing_the_ruling_took_out() -> None:
@@ -246,15 +295,32 @@ def test_no_page_runs_the_aisquare_integration_under_another_name() -> None:
 # --- controls: synthetic input, so they keep controlling whatever the pages say ------------------
 
 
-def test_a_title_that_is_not_rlx_is_caught() -> None:
-    assert _title("# aisquare\n\nrlx is short for relax.\n")
-    assert _title("# rlx\n\nNo word on the name.\n")
-    assert _title("# rlx\n\nShort for relax. Short for relax.\n")
-    assert _title("") == [
-        "the page opens with '', not '# rlx'",
-        "'short for relax' is said 0 times, not once",
-    ]
-    assert not _title("# rlx\n\nrlx is short for relax.\n")
+def test_a_title_that_is_not_rlx_or_explains_the_name_is_caught() -> None:
+    assert _title("# aisquare\n\nMade by a developer.\n")
+    assert _title("# rlx\n\nrlx is short for relax.\n")
+    assert _title("# rlx\n\nrlx, Short\nfor relax.\n")
+    assert _title("") == ["the page opens with '', not '# rlx'"]
+    assert not _title("# rlx\n\nMade by a developer, for developers.\n")
+    assert not _title("# rlx\n\n`relax` starts it too.\n")
+
+
+def test_a_version_in_copy_is_caught_and_requirements_and_code_are_not() -> None:
+    for line in (
+        "To pin one, use v0.10.0.",
+        "Every release from 0.9.0 on carries one.",
+        "`curl -fsSL https://github.com/x/releases/download/v0.10.0/install.sh | sh`",
+        "rlx 0.10.1 is out.",
+    ):
+        assert _versions(f"# rlx\n\n{line}\n"), line
+    page = (
+        "# rlx\n\nPin it: `download/vX.Y.Z/install.sh`, on Python 3.13, at 85% used.\n\n"
+        "```sh\nuv tool install aisquare-cli==0.10.0\n```\n\n"
+        "## Requirements\n\n- Codex 0.164.0 or newer, tmux 3.2+.\n\n"
+        "## License\n\nMIT\n"
+    )
+    assert _versions(page) == []
+    after = len(page.splitlines()) + 2  # past the section Requirements' exemption ended with
+    assert _versions(page + "\nSince 0.9.0.\n") == [f"line {after}: '0.9.0' in 'Since 0.9.0.'"]
 
 
 def test_cli_is_caught_in_any_case_and_urls_and_the_package_are_not() -> None:

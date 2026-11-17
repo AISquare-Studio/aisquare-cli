@@ -411,6 +411,8 @@ _RELEASE_URL = re.compile(
     r"(latest/download|download/v[^/\s]+)/([^\s)`'\"|]+)"
 )
 _DOCUMENTED = (REPO / "README.md",)
+#: The README names no version (the owner's rule for copy, RLX R14), so its pin is the shape.
+_PIN_PLACEHOLDER = "vX.Y.Z"
 
 
 @pytest.mark.parametrize("page", _DOCUMENTED, ids=lambda page: page.name)
@@ -418,15 +420,17 @@ def test_the_docs_lead_with_main_and_show_a_pin(page: Path) -> None:
     """Owner's decision (#401, MAJOR-2): main's copy stays the default one-liner,
     because the latest/download URL answers 404 until a release's installers are
     attached; a release's own URL is how to pin. Since rlx (R10) the default is
-    typed as the short URL, which redirects to main's copy (stamper.SHORT)."""
+    typed as the short URL, which redirects to main's copy (stamper.SHORT). Since R14 the
+    pin names no release: its tag is the placeholder ``vX.Y.Z``, or a real release tag."""
     text = page.read_text(encoding="utf-8")
     default = stamper.SH_ONE_LINER
     assert default in text, f"{page.name} lost the default one-liner"
     urls = _RELEASE_URL.findall(text)
     for where, asset in urls:
         assert asset in stamper.ASSETS, f"{page.name}: {asset} is not a release asset"
-        if where != "latest/download":
-            stamper.version_of(where.removeprefix("download/"))
+        tag = where.removeprefix("download/")
+        if where != "latest/download" and tag != _PIN_PLACEHOLDER:
+            stamper.version_of(tag)
     assert any(where.startswith("download/v") for where, _asset in urls), (
         f"{page.name}: no pin-a-version example"
     )

@@ -89,7 +89,7 @@ def test_the_readme_links_the_product_page_once_as_rlx_in_its_first_lines() -> N
 
 def test_the_product_link_is_found_by_its_target_and_read_with_its_text() -> None:
     page = (
-        "# rlx\n\n[rlx](https://aisquare.studio/rlx) is short for relax.\n\n## Install\n\n"
+        "# rlx\n\n[rlx](https://aisquare.studio/rlx) is made by a developer.\n\n## Install\n\n"
         "See [the site](https://aisquare.studio/rlx/) or [AISquare](https://aisquare.studio).\n"
     )
     assert _product_links(page) == [(3, "rlx"), (7, "the site")]

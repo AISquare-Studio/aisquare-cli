@@ -48,6 +48,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   counts as before. Releases up to 0.10.0 post to `/api/v1/cli/metrics/`, which AISquare
   keeps answering until May 2027. A server that answers 503 with `Retry-After` is asked
   again after that wait, as a 429 already was, not after the first five-minute retry.
+- The one-line install is shorter: `curl -fsSL https://aisquare.studio/rlx/install.sh | sh`,
+  and on Windows `irm https://aisquare.studio/rlx/install.ps1 | iex`. Both lead to the same
+  installers on GitHub, and a release's own pinned URL is unchanged.
+- The package's page on PyPI links to rlx's site and its docs, and the README links the site.
 - **The board names each agent as the left pane does, where it showed `role·<id>`.** In
   asq's board, `board -w` and `aisquare board`, a line's author, the sessions block, a
   task's claim and the done archive read the agent's name, such as `coder-auth`. A session

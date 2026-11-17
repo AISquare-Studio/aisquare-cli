@@ -68,7 +68,6 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.confirm_button import Arming
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import program as prog
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
     adapter_for_binary,
@@ -117,10 +116,10 @@ TARGETS_WORKER = "attach-targets"
 
 
 def seat_rule() -> str:
-    """What a seat may be: the names ``launch`` accepts, with the word hints print."""
+    """What a seat may be: the names ``launch`` accepts, said without the command (R13)."""
     return (
         "a seat is a role (coder, tester, …), a numbered seat of one (coder2), or a name "
-        f"already bound — the names `{prog.word()} launch` accepts"
+        "already bound"
     )
 
 
@@ -728,10 +727,7 @@ class NewBindScreen(ModalScreen[str | None]):
         with Vertical():
             seat, bound = self._editing or ("", RoleLaunchProfile())
             header = Text("Edit bind" if self._editing else "New bind", style="bold")
-            header.append(
-                f" — a seat `{prog.word()} team bind` pins: binary, environment, args",
-                style="dim",
-            )
+            header.append(" — pin a seat's binary, environment and args", style="dim")
             yield Static(header, classes="picker-header")
             with Horizontal(classes="picker-row"):
                 yield Label("Seat")

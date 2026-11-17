@@ -31,6 +31,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and questions, its ping for an agent idle by design, and a review that repeats a note it
   read no longer wake it. `rlx team standby` (or its question to you, with nothing in
   flight) holds watch's routine lines until your next prompt.
+- **You can see which pane has the keyboard.** While the left pane has it, its highlighted
+  project, agent or setting is a bar in the theme's colour; otherwise it is the dark
+  highlight it always was.
 - **The product is named rlx.** The README is titled rlx and opens as rlx's page does:
   "Tell the manager the goal. Then relax.", what rlx is, and the one-line install. Then
   what it does for you: one place for your Claude Code and Codex agents across your
@@ -100,6 +103,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is), so they change when you press `t`. They keep that colour while the other pane has
   the keyboard. Only colours change: nothing moves, at any width. asq cannot set your
   terminal's font. JetBrains Mono, the font on rlx's web page, is the one we recommend.
+- **asq never asks you to type a command.** Its screens, notifications, tooltips and
+  dialogs no longer tell you to run `rlx …` or any other command. Where rlx has a button
+  or a page for it, they point there instead. An agent or tmux that is not installed links
+  its own install page, and an install rlx cannot update says to update it the way you
+  installed it. The Doctor's buttons say what they do ("Connect Claude Code", "Sign in
+  account 3"). A check that needs the command line offers *Ask the manager*, which hands
+  the fix to your project's manager; with no manager running, the check says one can fix
+  it. The command line keeps every command: `rlx doctor`, `--help` and the messages printed
+  in a terminal are unchanged.
+- **Notifications in asq are small, sit top-right and are quick to clear.** They start
+  just under the top row, so they leave the agent bar's Stop and Restart clear. They are
+  one width, at most 46 columns, with no empty rows around the text. The newest is on
+  top, and at most three show at once. When a fourth arrives, the oldest one shown
+  waits, with its time stopped, and comes back when a slot frees. A `+N more` line
+  counts the ones waiting, and a click on it clears them. Each notification still goes
+  by itself after its own time, and that time stops while your pointer is over it. The
+  right-most column of each one dismisses it at once, and its `✕` sits on the first row.
+  Close the top one and the next moves up under your pointer, so clicking one spot
+  clears them all, however fast you click. A press and its release both in that column,
+  with no drag, dismiss. The rest of a notification is text: drag across it to select,
+  and the selection is copied, wherever the drag ends, the `✕` column or the pane beside
+  it included; only the notification's own text is copied. Double-click copies a word,
+  and a third click the whole. The `✕` turns to `✓` when it is copied, `↗` when it was
+  only sent to your terminal's clipboard, and `!` when it could not be copied. A click on
+  the text no longer dismisses it.
+- **One copy, the same everywhere in asq, and it says what really happened.** Board,
+  agent panes, notifications, Remote's link, Textual's own fields and the captain's
+  row copy all go through it. A clipboard tool that fails hands the copy to the next
+  one: Windows PowerShell after `clip.exe`, and `xsel` after `xclip`. A tool that
+  failed is skipped for a minute. Inside your own tmux, tmux now carries the copy to
+  your terminal (`tmux load-buffer -w`). An app's own copy never reached the terminal
+  there under tmux's default settings, over SSH included. The copy also goes through
+  tmux's and GNU screen's passthrough, for terminals that allow it. A copy too large
+  for a terminal's clipboard is not cut short: it says it could not be copied. The
+  captain's `copy_row` no longer says "copied" before it knows: asq's own toast says
+  whether it landed.
 
 ## [0.10.0] - 2026-11-16
 

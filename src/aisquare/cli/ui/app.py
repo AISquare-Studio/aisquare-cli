@@ -44,7 +44,7 @@ from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import events
-from textual.app import ComposeResult, SystemCommand
+from textual.app import ComposeResult, ScreenStackError, SystemCommand, UnknownModeError
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.css.query import NoMatches
@@ -139,6 +139,9 @@ from aisquare.cli.ui.terminal import (
 from aisquare.cli.ui.theme import (
     FADE_OPACITY,
     FADE_RELABELLED,
+    HIGHLIGHT_TEXT_VARIABLE,
+    HIGHLIGHT_VARIABLE,
+    KEYBOARD_CLASS,
     RLX_CSS,
     ThemePicker,
     register_themes,
@@ -171,7 +174,7 @@ from aisquare.cli.ui.views.accounts import (
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
 from aisquare.cli.ui.views.captain import CaptainView
-from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
+from aisquare.cli.ui.views.doctor import ASK_WORKER, DoctorRefreshed, DoctorView, ask_text
 from aisquare.cli.ui.views.fleet_bulk import (
     BULK_WORKER,
     BulkAsked,
@@ -685,8 +688,8 @@ class HelpScreen(ModalScreen[None]):
 
     @staticmethod
     def board_heading() -> str:
-        """The help's Board heading, which names the full-screen board's command."""
-        return f"Board (a project's Board tab, and {prog.word()} board -w)"
+        """The help's Board heading: asq's own Board tab. asq names no command to type (R13)."""
+        return "Board (a project's Board tab)"
 
     MAC_COPY_KEYS: ClassVar[tuple[tuple[str, str], ...]] = (
         ("ctrl+c", "copy a pane's highlight again; ⌘C stays the terminal's"),
@@ -884,7 +887,15 @@ class Panes(Horizontal):
     # fade, and draws the rest of its widget's text as the fade would (``theme.MarkStatic``).
     DEFAULT_CSS = f"""
     Panes > .-unfocused {{ opacity: {FADE_OPACITY}; }}
+    Panes > .{KEYBOARD_CLASS} Activatable.selected {{
+        background: ${HIGHLIGHT_VARIABLE};
+        color: ${HIGHLIGHT_TEXT_VARIABLE};
+    }}
     """
+    # R16 (#149): the sidebar's highlighted row is a coloured bar while the sidebar holds the
+    # keyboard, and the neutral one it was otherwise: which pane has the keyboard, at a
+    # glance. The colours are the theme's (``theme.highlight_colours``), and only the shell
+    # (FleetApp) defines them, so the rule lives here, with the panes, not with the rows.
 
     MIN_CONTENT: ClassVar[int] = 40
     """The columns the content pane keeps, whatever the drag or the terminal's size."""
@@ -949,10 +960,11 @@ class Panes(Horizontal):
         divider.set_class(side is self.sidebar, "-neighbour-focused")
         for child in self.children:
             if child is not divider:
-                self._fade(child, side is not None and child is not side)
+                self._fade(child, side is not None and child is not side, holds=child is side)
 
-    def _fade(self, side: Widget, faded: bool) -> None:
-        """Fade ``side`` or bring it back, restyling ``side`` alone.
+    def _fade(self, side: Widget, faded: bool, *, holds: bool = False) -> None:
+        """Fade ``side`` or bring it back, and mark it as holding the keyboard or not
+        (:data:`theme.KEYBOARD_CLASS`, R16), restyling ``side`` alone.
 
         ``set_class`` would match the CSS again for every widget below it, and
         only ``side``'s own rules change: the fade is ``opacity``, which Textual
@@ -970,14 +982,26 @@ class Panes(Horizontal):
         light label stayed after focus came back (3.84:1 on the blue). A hidden
         page's count too: it may be shown on the faded side. A side holds a handful
         of them, not the sidebar's hundreds of rows.
+
+        And the side's highlighted row (``Activatable.selected``, one at most), when the
+        keyboard comes or goes: it is a coloured bar while its side holds the keyboard
+        (R16, #149), and the restyle of ``side`` alone never reached it either.
         """
-        if side.has_class("-unfocused") is faded:
+        fades = side.has_class("-unfocused") is not faded
+        moves = side.has_class(KEYBOARD_CLASS) is not holds
+        if not (fades or moves):
             return
         side.set_class(faded, "-unfocused", update=False)
-        relabelled = [b for b in side.query(Button) if b.variant in FADE_RELABELLED]
-        self.app.stylesheet.update_nodes([side, *relabelled])
-        for widget in side.walk_children(Widget):
-            widget.notify_style_update()
+        side.set_class(holds, KEYBOARD_CLASS, update=False)
+        nodes: list[Widget] = [side]
+        if fades:
+            nodes += [b for b in side.query(Button) if b.variant in FADE_RELABELLED]
+        if moves:
+            nodes += list(side.query("Activatable.selected"))
+        self.app.stylesheet.update_nodes(nodes)
+        if fades:
+            for widget in side.walk_children(Widget):
+                widget.notify_style_update()
 
 
 class _WorkerThreads(WorkerManager):
@@ -1387,7 +1411,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 # The Onboard view is built on the first `+` (on_add_project): its
                 # DirectoryTree scans the home directory and keeps a loader worker
                 # alive for its whole life — not a cost to pay at every start-up.
-                yield DoctorView(id="doctor", machine=True)
+                yield DoctorView(id="doctor", machine=True, manager=self._doctor_manager_name)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1596,8 +1620,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         a Remote that did not come back at start, a tunnel that did not come up, auto-off.
         Said only there, the human found out from the phone, away from the desk (sweep of
         #243). What a control's write did (a new passphrase, a revoke) is said in any case:
-        no line of the panel says it."""
-        if not news.done and isinstance(self.screen, RemotePanel):
+        no line of the panel says it.
+
+        Remote's threads post news as asq quits (its auto-off, a write landing): news that
+        arrives once the screens are gone has no one to tell, and reading the screen then
+        raised ``ScreenStackError`` out of asq's exit (#517, Windows CI)."""
+        try:
+            screen = self.screen
+        except (ScreenStackError, UnknownModeError):
+            return
+        if not news.done and isinstance(screen, RemotePanel):
             return
         severity: SeverityLevel = "warning" if news.trouble else "information"
         self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)
@@ -2831,17 +2863,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         after = result.after
         if after.codename is not None and after.codename != result.before:
-            was = ""
-            if result.before:
-                was = (
-                    f" — was {result.before}, and --project {result.before} still works"
-                    if result.old_works
-                    else f" — was {result.before}; --project {result.before} names another "
-                    f"project too, so use --project {after.codename}"
-                )
+            # The new codename, and the old one it replaced; the tmux session and the
+            # `--project` spellings are the shell's to know, not asq's to say (R13).
+            was = f" — was {result.before}" if result.before else ""
             self.notify(
-                f"✓ {project_service.display_name(after)} · fleet codename {after.codename} "
-                f"(tmux {fleet_service.session_name(after.codename)}){was}",
+                f"✓ {project_service.display_name(after)} · fleet codename {after.codename}{was}",
                 timeout=8,
                 markup=False,
             )
@@ -3148,10 +3174,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         result = event.worker.result
         if event.state is WorkerState.SUCCESS and isinstance(result, ProjectForgetReport):
             removed = result.project
-            back = project_service.onboard_command(removed.root)
             self.notify(
                 f"✓ {project_service.display_name(removed)} removed from the fleet — "
-                f"its folder and history are kept; {back} brings it back",
+                "its folder and history are kept; + in the sidebar adds it back",
                 timeout=8,
                 markup=False,
             )
@@ -4168,6 +4193,58 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if self._exit:  # not when the quit was refused: a quit later is the person's own
             self.quit_asked_by = event.request
 
+    def _doctor_manager(self, cwd: Path | None) -> tuple[ProjectInfo, FleetAgent] | None:
+        """The manager *Ask the manager* asks (ruling Q2), from the frame on screen (no read):
+        the live manager of the project the report is about, else, for the machine's own
+        report, the first project's that has one."""
+        snapshot = self.snapshot
+        if snapshot is None:
+            return None
+        projects = list(snapshot.projects)
+        if cwd is not None:
+            projects = [p for p in projects if p.root == cwd]
+        for project in projects:
+            for status in snapshot.agents.get(project.id, []):
+                if _live_manager(status):
+                    return project, status.agent
+        return None
+
+    def _doctor_manager_name(self, cwd: Path | None) -> str | None:
+        found = self._doctor_manager(cwd)
+        if found is None:
+            return None
+        return f"{project_service.display_name(found[0])}'s manager"
+
+    def on_doctor_view_ask_manager(self, event: DoctorView.AskManager) -> None:
+        """Hand the row's fix to the manager (ruling Q2): typed into it when it waits, else a
+        board note to it, as ``fleet tell`` does; never asq's person at a command line."""
+        found = self._doctor_manager(event.cwd)
+        if found is None:
+            self.notify(
+                "no manager runs to ask — start one from a project's Manager tab",
+                severity="warning",
+                markup=False,
+            )
+            return
+        project, manager = found
+        check, text = event.check.name, ask_text(event.check)
+
+        def ask() -> None:
+            try:
+                fleet_service.tell(project, manager.label, text, agent_id=manager.id)
+            except Exception as exc:
+                self.call_from_thread(
+                    self.notify, f"{check}: the manager was not asked — {exc}",
+                    severity="error", markup=False,
+                )  # fmt: skip
+                return
+            name = project_service.display_name(project)
+            self.call_from_thread(
+                self.notify, f"asked {name}'s manager to fix {check}", markup=False
+            )
+
+        self.run_worker(ask, thread=True, name=ASK_WORKER, exit_on_error=False)
+
     def on_doctor_view_hand_off(self, event: DoctorView.HandOff) -> None:
         """Update or Uninstall in the Doctor view: quit, and let ``run_ui`` hand over.
 
@@ -4363,6 +4440,7 @@ def _writing_workers() -> dict[str, str]:
 
     return {
         doctor.FIX_WORKER: "a fix",
+        doctor.ASK_WORKER: "a question to the manager",
         onboard.ONBOARD_WORKER: "a folder's setup",
         welcome.worker_name("onboard"): "a folder's setup",
         welcome.worker_name("connect"): "Connect",

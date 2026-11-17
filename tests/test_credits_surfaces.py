@@ -354,7 +354,7 @@ def test_the_explainability_views_row_says_why_it_has_no_reading(
     assert runner.invoke(app, ["logout"]).exit_code == 0
     rows = dict(status_report(pointed).rows)
     assert rows["lands in"].startswith("acme / Frontend"), rows["lands in"]
-    assert rows["credits"] == "(sign in to read them — aisquare login)"
+    assert rows["credits"] == "(sign in to read them on the Accounts page)"
     elsewhere = iam.Session(api_url="https://api.aisquare.studio", token="aisq_x", source="file")
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: elsewhere)
     rows = dict(status_report(pointed).rows)

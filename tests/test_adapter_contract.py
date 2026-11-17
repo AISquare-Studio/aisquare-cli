@@ -292,6 +292,12 @@ def test_identity_and_config_home(adapter: AgentAdapter, tmp_path: Path) -> None
     assert real(chosen) == real(explicit)
 
 
+def test_install_page_is_a_page_asq_can_link(adapter: AgentAdapter) -> None:
+    """``install_page``: where asq sends a person to install the agent, in place of a command
+    to type (R13)."""
+    assert adapter.install_page.startswith("https://") and " " not in adapter.install_page
+
+
 def test_install_routes_offer_one_on_every_platform(adapter: AgentAdapter) -> None:
     """``install_routes``: at least one, each a command a terminal runs, and Welcome's step 2
     offers one on every platform (on Windows the best, inside WSL2)."""

@@ -721,7 +721,7 @@ async def _press_mic(pilot: Pilot[None]) -> str:
 
 
 @pytest.mark.needs_captain
-def test_the_mic_prints_the_url_the_qr_and_the_start_command_with_no_page_running(
+def test_the_mic_prints_the_url_and_the_qr_and_names_no_command_with_no_page_running(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """13178 Q2: print only — with none running, the URL it would serve, the QR, the command."""
@@ -739,8 +739,8 @@ def test_the_mic_prints_the_url_the_qr_and_the_start_command_with_no_page_runnin
     text = drive(body)
     assert voice.voice_url(voice.DEFAULT_PORT, serve_token()) in text
     assert "█▀▀█ qr" in text and "█▄▄█ qr" in text
-    assert "rlx captain voice" in text
-    assert voice.adb_reverse(voice.DEFAULT_PORT) in text
+    # The commands that start the page or forward a phone's port are the shell's (R13).
+    assert "captain voice" not in text and "adb reverse" not in text
     assert "not running" in text
 
 

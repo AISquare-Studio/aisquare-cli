@@ -469,7 +469,8 @@ def test_with_nothing_recorded_the_page_says_so_and_how_to_record_it() -> None:
     empty, empty_shown, body_shown = _drive_page(real_loader(), go)
 
     assert empty_shown and not body_shown
-    assert "No usage recorded yet." in empty and "rlx metrics backfill" in empty
+    assert "No usage recorded yet." in empty and "press r to read them again" in empty
+    assert "metrics backfill" not in empty, "asq names no command (R13)"
     assert empty_text().splitlines()[0] == "No usage recorded yet."
 
 

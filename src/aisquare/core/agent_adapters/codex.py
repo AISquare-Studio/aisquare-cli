@@ -712,6 +712,7 @@ class CodexAdapter:
     home_name = ".codex"
     settings_name = "hooks.json"
     install_hint = "npm install -g @openai/codex"
+    install_page = "https://developers.openai.com/codex/cli"
     #: Its own installer first (the layout the Accounts page reads first), npm last.
     install_routes: tuple[InstallRoute, ...] = (
         InstallRoute("installer", INSTALL_COMMAND),

@@ -45,6 +45,7 @@ from aisquare.cli.ui.views.agent import AgentView
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.fleet import FleetError, RelabelReceipt
+from tests import toast_log
 from tests.test_ui_shell import (
     Script,
     _as_the_terminal_sends,
@@ -455,6 +456,9 @@ def test_the_managers_row_offers_no_rename_and_f2_says_why(
 
     async def go(pilot: Pilot[None]) -> dict[str, object]:
         app = fleet_app(pilot)
+        # What was said, as it was said: read off the screen at the end, the manager's toast,
+        # the oldest, had gone by its time or waited under "+N more" (windows-latest, #517).
+        told = toast_log.record(app)
         manager = row_for(app, MANAGER)
         await _double_click(pilot, manager)
         double = _field(app, MANAGER) is None
@@ -473,7 +477,7 @@ def test_the_managers_row_offers_no_rename_and_f2_says_why(
                 row_for(app, CODER).tooltip,
                 row_for(app, "agt_a_tester-1").tooltip,
             ),
-            "toasts": await _toasts(app),
+            "toasts": " | ".join(told),
         }
 
     seen = drive(go, notifications=True)

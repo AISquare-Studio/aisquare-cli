@@ -494,9 +494,10 @@ def test_copy_row_copies_an_agents_row_and_a_projects_row(
         return agent, agent_text, project, app.clipboard, str(beta.root)
 
     agent, agent_text, project, project_text, root = drive(body)
-    assert agent == {"ok": True, "said": "copied coder-1's row"}
+    said = "copying {}'s row; asq's toast says whether it reached the clipboard"
+    assert agent == {"ok": True, "said": said.format("coder-1")}
     assert agent_text == "coder-1  coder  working  %1"
-    assert project == {"ok": True, "said": "copied beta's row"}
+    assert project == {"ok": True, "said": said.format("beta")}
     assert project_text == f"beta  blue-heron  {root}"
 
 
@@ -1063,7 +1064,10 @@ def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
         return reply, took, told
 
     reply, took, told = drive(body)
-    assert reply == {"ok": True, "said": "copied coder-1's row"}
+    assert reply == {
+        "ok": True,
+        "said": "copying coder-1's row; asq's toast says whether it reached the clipboard",
+    }
     assert took < actions.UI_TIMEOUT_S
     assert told == {"ok": False, "said": f"not a request: no line within {receiver.READ_S:g}s"}
 

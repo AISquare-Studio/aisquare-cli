@@ -187,6 +187,7 @@ class ClaudeCodeAdapter:
     home_name = ".claude"
     settings_name = "settings.json"
     install_hint = "https://claude.ai/install.sh"
+    install_page = "https://code.claude.com/docs/en/setup"
     args_example = "--model opus"
     """The example an *Extra args* field shows for it (``cli.ui.attach.args_hint``), as
     0.9.2's Spawn dialog and New bind form showed it. An agent without one is shown its

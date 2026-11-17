@@ -120,7 +120,6 @@ from aisquare.cli.ui.views.settings_captain import CaptainToggle
 from aisquare.cli.ui.views.settings_remote import RemoteSection
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths, personas
-from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.agent_adapters.codex import APPROVAL_POLICIES
 from aisquare.core.agent_adapters.types import (
@@ -231,8 +230,8 @@ no square bracket is written in one (tests/test_ui_app_settings.py pins what it 
 FALLBACK_AGENT_TIP = (
     "The agent a launch runs only when no account is usable (no one signed in, an API key, "
     "or the accounts unreadable). Otherwise it runs the agent of the first account with "
-    "room in the Accounts page's order; a role's own agent, --agent and a project's "
-    "default still win."
+    "room in the Accounts page's order; a role's own agent, the Spawn dialog's Agent and a "
+    "project's default still win."
 )
 """The form's fields beside the per-role rows, by id: what :meth:`AppSettingsView._changed`
 compares with what they showed when the form was read."""
@@ -581,8 +580,8 @@ def clear_note(role: str) -> Text:
     text = Text("The whole binding of ", style="bold")
     text.append(role, style="bold")
     text.append(
-        f" goes: its binary, environment, args and account, as `{prog.word()} team bind <role> "
-        "--clear` takes them; the role then launches as an unbound one."
+        " goes: its binary, environment, args and account; the role then launches as an "
+        "unbound one."
     )
     return text
 
@@ -670,12 +669,8 @@ class AppSettingsView(Vertical):
 
     @staticmethod
     def bindings_section() -> tuple[str, str]:
-        """The Role bindings section's title and line, which name the command that binds."""
-        return (
-            "Role bindings",
-            f"binary, environment and args per role ({prog.word()} team bind), each written "
-            "at once",
-        )
+        """The Role bindings section's title and line."""
+        return ("Role bindings", "binary, environment and args per role, each written at once")
 
     SIDEBAR_SECTION: ClassVar[tuple[str, str]] = ("Sidebar", "how the project list reads")
     ALWAYS_SHOW_PATH_ABOUT: ClassVar[str] = (
@@ -689,13 +684,12 @@ class AppSettingsView(Vertical):
     UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether rlx looks for a new release")
     # One line: at 80x24, beside the sidebar, three pushed the tab's Advanced one scroll down.
     UPDATES_CHECK_ABOUT: ClassVar[str] = "Off: no PyPI lookup, no ⬆ row in the sidebar."
-    PREFERENCES_FROM_A_SHELL: ClassVar[tuple[str, str]] = (
-        "Set from a shell (",
-        "), a preference shows after Reload here or when rlx next starts, not live.",
+    PREFERENCES_FROM_OUTSIDE: ClassVar[str] = (
+        "A preference changed outside rlx shows after Reload here, or when rlx next starts; "
+        "not live."
     )
-    """The tab's note, around the command it names in bold: ``asq`` holds ``[ui]`` and
-    takes it from this page, so a ``config set`` made while it runs waits for one or the
-    other."""
+    """The tab's note: ``asq`` holds ``[ui]`` and takes it from this page, so a change made
+    elsewhere while it runs waits for one or the other. It names no command (R13)."""
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
@@ -1061,19 +1055,13 @@ class AppSettingsView(Vertical):
         with Horizontal(classes="row"):
             yield Label("share settings.json")
             yield Switch(self.accounts.share_settings, id="accounts-share-settings")
-        # The commands in bold, not in backticks: the note is a ``Text``, which shows them.
+        # Where each thing is set in rlx: the page's own rows, never a command (R13).
         yield Static(
-            Text.assemble(
-                "Model and effort per role: ",
-                (f"{prog.word()} team harness", "bold"),
-                "; each role's binding (binary, environment, args) is under Role bindings "
-                "below, as ",
-                (f"{prog.word()} team bind", "bold"),
-                " writes it; the account select is ",
-                ("team bind <role> --account", "bold"),
-                ". The machine and project account defaults: the Accounts page and ",
-                (f"{prog.word()} accounts default", "bold"),
-                ". No value on this tab is read from the environment.",
+            Text(
+                "Each role's binding (binary, environment, args) is under Role bindings below, "
+                "and its account in the select beside it. The machine and project account "
+                "defaults are on the Accounts page. No value on this tab is read from the "
+                "environment."
             ),
             id="agent-settings-note",
             classes="about",
@@ -1089,14 +1077,7 @@ class AppSettingsView(Vertical):
     def _binding_rows(self) -> Iterable[Vertical | Static]:
         """One block per bound role — its binding, then Edit, Unset key… and Clear."""
         if not self._role_bindings:
-            yield Static(
-                Text(
-                    f"no role bindings — `{prog.word()} team bind <role> --bin … --env "
-                    "KEY=VALUE` "
-                    "makes one, or + New bind"
-                ),
-                id="bindings-empty",
-            )
+            yield Static(Text("no role bindings — + New bind makes one"), id="bindings-empty")
             return
         for role, profile in sorted(self._role_bindings.items()):
             yield Vertical(
@@ -1160,7 +1141,6 @@ class AppSettingsView(Vertical):
             yield Label("Check for a new release daily", classes="preference-label")
             yield Switch(self.updates.check, id=UPDATES_CHECK)
         yield Static(Text(self.UPDATES_CHECK_ABOUT), id="updates-check-about", classes="about")
-        before, after = self.PREFERENCES_FROM_A_SHELL
         with Collapsible(
             title="Advanced", collapsed=True, id=PREFERENCES_ADVANCED, classes="advanced"
         ):
@@ -1173,11 +1153,7 @@ class AppSettingsView(Vertical):
                 yield Switch(self.ui.confirm_stop, id="ui-confirm-stop")
             yield Static(Text(self.CONFIRM_STOP_ABOUT), id="ui-confirm-stop-about", classes="about")
             yield Static(
-                Text.assemble(
-                    before,
-                    (f"{prog.word()} config set ui.always_show_project_path true", "bold"),
-                    after,
-                ),
+                Text(self.PREFERENCES_FROM_OUTSIDE),
                 id="preferences-from-a-shell",
                 classes="about",
             )
@@ -1663,9 +1639,7 @@ class AppSettingsView(Vertical):
         except Exception as exc:  # the file could not be written: say so, change nothing shown
             self.notify(f"{key} not unset: {exc}", severity="error", markup=False)
             return
-        self.notify(
-            f"{role}: {key} unset ({prog.word()} team bind {role} --unset {key})", markup=False
-        )
+        self.notify(f"{role}: {key} unset", markup=False)
         self.call_later(self.reload_bindings)
 
     def _clear(self, role: str) -> None:
@@ -1674,9 +1648,7 @@ class AppSettingsView(Vertical):
         except Exception as exc:
             self.notify(f"{role}'s binding not cleared: {exc}", severity="error", markup=False)
             return
-        self.notify(
-            f"{role}: binding cleared ({prog.word()} team bind {role} --clear)", markup=False
-        )
+        self.notify(f"{role}: binding cleared", markup=False)
         self.call_later(self.reload_bindings)
 
     # --- reset -------------------------------------------------------------------------

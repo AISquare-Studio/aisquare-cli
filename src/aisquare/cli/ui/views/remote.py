@@ -35,8 +35,7 @@ from aisquare.cli.ui.remote_control import (
     read_only_reason,
 )
 from aisquare.cli.ui.ticks import while_running
-from aisquare.core import program as prog
-from aisquare.services.remote_server import _remote_instant, remote_install_hint
+from aisquare.services.remote_server import _remote_instant
 
 QR_UNAVAILABLE = "QR unavailable: this install lacks segno"
 """The QR's notice, before the command that puts segno back in the install that runs
@@ -50,12 +49,12 @@ LOCAL_ONLY = (
 
 def served_elsewhere_state() -> str:
     """The state, while another process serves Remote from this home and this one does not."""
-    return f"on in another process ({prog.word()} remote serve, or another rlx) — turn it off there"
+    return "on in another process or another rlx — turn it off there"
 
 
 def served_elsewhere_link() -> str:
     """The link row, then: that Remote's link is the other process's to show."""
-    return f"its link is shown where it runs; {prog.word()} remote status prints the local one"
+    return "its link is shown where it runs"
 
 
 LOCAL_ZONE: tzinfo | None = None
@@ -82,7 +81,7 @@ def qr_text(url: str) -> str:
     try:
         import segno
     except ImportError:
-        return f"{QR_UNAVAILABLE} — {remote_install_hint()}"
+        return QR_UNAVAILABLE  # what installs segno is the shell's (R13)
     buffer = io.StringIO()
     segno.make(url, error="l").terminal(out=buffer, compact=True, border=1)
     return buffer.getvalue().rstrip("\n")
@@ -281,8 +280,8 @@ class RemotePanel(ModalScreen[None]):
         if until is None:
             return Text(f"{failed} failed unlocks in 30 min", style="dim")
         return Text(
-            f"{failed} failed unlocks in 30 min — new unlocks paused; rotate the link: "
-            f"{prog.word()} remote regenerate-password --new-link"
+            f"{failed} failed unlocks in 30 min — new unlocks paused; Regenerate sets a new "
+            "password"
         )
 
     def _paint_devices(self, devices: list[dict[str, Any]]) -> None:

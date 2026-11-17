@@ -109,7 +109,7 @@ def test_a_codex_reading_is_never_recorded_as_a_trend_sample_nor_backed_off(
     assert not accounts_service.is_kept(read[codex.slot])
 
 
-def test_a_signed_in_codex_row_offers_log_in_again_which_opens_codex_login(
+def test_a_signed_in_codex_row_offers_log_in_again_which_opens_codex_s_sign_in(
     machine: Path,  # noqa: F811
 ) -> None:
     codex = _codex("x@example.com")
@@ -117,4 +117,4 @@ def test_a_signed_in_codex_row_offers_log_in_again_which_opens_codex_login(
     status = accounts_service.describe(codex)
 
     assert offers_login_again(status, None)
-    assert "codex login" in _sign_in_opens(CODEX)
+    assert _sign_in_opens(CODEX) == "Codex's sign-in opens below"  # never its command (R13)

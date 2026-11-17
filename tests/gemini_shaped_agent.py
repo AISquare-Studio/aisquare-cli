@@ -775,6 +775,7 @@ class GeminiShapedAdapter:
     home_name = CONFIG
     settings_name = "settings.json"
     install_hint = "npm install -g @google/gemini-cli"
+    install_page = "https://github.com/google-gemini/gemini-cli"
     install_routes: tuple[InstallRoute, ...] = (
         InstallRoute("npm", "npm install -g @google/gemini-cli"),
         InstallRoute("Homebrew", "brew install gemini-cli", frozenset({"darwin"})),

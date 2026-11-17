@@ -1283,7 +1283,10 @@ def test_over_ssh_to_an_unknown_terminal_the_toast_says_sent_not_copied(
 
     notices, severities, writes = run(drive())
     assert board.calls() == [], "no native write over SSH"
-    assert _osc52s(writes) == [osc52(TEXT)]
+    # Inside tmux the same sequence goes again in tmux's passthrough, which reaches the
+    # terminal where tmux keeps an app's own OSC 52 to itself (R13, #146).
+    passthrough = [f"\x1bPtmux;{osc52(TEXT).replace(chr(27), chr(27) * 2)}\x1b\\"]
+    assert _osc52s(writes) == [osc52(TEXT), *(passthrough if "TMUX" in env else [])]
     assert notices == [HEDGED] and severities == ["information"]
     assert not any(notice.startswith("copied") for notice in notices)
 

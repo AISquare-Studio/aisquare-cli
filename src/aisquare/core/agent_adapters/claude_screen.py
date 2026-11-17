@@ -22,8 +22,10 @@ carries the agent's ``--name``, on the pane's last row under a dialog drawn over
   and a footer naming Esc or Enter on the last two lines; *yes* is the digit of the first
   option that says Yes (``1`` on the real permission chooser, never a blind ``1``), *no* is
   Esc;
-- the **trust dialog** (``Quick safety check …``): its own shape, no keys — trusting a
-  folder is the owner's to answer;
+- the **trust dialog** (``Quick safety check …``, and 2.1.326's question about an
+  ``--add-dir`` folder, ``Adding a new directory: …`` over ``Yes, add it``, or on a pane
+  too short for it, cut off over ``Adding: <folder>`` under its footer): its own shape,
+  no keys — trusting a folder is the owner's to answer;
 - a ``[y/N]``-style **last line**: ``y`` and ``n``.
 
 :func:`modal_showing` is ``say``'s view of the same screen: those shapes, named, plus two
@@ -56,11 +58,28 @@ name (T2b, 13383): the fleet launches every agent with --name, and Claude Code d
 there — a long rule, one space, the name, one space, a short closing run, nothing else."""
 INPUT_LINE = re.compile(r"^\s*" + PROMPT_MARK)
 OPTION = re.compile(r"^\s*(" + PROMPT_MARK + r"\s*)?(\d)[.)]\s+(\S.*)$")
-MODAL_FOOTER = re.compile(r"Esc to (?:cancel|clear)|Enter to confirm")
+MODAL_FOOTER = re.compile(r"Esc to (?:cancel|clear|exit)|Enter to confirm")
 """A dialog's footer: ``Esc to cancel``, ``Enter to confirm`` and, on 2.1.318's ``/config``
-(``Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear``), ``Esc to clear``."""
+(``Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear``), ``Esc to clear``. And
+``Esc to exit``: 2.1.326's question at its start about an ``--add-dir`` folder, once it
+refused a key there (text typed into it, an Enter right after), says ``Esc to exit · To add
+it, press ↓ to Yes, then Enter (your text is kept)``, which a narrow pane wraps (R19)."""
 YES_NO = re.compile(r"[\[(]\s*[yY](?:es)?\s*/\s*[nN](?:o)?\s*[\])]\s*[:?]?\s*$")
-TRUST = re.compile(r"Quick safety check|Yes, I trust this folder")
+TRUST = re.compile(r"Quick safety check|Yes, I trust this folder|Yes, add it\b")
+"""A folder-trust question's words: the folder Claude Code starts in, and (2.1.326) an
+``--add-dir`` folder no trust covers, at its start or added later."""
+FOLDER_LINE = re.compile(r"^\s*Adding:(?: \S|\s*$)")
+"""The row 2.1.326 draws under the footer of its question about an ``--add-dir`` folder
+when the question is cut off: on a pane too short for even its compact layout, whose top
+it pushes off the screen, title and all. It names the folder, wrapped onto the rows under
+it, the last the question draws; measured from 40 rows down to 4, at which only the footer
+and this are left (R19). ``Adding:`` alone where the folder starts a row of its own: one
+with no space in it that fits on the next row but not on this one (brief 217)."""
+TRUST_TITLE = re.compile(r"Quick safety check|Adding a new directory|" + FOLDER_LINE.pattern)
+"""The row a :data:`TRUST` dialog's question is named by: its title, or the folder line of
+one cut off (:data:`FOLDER_LINE`), ``Adding:`` alone too, with the row under it, where the
+folder starts (review of #520). It names the question, never makes one: which screens are
+the dialog is :data:`TRUST`'s and the folder line's."""
 RATING = re.compile(r"How is Claude doing this session")
 WORKING = re.compile(r"esc to interrupt", re.IGNORECASE)
 """What a turn in progress shows at the box: in the footer, or on the spinner line."""
@@ -232,6 +251,19 @@ def _yes_option(region: Sequence[str]) -> str | None:
     return None
 
 
+def _folder_line_at(region: Sequence[str]) -> int | None:
+    """Where ``region`` ends on the folder line of a cut-off trust dialog
+    (:data:`FOLDER_LINE`): the last row that names the folder under the footer, whose rows
+    a narrow pane wraps."""
+    footers = [at for at, row in enumerate(region) if MODAL_FOOTER.search(row)]
+    lines = [
+        at
+        for at, row in enumerate(region)
+        if footers and footers[0] < at and FOLDER_LINE.match(row)
+    ]
+    return lines[-1] if lines else None
+
+
 def prompt_showing(lines: Sequence[str]) -> ScreenPrompt | None:
     """The prompt at the bottom of a pane, read by its structure, or ``None`` (T1b's question)."""
     rows = tail(lines)
@@ -241,9 +273,13 @@ def prompt_showing(lines: Sequence[str]) -> ScreenPrompt | None:
     if not region:
         return None
     whole = " ".join(" ".join(region).replace(PROMPT_MARK, " ").split())
+    cut = _folder_line_at(region)
     footer = any(MODAL_FOOTER.search(row) for row in region[-2:])
-    if footer and any(TRUST.search(row) for row in region):
-        question = next((row.strip() for row in region if "Quick safety check" in row), "")
+    if cut is not None or (footer and any(TRUST.search(row) for row in region)):
+        titled = next((at for at, row in enumerate(region) if TRUST_TITLE.search(row)), None)
+        question = region[titled].strip() if titled is not None else ""
+        if titled is not None and question == "Adding:" and titled + 1 < len(region):
+            question = f"{question} {region[titled + 1].strip()}"  # the folder, on its own row
         return ScreenPrompt(
             "trust", question or "the trust dialog", None, None, whole, _yes_option(region)
         )

@@ -35,7 +35,7 @@ from textual.message import Message
 from textual.notifications import SeverityLevel
 from textual.widgets._toast import ToastRack
 
-from aisquare.cli.ui import toasts
+from aisquare.cli.ui import timers, toasts
 from aisquare.core import clipboard, program
 
 ReturnType = TypeVar("ReturnType")
@@ -132,6 +132,11 @@ class ClipboardApp(App[ReturnType]):
     """
 
     DEFAULT_CSS = toasts.CSS
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Before any timer: on Windows, none of them waits in a thread (``cli.ui.timers``).
+        timers.install()
+        super().__init__(*args, **kwargs)
 
     def _on_load(self) -> None:
         """The app's first event, under ``run()`` and ``run_test()`` alike."""

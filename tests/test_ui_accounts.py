@@ -44,6 +44,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as shell_module
+from aisquare.cli.ui import timers
 from aisquare.cli.ui.app import ACCOUNTS_WORKER, FLEET_WORKER, SIDEBAR_WIDTH_KEY, FleetApp
 from aisquare.cli.ui.sidebar import SETTINGS_KEY, AccountsSelected, StatusLine
 from aisquare.cli.ui.terminal import TerminalPane
@@ -81,6 +82,7 @@ from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
+from tests import windows_timers as windows_timers_module
 from tests.pane_harness import asks_a_server, socket_of
 from tests.ui_workers import settle_page, settle_until
 
@@ -982,43 +984,41 @@ def in_asq() -> Iterator[None]:
 
 
 @pytest.fixture
-def windows_timers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Textual's timers as they sleep on Windows (``textual._win_sleep``), on any OS.
+def windows_timers(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Textual's timers as they sleep on Windows, Textual's alone (``tests.windows_timers``):
+    a pending timer holds a thread for its whole interval."""
+    return windows_timers_module.emulate(monkeypatch, asq=False)
 
-    Each timer's sleep is a blocking wait in asyncio's default executor, and its cancel is
-    set from that executor too; the executor has 8 threads, a 4-vCPU runner's
-    ``min(32, cpu + 4)``. So a pending timer holds a thread for its whole interval.
-    """
-    import concurrent.futures
 
-    import textual.timer as textual_timer
+@pytest.fixture
+def asq_on_windows(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The same, with asq's own sleep installed as on Windows (``cli.ui.timers``)."""
+    return windows_timers_module.emulate(monkeypatch, asq=True)
 
-    real_init = concurrent.futures.ThreadPoolExecutor.__init__
 
-    def eight(
-        self: Any, max_workers: Any = None, thread_name_prefix: str = "", *a: Any, **k: Any
-    ) -> None:
-        if max_workers is None and thread_name_prefix == "asyncio":
-            max_workers = 8
-        real_init(self, max_workers, thread_name_prefix, *a, **k)
+def test_no_timer_of_asq_s_holds_a_thread_past_the_ceiling_on_windows(
+    asq_on_windows: list[float], no_network: dict[str, Any]
+) -> None:
+    """On Windows a Textual timer waits in a thread of asyncio's default executor, the one
+    the workers and the quit run on (``cli.ui.timers``). asq's own (the refresh, headroom
+    60 s, housekeeping and Remote's tunnel 30 s, the Accounts page's usage 60 s, a toast's
+    10 s) took a thread each, for good. Each wait asks for a thread for the last
+    :data:`~aisquare.cli.ui.timers.CEILING` of its time at most, whoever set it, and as much
+    again as asyncio's own wait may end early (``timers.longest_hold``): 71 ms on
+    windows-py3.12, where a flat 50 ms failed (#526's run 44083919544)."""
 
-    async def win_sleep(secs: float) -> None:
-        sleep_for = max(0.0, secs - 0.001)
-        if sleep_for < 0.0005:
-            return
-        cancel = threading.Event()
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, cancel.wait, sleep_for)
-        except asyncio.CancelledError:
-            await loop.run_in_executor(None, cancel.set)
-            raise
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await open_accounts(pilot)
+        app.notify("a toast with its own time", timeout=10)
+        app.set_interval(3600, lambda: None)
+        app.set_timer(30, lambda: None)
+        await pilot.pause(0.5)
 
-    async def sleep(secs: float) -> None:
-        await asyncio.create_task(win_sleep(secs))
+    drive(go)
 
-    monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "__init__", eight)
-    monkeypatch.setattr(textual_timer, "sleep", sleep)
+    assert asq_on_windows, "the emulation saw the timers' last moments"
+    assert max(asq_on_windows) <= timers.longest_hold(), sorted(asq_on_windows)[-5:]
 
 
 @pytest.mark.usefixtures("windows_timers")
@@ -1664,10 +1664,17 @@ def test_an_environment_token_can_neither_sign_out_nor_start_a_browser_sign_in(
     assert workers == [] and seen == []  # no flow ran, nothing was replaced
 
 
+@pytest.mark.parametrize("windows", [False, True], ids=["here", "asq on Windows"])
 def test_quitting_mid_sign_in_cancels_the_device_flow(
-    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any], windows: bool
 ) -> None:
-    """Textual cancelling a thread worker does not stop its callable; the page's own flag must."""
+    """Textual cancelling a thread worker does not stop its callable; the page's own flag must.
+
+    On Windows too (``tests.windows_timers``): asq's timers, 30 s, 60 s and longer, each held a
+    thread of the 8 the worker and the quit run on, and the quit came after the wait's 5 s
+    (windows-py3.12: R17's run 44051094043, the rc/rlx gate run 44072523971)."""
+    if windows:
+        windows_timers_module.emulate(monkeypatch, asq=True)
     seen = _script_device_flow(monkeypatch, no_network, outcome={"access_token": "aisq_new"})
     waiting, released = threading.Event(), threading.Event()
     observed: dict[str, bool] = {}

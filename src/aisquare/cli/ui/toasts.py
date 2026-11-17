@@ -188,7 +188,7 @@ def show_calm(rack: ToastRack, notifications: Notifications) -> None:
         found = ids.get(holder.id or "")
         stock = any(type(toast) is Toast for toast in holder.query_children(Toast))
         if found is None or stock:
-            _remove(holder)
+            _unmount_once(holder)
         else:
             present[found.identity] = holder
     for notification in shown:
@@ -219,7 +219,7 @@ def _guarded(rack: ToastRack) -> bool:
     )
 
 
-def _remove(widget: Widget) -> None:
+def _unmount_once(widget: Widget) -> None:
     """Remove ``widget`` once: a holder dismissed by a click is removed then, and again by the
     refresh that follows, before the first removal is over."""
     if getattr(widget, "_calm_removed", False):
@@ -245,7 +245,7 @@ def _more_holder(rack: ToastRack) -> ToastHolder | None:
 def _show_more(rack: ToastRack, holder: ToastHolder | None, waiting: int) -> None:
     if not waiting:
         if holder is not None:
-            _remove(holder)
+            _unmount_once(holder)
         return
     if holder is None:
         more = MoreToasts(waiting)
@@ -313,7 +313,7 @@ class CalmToast(Toast):
         if self._notification.time_left > 0.05:
             self._arm()
             return
-        self.dismiss()
+        self.close_now()
 
     def on_enter(self, event: events.Enter) -> None:
         hold(self.app, self._notification)
@@ -329,7 +329,7 @@ class CalmToast(Toast):
         """Whether ``x`` (an offset into the toast) is in the right-most :data:`DISMISS` cells."""
         return x >= self.outer_size.width - DISMISS
 
-    def dismiss(self) -> None:
+    def close_now(self) -> None:
         """Gone at once: the notification is forgotten, and the toast leaves the rack before
         the next click, so the one below is under the pointer for it."""
         app = self.app
@@ -340,7 +340,7 @@ class CalmToast(Toast):
             self._timer.stop()
         held(app).pop(self._notification.identity, None)
         app._unnotify(self._notification)
-        _remove(holder)
+        _unmount_once(holder)
         if last and isinstance(rack, ToastRack) and not _guarded(rack):
             guard = ToastHolder(ClickGuard(), id=GUARD_ID)
             rack.mount(guard)
@@ -354,7 +354,7 @@ class CalmToast(Toast):
         event.prevent_default()  # Textual's own Toast is dismissed by any click at all
         event.stop()
         if self.in_dismiss_column(event.x):
-            self.dismiss()
+            self.close_now()
             return
         if event.chain >= 2 and self.allow_select:
             self.text_select_all()
@@ -419,7 +419,7 @@ class CalmToast(Toast):
 
 
 def _drop_guard(rack: ToastRack, guard: ToastHolder) -> None:
-    _remove(guard)
+    _unmount_once(guard)
     rack.display = any(True for _ in rack.app._notifications)
 
 

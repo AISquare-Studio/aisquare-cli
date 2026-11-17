@@ -117,4 +117,4 @@ def test_a_signed_in_codex_row_offers_log_in_again_which_opens_codex_login(
     status = accounts_service.describe(codex)
 
     assert offers_login_again(status, None)
-    assert "codex login" in _sign_in_opens(CODEX)
+    assert _sign_in_opens(CODEX) == "Codex's sign-in opens below"  # never its command (R13)

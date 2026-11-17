@@ -78,12 +78,13 @@ is drawn at 82% over its ground. The product mark is not (:class:`MarkStatic`)."
 
 RLX_THEME = Theme(
     name="rlx",
-    # #2F74F0 with its triad (magenta, lime) and its complement (amber) around it.
-    # Nothing else is blue. tests/test_ui_rlx_theme.py measures every colour against the
-    # grounds it is drawn on.
+    # #2F74F0 with a teal beside it (the owner's pick, 2026-11-17, for the pink), a lime, and
+    # its complement (amber) around it. Nothing else is blue: the teal's hue, 173°, sits just
+    # outside blue's. tests/test_ui_rlx_theme.py measures every colour against the grounds
+    # it is drawn on.
     primary=RLX_BLUE,
     secondary="#E8FF3A",
-    accent="#FF4FD8",
+    accent="#14B8A6",
     warning="#FF9F1C",
     error="#FF5A5F",
     success="#2BF07A",

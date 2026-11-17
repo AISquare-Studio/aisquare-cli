@@ -936,6 +936,11 @@ def test_agent_marks_off_draws_a_mixed_fleets_rows_without_them(
 # --- F. what a view with no pane says where its pane was ---------------------------------------
 
 
+def header_of(view: AgentView) -> str:
+    """The view's info line as drawn."""
+    return composited(view.query_one("#agent-header", Static))
+
+
 def pane_said(view: AgentView) -> tuple[list[str], str]:
     """The pane's rows as drawn, and their words run together as one reads them."""
     pane = view.pane
@@ -956,15 +961,17 @@ def test_a_paused_agents_view_says_it_is_paused_where_its_pane_was(
 ) -> None:
     """Brief 233: a paused agent's view said "(pane gone)" where its pane was, which read as if
     something broke. It says it is paused, what is kept and what Resume does, whole beside a
-    45-column terminal's sidebar too: wrapped over the pane's rows, never cut at its first."""
+    45-column terminal's sidebar too: wrapped over the pane's rows, never cut at its first. Its
+    header names no pane: the killed window's id is the next agent's to be given."""
     one_coder(tmp_path, script, "paused")
 
-    async def go(pilot: Pilot[None]) -> tuple[str | None, list[str], str]:
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str, list[str], str]:
         view = await open_view(pilot, fleet_app(pilot), CODER)
-        return view.pane.pane_id, *pane_said(view)
+        return view.pane.pane_id, header_of(view), *pane_said(view)
 
-    pane_id, rows, said = drive(go, size=size)
+    pane_id, header, rows, said = drive(go, size=size)
     assert pane_id is None, "no pane: the pause killed its window"
+    assert "%1" not in header, header
     assert said == PAUSED_WORDS, rows
     assert PANE_GONE not in said
     if size == (45, 30):
@@ -1013,12 +1020,15 @@ def test_every_other_state_keeps_its_own_words(
     if held:
         script["prj_a"] = [script["prj_a"][0], row.model_copy(update={"held": True})]
 
-    async def go(pilot: Pilot[None]) -> tuple[str | None, str]:
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str, str]:
         view = await open_view(pilot, fleet_app(pilot), CODER)
-        return view.pane.pane_id, pane_said(view)[1]
+        return view.pane.pane_id, header_of(view), pane_said(view)[1]
 
-    pane_id, said = drive(go)
+    pane_id, header, said = drive(go)
     assert pane_id == pane
+    # The header names the pane it shows, and none where it shows none (the id is another's).
+    assert header.rstrip().endswith("%1") is (pane is not None), header
+    assert ("%1" in header) is (pane is not None), header
     if words is not None:
         assert said == words
     assert PAUSED_WORDS not in said

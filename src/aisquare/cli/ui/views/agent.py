@@ -2,9 +2,9 @@
 
 The info line (:func:`info_line`) is the one the Manager tab shows too: who the
 agent is, its state, the account it runs on with that account's session use, the
-model and effort it runs, its pane, and the persona it runs as — one builder, so the
-two never drift apart again. It is a one-line :class:`rich.text.Text` built from a
-:class:`FleetAgentStatus`; every field is DATA and is appended as text, never as
+model and effort it runs, its pane while it has one, and the persona it runs as — one
+builder, so the two never drift apart again. It is a one-line :class:`rich.text.Text`
+built from a :class:`FleetAgentStatus`; every field is DATA and is appended as text, never as
 markup, so a label or a model name with brackets in it reaches the screen intact
 (tests/test_console_markup.py's rule). The shell calls
 :meth:`AgentView.refresh_status` on its poll, and :meth:`AgentView.show_usage`
@@ -128,11 +128,12 @@ def info_line(
 
     The Agent view's header and the Manager tab's first line, both:
     ``<icon> <label>  <chip> <state>[(exit)]  <account> · <pct>%  <model> <effort>  [detail]
-    <pane id>[ · <persona>]``. The role icon and the label; the state chip (``💤 exited(N)`` once it
-    ended); the account (:func:`account_text`, its NAME alone — no ``#slot``) with its
+    [<pane id>][ · <persona>]``. The role icon and the label; the state chip (``💤 exited(N)``
+    once it ended); the account (:func:`account_text`, its NAME alone — no ``#slot``) with its
     five-hour window percent USED from ``usage`` (slot → percent, the slow headroom read's
     ``limit_by_slot``); the model and the effort the session reported
-    (``TeamSession.effort``, left out while unknown); the state's detail; and the pane id.
+    (``TeamSession.effort``, left out while unknown); the state's detail; and the pane id,
+    while the row has a pane of its own (:func:`shown_pane`: none paused, lost or held).
     No role word, task, working directory or tmux command: the sidebar row says the role,
     and the attach command is the Settings tab's.
 
@@ -181,8 +182,9 @@ def info_line(
         return text
     # Too wide without the persona too: it is gone already, and the label gives way next.
     # The label's room: the row, less what must stay whole after it, less one cell for the
-    # ``…`` that cuts the rest — the pane id always follows.
-    room = width - 1 - (essential - label.cell_len)
+    # ``…`` that cuts the rest when there is a rest (the pane id, while the row has a pane).
+    rest = 1 if text.cell_len > essential else 0
+    room = width - rest - (essential - label.cell_len)
     if label.cell_len > room:
         label.truncate(max(room, LABEL_KEEP + 1), overflow="ellipsis")
         text, _ = _info_line(status, label, labels, usage, named)
@@ -232,8 +234,13 @@ def _info_line(
     if status.detail and not (exited and status.detail == f"exit {agent.exit_status}"):
         text.append(SEPARATOR)
         text.append(status.detail, style=DETAIL_STYLE)
-    text.append(SEPARATOR)
-    text.append(agent.pane_id, style=PANE_STYLE)
+    # The pane id only while the row has a pane of its own (:func:`shown_pane`). A paused or
+    # lost row's id was its killed window's, and a held row's is the next server's: tmux hands
+    # it to the next agent, so it named someone else's pane (brief 233's ruling).
+    pane = shown_pane(status)
+    if pane is not None:
+        text.append(SEPARATOR)
+        text.append(pane, style=PANE_STYLE)
     return text, essential
 
 

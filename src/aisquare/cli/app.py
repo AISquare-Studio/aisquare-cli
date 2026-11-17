@@ -95,8 +95,8 @@ def main_callback(
     ] = "default",
     no_color: Annotated[bool, typer.Option("--no-color", help="Disable coloured output.")] = False,
 ) -> None:
-    """One terminal over your projects and your coding agents: task a manager in
-    plain words, and it runs the coders, testers and reviewers for you.
+    """rlx is a manager for your AI coding agents. Tell it the goal: it runs Claude Code
+    and Codex on accounts with room. Then relax.
 
     Underneath, a memory keeps your preferences and each project's conventions
     across sessions.

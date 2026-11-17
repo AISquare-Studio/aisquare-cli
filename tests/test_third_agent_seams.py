@@ -2685,12 +2685,12 @@ def test_its_agent_views_stop_says_its_own_exit_command(
 
 
 def _bulk_about(monkeypatch: pytest.MonkeyPatch, action: str, rows: list[Any]) -> tuple[str, str]:
-    """What the bulk dialog says ``action`` does once it shows ``rows``, and with *Managers
-    only* switched on."""
+    """What the bulk dialog says ``action`` does once it shows ``rows``, and with the managers
+    picked alone (R17's pick-list, which replaced *Managers only*)."""
     import asyncio
 
     from textual.app import App
-    from textual.widgets import Static, Switch
+    from textual.widgets import Static
 
     from aisquare.cli.ui.views.fleet_bulk import ConfirmBulk
     from aisquare.models import ProjectInfo
@@ -2719,7 +2719,10 @@ def _bulk_about(monkeypatch: pytest.MonkeyPatch, action: str, rows: list[Any]) -
                 await pilot.pause(0.01)
             await pilot.pause()
             every = str(about.content)
-            dialog.query_one("#bulk-managers", Switch).value = True
+            for pick in dialog.picks:  # the managers picked alone
+                if pick.row is not None and pick.row.agent.role != "manager":
+                    pick.value = False
+            await pilot.pause()
             await pilot.pause()
             return every, str(about.content)
 
@@ -2751,8 +2754,9 @@ def test_a_bulk_of_agents_whose_exit_commands_differ_spells_none(
     third: AgentAdapter, monkeypatch: pytest.MonkeyPatch, action: str
 ) -> None:
     """#60: a Claude Code coder beside a manager of the third agent's: each is sent its own
-    command, so the dialog says "its own exit command" and spells neither. *Managers only*
-    leaves the third agent's manager alone, whose command it then names."""
+    command, so the dialog says "its own exit command" and spells neither. The manager picked
+    alone (R17's pick-list, which replaced *Managers only*) is the third agent's, whose command
+    it then names."""
     from aisquare.cli.ui.views.fleet_bulk import OWN_EXIT
     from aisquare.core.agent_adapters import DEFAULT_AGENT, get_adapter
 

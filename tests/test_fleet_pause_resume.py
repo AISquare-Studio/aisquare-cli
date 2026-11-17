@@ -241,6 +241,75 @@ def test_managers_only_pauses_the_managers_alone(fleet: Fleet) -> None:
     assert _row(fleet.agents[_coder_label(fleet, "alpha")].id).ended_at is None
 
 
+def _picked(plan: fleet_service.BulkPlan, *leave: str) -> fleet_service.BulkPlan:
+    """``plan`` as asq's pick-list answers it, the agents ``leave`` names (``alpha/manager``)
+    unticked (R17)."""
+    from aisquare.cli.ui.views.fleet_bulk import picked_plan
+
+    names = {plan_row.project.id: plan_row.project.root.name for plan_row in plan.rows}
+    chosen = {
+        row.agent.id
+        for row in plan.rows
+        if f"{names[row.project.id]}/{row.agent.label}" not in leave
+    }
+    return picked_plan(plan, chosen)
+
+
+def test_a_pause_of_the_agents_picked_fleet_pauses_only_a_project_picked_whole(
+    fleet: Fleet,
+) -> None:
+    """R17, Q-E1: alpha's manager unticked, the pause exits alpha's coder alone, its claim
+    kept, and leaves alpha's ``fleet-paused`` signal off, so the manager still running can
+    spawn; beta, picked whole, is fleet-paused as a pause of all sets it. The unticked manager
+    is reported skipped, ``not chosen``, and is never touched."""
+    shown = _picked(fleet_service.bulk_plan("pause"), "alpha/manager")
+
+    report = fleet_service.bulk("pause", shown=shown)
+
+    outcomes = _outcomes(fleet, report.receipts)
+    assert outcomes["alpha/manager"] == ("skipped", fleet_service.NOT_CHOSEN)
+    assert {key for key, (outcome, _) in outcomes.items() if outcome == "done"} == {
+        _coder_label(fleet, "alpha"),
+        "beta/manager",
+        _coder_label(fleet, "beta"),
+    }
+    assert [p.id for p in report.signals] == [fleet.beta.id]
+    assert not fleet_service.is_paused(fleet.alpha), "alpha's manager runs: it may spawn"
+    assert fleet_service.is_paused(fleet.beta)
+    assert _row(fleet.agents["alpha/manager"].id).ended_at is None
+    assert _row(fleet.agents[_coder_label(fleet, "alpha")].id).paused_at is not None
+
+
+def test_a_pause_with_every_agent_picked_fleet_pauses_as_a_pause_of_all_does(
+    fleet: Fleet,
+) -> None:
+    report = fleet_service.bulk("pause", shown=_picked(fleet_service.bulk_plan("pause")))
+
+    assert {p.id for p in report.signals} == {fleet.alpha.id, fleet.beta.id}
+    assert fleet_service.is_paused(fleet.alpha) and fleet_service.is_paused(fleet.beta)
+    assert not report.of("skipped")
+
+
+def test_a_resume_of_the_agents_picked_keeps_the_project_fleet_paused(fleet: Fleet) -> None:
+    """A resume that leaves alpha's manager paused brings back its coder alone, and alpha
+    stays fleet-paused beside the agent still paused (``_resumes_clear``), on the report's
+    ``kept``; the manager is reported ``not chosen``."""
+    fleet_service.bulk("pause", projects=[fleet.alpha])
+    plan = fleet_service.bulk_plan("resume", projects=[fleet.alpha])
+
+    report = fleet_service.bulk(
+        "resume", shown=_picked(plan, "alpha/manager"), projects=[fleet.alpha]
+    )
+
+    outcomes = _outcomes(fleet, report.receipts)
+    assert outcomes["alpha/manager"] == ("skipped", fleet_service.NOT_CHOSEN)
+    assert [r.agent.label for r in report.of("done")] == [
+        _coder_label(fleet, "alpha").split("/")[1]
+    ]
+    assert fleet_service.is_paused(fleet.alpha), "the manager is still paused"
+    assert report.signals == () and [(p.id, n) for p, n in report.kept] == [(fleet.alpha.id, 1)]
+
+
 # --- A3: the resume -------------------------------------------------------------------
 
 

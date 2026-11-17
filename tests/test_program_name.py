@@ -252,3 +252,274 @@ def test_the_command_hints_print_is_one_the_install_writes() -> None:
     from aisquare.services import install_route
 
     assert program.COMMAND in install_route.NEW_COMMANDS
+
+
+# ---------------------------------------------------------------------------- the guard
+
+_SRC = Path(__file__).resolve().parent.parent / "src" / "aisquare"
+
+#: Text R3 keeps as it is (the manager's rulings, brief 180; the owner's, seq 12065), whole files:
+_KEEP_FILES: dict[str, str] = {
+    **{
+        name: "the AISquare integration, not rebranded (owner, seq 12065)"
+        for name in (
+            "cli/auth.py",
+            "cli/explainability.py",
+            "cli/ui/views/explainability.py",
+            "services/credits.py",
+            "services/destinations.py",
+            "services/device_flow.py",
+            "services/explainability.py",
+            "services/explainability_ops.py",
+            "services/iam.py",
+            "services/ci_augment.py",
+            "services/ci_doctor.py",
+            "services/ci_client.py",
+            "core/insights.py",
+        )
+    },
+    **{
+        name: "the agents' protocol, which names its commands with aisquare (Q9)"
+        for name in (
+            "core/injection.py",
+            "core/prompt_origin.py",
+            "core/ledger.py",
+            "services/briefs.py",
+            "services/command_reports.py",
+            "services/parent.py",
+            "cli/brief.py",
+            "cli/command_reports.py",
+            "cli/task.py",
+        )
+    },
+    "core/program.py": "the one place the word is named",
+    "core/spawn.py": "the inventory of process seams the tests walk; never printed",
+    "core/agent_adapters/claude_usage.py": "usage traces, recorded as data",
+    "core/agent_adapters/codex_usage.py": "usage traces, recorded as data",
+}
+#: ... and single functions (qualified names), the agents' protocol and the integration's rows:
+_KEEP_FUNCS: dict[tuple[str, str], str] = {
+    **{
+        ("services/team.py", name): "the agents' protocol (Q9)"
+        for name in (
+            "_assignment_lines",
+            "_captain_briefing",
+            "_delegated_board",
+            "_protocol_lines",
+            "_render_delta",
+            "_render_wakeup",
+            "_role_cycle",
+            "_start_pack",
+            "short_line",
+            "DeliveryUnconfirmedError.__init__",
+        )
+    },
+    **{
+        ("core/harness.py", name): "the agents' role cycles (Q9)"
+        for name in ("_role_cycle_core", "_ui_start", "_verify_start", "<module>")
+    },
+    **{
+        ("services/fleet.py", name): "an agent's fork, hand-off, restart or resume brief (Q9)"
+        for name in ("_fork_prompt", "_handoff_prompt", "_restart_prompt", "_resume_prompt")
+    },
+    ("services/handoff.py", "HandoffBrief._tail"): "an agent's hand-off brief (Q9)",
+    ("services/captain/actions.py", "_wololo"): "what the captain tells an agent (Q9)",
+    ("services/watch.py", "event_text"): "the watch line a manager runs through its broker",
+    **{
+        ("services/store_broker.py", name): "the store broker's replies to a sandboxed agent"
+        for name in ("vet", "_refused", "forward", "Broker._run", "ask", "_ring", "_runs")
+    },
+    ("services/diagnostics.py", "_workspace_credits_check"): "the AISquare integration",
+    ("services/diagnostics.py", "_minted_keys_check"): "the AISquare integration",
+    ("services/diagnostics.py", "_check_remote_control"): "explainability: the integration",
+    ("services/lifecycle.py", "_explainability_step"): "explainability: the integration",
+    ("cli/root.py", "init"): "init --explainability's help: the integration",
+    ("cli/team.py", "show"): "its help describes the agents' one-line board update (Q9)",
+}
+#: ... and single literals, by the text they start with:
+_KEEP_TEXTS: dict[tuple[str, str], str] = {
+    ("services/captain/actions.py", "(from the captain — answer with: aisquare note"): (
+        "signs a captain's note to an agent (Q9)"
+    ),
+    ("services/store_broker.py", "seal the report an `asq exec`"): "the broker's own table",
+    ("services/diagnostics.py", "asq instances"): "the check's name, also its --json name",
+    ("services/captain/gate.py", "aisquare captain"): "the TOTP issuer, in enrolled apps",
+    ("core/tmux.py", "# aisquare fleet — private tmux server"): "a generated file's header",
+    ("services/fleet.py", "# aisquare fleet worktrees"): "a generated file's header",
+    ("services/context.py", "# aisquare context"): "an exported file's header",
+    ("cli/hook.py", "this session starts with no rlx context"): "the product's name",
+    ("cli/watch.py", "rlx board"): "the board window's title (Q11)",
+    ("services/remote_push.py", "This is the test you asked for from rlx remote."): (
+        "the product's name in a test notification"
+    ),
+}
+
+
+def _subcommands() -> list[str]:
+    import typer.main
+
+    return sorted(typer.main.get_command(app).commands)  # type: ignore[attr-defined]
+
+
+def _scopes(tree: object) -> dict[int, str]:
+    """id(node) -> the qualified name of the function or class around it."""
+    import ast
+
+    where: dict[int, str] = {}
+
+    def visit(node: ast.AST, q: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            cq = q
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                cq = f"{q}.{child.name}" if q else child.name
+            where[id(child)] = cq or "<module>"
+            visit(child, cq)
+
+    assert isinstance(tree, ast.AST)
+    visit(tree, "")
+    return where
+
+
+def _scan() -> set[tuple[str, int, str, str]]:
+    """(file, line, kind, text) for every user-facing literal that names a command with a
+    hard-coded word: an old one (aisquare, asq) anywhere, rlx outside static help, or calls
+    the product "the CLI"."""
+    import ast
+    import re
+
+    subs = "|".join(map(re.escape, _subcommands()))
+    lead = r"(?:(?<=\\n)|(?<![\w./~@{$\\-]))"
+    flags = r"(?:(?:--json|--no-color|-q|--quiet|-v|--verbose) )*"
+    old = re.compile(lead + r"(?:aisquare|asq)(?= " + flags + r"(?:" + subs + r")\b)")
+    new = re.compile(
+        lead + r"rlx(?= " + flags + r"(?:" + subs + r")\b)"
+        r"(?! instances (?:have|on)\b)(?! board — )"  # rlx instances (a noun); a heading
+    )
+    cli = re.compile(r"\b(?:[Tt]his|[Tt]he|an earlier|our own) CLI\b")
+    shield = re.compile(r"`?aisquare hook\b[^`]*`?|-m aisquare\S*|aisquare-[\w-]+|aisquare@\S+")
+    found: set[tuple[str, int, str, str]] = set()
+    for path in sorted(_SRC.rglob("*.py")):
+        rel = path.relative_to(_SRC).as_posix()
+        if rel in _KEEP_FILES:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        scope = _scopes(tree)
+        bare = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Expr)}
+        helps = {
+            id(sub)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.keyword) and n.arg == "help"
+            for sub in ast.walk(n.value)
+        }
+        commands = {
+            id(fn.body[0].value)
+            for fn in ast.walk(tree)
+            if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef)
+            and fn.body
+            and isinstance(fn.body[0], ast.Expr)
+            and any(
+                isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                for d in fn.decorator_list
+            )
+        }
+        parts = {id(v) for n in ast.walk(tree) if isinstance(n, ast.JoinedStr) for v in n.values}
+        for node in ast.walk(tree):
+            if id(node) in parts:
+                continue
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                text = node.value
+            elif isinstance(node, ast.JoinedStr):
+                text = "".join(
+                    str(v.value) if isinstance(v, ast.Constant) else "{…}" for v in node.values
+                )
+            else:
+                continue
+            static = id(node) in helps or id(node) in commands
+            if id(node) in bare and not static:
+                continue  # developer prose
+            if (rel, scope.get(id(node), "<module>")) in _KEEP_FUNCS:
+                continue
+            if any(rel == f and text.startswith(t) for f, t in _KEEP_TEXTS):
+                continue
+            plain = shield.sub(lambda m: "\x01" * len(m.group(0)), text)
+            kinds = [
+                kind
+                for kind, hit in (
+                    ("old word", old.search(plain)),
+                    ("hard-coded rlx", None if static else new.search(plain)),
+                    ("the CLI", cli.search(plain)),
+                )
+                if hit
+            ]
+            if kinds:
+                found.add((rel, node.lineno, ",".join(kinds), text[:120]))
+    return found
+
+
+def test_no_user_facing_text_names_a_command_with_a_hard_coded_word() -> None:
+    """Every printed command takes its word from core.program (the manager's Q2, brief 180):
+    no literal `aisquare <sub>` or `asq <sub>`, and no literal `rlx <sub>` outside help text
+    (static, read at import). What R3 keeps is listed above, each with why."""
+    assert sorted(_scan()) == []
+
+
+def test_every_kept_entry_is_still_in_the_source() -> None:
+    """An entry whose file, function or text is gone is dropped, not left to cover another."""
+    for rel in _KEEP_FILES:
+        assert (_SRC / rel).is_file(), rel
+    for rel, text in _KEEP_TEXTS:
+        assert text in (_SRC / rel).read_text(encoding="utf-8"), (rel, text)
+
+
+def test_the_guard_finds_what_it_should_and_passes_what_it_should(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = (
+        '"""aisquare doctor in a docstring is developer prose."""\n'
+        'A = "run aisquare doctor to see"\n'
+        'B = f"`{prog.command()} accounts add` makes one"\n'
+        'C = "`rlx accounts add` makes one"\n'
+        'D = "rlx is quitting"\n'
+        'E = "keys the CLI minted"\n'
+        'F = "each running `aisquare hook stop`"\n'
+        'G = "pip install aisquare-cli[voice]"\n'
+    )
+    root = tmp_path / "aisquare"
+    (root / "cli").mkdir(parents=True)
+    (root / "cli" / "fake.py").write_text(module, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "_SRC", root)
+    found = sorted((kind, text) for _rel, _line, kind, text in _scan())
+    assert found == [
+        ("hard-coded rlx", "`rlx accounts add` makes one"),
+        ("old word", "run aisquare doctor to see"),
+        ("the CLI", "keys the CLI minted"),
+    ]
+
+
+def test_no_module_names_the_word_at_import(tmp_path: Path) -> None:
+    """The word is the PATH's and the install's when a line is said, never frozen at import: a
+    module constant that called program.command() kept the word its import found, and on every
+    hook it would look up PATH and walk the install's RECORD for nothing."""
+    import subprocess
+
+    probe = (
+        "import importlib, pkgutil\n"
+        "from aisquare.core import program\n"
+        "calls = []\n"
+        "real = program.command\n"
+        "program.command = lambda: calls.append(1) or real()\n"
+        "import aisquare\n"
+        "for info in pkgutil.walk_packages(aisquare.__path__, 'aisquare.'):\n"
+        "    if info.name == 'aisquare.__main__':\n"
+        "        continue\n"
+        "    try:\n"
+        "        importlib.import_module(info.name)\n"
+        "    except ImportError:\n"
+        "        pass  # an optional extra this environment lacks\n"
+        "print(len(calls))\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=300, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "0", done.stdout

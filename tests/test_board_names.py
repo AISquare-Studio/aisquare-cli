@@ -21,12 +21,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import OptionList
 
 from aisquare.cli import board_names, watch
 from aisquare.cli.ui.board import BoardPanel, needs_you
-from aisquare.core.store import store_session
+from aisquare.core.store import FLEET_HELD, store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
@@ -356,19 +357,45 @@ def test_the_store_names_each_session_by_its_newest_row_live_or_ended(project: P
     _row(project, "agt_gam2", "coder-gamma-was", "ses-gamma", created=now - timedelta(minutes=40))
     # A row whose own column is empty: the session its launch bound (Codex's).
     _row(project, "agt_delta", "codex-delta", None, created=now - timedelta(minutes=30))
+    # A /clear: the same row moves to the new id, and names the session it left.
+    _row(
+        project,
+        "agt_eps",
+        "coder-epsilon",
+        "ses-eps1",
+        created=now - timedelta(minutes=20),
+        ended=False,
+    )
+    # A session a row left, and another row recorded against it since: that row wins.
+    _row(
+        project,
+        "agt_eta",
+        "coder-eta",
+        "ses-eta1",
+        created=now - timedelta(minutes=15),
+        ended=False,
+    )
+    _row(project, "agt_back", "coder-back", "ses-eta1", created=now - timedelta(minutes=5))
     with store_session() as store:
         store.set_meta("fleet-session:agt_delta", "ses-delta")
+        lease = now + timedelta(hours=1)
+        assert store.adopt_fleet_agent_session("agt_eps", "ses-eps1", "ses-eps2", lease)
+        assert store.adopt_fleet_agent_session("agt_eta", "ses-eta1", "ses-eta2", lease)
         # Asked past one chunk of 500: these sort first, the rows' sessions after them.
         padding = [f"ses-0{n:03d}" for n in range(600)]
-        found = store.fleet_labels_for_sessions(
-            [*padding, "ses-alpha", "ses-beta", "ses-gamma", "ses-delta", "ses-none"]
-        )
+        asked = [*padding, "ses-alpha", "ses-beta", "ses-gamma", "ses-delta", "ses-none"]
+        asked += ["ses-eps1", "ses-eps2", "ses-eta1", "ses-eta2"]
+        found = store.fleet_labels_for_sessions(asked)
 
     assert found == {
         "ses-alpha": "coder-alpha",
         "ses-beta": "coder-beta",
         "ses-gamma": "coder-gamma",
         "ses-delta": "codex-delta",
+        "ses-eps1": "coder-epsilon",
+        "ses-eps2": "coder-epsilon",
+        "ses-eta1": "coder-back",
+        "ses-eta2": "coder-eta",
     }
 
 
@@ -488,3 +515,58 @@ def test_board_w_s_plain_frame_names_a_claim_and_an_ended_agent_s_lines(
     assert " coder-auth 💬 noted: PR ready" in live
     assert " coder-auth 💬 noted: PR ready" in ended, "the stop renamed the agent's lines"
     assert sid[:8] not in live and sid[:8] not in ended
+
+
+def test_a_clear_keeps_the_name_of_the_session_it_leaves(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tester's coder-eta (round 2): a ``/clear``, taken by the pane's own process, moves the
+    SAME row to the new session, and an open board redrew the earlier session's lines as
+    "coder (19:34)". The earlier session keeps the agent's name, told apart by the time it
+    started; a second clear keeps both earlier ones; a relabel moves them all."""
+    agent, first = fleet_suite._spawned(project, "coder", None, tmux, monkeypatch)
+    label = agent.label
+    team_service.hook_session_start(first, project.root, "startup")
+    note = team_service.add_note("eta: before clear", session_ref=first, project_id=project.id)
+
+    async def go() -> tuple[str, str]:
+        app = _Board(project)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await settle_page(app)
+            panel = app.query_one(BoardPanel)
+            feed = panel.query_one("#feed", OptionList)
+            before = str(feed.get_option(note.id).prompt)
+            fleet_suite._clear(first, "sess-c2", project)
+            panel.refresh_data()
+            await settle_page(app)
+            return before, str(feed.get_option(note.id).prompt)
+
+    before, after = asyncio.run(go())
+    cleared = _names(project)
+    fleet_suite._clear("sess-c2", "sess-c3", project)
+    twice = _names(project)
+    fleet_service.relabel(project, label, "login fix")
+    relabelled = _names(project)
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-c3")
+        started = store.get_session(first)
+    assert row is not None and row.id == agent.id, "a faithful clear: the same row moved on"
+    assert started is not None and started.label is None, "the session records no label"
+    stamp = f"{started.started_at.astimezone():%H:%M}"
+
+    assert f" {label} 💬 noted: eta: before clear" in before
+    assert f" {label} ({stamp}) 💬 noted: eta: before clear" in after, "redrawn as its role"
+    assert cleared == {first: f"{label} ({stamp})", "sess-c2": label}
+    assert twice["sess-c3"] == label
+    assert twice[first].startswith(f"{label} (") and twice["sess-c2"].startswith(f"{label} (")
+    assert twice[first] != twice["sess-c2"], "two earlier sessions, each told apart"
+    assert relabelled["sess-c3"] == "login-fix"
+    assert all(relabelled[sid].startswith("login-fix (") for sid in (first, "sess-c2"))
+    # What it keeps goes with the sessions: a purge of the project leaves none of it.
+    with store_session() as store:
+        kept = set(store.list_meta(FLEET_HELD))
+        store.purge_project(project.id)
+        left = store.list_meta(FLEET_HELD)
+    assert kept == {f"{FLEET_HELD}{first}", f"{FLEET_HELD}sess-c2"}
+    assert left == {}

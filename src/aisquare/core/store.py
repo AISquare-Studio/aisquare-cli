@@ -6561,15 +6561,26 @@ class SqliteStore:
         (``fleet-session:<id>``), as :meth:`fleet_agent_for_session` and
         :meth:`fleet_session_ids` read it. Of several rows on one session (a resume that kept
         its id), a live one wins, as :meth:`fleet_agent_for_session` picks it; else the
-        newest, the row the agent ended on, whose label a ``fleet relabel`` moved with it. In
-        any project, as :meth:`fleet_agent_for_session` looks: a hub's sessions are rows
-        elsewhere. One pass over the rows per 500 sessions, not a lookup each: the board asks
-        for every session it shows, at every tick.
+        newest, the row the agent ended on, whose label a ``fleet relabel`` moved with it. A
+        session the row has LEFT (a ``/clear``, a hand-over: :meth:`adopt_fleet_agent_session`
+        moves the same row to the new id) is the row's it held (:data:`FLEET_HELD`), as that
+        row is labelled now; a row recorded against the session wins. In any project, as
+        :meth:`fleet_agent_for_session` looks: a hub's sessions are rows elsewhere. Two reads
+        per 500 sessions, not a lookup each: the board asks for every session it shows, at
+        every tick.
         """
         named = sorted(set(session_ids))
         labels: dict[str, str] = {}
         for start in range(0, len(named), 500):  # well under SQLite's bound on parameters
             chunk = named[start : start + 500]
+            held = self._conn.execute(
+                "SELECT substr(held.key, ?) AS owned, fleet_agent.label FROM team_meta AS held "
+                "JOIN fleet_agent ON fleet_agent.id = held.value "
+                f"WHERE held.key IN ({', '.join('?' * len(chunk))})",
+                (len(FLEET_HELD) + 1, *(f"{FLEET_HELD}{sid}" for sid in chunk)),
+            ).fetchall()
+            for row in held:  # a row recorded against the session, read next, wins
+                labels[str(row["owned"])] = str(row["label"])
             rows = self._conn.execute(
                 "SELECT owned, label FROM (SELECT COALESCE(session_id, (SELECT value "
                 "FROM team_meta WHERE key = 'fleet-session:' || fleet_agent.id)) AS owned, "
@@ -6638,6 +6649,9 @@ class SqliteStore:
         whose own column is empty is the session its launch bound
         (``fleet-session:<id>``, an agent whose native id binds at its start), as
         :meth:`_bound_fleet_agent` reads it, and moves into the column.
+
+        The session it leaves is recorded as the row's (:data:`FLEET_HELD`), for the board
+        to name it as the agent once no row is recorded against it (#140).
         """
         try:
             cursor = self._conn.execute(
@@ -6671,6 +6685,15 @@ class SqliteStore:
                     f"WHERE claimed_by = ? AND status IN ({', '.join('?' * len(statuses))})",
                     (session_id, _now_iso(), lease_until.isoformat(), previous, *statuses),
                 )
+                if previous != session_id:
+                    # The session the row leaves stays the row's (#140): no row names it
+                    # once the row moves, and the board names it by the row it held, as a
+                    # relabel leaves the row (``fleet_labels_for_sessions``).
+                    self._conn.execute(
+                        "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+                        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                        (f"{FLEET_HELD}{previous}", agent_id),
+                    )
         except Exception:
             self._rollback()
             raise
@@ -7381,11 +7404,19 @@ def _event_values(event: TeamEvent) -> tuple[object, ...]:
 
 
 _SESSION_META_KINDS: tuple[str, ...] = (
-    "nudge", "unbriefed", "compact", "compact-refused", "compact-armed"
+    "nudge", "unbriefed", "compact", "compact-refused", "compact-armed", "fleet-held"
 )  # fmt: skip
 """The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
-debounce, the solo session's not-yet-briefed mark (#346), and the quiet compaction's mark,
-its newest refusal and its latest arm (P1 WS-4)."""
+debounce, the solo session's not-yet-briefed mark (#346), the quiet compaction's mark,
+its newest refusal and its latest arm (P1 WS-4), and the fleet row a session was before
+the row moved on (:data:`FLEET_HELD`)."""
+
+FLEET_HELD = "fleet-held:"
+"""The ``team_meta`` key ``fleet-held:<session id>``: the id of the fleet row that session was
+before the row moved to another (a ``/clear``, a hand-over:
+:meth:`SqliteStore.adopt_fleet_agent_session`). The board names such a session as that row
+is labelled (:meth:`SqliteStore.fleet_labels_for_sessions`, #140); nothing else reads it. It
+goes with the session (:data:`_SESSION_META_KINDS`)."""
 
 
 _FLEET_LABEL_MOVES: tuple[str, ...] = ("before-limit:", "before-limit-warned:", "fleet-launched:")

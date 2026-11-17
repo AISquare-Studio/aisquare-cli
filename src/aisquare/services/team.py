@@ -3790,13 +3790,15 @@ def fleet_labels(store: ContextStore, sessions: Sequence[TeamSession]) -> dict[s
     """Each session's fleet row's label, by session id, LIVE OR ENDED (#140): what the left pane
     shows for its agent, as a ``fleet relabel`` left it.
 
-    An agent that has ended keeps the name of the newest row recorded against it
+    An agent that has ended keeps the name of the newest row recorded against it, and a
+    session a ``/clear`` or a hand-over left keeps the name of the row that moved on from it
     (``fleet_labels_for_sessions``). The session itself records no label (the hooks write
     none), so a lookup of the live rows alone named an ended agent by its role: a stopped
-    agent's whole history was renamed on an open board, and a restarted one's earlier round
-    read "coder" (tester-rlx-board, #140). A row a relabel retired (``~login-fix``,
-    :data:`~aisquare.core.store.RETIRED_LABEL`) is named by the label it had; the board tells it
-    apart from the agent that took the label by the time each started (``cli.board_names``).
+    agent's whole history was renamed on an open board, a restarted one's earlier round read
+    "coder", and so did the session before a ``/clear`` (tester-rlx-board, #140). A row a
+    relabel retired (``~login-fix``, :data:`~aisquare.core.store.RETIRED_LABEL`) is named by the
+    label it had; the board tells it apart from the agent that took the label by the time each
+    started (``cli.board_names``).
 
     One read in the board's own store session. A read that fails costs the names, never the
     board: each session falls back to its own label, else its role."""

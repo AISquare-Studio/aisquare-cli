@@ -1239,6 +1239,12 @@ def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
     assert fleet_service.status_of(_row(manager.id)).state == "waiting"
     typed = _timed_input(tmux, clock, monkeypatch)
 
+    # The board write this nudge follows: a nudge is due only for news, unread
+
+    # (``team.wake_pending``, R12).
+
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
+
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
 
     [(kind, text, typed_at), (key, enter, entered_at)] = typed
@@ -1253,6 +1259,31 @@ def test_a_waiting_codex_manager_is_woken_with_the_enter_apart(
     tmux.screens[manager.pane_id] = IDLE_PROMPT
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert len(typed) == 4
+
+
+def test_a_codex_manager_is_nudged_for_a_review_its_coders_earlier_notes_did_not_name(
+    tmux: FakeTmux,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#145's reopen, the Codex manager's C4: a coder's earlier notes to it, read, swallowed
+    the coder's review of a task they never named (R12's echo rule, too wide). The echo is
+    only a move right after its author's word about the SAME task; this review nudges."""
+    manager = _waiting_manager_on("codex", project, tmux, tmp_path / "codex-home", monkeypatch)
+    tmux.screens[manager.pane_id] = IDLE_PROMPT
+    task = _task(project, "the settings page")
+    coder = "cdr-c4-0000-0000-0000-000000000004"
+    with store_session() as store:
+        for text in ("on it", "PUSHED the branch; CI is running"):
+            team_service._emit(store, project.id, "note", text, session_id=coder, to_role="manager")
+        store.touch_session(manager.session_id or "", cursor=store.latest_seq(project.id))
+        team_service._emit(
+            store, project.id, "task_review", task.title, session_id=coder, task_id=task.id
+        )
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
+    assert any(fleet_service.NUDGE_TEXT in text for _, _, text in tmux.typed), tmux.typed
 
 
 #: Codex 0.162.1 after a turn near its five-hour limit, its Stop fired and its hooks saying

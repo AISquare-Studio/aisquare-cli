@@ -67,11 +67,17 @@ def _box(composer: str = "", *, dim: str = "") -> list[str]:
 DRAFT = "hey manager, about the auth task — I think we shou"
 
 
-def _waiting(tmux: FakeTmux, project: ProjectInfo, role: str = "manager") -> FleetAgent:
+def _waiting(
+    tmux: FakeTmux, project: ProjectInfo, role: str = "manager", *, news: bool = True
+) -> FleetAgent:
     agent = fleet_service.spawn(project, role, worktree=False).agent
     _board_session(agent, "waiting")
     tmux.set_command(agent.pane_id, "claude")
     tmux.screens[agent.pane_id] = _box()
+    if role == "manager" and news:
+        # Every nudge follows a board write it is due for, unread (``team.wake_pending``,
+        # R12): the news these nudges are about.
+        team_service.watch_event(project.id, "watch: 1 new (1 permission): see the detail")
     return agent
 
 
@@ -566,3 +572,25 @@ def test_a_note_to_a_cold_reviewer_behind_a_page_of_others_still_reaches_it(
 
     assert decision is not None and "please look at #361 next" in decision.reason
     assert "PASS #" not in decision.reason
+
+
+def test_a_nudge_for_news_the_manager_does_not_wake_for_types_nothing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R12 (#145): every nudge asks ``team.wake_pending``, a write's own included. The manager's
+    own result, or a routine watch line while it is in standby, types nothing into its pane;
+    an urgent line still does."""
+    manager = _waiting(tmux, project, news=False)
+    with store_session() as store:
+        team_service._emit(store, project.id, "result", "mine", session_id=manager.session_id)
+    assert fleet_service.nudge_manager(project.id, reason="result") is False
+    with store_session() as store:
+        me = store.get_session(manager.session_id or "")
+        assert me is not None
+        team_service.begin_standby(store, me, why="explicit")
+    team_service.watch_event(project.id, "watch: 1 new (1 stale)", urgent=False)
+    assert fleet_service.nudge_manager(project.id, reason="watch") is False
+    assert tmux.typed == []
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
+    assert fleet_service.nudge_manager(project.id, reason="watch") is True
+    assert (manager.pane_id, "paste", NUDGE_TEXT) in tmux.typed

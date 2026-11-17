@@ -1688,6 +1688,8 @@ def _role_cycle_core(
             *_state_rule(state_file),
             "Never watch panes, CI or pull requests with Monitor or sleep loops: `aisquare",
             "watch --detach` runs one watcher for the fleet, and its `watch:` lines wake you.",
+            f"Waiting on your person with nothing in flight? `aisquare team standby --as {sid}`:",
+            "its routine lines stop waking you until their next prompt; urgent news still does.",
             # The owner's ruling of 2026-11-11 (PR #499, redone here): the manager may merge,
             # on a person's GitHub approval and a green head, and still never pushes. Said once,
             # before both escalations; the lane rule then adds no "Never merge" after it.

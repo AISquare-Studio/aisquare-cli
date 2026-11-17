@@ -272,6 +272,36 @@ def test_a_codex_turn_that_ended_on_a_question_is_an_asked_card(
     assert card.excerpt.endswith("Shall I go on?")
 
 
+def test_a_codex_manager_that_asks_its_person_goes_into_standby(
+    tmp_path: Path, project: ProjectInfo, tmux: FakeTmux
+) -> None:
+    """R12 (#145): watch's automatic standby reads the phone's ``asked``, which reads a Codex
+    rollout as it reads Claude Code's transcript. A Codex manager whose turn ended on a
+    question to its person (the measured rollout's "… Shall I go on?") is put in standby by
+    watch's tick, and the question stays off its own line."""
+    from aisquare.core.config import WatchSettings
+    from aisquare.services import team as team_service
+    from aisquare.services import watch as watch_service
+
+    now = datetime.now(UTC)
+    rollout, records = _moment(tmp_path, "asked", now - timedelta(minutes=2))
+    stopped = _stamp(records[-1]) + timedelta(milliseconds=200)
+    agent = _codex_agent(
+        project, state="waiting", seen=stopped, born=now - timedelta(hours=1), rollout=rollout,
+        label="manager",
+    )  # fmt: skip
+    (card,) = _cards(now)
+    assert (card.kind, card.reason) == ("asked", "manager ended its turn with a question")
+    report = watch_service.Watcher(WatchSettings(auto_stop=False), stale=False).tick(now)
+    assert [item.kind for item in report.new] == ["asked"]
+    assert report.files == {}, "the manager's own question is its person's, not its line"
+    with store_session() as store:
+        session = store.get_session(agent.session_id or "")
+        assert session is not None
+        standby = team_service.standby_of(store, session)
+    assert standby is not None and standby.why == "asked"
+
+
 def test_a_codex_command_at_work_is_a_pending_tool_to_the_guards_and_no_card(
     tmp_path: Path, project: ProjectInfo, tmux: FakeTmux
 ) -> None:

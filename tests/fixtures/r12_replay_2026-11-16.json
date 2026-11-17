@@ -1,0 +1,936 @@
+{
+ "source": "cli-next-release's board, its manager's 72 wake turns from 2026-11-16 05:00Z to 2026-11-17 00:38Z (R12 replay, #145): event shapes only, as the replay classified them",
+ "turns": [
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "question",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "board_result",
+       "about_manager": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "question",
+     "author": "coder",
+     "to": "other"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "stale",
+       "quiet": true,
+       "last_act": {
+        "kind": "task_review",
+        "to": null
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "task_done",
+     "author": "tester",
+     "to": null,
+     "echo": false
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    },
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    },
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "permission"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "asked",
+       "about_manager": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "question",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "stale",
+       "quiet": true,
+       "last_act": null
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "task_reopened",
+     "author": "tester",
+     "to": null
+    },
+    {
+     "kind": "note",
+     "author": "tester",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "board_result",
+       "about_manager": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "stale",
+       "quiet": true,
+       "last_act": {
+        "kind": "note",
+        "to": "manager"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "tester",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "task_done",
+     "author": "tester",
+     "to": null,
+     "echo": false
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    },
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    },
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    },
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "stale",
+       "quiet": true,
+       "last_act": {
+        "kind": "note",
+        "to": "manager"
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "board_result",
+       "about_manager": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "tester",
+     "to": "manager"
+    },
+    {
+     "kind": "note",
+     "author": null,
+     "to": "manager"
+    },
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    },
+    {
+     "kind": "note",
+     "author": null,
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    },
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": null,
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": null,
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "tester",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "tester",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "task_reopened",
+     "author": "tester",
+     "to": null
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "tester",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "tester",
+     "to": "manager"
+    },
+    {
+     "kind": "result",
+     "author": "tester",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "note",
+     "author": "coder",
+     "to": "manager"
+    }
+   ]
+  },
+  {
+   "origin": "continuation",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "task_review",
+     "author": "coder",
+     "to": null,
+     "echo": true
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NOISE",
+   "events": [
+    {
+     "kind": "watch",
+     "author": null,
+     "to": "manager",
+     "watch": [
+      {
+       "kind": "asked",
+       "about_manager": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "origin": "wake",
+   "verdict": "NEEDED",
+   "events": [
+    {
+     "kind": "result",
+     "author": "tester",
+     "to": "manager"
+    }
+   ]
+  }
+ ]
+}

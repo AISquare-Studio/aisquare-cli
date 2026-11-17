@@ -44,6 +44,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A manager waiting on you is not woken by noise.** Watch's lines about its own results
+  and questions, its ping for an agent idle by design, and a review that repeats a note it
+  read no longer wake it. `rlx team standby` (or its question to you, with nothing in
+  flight) holds watch's routine lines until your next prompt.
 - **You can see which pane has the keyboard.** While the left pane has it, its highlighted
   project, agent or setting is a bar in the theme's colour; otherwise it is the dark
   highlight it always was.

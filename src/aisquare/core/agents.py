@@ -201,11 +201,18 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
     return specs
 
 
-_PROGRAM_NAMES = frozenset({"aisquare", "asq"})
+_PROGRAM_NAMES = frozenset({"aisquare", "asq", "rlx", "relax"})
+"""Every name the package's console scripts give the CLI: a hook naming any is ours (#133)."""
+
+_WRITTEN_NAMES = frozenset({"aisquare", "asq"})
+"""The names :func:`_aisquare_command` writes a hook with when it runs as one. Not ``rlx`` or
+``relax`` (#133): another program can take either name over where uv puts executables, and a
+hook naming it would then run that program; run as either, a hook names this install's
+``aisquare`` script."""
 
 
-def _is_aisquare_program(token: str) -> bool:
-    """Whether ``token`` names the aisquare executable itself.
+def _is_aisquare_program(token: str, names: frozenset[str] = _PROGRAM_NAMES) -> bool:
+    """Whether ``token`` names the aisquare executable itself (one of ``names``).
 
     On Windows the console scripts are ``aisquare.exe`` / ``asq.EXE``, so the
     extension is stripped and the comparison is case-insensitive — the bare
@@ -213,11 +220,11 @@ def _is_aisquare_program(token: str) -> bool:
     ``PureWindowsPath`` because ``Path`` follows the *running* platform, and
     backslashes are ordinary filename characters to a ``PosixPath``.
     """
-    if Path(token).name in _PROGRAM_NAMES:
+    if Path(token).name in names:
         return True
     if sys.platform != "win32":
         return False
-    return PureWindowsPath(token).stem.lower() in _PROGRAM_NAMES
+    return PureWindowsPath(token).stem.lower() in names
 
 
 def _quote(path: str) -> str:
@@ -274,7 +281,7 @@ def _aisquare_command(isolated: bool = False) -> str:
     if isolated:
         return " ".join(_quote(part) for part in selfcli.isolated_argv_for([]))
     argv0 = Path(sys.argv[0])
-    if _is_aisquare_program(argv0.name) and argv0.exists():
+    if _is_aisquare_program(argv0.name, _WRITTEN_NAMES) and argv0.exists():
         return _quote(str(argv0.resolve()))
     installed = current_install()
     if _starts(installed):
@@ -512,7 +519,7 @@ def _is_aisquare_hook_command(command: str) -> bool:
     """Whether ``command`` is one of aisquare's own hook invocations.
 
     Deliberately strict: the command must *end* with ``hook <subcommand>``
-    AND the invoked program must be aisquare itself (an ``aisquare``/``asq``
+    AND the invoked program must be aisquare itself (an ``aisquare``/``asq``/``rlx``/``relax``
     executable, or ``python [-P] -m aisquare`` — the ``-m aisquare`` pair is
     matched by position, so hooks written before ``-P`` still count as ours
     and ``connect`` replaces rather than duplicates them). A bare-substring match would
@@ -521,9 +528,10 @@ def _is_aisquare_hook_command(command: str) -> bool:
     uses shlex so aisquare paths containing spaces (quoted at install time)
     keep matching.
 
-    This must stay the exact inverse of :func:`_aisquare_command`: if the two
-    ever disagree, ``connect`` stops recognising its own hooks and appends a
-    duplicate, and ``disconnect`` cannot remove them.
+    It must recognise everything :func:`_aisquare_command` writes: if it ever missed one,
+    ``connect`` would stop recognising its own hooks and append a duplicate, and
+    ``disconnect`` could not remove them. It recognises ``rlx`` and ``relax`` too, which
+    are never written (:data:`_WRITTEN_NAMES`), so one a person wrote is ours as well.
     """
     try:
         tokens, _ = _hook_command_parts(command)

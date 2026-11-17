@@ -446,7 +446,7 @@ def test_the_vapid_header_verifies_with_the_public_key_and_says_who_for_how_long
     assert json.loads(_unb64(head)) == {"typ": "JWT", "alg": "ES256"}
     body = json.loads(_unb64(claims))
     assert body["aud"] == "https://fcm.googleapis.com", "the origin, without path or query"
-    assert body["sub"] == "https://github.com/AISquare-Studio/aisquare-cli"
+    assert body["sub"] == "https://github.com/AISquare-Studio/rlx"
     assert body["exp"] == int((T0 + timedelta(hours=12)).timestamp())
     assert body["exp"] - T0.timestamp() <= 24 * 3600
     raw = _unb64(signature)

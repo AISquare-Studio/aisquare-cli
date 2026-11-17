@@ -55,7 +55,7 @@ _DELTA_OPENING = re.compile(r"<aisquare-team-delta(?:\s[^>]*)?>")
 #: ``--claim``) and ``fleet ls|status``, after any global flag (``--json``). Not ``aisquare
 #: log``, which is the PROMPT log, and nothing that writes.
 BOARD_READ = re.compile(
-    r"^(?:\S*/)?(?:aisquare|asq)(?:\s+(?:--json|--no-color|--quiet|-q|--verbose|-v))*\s+"
+    r"^(?:\S*/)?(?:aisquare|asq|rlx|relax)(?:\s+(?:--json|--no-color|--quiet|-q|--verbose|-v))*\s+"
     r"(?:board|team\s+(?:log|status|signals|verify|show)|task\s+(?:list|show|next)"
     r"|fleet\s+(?:ls|status))(?:\s|$)"
 )

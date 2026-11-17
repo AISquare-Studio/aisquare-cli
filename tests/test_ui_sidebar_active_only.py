@@ -163,10 +163,10 @@ def test_the_toggle_sits_after_the_plus_and_reads_off_and_on(
         return seen
 
     (off_glyph, off_on, off_tip, off_parts), (on_glyph, on_on, on_tip, on_parts) = drive(go)
-    assert [part.strip() for part in off_parts] == ["Fleet", "+", "○"], "after the +, whole"
+    assert [part.strip() for part in off_parts] == ["rlx", "+", "○"], "after the +, whole"
     assert (off_glyph, off_on) == (" ○ ", False)
     assert (on_glyph, on_on) == (" ● ", True)
-    assert [part.strip() for part in on_parts] == ["Fleet", "+", "●"]
+    assert [part.strip() for part in on_parts] == ["rlx", "+", "●"]
     assert "Active only: off" in off_tip and "live agent" in off_tip
     assert "Active only: on" in on_tip and "live agent" in on_tip
 
@@ -175,9 +175,9 @@ def test_the_toggle_sits_after_the_plus_and_reads_off_and_on(
 def test_the_live_count_the_plus_and_the_toggle_share_the_header_at_the_sidebars_widths(
     tmp_path: Path, script: Script, width: int
 ) -> None:
-    """rc/0.9.2's ``Fleet · N live`` beside the ``+`` and this ○, with the captain on: at the
-    sidebar's default and minimum widths a three-digit count is whole, and so are both
-    buttons, side by side and inside the header."""
+    """rc/0.9.2's ``Fleet · N live`` (``rlx · N live`` since #133) beside the ``+`` and this
+    ○, with the captain on: at the sidebar's default and minimum widths a three-digit count is
+    whole, and so are both buttons, side by side and inside the header."""
     seed(tmp_path, *FOUR)
     script[captain_state.home_project().id] = [_captain("working")]
 
@@ -199,7 +199,7 @@ def test_the_live_count_the_plus_and_the_toggle_share_the_header_at_the_sidebars
         )
 
     parts, side_by_side, inside = drive(go)
-    assert [part.strip() for part in parts] == ["Fleet · 128 live", "+", "○"]
+    assert [part.strip() for part in parts] == ["rlx · 128 live", "+", "○"]
     assert side_by_side and inside
 
 

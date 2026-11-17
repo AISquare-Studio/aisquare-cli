@@ -367,6 +367,10 @@ class UpgradePlan:
     """The sessions started with ``aisquare launch`` that wait on their agents, holding this
     install's files open, named (:func:`running_launchers`): Windows', whatever the route, as
     a reinstall there is run by hand and fails on files in use (:attr:`launchers_refusal`)."""
+    commands_taken: tuple[Path, ...] = ()
+    """Another program's ``rlx`` or ``relax`` where uv puts this tool's executables
+    (``install_route.taken_commands``): the reinstall would replace it without a word, so the
+    upgrade refuses while one is there (:attr:`taken_refusal`)."""
     pin_refused: bool = False
     """Whether :attr:`reason` is that ``--version`` cannot pick a release for this route
     (``install_route.pin_refusal``): Homebrew's, a checkout's or a local source's."""
@@ -437,13 +441,20 @@ class UpgradePlan:
     @property
     def asqs_refusal(self) -> str | None:
         """Why the upgrade will not run while :attr:`asqs` do, or ``None`` when none does; else
-        while :attr:`launchers` wait (:attr:`launchers_refusal`)."""
-        return asqs_refusal("upgrade", self.asqs) or self.launchers_refusal
+        while :attr:`launchers` wait (:attr:`launchers_refusal`), or another program's command
+        is in the way (:attr:`taken_refusal`)."""
+        return asqs_refusal("upgrade", self.asqs) or self.launchers_refusal or self.taken_refusal
 
     @property
     def launchers_refusal(self) -> str | None:
         """Why the reinstall cannot run while :attr:`launchers` wait, or ``None``."""
         return launchers_refusal("upgrade", self.launchers)
+
+    @property
+    def taken_refusal(self) -> str | None:
+        """Why the reinstall will not run over :attr:`commands_taken`, or ``None`` when
+        nothing is."""
+        return taken_refusal("upgrade", self.commands_taken)
 
     @property
     def config_warning(self) -> str | None:
@@ -737,6 +748,7 @@ def upgrade_plan(
         remote=remote,
         asqs=asqs,
         launchers=running_launchers(),
+        commands_taken=install_route.taken_commands(route),
         config_defaults_lost=lost,
         env_files_dropped=dropped,
         tools_regained=regained,
@@ -1561,6 +1573,10 @@ class UninstallPlan:
     """The sessions started with ``aisquare launch`` that wait on their agents, named
     (:func:`running_launchers`). One refuses the run, as an asq does: it holds the program's
     files open, which Windows will not let the uninstall remove."""
+    commands_taken: tuple[Path, ...] = ()
+    """Another program's ``rlx`` or ``relax`` where uv put this tool's own
+    (``install_route.taken_commands``): ``uv tool uninstall`` would delete it with the
+    package, so one refuses the run (:func:`taken_refusal`)."""
     statuslines: tuple[Path, ...] = ()
     """The config directories whose ``statusLine`` aisquare set (``accounts statusline``,
     #287): removed with the hooks, a wrapped one put back as the user had it, so no status
@@ -1717,6 +1733,9 @@ class UninstallPlan:
         refused_for_launchers = launchers_refusal("uninstall", self.launchers)
         if refused_for_launchers is not None:
             return UninstallRefused(refused_for_launchers, error="launcher_running")
+        refused_for_taken = taken_refusal("uninstall", self.commands_taken)
+        if refused_for_taken is not None:
+            return UninstallRefused(refused_for_taken, error="command_taken")
         if self.purge and self.purge_refusal is not None:
             return UninstallRefused(
                 f"--purge will not delete {self.home}: {self.purge_refusal}",
@@ -2315,6 +2334,36 @@ def asqs_refusal(command: str, asqs: Sequence[str], *, again: str | None = None)
     return f"{running} on this home ({named}): {cost}. Quit {it} first (q in {each}), then {again}."
 
 
+_TAKEN_COST = {
+    "upgrade": "which the reinstall would replace without a word",
+    "uninstall": "which uv would delete with the package",
+}
+"""What each command would do to another program's ``rlx`` or ``relax`` (:func:`taken_refusal`)."""
+
+_TAKEN_REMEDY = {
+    "upgrade": "rename or move {it} first, then {again}",
+    "uninstall": "move {it} aside first, {again}, then put {it} back",
+}
+"""What to do about one, for each command."""
+
+
+def taken_refusal(command: str, taken: Sequence[Path], *, again: str | None = None) -> str | None:
+    """Why ``aisquare <command>`` (``upgrade`` or ``uninstall``) will not run while another
+    program's ``rlx`` or ``relax`` is where uv puts this tool's executables
+    (``install_route.taken_commands``, #133), naming each, or ``None`` when none is: never
+    replaced or deleted unasked, and said in one line with what to do."""
+    if not taken:
+        return None
+    one = len(taken) == 1
+    it = "it" if one else "them"
+    cost = _TAKEN_COST.get(command, "which it would change")
+    remedy = _TAKEN_REMEDY.get(command, _TAKEN_REMEDY["upgrade"]).format(
+        it=it, again=again or f"run `aisquare {command}` again"
+    )
+    named = " and ".join(str(path) for path in taken)
+    return f"{named} {'is another program' if one else 'are other programs'}, {cost}: {remedy}."
+
+
 def plugin_answers(cache: str | None = None) -> Path:
     """The file the Claude Code plugin's launcher keeps uv's answers in.
 
@@ -2471,6 +2520,7 @@ def _uninstall_plan(purge: bool) -> UninstallPlan:
         remote=running_remote(),
         asqs=running_asqs(),
         launchers=running_launchers(),
+        commands_taken=install_route.taken_commands(route),
     )
 
 

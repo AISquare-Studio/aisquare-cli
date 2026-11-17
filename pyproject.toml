@@ -278,13 +278,15 @@ dev = [
 [project.scripts]
 aisquare = "aisquare.cli.app:main"
 asq = "aisquare.cli.app:main"
+rlx = "aisquare.cli.app:main"
+relax = "aisquare.cli.app:main"
 asq-statusline = "aisquare.statusline:main"
 
 [project.urls]
 Homepage = "https://aisquare.studio"
-Repository = "https://github.com/AISquare-Studio/aisquare-cli"
-Issues = "https://github.com/AISquare-Studio/aisquare-cli/issues"
-Changelog = "https://github.com/AISquare-Studio/aisquare-cli/blob/main/CHANGELOG.md"
+Repository = "https://github.com/AISquare-Studio/rlx"
+Issues = "https://github.com/AISquare-Studio/rlx/issues"
+Changelog = "https://github.com/AISquare-Studio/rlx/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aisquare"]

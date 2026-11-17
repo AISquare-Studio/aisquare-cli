@@ -1,6 +1,6 @@
 """The Claude Code plugin route: the marketplace, the plugin, its hooks and its launcher.
 
-``/plugin marketplace add AISquare-Studio/aisquare-cli``, then ``/plugin install
+``/plugin marketplace add AISquare-Studio/rlx``, then ``/plugin install
 aisquare@aisquare-cli``, gives Claude Code the six lifecycle hooks ``aisquare agents
 connect claude-code`` writes into settings.json, with no installer. Each one runs
 ``plugins/claude-code/scripts/aisquare-hook``, a POSIX launcher around ``aisquare hook
@@ -457,6 +457,8 @@ def _programs(machine: Machine) -> Path:
     for relative in (
         "aisquare",
         "asq",
+        "rlx",
+        "relax",
         "python3",
         "My Tools/aisquare",
         "Jane's Tools/aisquare",
@@ -491,6 +493,9 @@ _OURS = [
     ("{bin}/python3 -m aisquare hook stop", True),
     ("aisquare hook stop", True),
     ("{bin}/asq hook stop", True),
+    # rlx and relax, which connect never writes, as a person may (#133).
+    ("{bin}/rlx hook stop", True),
+    ("'{bin}/relax' hook stop", True),
     ("{bin}/aisquare hook stop ", True),
     ("{bin}/aisquare\thook\tstop", True),
     ("{bin}/aisquare  hook  stop", True),

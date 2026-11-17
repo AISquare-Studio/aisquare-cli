@@ -189,6 +189,12 @@ fi
 
 command -v aisquare >/dev/null 2>&1 || fail "aisquare is not on PATH after run 1"
 command -v asq >/dev/null 2>&1 || fail "asq is not on PATH after run 1"
+# rlx and relax (#133): this tree's wheel has them; a release before them, which a cell
+# run by hand with no wheel installs from PyPI, does not.
+if [ -n "${AISQUARE_INSTALL_PACKAGE:-}" ]; then
+    command -v rlx >/dev/null 2>&1 || fail "rlx is not on PATH after run 1"
+    command -v relax >/dev/null 2>&1 || fail "relax is not on PATH after run 1"
+fi
 head1 "installed: $(aisquare --version)"
 
 # The four things the installer promised, checked one at a time so a failure

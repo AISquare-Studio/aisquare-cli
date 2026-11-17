@@ -62,8 +62,9 @@ esac
 
 # The hook `agents connect` writes for this event, as it reads in settings.json's or
 # hooks.json's JSON text, matched the way core.agents._is_aisquare_hook_command
-# matches it: the command's first word is a program named aisquare or asq (a path or
-# the bare name, plain or in single or double quotes, `.exe` on Windows), or it is
+# matches it: the command's first word is a program named aisquare, asq, rlx or
+# relax (a path or the bare name, plain or in single or double quotes, `.exe` on
+# Windows), or it is
 # `python [-P] -m aisquare`; then `hook <event>` ends it, with any options before
 # `hook`. A user's own `webhook stop`, `~/bin/my-hook stop` or `echo aisquare hook
 # stop` does not match. Codex's is `hook codex` for every event, which may be followed
@@ -84,7 +85,7 @@ _p5='([^"]|\\")* -m '      # python -P -m, its path quoted or not
 _p6='\\"([^"]*/)?'         # \"/a path/with spaces/ (or a bare name, quoted)
 # \"$HOME\"/a/path/ and \"${HOME}\"/a/path/, which the hook's shell reads as $HOME/
 _p7="\\\\\"[\$]([{]HOME[}]|HOME)\\\\\"$_p2"
-_program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6|$_p7)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
+_program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6|$_p7)?(aisquare|asq|rlx|relax)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
 _hook=$event
 _tail=
 if [ "$_agent" = codex ]; then

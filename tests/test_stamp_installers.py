@@ -87,7 +87,7 @@ def test_the_stamp_changes_only_the_stamp_lines(stamped: Path) -> None:
         (REPO / "install.sh").read_text(encoding="utf-8"),
         (stamped / "install.sh").read_text(encoding="utf-8"),
     )
-    main_sh = f"curl -fsSL {stamper.RAW_MAIN}/install.sh | sh"
+    main_sh = stamper.SH_ONE_LINER
     own_sh = f"curl -fsSL {stamper.release_url(TAG, 'install.sh')} | sh"
     # The header and --help print the release's own one-liner, not main's.
     assert sh_changes == [
@@ -102,7 +102,7 @@ def test_the_stamp_changes_only_the_stamp_lines(stamped: Path) -> None:
     )
     assert ps1_changes == [
         (
-            f"#   irm {stamper.RAW_MAIN}/install.ps1 | iex",
+            f"#   {stamper.PS1_ONE_LINER}",
             f"#   irm {stamper.release_url(TAG, 'install.ps1')} | iex",
         ),
         ("$StampedVersion = ''", f"$StampedVersion = '{VERSION}'"),
@@ -407,7 +407,7 @@ def test_the_suites_really_read_the_override(stamped: Path) -> None:
 # --- the URLs people are given -------------------------------------------------
 
 _RELEASE_URL = re.compile(
-    r"https://github\.com/AISquare-Studio/aisquare-cli/releases/"
+    r"https://github\.com/AISquare-Studio/rlx/releases/"
     r"(latest/download|download/v[^/\s]+)/([^\s)`'\"|]+)"
 )
 _DOCUMENTED = (REPO / "README.md",)
@@ -417,9 +417,10 @@ _DOCUMENTED = (REPO / "README.md",)
 def test_the_docs_lead_with_main_and_show_a_pin(page: Path) -> None:
     """Owner's decision (#401, MAJOR-2): main's copy stays the default one-liner,
     because the latest/download URL answers 404 until a release's installers are
-    attached; a release's own URL is how to pin."""
+    attached; a release's own URL is how to pin. Since rlx (R10) the default is
+    typed as the short URL, which redirects to main's copy (stamper.SHORT)."""
     text = page.read_text(encoding="utf-8")
-    default = f"curl -fsSL {stamper.RAW_MAIN}/install.sh | sh"
+    default = stamper.SH_ONE_LINER
     assert default in text, f"{page.name} lost the default one-liner"
     urls = _RELEASE_URL.findall(text)
     for where, asset in urls:
@@ -437,5 +438,4 @@ def test_the_docs_lead_with_main_and_show_a_pin(page: Path) -> None:
 def test_the_repair_command_is_mains_one_liner() -> None:
     from aisquare.services import install_route
 
-    main = f"curl -fsSL {stamper.RAW_MAIN}/install.sh | sh"
-    assert main == install_route.INSTALLER_ONE_LINER
+    assert stamper.SH_ONE_LINER == install_route.INSTALLER_ONE_LINER

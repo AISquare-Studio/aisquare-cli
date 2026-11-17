@@ -1,7 +1,7 @@
 #!/bin/sh
 # aisquare one-line installer — curl … | sh to a green doctor and the fleet UI.
 #
-#   curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
+#   curl -fsSL https://aisquare.studio/rlx/install.sh | sh
 #
 # Design, measurements and the rejected alternatives: docs/plans/one-line-install.md.
 # Section marks below (§) point into it. Four things about this file are
@@ -68,7 +68,7 @@ NODESOURCE_DEB_URL="https://deb.nodesource.com/setup_NODEMAJOR.x"
 NODESOURCE_RPM_URL="https://rpm.nodesource.com/setup_NODEMAJOR.x"
 #: Where every release since 0.9.0 attaches its stamped install.sh (see
 #: `hand_off`, scripts/stamp_installers.py and .github/workflows/installers.yml).
-RELEASES_URL="https://github.com/AISquare-Studio/aisquare-cli/releases"
+RELEASES_URL="https://github.com/AISquare-Studio/rlx/releases"
 
 DEFAULT_PYTHON="3.13"
 # The highest version CI actually tests (.github/workflows/ci.yml is 3.11–3.13).
@@ -1366,14 +1366,14 @@ banner() {
     printf '%s\n' "$_plan"
 
     # Only what THIS run's own steps write, from the same decisions as the plan
-    # above: uv when it installs uv, aisquare and asq when it installs or upgrades
+    # above: uv when it installs uv, aisquare, asq, rlx and relax when it installs or upgrades
     # the CLI, claude when it installs Claude Code, codex when it installs Codex. The
     # updaters the plan names (`uv self update`, `claude update`, `codex update`) write
     # at their own paths.
     _written=""
     [ -z "$UV_VERSION" ] && _written="uv"
     case "$CLI_ACTION" in
-        install | upgrade | repair) _written="${_written:+$_written, }aisquare, asq" ;;
+        install | upgrade | repair) _written="${_written:+$_written, }aisquare, asq, rlx, relax" ;;
     esac
     wants_claude && [ "$CLAUDE_ACTION" = install ] && _written="${_written:+$_written, }claude"
     wants_codex && [ "$CODEX_ACTION" = install ] && _written="${_written:+$_written, }codex"
@@ -3168,7 +3168,7 @@ usage() {
     cat <<'USAGE'
 aisquare installer — one command to a working install and the fleet UI.
 
-  curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
+  curl -fsSL https://aisquare.studio/rlx/install.sh | sh
 
 With options, note the `-s --` (sh reads the script on stdin, so the options
 have to be handed to sh explicitly):
@@ -3356,6 +3356,83 @@ choose_project() {
 }
 
 # ---------------------------------------------------------------------------
+# the commands another program may already have
+# ---------------------------------------------------------------------------
+
+#: The commands aisquare-cli installs beside aisquare and asq since the rlx rename:
+#: names another program may already have in uv's executable directory (PyPI's
+#: `relax` is another project). services/install_route.py NEW_COMMANDS holds the same two.
+NEW_COMMANDS="rlx relax"
+
+# Where uv puts a tool's executables, decided as uv decides it: UV_TOOL_BIN_DIR,
+# then XDG_BIN_HOME, then XDG_DATA_HOME/../bin, then ~/.local/bin. Worked out here
+# rather than asked of `uv tool dir --bin`: uv may not be installed yet, and under
+# --dry-run nothing but a version read may run.
+uv_bin_dir() {
+    if [ -n "${UV_TOOL_BIN_DIR:-}" ]; then
+        printf '%s' "${UV_TOOL_BIN_DIR%/}"
+    elif [ -n "${XDG_BIN_HOME:-}" ]; then
+        printf '%s' "${XDG_BIN_HOME%/}"
+    elif [ -n "${XDG_DATA_HOME:-}" ]; then
+        printf '%s' "${XDG_DATA_HOME%/}/../bin"
+    else
+        printf '%s' "$HOME/.local/bin"
+    fi
+}
+
+# Each of NEW_COMMANDS in uv's executable directory that is another program's, one
+# per line: anything there but uv's link to aisquare-cli's own script. Measured with
+# uv 0.11.6: a plain `uv tool install` refuses the whole package over one
+# ("Executables already exist"), and over an installed aisquare-cli it takes that
+# install away too; `uv tool install --force`, which the upgrade runs, replaces it
+# without a word.
+taken_commands() {
+    _tc_bin=$(uv_bin_dir)
+    for _tc_name in $NEW_COMMANDS; do
+        _tc_path=$_tc_bin/$_tc_name
+        [ -e "$_tc_path" ] || [ -L "$_tc_path" ] || continue
+        if [ -L "$_tc_path" ]; then
+            case $(readlink "$_tc_path") in
+                */"$PYPI_PACKAGE"/bin/"$_tc_name") continue ;;
+            esac
+        fi
+        printf '%s\n' "$_tc_path"
+    done
+}
+
+# Stops a run that would install or upgrade aisquare-cli over another program's rlx
+# or relax, before anything is installed: never replaced unasked, and never the
+# whole install refused halfway. One line says which and what to do.
+refuse_taken_commands() {
+    case "$CLI_ACTION" in
+        install | upgrade | repair) ;;
+        *) return 0 ;;
+    esac
+    _rt_taken=$(taken_commands)
+    [ -n "$_rt_taken" ] || return 0
+    _rt_shown=""
+    _rt_names=""
+    _rt_count=0
+    while IFS= read -r _rt_path; do
+        _rt_count=$((_rt_count + 1))
+        _rt_shown="${_rt_shown:+$_rt_shown and }$(shown_path "$_rt_path")"
+        _rt_names="${_rt_names:+$_rt_names and }${_rt_path##*/}"
+    done <<EOF_TAKEN
+$_rt_taken
+EOF_TAKEN
+    if [ "$_rt_count" = 1 ]; then
+        _rt_what="is another program's, and $PYPI_PACKAGE now installs its own $_rt_names command there"
+        _rt_them="it"
+    else
+        _rt_what="are another program's, and $PYPI_PACKAGE now installs its own $_rt_names commands there"
+        _rt_them="them"
+    fi
+    printf '%serror%s %s\n' "$C_RED" "$C_RESET" \
+        "$_rt_shown $_rt_what: rename or move $_rt_them, then run this again. Nothing was changed." >&2
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -3368,6 +3445,7 @@ main() {
     survey
     choose_project
     resolve
+    refuse_taken_commands
     if short_circuit; then
         exit 0
     fi

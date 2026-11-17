@@ -74,13 +74,13 @@ _RECENT_IDS = 512
 
 _AISQUARE_HOOK = re.compile(
     r"aisquare-hook\b"  # the Claude Code plugin's script
-    r"|(?:^|[\s/\\\"'])(?:aisquare|asq)(?:\.exe)?[\"']?(?:\s+-\S+)*\s+hook\s"
+    r"|(?:^|[\s/\\\"'])(?:aisquare|asq|rlx|relax)(?:\.exe)?[\"']?(?:\s+-\S+)*\s+hook\s"
     r"|-m\s+aisquare\b(?:\s+-\S+)*\s+hook\s"
 )
 #: ``aisquare repo …`` as a COMMAND: the program word at the start of the line or
 #: after a shell separator, bare or by path — not ``grep aisquare repo/``.
 _LOOKUP_COMMAND = re.compile(
-    r"(?:^|[;&|(`]|\$\()\s*(?:\w+=\S*\s+)*(?:\S*/)?(?:aisquare|asq)(?:\.exe)?\s+repo\b"
+    r"(?:^|[;&|(`]|\$\()\s*(?:\w+=\S*\s+)*(?:\S*/)?(?:aisquare|asq|rlx|relax)(?:\.exe)?\s+repo\b"
 )
 
 #: A line this reader may count carries one of these. ``<aisquare-`` is the context markers

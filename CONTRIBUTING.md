@@ -6,12 +6,12 @@ contributions are welcome.
 ## Where to start
 
 - **Pick up a
-  [good first issue](https://github.com/AISquare-Studio/aisquare-cli/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22).**
+  [good first issue](https://github.com/AISquare-Studio/rlx/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22).**
   Each one names the files and lines involved and says what done looks like.
   Say on the issue that you are taking it, so two people do not build the
   same thing.
 - **Ask when unsure.**
-  [Discussions, Q&A](https://github.com/AISquare-Studio/aisquare-cli/discussions/categories/q-a)
+  [Discussions, Q&A](https://github.com/AISquare-Studio/rlx/discussions/categories/q-a)
   is the place for "where does this live?" and "would you take a PR that…?".
 - **Find your way around.** `src/aisquare/cli/` parses the command line and
   holds the full-screen UI (`src/aisquare/cli/ui/`), `src/aisquare/services/`

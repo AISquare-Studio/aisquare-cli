@@ -5,9 +5,9 @@ what ``aisquare project rename`` sets — is edited here: Enter or Save writes i
 and a blank field clears it back to the folder name. The codename follows it, as it
 follows ``project rename`` (``services.fleet.rename_project``): ``Billing v2`` makes it
 ``billing-v2`` and the tmux session ``asq-billing-v2``; ``aisquare fleet rename`` sets one
-of your own. It is shown, not edited. Under it, the command that attaches a terminal to
-the project's tmux session (:func:`attach_line`), from the shell's agent frames
-(:meth:`SettingsView.show_agents`). Its *Pause agents…* and *Resume agents…* ask the shell to
+of your own. It is shown, not edited; asq names no command to attach a terminal to the
+project's tmux session (R13), which is the shell's ``fleet attach``. Its *Pause agents…* and
+*Resume agents…*, from the shell's agent frames (:meth:`SettingsView.show_agents`), ask it to
 pause or resume the project's agents (:class:`~aisquare.cli.ui.views.fleet_bulk.BulkAsked`),
 the one that would act on none greyed, and its *Start fresh…* to clear the project's board
 and fleet (:class:`~aisquare.cli.ui.fresh.StartFresh`), as the card's menu does.
@@ -29,8 +29,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Sequence
 
-from rich.style import StyleType
-from rich.text import Span, Text
+from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
@@ -41,10 +40,8 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.fresh import StartFresh
 from aisquare.cli.ui.sidebar import ProjectRenamed
 from aisquare.cli.ui.views.fleet_bulk import BulkAsked, applicable
-from aisquare.core import program as prog
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from aisquare.services import install_route
 from aisquare.services import project as project_service
 
 NICKNAME_WORKER = "settings-nickname"
@@ -58,76 +55,18 @@ def fleet_id_line(project: ProjectInfo) -> Text:
     if codename is None:
         return Text(
             "fleet id: none yet — the first agent started here gives the project one "
-            "(it names the tmux session and the fleet/<id>/… branches)",
+            "(it names the fleet/<id>/… branches)",
             style="dim",
         )
     return Text(
-        f"fleet id: {codename} — tmux session {fleet_service.session_name(codename)}, "
-        f"branches fleet/{codename}/…, --project {codename}; renaming the project renames it",
+        f"fleet id: {codename} — branches fleet/{codename}/…; renaming the project renames it",
         style="dim",
     )
 
 
-def attach_command(status: FleetAgentStatus) -> str | None:
-    """``tmux -L asq attach -t =asq-<codename>`` for ``status``'s session, or ``None`` without one.
-
-    Where the fleet asks its server: from a shell under another TMUX_TMPDIR, ``-L`` by the
-    name reaches another server, and attaches to its session — so a row recorded at a path is
-    attached by that path (``-S``). Quoted as every printed path is: a TMUX_TMPDIR or
-    ``[fleet] tmux_socket`` with a space or a ``$`` in it pasted as another command, or
-    another path (round 29 of #257).
-    """
-    if not status.tmux_session:
-        return None
-    path = status.socket_at
-    where = ["-L", status.agent.tmux_socket] if path is None else ["-S", str(path)]
-    return install_route.command_line(["tmux", *where, "attach", "-t", f"={status.tmux_session}"])
-
-
-def attached_status(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | None:
-    """The row whose tmux session a terminal attaches to, in the order ``aisquare fleet
-    attach`` asks the servers (``services.fleet.attach_argv``): the rows that have not ended,
-    the manager first, then the ended ones whose window still stands, the latest to end first.
-
-    An ENDED manager is listed while its window stands (#138), and ranked by its label alone
-    it named its server ahead of a live coder's — not the server ``fleet attach`` reaches
-    (review of #267, 1). Not a ``lost`` row either (its pane, and maybe its session, is
-    gone), nor one held as another server's: what answers at its socket is not the server
-    it started on.
-    """
-    usable = [s for s in agents if s.tmux_session and s.state != "lost" and not s.held]
-    live = sorted(
-        (s for s in usable if s.agent.ended_at is None),
-        key=lambda s: s.agent.label != fleet_service.MANAGER_LABEL,
-    )
-    ended = sorted(
-        (s for s in usable if s.agent.ended_at is not None),
-        key=lambda s: s.agent.ended_at or s.agent.created_at,
-        reverse=True,
-    )
-    return next(iter([*live, *ended]), None)
-
-
-def attach_line(agents: Sequence[FleetAgentStatus] | None) -> Text:
-    """``Attach in a terminal: tmux -L asq attach -t =asq-<codename>`` — or a dim note when the
-    project has no live tmux session to attach to.
-
-    ``None`` is no frame yet: nothing is said rather than a "no session" that may be false.
-    """
-    if agents is None:
-        return Text()
-    status = attached_status(agents)
-    command = attach_command(status) if status is not None else None
-    if command is None:
-        return Text(
-            "Attach in a terminal: no live tmux session — the project's first agent starts one",
-            style="dim",
-        )
-    return Text.assemble(("Attach in a terminal: ", "bold"), command)
-
-
 class SettingsView(VerticalScroll):
-    """One project's own settings: its nickname, its codename shown, and how to attach to it."""
+    """One project's own settings: its nickname and its codename shown. How to attach to its
+    tmux session from a terminal is the shell's (``fleet attach``): asq names no command (R13)."""
 
     DEFAULT_CSS = """
     SettingsView { padding: 1 2; }
@@ -154,9 +93,6 @@ class SettingsView(VerticalScroll):
         self.fleet_paused = False
         """Whether the project's ``fleet-paused`` signal read on in that frame: Resume clears
         it, with no agent paused too."""
-        self._attach_painted: tuple[str, list[Span], StyleType] | None = None
-        """The attach line as last painted: a frame that changes nothing repaints nothing.
-        Its text, spans and style — ``Text``'s own ``==`` leaves the style out."""
 
     def show_agents(
         self, agents: Sequence[FleetAgentStatus], *, fleet_paused: bool = False
@@ -165,16 +101,9 @@ class SettingsView(VerticalScroll):
         Pause / Resume what they would act on (``fleet_paused``: its signal reads on)."""
         self.agents = list(agents)
         self.fleet_paused = fleet_paused
-        try:
-            line = self.query_one("#attach-line", Static)
-        except NoMatches:  # not composed yet: compose reads self.agents
+        if not self.is_mounted:  # not composed yet: compose reads self.agents
             return
         self._paint_pause()
-        wanted = attach_line(self.agents)
-        painted = (wanted.plain, wanted.spans, wanted.style)
-        if painted != self._attach_painted:
-            self._attach_painted = painted
-            line.update(wanted)
 
     def show_project(self, project: ProjectInfo) -> None:
         """The project as the store has it now: the title, the codename line and the field.
@@ -215,9 +144,6 @@ class SettingsView(VerticalScroll):
             )
             yield Button("Save", id="save-nickname", variant="primary")
         yield Static(fleet_id_line(self.project), id="fleet-id")
-        attach = attach_line(self.agents)
-        self._attach_painted = (attach.plain, attach.spans, attach.style)
-        yield Static(attach, id="attach-line")
         can = applicable(self.agents, fleet_paused=self.fleet_paused)
         with Horizontal(classes="row", id="pause-row"):
             yield Button("⏸ Pause agents…", id="pause-agents", disabled=not can["pause"])
@@ -238,14 +164,11 @@ class SettingsView(VerticalScroll):
                 ),
                 id="fresh-about",
             )
-        # The command in bold, not in backticks: the note is a ``Text``, which shows them.
         yield Static(
-            Text.assemble(
+            Text(
                 "The nickname is the name every list shows; blank shows the folder name. "
-                "The fleet id follows it. ",
-                (f"{prog.word()} project rename", "bold"),
-                " sets the same. The settings for every project — roles, the fleet, "
-                "accounts — are in App settings ▸ Agent settings.",
+                "The fleet id follows it. The settings for every project — roles, the fleet, "
+                "accounts — are in App settings ▸ Agent settings."
             ),
             id="settings-note",
         )
@@ -328,7 +251,7 @@ class SettingsView(VerticalScroll):
         result = event.worker.result
         if not isinstance(result, tuple):
             return
-        updated, notes, old_works = result
+        updated, notes, _old_works = result
         if not isinstance(updated, ProjectInfo):
             return
         before = self.project.codename
@@ -344,12 +267,7 @@ class SettingsView(VerticalScroll):
         if updated.codename:
             said += f" · fleet codename {updated.codename}"
             if before and before != updated.codename:
-                said += (
-                    f" (was {before}; --project {before} still works)"
-                    if old_works
-                    else f" (was {before}; --project {before} names another project too: use "
-                    f"--project {updated.codename})"
-                )
+                said += f" (was {before})"  # the `--project` spellings are the shell's (R13)
         self.notify(said, timeout=6, markup=False)
         for note in notes:
             self.notify(note, severity="warning", timeout=10, markup=False)

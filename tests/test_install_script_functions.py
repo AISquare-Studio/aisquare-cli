@@ -879,7 +879,7 @@ def test_dry_run_still_reports_what_it_would_do(tmp_path: Path) -> None:
         env={"AISQUARE_HOME": ""},
         path=f"{cli}:{curl}:{base_path(tmp_path)}",
     )
-    assert "aisquare installer" in result.stdout
+    assert "rlx installer" in result.stdout
     assert "~/.aisquare/" in result.stdout, "the banner must list what gets written (§3.7)"
     assert "nothing above was actually run" in result.stdout
 
@@ -1049,7 +1049,7 @@ def test_the_handoff_survives_having_no_controlling_terminal(tmp_path: Path) -> 
         f"(rc={result.returncode}) — see the docstring\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    assert "Open the fleet UI with" in result.stdout, (
+    assert "Open rlx with" in result.stdout, (
         f"it exited before naming the next step:\n{result.stdout}"
     )
 
@@ -1071,7 +1071,7 @@ def test_no_terminal_means_the_ui_is_named_rather_than_launched(tmp_path: Path) 
     assert "THE UI STARTED" not in result.stdout, (
         f"the UI was launched with no terminal to read:\n{result.stdout}"
     )
-    assert "asq" in result.stdout, "it should still tell the user the command"
+    assert "rlx" in result.stdout, "it should still tell the user the command"
 
 
 def test_yes_names_the_ui_rather_than_launching_it(tmp_path: Path) -> None:
@@ -1283,7 +1283,7 @@ def test_the_prompt_reads_the_terminal_and_not_the_script(
         extra=_HANDOFF_FLAGS,
     )
 
-    assert "Open the aisquare fleet UI now?" in output, (
+    assert "Open rlx now?" in output, (
         f"the prompt never appeared — the read did not reach a terminal:\n{output}"
     )
     assert "UI-STARTED" not in output, f"answering 'n' still launched the UI:\n{output}"
@@ -1768,7 +1768,7 @@ def test_a_missing_extra_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None
     assert _NODE_FAILED in alone.stdout
     assert "aisquare doctor" not in alone.stdout, alone.stdout
     assert alone.returncode == 2
-    pointer = both.stdout.index("the full detail and a fix for each: aisquare doctor")
+    pointer = both.stdout.index("the full detail and a fix for each: rlx doctor")
     assert both.stdout.index("  python\n") < pointer < both.stdout.index(_NODE_FAILED)
     assert "  chrome-devtools\n" not in both.stdout, "an extra is not listed as a doctor check"
     assert both.returncode == 2
@@ -3603,7 +3603,7 @@ def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
 
     assert row["status"] == "warn" and row["fix"], row
     assert "expected: brain claude-code" in result.stdout, result.stdout
-    told = "  claude-code — left alone by --no-agent; aisquare doctor here says:\n"
+    told = "  claude-code — left alone by --no-agent; rlx doctor here says:\n"
     assert f"{told}               {row['detail']}\n" in result.stdout, result.stdout
     assert row["fix"] not in result.stdout, result.stdout
     assert "Not expected" not in result.stdout and "authenticate" not in result.stdout
@@ -3630,7 +3630,7 @@ def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
     )
 
     assert "{" in row["detail"], row
-    said = "  claude-code — left alone by --no-agent; aisquare doctor here shows its state.\n"
+    said = "  claude-code — left alone by --no-agent; rlx doctor here shows its state.\n"
     assert said in result.stdout, result.stdout
     assert "here says:" not in result.stdout, result.stdout
     assert result.returncode == 0
@@ -4201,7 +4201,7 @@ def test_the_dry_run_banner_names_codex_and_where_it_writes(tmp_path: Path) -> N
     assert "  connect  codex's hooks" in out, out
     assert "Claude Code" not in out, out
     assert f"{tmp_path / 'codex-home'}/hooks.json" in out, out
-    assert "MERGED — aisquare's hook groups only" in out, out
+    assert "MERGED — rlx's hook groups only" in out, out
     assert "would run: aisquare agents use codex" in out, out
 
 
@@ -4228,7 +4228,7 @@ def test_claude_code_is_left_alone_when_only_codex_is_asked_for(tmp_path: Path) 
     assert expected.stdout.strip() == (
         "brain claude-code repomix sandbox-path snapshot tiktoken"
     ), expected.stdout
-    assert "  claude-code — left alone by --agent codex; aisquare doctor here says:" in (
+    assert "  claude-code — left alone by --agent codex; rlx doctor here says:" in (
         result.stdout
     ), result.stdout
     assert row["fix"] not in result.stdout and result.returncode == 0, result.stdout
@@ -4261,7 +4261,7 @@ def test_codex_hooks_awaiting_trust_are_the_users_step_not_a_surprise(tmp_path: 
         env={"PAYLOAD": json.dumps([rows[0], _codex_row("not_configured")])},
     )
 
-    step = "  codex — run codex (sign in if it asks), open /hooks and trust aisquare's hooks\n"
+    step = "  codex — run codex (sign in if it asks), open /hooks and trust rlx's hooks\n"
     assert trust.stdout.count(step) == 1, trust.stdout
     assert "UNEXPECTED=0" in trust.stdout and trust.returncode == 0, trust.stdout
     assert step not in broken.stdout and "Not expected" in broken.stdout, broken.stdout
@@ -4574,3 +4574,26 @@ def test_main_stops_on_a_taken_command_before_uv_or_anything_runs(tmp_path: Path
     mutations = [call for call in calls if call.split()[1:2] not in ([], ["--version"], ["-V"])]
     assert not mutations, f"the refusal still ran something: {calls}"
     assert taken.read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
+
+
+@pytest.mark.parametrize(
+    ("on_path", "word"),
+    [
+        ("none", "rlx"),
+        ("ours", "rlx"),
+        ("foreign-first", "aisquare"),
+    ],
+    ids=["none-yet", "ours-first", "another-programs-first"],
+)
+def test_the_word_a_line_tells_a_person_to_type_is_rlx_while_rlx_is_ours(
+    tmp_path: Path, on_path: str, word: str
+) -> None:
+    """install.sh names a command by core/program.py's rule (#135): `rlx` while the rlx a shell
+    finds first is uv's own (refuse_taken_commands keeps another program's out of uv's
+    directory), or while none is on PATH yet; `aisquare` while another program's comes first."""
+    uv_bin = stub_dir(tmp_path, "uv-bin", "aisquare", "rlx")
+    other = stub_dir(tmp_path, "other-bin", "rlx")
+    dirs = {"none": [], "ours": [uv_bin], "foreign-first": [other, uv_bin]}[on_path]
+    path = ":".join([*map(str, dirs), base_path(tmp_path)])
+    said = sh("program_word", env={"UV_TOOL_BIN_DIR": str(uv_bin)}, path=path)
+    assert said.stdout == word, (said.stdout, said.stderr)

@@ -462,7 +462,7 @@ def test_a_remote_on_elsewhere_adds_its_warning_short(
     )
 
 
-def test_an_install_asq_does_not_update_shows_the_command_and_no_restart(
+def test_an_install_asq_does_not_update_shows_no_command_and_no_restart(
     tmp_path: Path,
     script: Script,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

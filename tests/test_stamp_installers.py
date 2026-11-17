@@ -14,6 +14,8 @@
   version on, ahead of the user's own arguments;
 * the release workflow is valid YAML, runs only after the PyPI publish, and
   uploads only when asked to.
+* the README's pin says which releases carry an installer, since the oldest
+  ones carry none.
 
 The stamped install.sh also runs the whole POSIX and function suites in the
 release workflow (``AISQUARE_TEST_INSTALL_SH``), and the test at the bottom
@@ -411,6 +413,8 @@ _RELEASE_URL = re.compile(
     r"(latest/download|download/v[^/\s]+)/([^\s)`'\"|]+)"
 )
 _DOCUMENTED = (REPO / "README.md",)
+#: The README names no version (the owner's rule for copy, RLX R14), so its pin is the shape.
+_PIN_PLACEHOLDER = "vX.Y.Z"
 
 
 @pytest.mark.parametrize("page", _DOCUMENTED, ids=lambda page: page.name)
@@ -418,21 +422,70 @@ def test_the_docs_lead_with_main_and_show_a_pin(page: Path) -> None:
     """Owner's decision (#401, MAJOR-2): main's copy stays the default one-liner,
     because the latest/download URL answers 404 until a release's installers are
     attached; a release's own URL is how to pin. Since rlx (R10) the default is
-    typed as the short URL, which redirects to main's copy (stamper.SHORT)."""
+    typed as the short URL, which redirects to main's copy (stamper.SHORT). Since R14 the
+    pin names no release: its tag is the placeholder ``vX.Y.Z``, or a real release tag."""
     text = page.read_text(encoding="utf-8")
     default = stamper.SH_ONE_LINER
     assert default in text, f"{page.name} lost the default one-liner"
     urls = _RELEASE_URL.findall(text)
     for where, asset in urls:
         assert asset in stamper.ASSETS, f"{page.name}: {asset} is not a release asset"
-        if where != "latest/download":
-            stamper.version_of(where.removeprefix("download/"))
+        tag = where.removeprefix("download/")
+        if where != "latest/download" and tag != _PIN_PLACEHOLDER:
+            stamper.version_of(tag)
     assert any(where.startswith("download/v") for where, _asset in urls), (
         f"{page.name}: no pin-a-version example"
     )
     # The default comes first: before any release URL on the page.
     first_release = min(text.index(m.group(0)) for m in _RELEASE_URL.finditer(text))
     assert text.index(default) < first_release, f"{page.name} leads with a release URL"
+
+
+#: Only recent releases carry install.sh: installers.yml attaches it from 0.9.0 on, and 0.1.0 to
+#: 0.8.2 have none (RLX R14, tester note 12670). The README names no version, so its pin says
+#: "recent" in the sentence that gives the URL.
+_PIN_BOUND = re.compile(r"\brecent releases carry one\b", re.IGNORECASE)
+
+
+def _pin_sentences(markdown: str) -> list[str]:
+    """Each sentence that gives a pin URL, up to the URL, on one line."""
+    sentences = []
+    for paragraph in markdown.split("\n\n"):
+        flat = " ".join(paragraph.split())
+        for match in _RELEASE_URL.finditer(flat):
+            if match.group(1).startswith("download/v"):
+                cut = flat.rfind(". ", 0, match.start())
+                sentences.append(flat[cut + 2 if cut >= 0 else 0 : match.end()])
+    return sentences
+
+
+@pytest.mark.parametrize("page", _DOCUMENTED, ids=lambda page: page.name)
+def test_the_pin_says_which_releases_carry_an_installer(page: Path) -> None:
+    sentences = _pin_sentences(page.read_text(encoding="utf-8"))
+    assert sentences, f"{page.name} shows no pin"
+    unbounded = [sentence for sentence in sentences if not _PIN_BOUND.search(sentence)]
+    assert not unbounded, (
+        f"{page.name}: a pin that does not say only recent releases carry an installer sends "
+        "the reader to a file the oldest releases lack:\n  " + "\n  ".join(unbounded)
+    )
+
+
+def test_a_pin_whose_sentence_does_not_bound_it_is_caught() -> None:
+    url = "`curl -fsSL https://github.com/AISquare-Studio/rlx/releases/download/vX.Y.Z/install.sh`"
+    bounded = (
+        f"Latest.\n\nIt installs the latest. To pin a release, run it\n"
+        f"(Recent releases carry one): {url}."
+    )
+    unbounded = f"It installs the latest. To pin one, run the `install.sh` on Releases: {url}."
+    elsewhere = f"Recent releases carry one. To pin one, run it: {url}."
+    latest = (
+        "`curl -fsSL https://github.com/AISquare-Studio/rlx/releases/latest/download/install.sh`"
+    )
+
+    assert [bool(_PIN_BOUND.search(s)) for s in _pin_sentences(bounded)] == [True]
+    assert [bool(_PIN_BOUND.search(s)) for s in _pin_sentences(unbounded)] == [False]
+    assert [bool(_PIN_BOUND.search(s)) for s in _pin_sentences(elsewhere)] == [False]
+    assert _pin_sentences(f"The latest: {latest}.") == []
 
 
 def test_the_repair_command_is_mains_one_liner() -> None:

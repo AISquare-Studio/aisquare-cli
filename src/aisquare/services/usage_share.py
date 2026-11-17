@@ -616,6 +616,9 @@ def _ship(
 
 
 _SAYS_WHEN = frozenset({429, 503})
+RETRY_AFTER_CAP_S = 24 * 60 * 60
+"""The longest ``Retry-After`` the next try waits for: a day. The kill switch's 3600 is waited in
+full; a longer one (a year, or 10^12 s from a broken proxy) waits the day and is asked again."""
 """The answers whose ``Retry-After`` the next try waits for, when it is longer than the backoff:
 a throttle (429) and a server that is unavailable for now (503), as the server's ingest answers
 with ``Retry-After: 3600`` while its kill switch is off (AISquare-Studio-BE #3791). An answer that
@@ -713,7 +716,9 @@ def _failed(
         state.last_error = error[:200]
         delay = sharing.backoff(state.failures)
         if retry_after is not None:
-            delay = max(delay, timedelta(seconds=retry_after))
+            # Capped in whole seconds, before any date math: a year's Retry-After would park
+            # sharing for a year, and 10^12 s overflowed the date, so the failure went unrecorded.
+            delay = max(delay, timedelta(seconds=min(retry_after, RETRY_AFTER_CAP_S)))
         state.next_due_at = (moment + delay).isoformat(timespec="seconds")
 
     if _still_on():

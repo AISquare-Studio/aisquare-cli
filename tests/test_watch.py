@@ -277,7 +277,7 @@ def test_done_archive_view_shows_who_and_when(
     open_rows, done_rows, detail = asyncio.run(drive())
     assert open_rows == [board_mod.EMPTY_ROW] and done_rows == 1
     assert "finished thing" in detail
-    assert "done by ffff9999" in detail  # who + when from the task_done event
+    assert "done by runner (ffff9999)" in detail  # who + when from the task_done event
 
 
 def test_transcript_line_near_finds_the_moment(tmp_path: Path) -> None:

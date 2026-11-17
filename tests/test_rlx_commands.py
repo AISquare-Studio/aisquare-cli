@@ -12,8 +12,8 @@ tests/test_lifecycle_upgrade.py and tests/test_lifecycle_uninstall.py.
 
 from __future__ import annotations
 
+import json
 import os
-import shlex
 import sys
 import types
 from pathlib import Path
@@ -127,9 +127,11 @@ def test_a_hook_connected_from_rlx_or_relax_runs_the_aisquare_script(
         monkeypatch.setattr(sys, "argv", [str(bin_dir / name), "agents", "connect"])
         written[name] = agent_core._aisquare_command()
 
-    aisquare = shlex.quote(str((bin_dir / "aisquare").resolve()))
+    # Quoted as the hook's shell reads it, the product's own rule (`_quote`): POSIX quotes
+    # where sh runs it, none (or double quotes) where cmd.exe does, unchanged since 0.10.0.
+    aisquare = agent_core._quote(str((bin_dir / "aisquare").resolve()))
     assert written["rlx"] == written["relax"] == aisquare
-    assert written["asq"] == shlex.quote(str((bin_dir / "asq").resolve())), "control"
+    assert written["asq"] == agent_core._quote(str((bin_dir / "asq").resolve())), "control"
     for name in NAMES:
         assert agent_core._is_aisquare_hook_command(f"{written[name]} hook stop"), name
         assert agent_core._is_aisquare_hook_command(f"{bin_dir / name} hook stop"), name
@@ -290,8 +292,10 @@ def test_the_receipt_records_every_entrypoint_by_its_path(tmp_path: Path) -> Non
     prefix = tmp_path / "aisquare-cli"
     prefix.mkdir()
     bin_dir = tmp_path / "bin"
+    # A TOML basic string, escaped as uv writes one: a Windows path's backslashes doubled.
     rows = ",\n".join(
-        f'    {{ name = "{name}", install-path = "{bin_dir / name}", from = "aisquare-cli" }}'
+        f'    {{ name = "{name}", install-path = {json.dumps(str(bin_dir / name))}, '
+        'from = "aisquare-cli" }'
         for name in ("aisquare", "asq", "asq-statusline", "relax", "rlx")
     )
     (prefix / install_route.RECEIPT_NAME).write_text(
@@ -335,6 +339,9 @@ def test_the_receipt_records_every_entrypoint_by_its_path(tmp_path: Path) -> Non
 def test_the_refusal_is_one_line_naming_each_and_what_to_do(
     command: str, taken: tuple[str, ...], said: str
 ) -> None:
+    # Each file named as this platform writes its path: `\h\.local\bin\rlx` on Windows.
+    for path in taken:
+        said = said.replace(path, str(Path(path)))
     assert lifecycle.taken_refusal(command, [Path(path) for path in taken]) == said
     assert lifecycle.taken_refusal(command, []) is None
 

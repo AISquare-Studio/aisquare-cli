@@ -346,12 +346,15 @@ _KEY_HINT = re.compile(r"Enter to confirm\b|\bEsc to (?:cancel|exit)\b")
 a key at its question at its start (text typed there, an Enter right after it), ``Esc to
 exit \u00b7 To add it, press \u2193 to Yes, then Enter (your text is kept)``, wrapped onto rows
 of its own."""
-_FOLDER_LINE = re.compile(r"Adding: (\S.*)")
+_FOLDER_LINE = re.compile(r"Adding:(?: (\S.*))?")
 """The row 2.1.326 draws under the key hint of its question about an ``--add-dir`` folder
 when the question is cut off: on a pane too short for even its compact layout (under 30
 rows, no blank rows), whose top it pushes off the screen, title and all. The folder,
 named, wraps onto the rows under it, the last the question draws. Measured from 40 rows
-down to 4, at which only the key hint and this are left."""
+down to 4, at which only the key hint and this are left. ``Adding:`` alone where the
+folder starts a row of its own: one with no space in it that does not fit on the row
+with ``Adding:`` but does on the next (45 characters at 50 columns, measured), or that
+breaks fewer times from there (brief 217)."""
 _INPUT_BOX = re.compile(r"[\u276f>](?! ?(?:\d+\. ?)?(?:Yes|No)\b).*")
 """An input box's row: its pointer, with nothing, a placeholder or what is typed after it —
 never one of the dialog's options."""
@@ -474,8 +477,8 @@ def trust_prompt_folder(
     if cut is not None:
         at = kept[cut]
         named = _FOLDER_LINE.fullmatch(rows[at])
-        under = list(itertools.takewhile(bool, rows[at + 1 :]))
-        return _folder([named[1], *under], is_dir) if named else None
+        first = [named[1]] if named and named[1] else []
+        return _folder([*first, *itertools.takewhile(bool, rows[at + 1 :])], is_dir)
     if _ADDED_QUESTION.search(" ".join(plain)) or any(map(_ADD_IT.fullmatch, plain)):
         return None
     return default

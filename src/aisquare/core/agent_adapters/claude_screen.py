@@ -71,12 +71,13 @@ TRUST = re.compile(r"Quick safety check|Yes, I trust this folder|Yes, add it\b")
 TRUST_TITLE = re.compile(r"Quick safety check|Adding a new directory|^\s*Adding: \S")
 """The row a :data:`TRUST` dialog's question is named by: its title, or the folder line of
 one cut off (:data:`FOLDER_LINE`)."""
-FOLDER_LINE = re.compile(r"^\s*Adding: \S")
+FOLDER_LINE = re.compile(r"^\s*Adding:(?: \S|\s*$)")
 """The row 2.1.326 draws under the footer of its question about an ``--add-dir`` folder
 when the question is cut off: on a pane too short for even its compact layout, whose top
 it pushes off the screen, title and all. It names the folder, wrapped onto the rows under
 it, the last the question draws; measured from 40 rows down to 4, at which only the footer
-and this are left (R19)."""
+and this are left (R19). ``Adding:`` alone where the folder starts a row of its own: one
+with no space in it that fits on the next row but not on this one (brief 217)."""
 RATING = re.compile(r"How is Claude doing this session")
 WORKING = re.compile(r"esc to interrupt", re.IGNORECASE)
 """What a turn in progress shows at the box: in the footer, or on the spinner line."""

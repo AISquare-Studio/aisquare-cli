@@ -10,11 +10,12 @@ and the rules are the ones measured on Claude Code 2.1.299 (the module docstring
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import shutil
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ from aisquare.core.agent_adapters import claude_screen
 from aisquare.core.config import load_config, save_config
 from aisquare.models import ClaudeAccount
 from aisquare.services import claude_accounts as service
+from tests import added_folder_screens as folder_screens
 from tests.fsperms import can_symlink
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude_code"
@@ -604,6 +606,12 @@ its key hint is ``Esc to exit \u00b7 To add it, press \u2193 to Yes, then Enter 
 kept)``, wrapped onto two rows."""
 HELD_CUT_OFF = _rows("added_folder_trust_2.1.326_held_cut_off_50x8.txt")
 """And so at 50x8, cut off: that key hint over the folder."""
+CUT_OFF_ALONE = _rows("added_folder_trust_2.1.326_cut_off_alone_50x8.txt")
+"""Cut off at 50x8 about a folder 45 characters long with no space in it, which fits on no
+row with ``Adding:`` but does on the next: ``Adding:`` alone, the folder under it (brief
+217). Masked at the temp folder's own length, so its rows break where they did."""
+ALONE = "/private/var/tmp/asq-native00/fffffffffffffff"
+"""The folder that capture names."""
 MASKED = "/private/var/tmp/asq-native"
 SPACES = f"{MASKED}/extra dir with spaces"
 """The folder the compact, cut-off and held captures name, masked."""
@@ -620,6 +628,7 @@ LAYOUTS = {
     "in a repository, 50x22": REPOSITORY_COMPACT,
     "held, 50x22": HELD,
     "held, cut off, 50x8": HELD_CUT_OFF,
+    "cut off, the folder on a row of its own, 50x8": CUT_OFF_ALONE,
 }
 """Each layout of 2.1.326's question captured: measured from 40 rows down to 4, at 30, 48, 50,
 80 and 120 columns. Under 30 rows it draws no blank row; where even that does not fit, it
@@ -721,11 +730,12 @@ def test_the_folder_trust_question_names_the_added_folder_it_asks_about(tmp_path
     assert long in asked and len(asked) <= 2 ** (4 - 1), "its four rows, joined every way"
     # A folder that is not on this machine is not guessed at: a command names `<dir>`.
     assert sharing.trust_prompt_folder(ADDED_48, start, is_dir=lambda _: False) is None
-    # On disk, by default.
+    # On disk, by default: a folder of the test's own, wrapped as Claude Code wraps it at 48
+    # columns, wherever the test's temp folder is (one with spaces in it too; brief 217).
     folder = tmp_path / "two words" / "x"
     folder.mkdir(parents=True)
-    head, tail = str(folder).split(" ")
-    screen = [" Adding a new directory:", "", f" \x1b[1m{head}\x1b[0m", f" \x1b[1m{tail}\x1b[0m"]
+    rows = [f" \x1b[1m{row}\x1b[0m" for row in folder_screens.wrapped(str(folder), 48 - 2)]
+    screen = [" Adding a new directory:", "", *rows]
     assert sharing.trust_prompt_folder([*screen, "", " This session…"], start) == folder
 
 
@@ -773,6 +783,98 @@ def test_the_question_names_no_folder_it_cannot_see_and_reads_rows_it_cannot_end
     assert sharing.trust_prompt_folder(reworded, start, is_dir=both.__contains__) == Path(SPACES)
     assert sharing.trust_prompt_folder(reworded, start, is_dir={first}.__contains__) == Path(first)
     assert sharing.trust_prompt_folder(reworded, start, is_dir=lambda _: False) is None
+
+
+DRAWN = {
+    "120 columns": (ADDED, f"{MASKED}/extra-dir", 120),
+    "50x22": (COMPACT, SPACES, 50),
+    "120x12": (COMPACT_ONE_ROW, SPACES, 120),
+    "50x14": (CUT_OFF, SPACES, 50),
+    "50x8": (CUT_OFF_SHORT, SPACES, 50),
+    "in a repository, 50x22": (REPOSITORY_COMPACT, IN_A_REPOSITORY, 50),
+    "held, 50x22": (HELD, SPACES, 50),
+    "held, cut off, 50x8": (HELD_CUT_OFF, SPACES, 50),
+    "the folder on a row of its own, 50x8": (CUT_OFF_ALONE, ALONE, 50),
+}
+"""Each capture, the folder it names and its width: what ``tests.added_folder_screens.drawn``
+draws another folder into."""
+
+
+@pytest.mark.parametrize("size", list(DRAWN))
+def test_a_folder_drawn_into_a_capture_is_drawn_as_claude_code_draws_it(size: str) -> None:
+    """Brief 217: the tests that read the folder off the disk draw a real one into a capture
+    (``tests.added_folder_screens``), wrapped as Claude Code's renderer wraps it (Bun's
+    ``wrap-ansi``: at a space, and a word wider than the pane broken inside it). That model
+    finds each capture's own folder where Claude Code drew it, row for row."""
+    screen, masked, columns = DRAWN[size]
+    again = folder_screens.drawn(screen, masked, masked, columns)
+    assert folder_screens.plain(again) == folder_screens.plain(screen)
+    # The 48-column capture's temp folder was masked 2 characters short, which moves a break
+    # that fell at a full row; at its own length the model breaks it as Claude Code did.
+    real = f"/private/var/tmp/asq-abcdefgh/a long folder name {'x' * 50}/{'y' * 40}"
+    rows = [row.strip() for row in folder_screens.wrapped(real, 48 - 2)]
+    shown = [row.strip() for row in folder_screens.plain(ADDED_48)[4:8]]
+    assert rows[1:] == shown[1:] and rows[0] == shown[0].replace("asq-native", "asq-abcdefgh")
+
+
+def test_a_folder_on_a_row_of_its_own_under_adding_is_the_folder_cut_off() -> None:
+    """Brief 217, measured on 2.1.326: cut off at 50 columns, a folder 45 characters long with
+    no space in it starts a row of its own, under ``Adding:`` alone. Both readers read the
+    question there now, and the folder; before, it was no question, its folder the one the
+    agent starts in, and the row read a healthy ``working``."""
+
+    def never(spelling: str) -> bool:
+        raise AssertionError(f"one row is the folder as it reads, not looked up: {spelling}")
+
+    assert sharing.shows_trust_prompt(CUT_OFF_ALONE)
+    assert sharing.trust_prompt_folder(CUT_OFF_ALONE, Path("/w"), is_dir=never) == Path(ALONE)
+    read = claude_screen.prompt_showing(CUT_OFF_ALONE)
+    assert read is not None and read.shape == "trust"
+    assert claude_screen.modal_showing(CUT_OFF_ALONE) == "the trust dialog"
+    # Wrapped under it, as a longer one breaks: still the one way that is a directory.
+    longer = f"/private/var/tmp/asq-native00/{'f' * 60}/x y"
+    screen = folder_screens.drawn(CUT_OFF_ALONE, ALONE, longer, 50)
+    assert sharing.shows_trust_prompt(screen)
+    assert sharing.trust_prompt_folder(screen, Path("/w"), is_dir={longer}.__contains__) == Path(
+        longer
+    )
+
+
+WINDOWS_FOLDERS = [
+    str(PureWindowsPath(r"C:\Users\me\Work\extra dir with spaces")),
+    str(PureWindowsPath(r"C:\Users\RUNNER~1\AppData\Local\Temp\pytest-of-me\pytest-0") / "w x"),
+    str(PureWindowsPath(r"D:\work\rlx\abcdefghijklmnopqrstuvwxyz0123456789")),
+]
+"""Folders as Windows spells them (``PureWindowsPath``): with spaces; long enough to break
+inside a word and to wrap onto rows; and 45 characters with no space, which starts a row of
+its own under ``Adding:``."""
+
+
+@pytest.mark.parametrize("folder", WINDOWS_FOLDERS)
+@pytest.mark.parametrize("size", list(DRAWN))
+def test_a_windows_folder_on_the_question_is_read_or_named_dir_never_misnamed(
+    size: str, folder: str
+) -> None:
+    """Brief 217: the fleet runs where tmux does (on Windows, under WSL, with POSIX paths),
+    but a folder Windows spells (``C:\\…``) drawn on the question must not be misread: the
+    screen is the question, so nothing is typed into it; its folder is the one drawn, found
+    with the disk's own case rules (``ntpath``), or none (``<dir>``) where it is not one;
+    never the folder the agent starts in."""
+    screen, masked, columns = DRAWN[size]
+    drawn = folder_screens.drawn(screen, masked, folder, columns)
+    start = Path("/the/folder/it/starts/in")
+    assert sharing.shows_trust_prompt(drawn)
+    read = claude_screen.prompt_showing(drawn)
+    assert read is not None and read.shape == "trust" and read.yes_key is None
+
+    def is_dir(spelling: str) -> bool:
+        return ntpath.normcase(spelling) == ntpath.normcase(folder)
+
+    found = sharing.trust_prompt_folder(drawn, start, is_dir=is_dir)
+    assert found is not None and str(found) == str(Path(folder)), found
+    missing = sharing.trust_prompt_folder(drawn, start, is_dir=lambda _: False)
+    assert missing in (None, Path(folder)), "the one drawn, or none"
+    assert missing != start
 
 
 # --- aisquare accounts trust ---------------------------------------------------------------------

@@ -739,7 +739,7 @@ def test_the_mic_prints_the_url_the_qr_and_the_start_command_with_no_page_runnin
     text = drive(body)
     assert voice.voice_url(voice.DEFAULT_PORT, serve_token()) in text
     assert "█▀▀█ qr" in text and "█▄▄█ qr" in text
-    assert "aisquare captain voice" in text
+    assert "rlx captain voice" in text
     assert voice.adb_reverse(voice.DEFAULT_PORT) in text
     assert "not running" in text
 

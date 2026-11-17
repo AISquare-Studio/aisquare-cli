@@ -518,7 +518,7 @@ def test_a_plugin_for_the_project_folder_alone_offers_connect_for_the_coders(
         return (card(page, "claude-status"), *offered)
 
     text, connect, manager = hosted(machine, go)
-    assert "✗ the coders may run without aisquare" in text and "✓ connected" not in text
+    assert "✗ the coders may run without rlx" in text and "✓ connected" not in text
     assert connect and not manager, text
 
 
@@ -1986,7 +1986,7 @@ def test_a_refused_restart_is_said_under_its_coder_with_the_way_out(
         lines = text.splitlines()
         lost = lines.index("✗ coder-1 — lost (pane gone)")
         assert lines[lost + 1] == f"✗ coder-1: {reason}", text
-        way_out = f"aisquare fleet reap --project {codename or project.id} ends the rows"
+        way_out = f"rlx fleet reap --project {codename or project.id} ends the rows"
         assert f"coder-1 could not be restarted: {way_out}" in text, text
         assert "trusting this folder" not in text, text
     assert offered, "a refusal that may pass (a hand-over in flight) can still be retried"

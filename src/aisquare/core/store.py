@@ -38,6 +38,7 @@ from types import EllipsisType
 from typing import Any, Concatenate, Literal, NamedTuple, ParamSpec, Protocol, TypeVar
 
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
     CLAIM_KEEPING_STATUSES,
@@ -7678,8 +7679,8 @@ def store_recovery(exc: BaseException) -> str:
     return (
         f"Leave it where it is: nothing in it is damaged, and this process may not write "
         f"{paths.db_path().parent}. Inside an agent's sandbox, where the store is read-only, "
-        f"its board calls go through its launch's broker: an agent `aisquare fleet` or "
-        f"`aisquare launch` started has one (restart it if it says the broker is not "
+        f"its board calls go through its launch's broker: an agent `{prog.word()} fleet` or "
+        f"`{prog.word()} launch` started has one (restart it if it says the broker is not "
         f"running); otherwise run the command outside the sandbox (an approval), or give "
         f"the directory back its permissions"
     )
@@ -7702,7 +7703,7 @@ def damaged_store_recovery() -> str:
     """
     db = paths.db_path()
     return (
-        f"Move it aside and re-create: mv {db} {db}.broken && aisquare init "
+        f"Move it aside and re-create: mv {db} {db}.broken && {prog.word()} init "
         f"— the board history in it is lost; config.toml and credentials are untouched"
     )
 

@@ -431,7 +431,7 @@ def recorded(agent_id: str) -> bool:
 
 
 UNRECORDED = (
-    "no launch record was written for it (it was spawned by an aisquare that keeps none, "
+    "no launch record was written for it (it was spawned by an rlx that keeps none, "
     "or its record could not be written), and the census does not hold it"
 )
 """Why a row has no record to replay, when no spawn wrote one and the census holds none."""
@@ -457,7 +457,7 @@ def read(agent_id: str) -> LaunchRecord | str:
         return f"its launch record could not be read ({exc.error_count()} invalid fields)"
     if record.version > VERSION:
         return (
-            f"its launch record was written by a newer aisquare (version {record.version}); "
+            f"its launch record was written by a newer rlx (version {record.version}); "
             "upgrade to replay it"
         )
     if record.id != agent_id:

@@ -1796,11 +1796,11 @@ def test_settings_says_whether_writes_are_on_as_the_machine_says_it_now(
     version the frame named never replaced the one before. A frame, and a 403
     ``read_only`` that came after the human went on to Settings, now tell it again."""
     facts = boot_report["settingsFacts"]
-    assert facts["before"] == "aisquare test · writes on"
-    assert facts["off"] == {"line": "aisquare 0.7.0 · writes off", "pill": True}
-    assert facts["on"] == "aisquare 0.7.0 · writes on"
-    assert facts["left"] == "aisquare test · writes on"
-    assert facts["refused"] == "aisquare test · writes off"
+    assert facts["before"] == "rlx test · writes on"
+    assert facts["off"] == {"line": "rlx 0.7.0 · writes off", "pill": True}
+    assert facts["on"] == "rlx 0.7.0 · writes on"
+    assert facts["left"] == "rlx test · writes on"
+    assert facts["refused"] == "rlx test · writes off"
 
 
 def test_every_key_of_the_pad_has_a_name_a_screen_reader_can_say(
@@ -3196,12 +3196,12 @@ def test_a_page_that_cannot_go_on_keeps_no_timer_extend_or_connecting_dot(
         "extend": False,
         "readOnly": False,
         "dot": "Not connected",
-        "title": "aisquare remote",
+        "title": "rlx remote",
     }
     for how in ("off", "link", "signedOut", "probedGone"):
         assert strip[how]["before"]["off"] and strip[how]["before"]["extend"], how
         assert strip[how]["before"]["readOnly"], how
-        assert strip[how]["before"]["title"] == "(1) aisquare remote", how
+        assert strip[how]["before"]["title"] == "(1) rlx remote", how
         assert strip[how]["after"] == gone, how
     assert strip["signedOut"]["at"] == "#/unlock" and strip["off"]["at"] == "#/"
     taken = strip["takenThenLocked"]

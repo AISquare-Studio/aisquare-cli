@@ -23,6 +23,7 @@ import typer
 from aisquare.cli.common import fail, resolve_pool
 from aisquare.cli.fleet import ProjectRef, SessionRef, _fail_fleet, _project
 from aisquare.core import personas as core
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import agents_named
 from aisquare.core.personas import Layer, Persona, PersonaError
 from aisquare.core.state import get_state
@@ -200,7 +201,7 @@ def new(name: PersonaName, user: UserFlag = False, project: ProjectFlag = False)
         with _reported():
             edited = persona_service.edit(name, root=root, layer=layer)
     elif not _json():
-        typer.echo(f"  edit it with: aisquare persona edit {name}")
+        typer.echo(f"  edit it with: {prog.word()} persona edit {name}")
     if _json():
         _emit({"name": name, "layer": layer, "path": str(path), "edited": edited is not None})
     elif edited is not None:
@@ -385,7 +386,7 @@ def import_(
     if not batch:
         fail(
             "name a source: a skill directory, a SKILL.md or Markdown file, - for stdin, or a "
-            "skill from `aisquare persona import --list`",
+            f"skill from `{prog.word()} persona import --list`",
             error="missing_source",
         )
     layer: Layer = resolve_pool(user, project) or "user"

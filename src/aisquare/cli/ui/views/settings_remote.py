@@ -59,10 +59,10 @@ from textual.widgets.data_table import ColumnKey
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.clipboard import copy_and_tell
-from aisquare.cli.ui.remote_control import AUTO_OFF_CHOICES, READ_ONLY_REASON, RemoteController
+from aisquare.cli.ui.remote_control import AUTO_OFF_CHOICES, RemoteController, read_only_reason
 from aisquare.cli.ui.ticks import while_running
+from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import (
-    ELSEWHERE,
     RemotePanel,
     _auto_off_label,
     _auto_off_time,
@@ -92,7 +92,7 @@ TOKEN_TITLE = "Paste your ngrok token"
 REPLACE_TITLE = "Replace your ngrok token"
 TOKEN_ABOUT = "Remote reaches your phone through ngrok: a free account's token, once."
 ENV_TOKEN = (
-    "NGROK_AUTHTOKEN is set where asq started: ngrok signs in with it, not with a token saved here"
+    "NGROK_AUTHTOKEN is set where rlx started: ngrok signs in with it, not with a token saved here"
 )
 """The one line beside the token field while ``NGROK_AUTHTOKEN`` overrides what it saves."""
 NGROK_MISSING = ngrok_sdk.SDK_MISSING
@@ -369,7 +369,11 @@ class RemoteSection(Vertical):
             self._paint_on()
         else:
             elsewhere = controller.served_elsewhere()
-            about = Text(ELSEWHERE, style="bold yellow") if elsewhere else Text(OFF_ABOUT)
+            about = (
+                Text(remote_view.served_elsewhere_state(), style="bold yellow")
+                if elsewhere
+                else Text(OFF_ABOUT)
+            )
             status = controller.status_line()
             if status:
                 about.append("\n" + status, style="yellow")
@@ -413,7 +417,7 @@ class RemoteSection(Vertical):
                 box.value = writes
             self._painted[box.id or ""] = writes
         self.query_one("#settings-remote-write-hint", Static).update(
-            Text("writes reach the fleet" if writes else READ_ONLY_REASON)
+            Text("writes reach the fleet" if writes else read_only_reason())
         )
         self.query_one("#settings-remote-regen", Button).disabled = not controller.running
         collapsed = self.query_one("#settings-remote-advanced", Collapsible).collapsed

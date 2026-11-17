@@ -31,7 +31,7 @@ from tests.test_lifecycle_uninstall import (  # noqa: F401 — `tool` and `world
     world,
 )
 
-_ENTER = "Press Enter to go back to asq "
+_ENTER = "Press Enter to go back to rlx "
 
 #: Taken at import, before ``no_real_installer`` closes it, and never called.
 _REAL_EXEC_SELF = selfcli.exec_self
@@ -66,7 +66,7 @@ def test_a_no_brings_asq_back_and_removes_nothing(
     result = runner.invoke(app, ["uninstall", "--reopen"])
 
     assert result.exit_code == 0 and "nothing removed" in result.stdout, result.output
-    assert reopened == [("prompt", [_ENTER]), ("exec", ["ui"])], "Enter first, then asq"
+    assert reopened == [("prompt", [_ENTER]), ("exec", ["ui"])], "Enter first, then rlx"
     assert world.events == []
 
 
@@ -79,7 +79,7 @@ def test_nothing_to_remove_brings_asq_back(
     hooks either, there is nothing to ask about."""
     result = runner.invoke(app, ["uninstall", "--reopen"])
 
-    assert "nothing for aisquare to remove here" in result.stdout, result.output
+    assert "nothing for rlx to remove here" in result.stdout, result.output
     assert reopened == [("prompt", [_ENTER]), ("exec", ["ui"])]
 
 
@@ -99,7 +99,7 @@ def test_a_refusal_is_read_and_then_asq_comes_back(
     result = runner.invoke(app, ["uninstall", "--reopen"])
 
     assert result.exit_code == 1
-    assert "aisquare fleet shutdown --all --yes" in result.output
+    assert "rlx fleet shutdown --all --yes" in result.output
     assert reopened == [("prompt", [_ENTER]), ("exec", ["ui"])] and world.events == []
 
 

@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import atomic, locking, selfcli
+from aisquare.core import program as prog
 from aisquare.core.config import WatchSettings, load_config
 from aisquare.core.spawn import untraced_env
 from aisquare.core.store import store_session
@@ -512,7 +513,8 @@ def event_text(items: Sequence[WatchItem], path: Path) -> str:
     said = ", ".join(
         f"{n} {kind}" for kind, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     )
-    return f"watch: {len(items)} new ({said}): aisquare watch show {path}"
+    # A manager reads this line and runs it through its broker: the agents' protocol word.
+    return f"watch: {len(items)} new ({said}): {prog.PROTOCOL} watch show {path}"
 
 
 def _deliver(project_id: str, items: Sequence[WatchItem], path: Path) -> bool:
@@ -578,7 +580,7 @@ def run(
         os.close(fd)
         pid = running_pid()
         raise AlreadyWatching(
-            f"a watcher already runs for this home (pid {pid}): `aisquare watch --status`"
+            f"a watcher already runs for this home (pid {pid}): `{prog.word()} watch --status`"
         ) from exc
     stop = False
 
@@ -616,7 +618,7 @@ def detach() -> int:
     pid = running_pid()
     if pid is not None:
         raise AlreadyWatching(
-            f"a watcher already runs for this home (pid {pid}): `aisquare watch --status`"
+            f"a watcher already runs for this home (pid {pid}): `{prog.word()} watch --status`"
         )
     config = fleet_service.settings()
     fleet_service.open_window(  # the one way a window opens at the fleet's socket

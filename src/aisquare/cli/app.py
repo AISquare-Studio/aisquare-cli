@@ -59,7 +59,7 @@ app = typer.Typer(
 def _print_version(value: bool) -> None:
     """Eager callback for ``--version``."""
     if value:
-        typer.echo(f"aisquare {__version__}")
+        typer.echo(f"rlx {__version__}")
         raise typer.Exit()
 
 
@@ -299,6 +299,6 @@ def main(prog_name: str | None = None) -> None:
     why = store_broker.check_cwd()
     if why is not None:
         store_broker.record_refusal("board", why)
-        sys.stderr.write(f"aisquare: {why}\n")
+        sys.stderr.write(f"rlx: {why}\n")
         raise SystemExit(2)
     app(prog_name=prog_name)

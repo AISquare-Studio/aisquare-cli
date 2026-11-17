@@ -294,7 +294,7 @@ def test_with_capture_off_a_board_on_a_captured_row_is_refused_not_written(
 
     text = error_text(call_remote("team_board"))
 
-    assert text.startswith("error:") and "add it first: aisquare project onboard" in text
+    assert text.startswith("error:") and "add it first: rlx project onboard" in text
     project = team_project(work_dir)
     with store_session() as store:
         assert store.list_projects() == [], "the refusal adds nothing"

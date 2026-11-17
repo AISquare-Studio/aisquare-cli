@@ -410,7 +410,7 @@ def test_a_limited_fleet_agent_is_named_by_its_label_with_the_switch_command(
     with store_session() as store:
         stored = store.get_project(work.id)
     assert stored is not None
-    assert f"aisquare fleet switch --project {stored.codename or work.id} coder-auth" in text
+    assert f"rlx fleet switch --project {stored.codename or work.id} coder-auth" in text
 
 
 def test_other_api_errors_end_the_turn_as_waiting_with_a_feed_line(
@@ -1255,7 +1255,7 @@ def test_under_a_hub_the_limit_is_handed_over_from_the_agents_own_row(
     _settings(wait_if_reset_within_minutes=15)
     session = _session(hub, "sess-fleet")
     _fleet_row(work, "agt_hub1", "coder-db", "sess-fleet")
-    switch = f"aisquare fleet switch --project {work.id} coder-db"
+    switch = f"rlx fleet switch --project {work.id} coder-db"
 
     _fire_limit(runner, work, WEEKLY_LIMIT_DAYS_OUT, "sess-fleet")
 
@@ -2107,7 +2107,7 @@ def test_doctor_names_limited_agents_and_is_silent_without_any(
     assert limits.status.value == "warn"
     assert "coder-auth" in limits.detail and "resets" in limits.detail
     # The agent's own switch, naming its project (review of #259, round 21).
-    switch = f"aisquare fleet switch --project {work.codename or work.id} coder-auth"
+    switch = f"rlx fleet switch --project {work.codename or work.id} coder-auth"
     assert limits.fix is not None and switch in limits.fix, limits.fix
 
 

@@ -248,7 +248,7 @@ def test_a_directory_no_project_holds_is_refused_with_how_to_onboard_it(
     with pytest.raises(adopt_service.AdoptRefused) as refused:
         adopt_service.adopt(SESSION)
     assert refused.value.code == "not_onboarded"
-    assert f"aisquare project onboard {elsewhere}" in str(refused.value)
+    assert f"rlx project onboard {elsewhere}" in str(refused.value)
     assert tmux.spawned == []
 
 

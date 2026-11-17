@@ -333,7 +333,7 @@ def test_doctor_says_once_that_the_snapshot_section_is_no_longer_read(
     row = diagnostics._check_config()
     assert row.status is CheckStatus.ok, "nothing is wrong: the section is ignored"
     assert row.detail == (
-        "config.toml is valid; [snapshot] is no longer read (aisquare no longer packs a "
+        "config.toml is valid; [snapshot] is no longer read (rlx no longer packs a "
         "codebase; an ignore list in it moves to [code]), and the next save drops it"
     )
     save_config(load_config())

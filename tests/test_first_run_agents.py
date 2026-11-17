@@ -171,7 +171,7 @@ def test_the_hooks_are_read_in_the_home_of_the_account_the_manager_runs_on(
     assert bare.home == slot.config_dir and not bare.connected and not bare.ready
     assert bare.signed_in is True and bare.account_slot == slot.slot
     step_two = claude_text(bare, platform="linux").plain
-    assert f"not connected — Connect installs aisquare's hooks in {slot.config_dir}" in step_two
+    assert f"not connected — Connect installs rlx's hooks in {slot.config_dir}" in step_two
     assert first_run.connect_fix("codex", bare.home).argv[-2:] == (
         "--config-dir",
         str(slot.config_dir),
@@ -185,7 +185,7 @@ def test_the_hooks_are_read_in_the_home_of_the_account_the_manager_runs_on(
     hooked = first_run.probe_fleet(which=on_path("codex"), sign_in=False)
     # Its trust recorded with the hooks (SMOKE12 O3): no step left for the human there.
     assert hooked.home == slot.config_dir and hooked.connected and not hooked.trust_pending
-    assert f"aisquare's hooks in {slot.config_dir}" in claude_text(hooked, platform="linux").plain
+    assert f"rlx's hooks in {slot.config_dir}" in claude_text(hooked, platform="linux").plain
     # The machine default is rank 1 of the one order (0.9.0, #406): the signed-in slot is the
     # first usable Codex account, so the manager runs on it, whether the launch picks by
     # headroom (0.8.1's own default) or by the order (`pick = "default"`).

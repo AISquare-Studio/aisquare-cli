@@ -116,7 +116,7 @@ def test_the_error_carries_the_recovery_not_just_the_diagnosis(runner: CliRunner
     result = runner.invoke(app, ["init"])
 
     assert "mv " in result.output, "no executable step reached the human surface"
-    assert "aisquare init" in result.output
+    assert "rlx init" in result.output
 
 
 def test_status_is_legible_too(runner: CliRunner) -> None:
@@ -205,7 +205,7 @@ def test_the_whole_chain_walks_from_corrupt_to_green(runner: CliRunner) -> None:
     assert source == db, "the remediation moves a file that is not the broken one"
 
     source.rename(destination)
-    assert "aisquare init" in remediation
+    assert "rlx init" in remediation
     recovered = runner.invoke(app, ["init"], catch_exceptions=False)
 
     assert recovered.exit_code == 0, recovered.output
@@ -383,7 +383,7 @@ def test_json_callers_get_the_recovery_too(runner: CliRunner) -> None:
     payload = json.loads(result.output.strip().splitlines()[0])
     assert payload["error"] == "store_unopenable"
     assert "mv " in payload["hint"]
-    assert "aisquare init" in payload["hint"]
+    assert "rlx init" in payload["hint"]
 
 
 @pytest.mark.skipif(

@@ -53,7 +53,7 @@ REAL_RUN = service._run_token_refresh
 REAL_COMMAND = service._token_refresh_command
 
 _REFRESH_TOKEN = (
-    "press Log in, or open a session on this account (aisquare accounts run {slot}): "
+    "press Log in, or open a session on this account (rlx accounts run {slot}): "
     "Claude Code refreshes the token"
 )
 

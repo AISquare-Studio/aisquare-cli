@@ -1224,7 +1224,8 @@ def test_with_neither_cli_nor_uv_session_start_says_so_once(machine: Machine) ->
 
     message = json.loads(results.pop("session-start").stdout)
     assert list(message) == ["systemMessage"]
-    assert "uv" in message["systemMessage"]
+    # It names the two programs it looked for: the `aisquare` command, then uv (seq 12524).
+    assert "neither the aisquare command nor uv was found" in message["systemMessage"]
     assert {sub: (r.returncode, r.stdout) for sub, r in results.items()} == {
         sub: (0, b"") for sub in results
     }

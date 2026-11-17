@@ -75,7 +75,7 @@ def test_the_gate_applies_only_while_the_captain_is_on(monkeypatch: pytest.Monke
 
 def test_unenrolled_the_gate_fails_closed_and_says_how() -> None:
     """On by default: until a secret is enrolled, the tools that act as the owner refuse."""
-    with pytest.raises(Refused, match="aisquare captain gate enroll"):
+    with pytest.raises(Refused, match="rlx captain gate enroll"):
         _press_like()
     (event,) = _audit()
     assert event["tool"] == "press" and event["ok"] is False

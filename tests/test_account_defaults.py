@@ -458,7 +458,7 @@ def test_a_disabled_account_cannot_be_made_the_default(fake_home: Path, runner: 
     core.create_account()
     core.create_account()
     service.set_disabled("2", True)
-    with pytest.raises(service.AccountsError, match="enable it first: aisquare accounts enable 2"):
+    with pytest.raises(service.AccountsError, match="enable it first: rlx accounts enable 2"):
         service.set_default("2")
     refused = runner.invoke(app, ["accounts", "default", "2"])
     assert refused.exit_code == 1 and "enable it first" in refused.output
@@ -961,9 +961,7 @@ def test_making_a_signed_out_account_the_default_says_launches_skip_it(
     moved = runner.invoke(app, ["accounts", "default", "2"])
     assert moved.exit_code == 0, moved.output
     assert "moved to rank 1" in moved.stdout
-    assert "not signed in, so launches skip it until it is: aisquare accounts run 2" in (
-        moved.stdout
-    )
+    assert "not signed in, so launches skip it until it is: rlx accounts run 2" in (moved.stdout)
     assert _slots(service.list_accounts()) == [2, 1]
 
 

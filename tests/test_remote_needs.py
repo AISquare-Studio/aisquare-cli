@@ -67,10 +67,10 @@ from aisquare.services.remote_needs import (
     scan_needs_you,
 )
 from aisquare.services.remote_server import (
-    READ_ONLY_REASON,
     Runtime,
     Sources,
     build_app,
+    read_only_reason,
     remote_agent_lock,
 )
 from aisquare.services.transcript import (
@@ -2788,7 +2788,7 @@ def test_a_limits_reset_reaches_the_phone_as_an_instant_never_the_machines_clock
     assert item.reason == "coder-1 hit its usage limit · limit resets in 3h 09m"
     assert push["body"] == item.reason
     assert item.detail == {
-        "text": "coder-1 hit its five-hour limit — `aisquare fleet switch --project prj_alpha "
+        "text": "coder-1 hit its five-hour limit — `rlx fleet switch --project prj_alpha "
         "coder-1` moves it to the account with the most headroom (or wait for the reset)",
         "resets_at": "2026-10-07T13:10:00+00:00",
     }
@@ -7428,7 +7428,7 @@ def test_an_answer_is_refused_while_writes_are_off(live: Live) -> None:
     card = live.card("permission")
     response = live.client.post(live.url("needs/answer"), json={"id": card["id"], "keys": ["1"]})
     assert response.status_code == 403
-    assert response.json() == {"error": "read_only", "message": READ_ONLY_REASON}
+    assert response.json() == {"error": "read_only", "message": read_only_reason()}
     assert live.tmux.typed == []
 
 

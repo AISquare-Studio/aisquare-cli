@@ -404,7 +404,7 @@ def test_a_home_that_cannot_be_created_costs_the_conf_and_not_the_command(
     assert server.conf_path() == Path(os.devnull)
     assert server.has_session("x") is True, "the command still runs"
     assert fake.calls[0][0][4] == os.devnull
-    assert server.conf_fallback is not None and "aisquare home" in server.conf_fallback
+    assert server.conf_fallback is not None and "rlx home" in server.conf_fallback
 
 
 def test_check_conf_sources_the_file_on_a_throwaway_server(fake_bin: Path, conf: Path) -> None:

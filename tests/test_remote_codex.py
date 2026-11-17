@@ -471,7 +471,7 @@ def test_a_claude_code_row_reads_no_screen(
     pane.command, pane.screen = "claude", SWITCH_DIALOG
     response = phone.post("agent/tell", agent=LABEL, text="carry on", mode="prompt")
     assert response.status_code == 409
-    assert response.json()["message"].startswith("coder-1 runs without aisquare's hooks")
+    assert response.json()["message"].startswith("coder-1 runs without rlx's hooks")
     assert scan.snaps[0].screen is None
 
 
@@ -515,7 +515,7 @@ def test_an_auto_tell_at_a_fresh_codexs_folder_trust_dialog_sends_no_one_to_inte
     assert told["delivered"] is False
     assert told["how"].startswith("it is showing a prompt, which typing would answer — filed as")
     assert told["how"].endswith(
-        "which it is not shown without aisquare's hooks: once its prompt is answered, "
+        "which it is not shown without rlx's hooks: once its prompt is answered, "
         "Interrupt & tell types it"
     )
     assert fleet.calls == [] and pane.sent == []

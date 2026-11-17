@@ -69,8 +69,8 @@ def test_two_asqs_name_where_each_runs_and_mark_this_one() -> None:
     at_the_mac = chip_text([ssh, mac], "mac", host=mac.host)
 
     assert over_ssh is not None and at_the_mac is not None
-    assert over_ssh.plain == f"2 asq · {HERE_WORD} + ssh (here)"
-    assert at_the_mac.plain == f"2 asq · {HERE_WORD} (here) + ssh"
+    assert over_ssh.plain == f"2 rlx · {HERE_WORD} + ssh (here)"
+    assert at_the_mac.plain == f"2 rlx · {HERE_WORD} (here) + ssh"
     # The mark is bold, so it reads at a glance too.
     marked = next(span for span in at_the_mac.spans if span.style == "bold")
     assert at_the_mac.plain[marked.start : marked.end] == f"{HERE_WORD} (here)"
@@ -85,7 +85,7 @@ def test_asqs_in_one_place_are_counted_and_another_host_is_named() -> None:
     text = chip_text([ssh_one, elsewhere, here, ssh_two], "c", host=here.host)
 
     assert text is not None
-    assert text.plain == f"4 asq · {HERE_WORD} + mini + 2 ssh (here)"
+    assert text.plain == f"4 rlx · {HERE_WORD} + mini + 2 ssh (here)"
 
 
 def test_an_unregistered_process_marks_nothing() -> None:
@@ -103,8 +103,8 @@ def test_releases_that_differ_are_flagged_in_the_chip_and_its_tooltip() -> None:
 
     assert text is not None and text.plain.endswith(" ⚠")
     assert "different releases" in tooltip
-    assert f"asq {mine.version} — {mine.where}  ← this asq" in tooltip
-    assert f"asq 0.0.1 — {old.where}" in tooltip
+    assert f"rlx {mine.version} — {mine.where}  ← this rlx" in tooltip
+    assert f"rlx 0.0.1 — {old.where}" in tooltip
 
 
 def test_the_chip_shows_while_another_asq_runs_and_hides_when_it_quits() -> None:
@@ -124,14 +124,14 @@ def test_the_chip_shows_while_another_asq_runs_and_hides_when_it_quits() -> None
                 await settle_page(app)
                 assert chip.display is True
                 assert isinstance(chip.content, Text)
-                assert chip.content.plain == f"2 asq · {HERE_WORD} (here) + ssh"
+                assert chip.content.plain == f"2 rlx · {HERE_WORD} (here) + ssh"
                 assert {i.id for i in chip.live} == {me.instance.id, other.id}
                 assert chip.parent is app.query_one("#others")
-                assert "← this asq" in str(chip.tooltip)
+                assert "← this rlx" in str(chip.tooltip)
 
             app.refresh_data()
             await settle_page(app)
-            assert chip.display is False, "the other asq quit: alone again"
+            assert chip.display is False, "the other rlx quit: alone again"
 
     asyncio.run(run())
 
@@ -166,7 +166,7 @@ def test_a_frame_that_could_not_read_the_registry_leaves_the_chip_as_it_was(
 def test_instances_lists_nothing_on_a_home_with_no_asq(runner: CliRunner) -> None:
     result = runner.invoke(cli_app, ["instances"])
     assert result.exit_code == 0, result.output
-    assert "No asq is running on this home." in result.output
+    assert "No rlx is running on this home." in result.output
 
     as_json = runner.invoke(cli_app, ["instances", "--json"])
     assert as_json.exit_code == 0, as_json.output
@@ -243,7 +243,7 @@ def test_doctor_says_none_runs() -> None:
     row = diagnostics._check_instances()
     assert row.name == "asq instances"
     assert row.status is CheckStatus.ok
-    assert row.detail == "no asq is running on this home"
+    assert row.detail == "no rlx is running on this home"
     assert not instances.registry_dir().exists()
 
 
@@ -269,8 +269,8 @@ def test_doctor_warns_on_another_release_or_schema(differs: str) -> None:
         row = diagnostics._check_instances()
     assert row.status is CheckStatus.warn
     assert old.label in row.detail
-    assert row.detail.startswith("2 running, 1 on another release than this aisquare")
-    assert row.fix is not None and "q in that asq" in row.fix
+    assert row.detail.startswith("2 running, 1 on another release than this rlx")
+    assert row.fix is not None and "q in that rlx" in row.fix
 
 
 def test_the_row_is_in_the_doctor() -> None:

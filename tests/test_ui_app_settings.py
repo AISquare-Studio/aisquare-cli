@@ -1011,7 +1011,7 @@ def test_no_binding_shows_how_to_make_one() -> None:
         await settle(pilot)
         return str(host.query_one("#bindings-empty", Static).render())
 
-    assert "aisquare team bind" in drive(scenario)
+    assert "rlx team bind" in drive(scenario)
 
 
 def test_edit_opens_the_bind_form_on_the_binding_and_writes_what_team_bind_writes(
@@ -1354,8 +1354,8 @@ def test_the_form_opens_on_agent_settings_beside_a_user_preferences_tab() -> Non
         "Off: shown only when two projects share a name."
     )
     assert seen["from a shell"] == (
-        "Set from a shell (aisquare config set ui.always_show_project_path true), a preference "
-        "shows after Reload here or when asq next starts, not live."
+        "Set from a shell (rlx config set ui.always_show_project_path true), a preference "
+        "shows after Reload here or when rlx next starts, not live."
     )
     assert seen["buttons shown"] is True
 

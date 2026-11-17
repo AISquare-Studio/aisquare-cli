@@ -124,7 +124,7 @@ class NativeForwardingCommand(PassthroughCommand):
                     until_separator = tail[: tail.index("--")] if "--" in tail else tail
                     if any(part.split("=")[0] in valued for part in until_separator):
                         raise UsageError(
-                            f"Unknown native option {token!r}: put AISquare options before it "
+                            f"Unknown native option {token!r}: put rlx options before it "
                             "and use -- before the native arguments.",
                             ctx,
                         )

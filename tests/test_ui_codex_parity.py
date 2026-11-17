@@ -73,7 +73,7 @@ def test_launch_lines_show_each_agents_flags_and_a_refusal() -> None:
     assert "Codex --approve-for-me" in launch_line("coder", "codex", coder).plain
     seat = launch_line("reviewer", "codex", reviewer).plain
     assert "--ask-for-approval on-request -c 'approvals_reviewer=\"auto_review\"'" in seat
-    assert "+ the aisquare store, read-only in its read_only sandbox" in seat
+    assert "+ the rlx store, read-only in its read_only sandbox" in seat
     claude = launch_line("coder", "claude-code", coder).plain
     assert "Claude Code --permission-mode auto" in claude and "--name" not in claude
     off = coder.model_copy(update={"approve_for_me": False})
@@ -180,7 +180,7 @@ def test_a_slots_sign_in_is_one_click_that_opens_accounts_never_a_json_run() -> 
     claude_accounts_core.create_account("codex")  # 3, with no login
     [check] = diagnostics._agent_accounts_checks("codex")
     assert check.fix is not None and check.fix.endswith(
-        " ".join(("aisquare accounts run 3", *claude_accounts_core.kind("codex").sign_in_args()))
+        " ".join(("rlx accounts run 3", *claude_accounts_core.kind("codex").sign_in_args()))
     )
     (fix,) = onboarding.fix_commands([check])
     assert fix.interactive and fix.sign_in_slot == 3 and fix.argv == ("accounts", "run", "3")
@@ -188,7 +188,7 @@ def test_a_slots_sign_in_is_one_click_that_opens_accounts_never_a_json_run() -> 
     result = onboarding.apply_fix(fix, None, run=lambda *a, **k: ran.append(a))  # type: ignore[arg-type]
     assert not result.ok and not ran  # never handed to `--json`
     # Control: a hint carrying more than a slot is text, not a button.
-    loose = check.model_copy(update={"fix": "aisquare accounts run 3 and sign in"})
+    loose = check.model_copy(update={"fix": "rlx accounts run 3 and sign in"})
     assert onboarding.fix_commands([loose]) == []
 
     class Recorder(App[None]):

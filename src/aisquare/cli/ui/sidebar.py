@@ -70,6 +70,7 @@ from aisquare.cli.ui.terminal import InPlaceField
 from aisquare.cli.ui.theme import MARK_STYLE, MarkStatic
 from aisquare.cli.ui.views.accounts import agent_mark
 from aisquare.core import codenames
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import default_binary, recorded_adapter
 from aisquare.core.version import PRODUCT_NAME
 from aisquare.models import (
@@ -1799,7 +1800,7 @@ class StartCaptain(ActionRow):
     def __init__(self) -> None:
         super().__init__(action_text("▶", "Start captain"), id="captain-empty")
         self.selection_key = START_CAPTAIN_KEY
-        self.tooltip = "No captain running — start one (aisquare captain)"
+        self.tooltip = f"No captain running — start one ({prog.word()} captain)"
 
     def message(self) -> Message:
         return CaptainRequested()
@@ -1998,7 +1999,7 @@ def fleet_title_tooltip(live_total: int) -> str | None:
         return None
     return (
         f"{live_total} agent{'' if live_total == 1 else 's'} live across every project, "
-        "the captain excluded — aisquare fleet capacity"
+        f"the captain excluded — {prog.word()} fleet capacity"
     )
 
 

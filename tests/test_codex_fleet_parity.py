@@ -2555,7 +2555,7 @@ def test_a_refusal_is_said_on_the_board_once_per_row_and_reason(
     stop = project_service.fleet_command("stop", codex.project, codex.agent.label)
     assert said == [
         f"{codex.agent.label}: cannot restart it — no launch record was written for it (it was "
-        "spawned by an aisquare that keeps none, or its record could not be written), and the "
+        "spawned by an rlx that keeps none, or its record could not be written), and the "
         "census does not hold it; end its agent in its own "
         f"window, then `{stop}` removes the window and ends its row, and spawn a new agent"
     ]
@@ -2685,7 +2685,7 @@ def test_a_record_a_newer_aisquare_wrote_is_refused_naming_the_upgrade(
     assert isinstance(launch_seal.read(agent.id), launch_seal.LaunchRecord)
     path.write_text(json.dumps({**written, "version": launch_seal.VERSION + 1}), encoding="utf-8")
 
-    with pytest.raises(fleet_service.FleetError, match="written by a newer aisquare"):
+    with pytest.raises(fleet_service.FleetError, match="written by a newer rlx"):
         fleet_service.restart(project, agent.label)
 
 
@@ -3111,7 +3111,7 @@ def test_the_settings_line_shows_one_permission_for_every_agent() -> None:
     assert line.index("Codex --approve-for-me") < line.index("Claude Code --permission-mode auto")
     assert "workspace:auto" in line and "--name" not in line
     # The store's profile is the same long run for every role: named, not spelled out.
-    assert "+ the aisquare store, read-only in its workspace sandbox" in line
+    assert "+ the rlx store, read-only in its workspace sandbox" in line
     assert "permissions.aisquare" not in line
     reviewer = launch_line("reviewer", "codex", FleetRoleSettings()).plain
     assert 'approvals_reviewer="auto_review"' in reviewer and "its read_only sandbox" in reviewer

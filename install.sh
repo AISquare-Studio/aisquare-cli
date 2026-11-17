@@ -786,7 +786,7 @@ preflight() {
         if in_container; then
             note "running as root inside a container — allowed, there is no other user here"
         else
-            die "do not run this as root: uv, aisquare and Claude Code install under \$HOME,
+            die "do not run this as root: uv, rlx and Claude Code install under \$HOME,
 so a root run installs them into root's home and leaves yours without them.
 Run it as your own user (it uses sudo only for tmux/gh/Node), or set
 AISQUARE_INSTALL_ALLOW_ROOT=1 if you really mean root's home."
@@ -851,8 +851,8 @@ detect_os() {
     fi
 
     if [ "$OS" = windows ]; then
-        die "this is Windows-native (Git Bash / MSYS). The fleet UI runs agents in
-tmux, and there is no tmux on Windows — so aisquare runs inside WSL2 there.
+        die "this is Windows-native (Git Bash / MSYS). The rlx UI runs agents in
+tmux, and there is no tmux on Windows — so rlx runs inside WSL2 there.
 Install WSL2 with:   wsl --install
 then run this same command inside the Ubuntu shell it gives you.
 (install.ps1 in this repo does both steps for you.)"
@@ -970,7 +970,7 @@ survey() {
     if [ "$CLI_BROKEN" = 1 ]; then
         note "aisquare — broken: \`aisquare --version\` fails"
     else
-        _report aisquare "$CLI_VERSION"
+        _report rlx "$CLI_VERSION"
     fi
     _report "Claude Code" "$CLAUDE_VERSION"
     # Only where it is asked for or already there: a Claude Code install has no use for
@@ -1252,7 +1252,7 @@ short_circuit() {
     fi
 
     say ""
-    say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
+    say "${C_BOLD}rlx $CLI_VERSION is already the latest.${C_RESET}"
     _sc_codex=""
     wants_codex && _sc_codex=" · Codex $CODEX_VERSION"
     note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped}$_sc_codex · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION${NODE_VERSION:+ · Node $NODE_VERSION}"
@@ -1293,7 +1293,7 @@ short_circuit() {
             note "optional: $(extra_call line "$_sc_offer") — rerun with --with $_sc_offer"
     done
     say ""
-    say "Nothing to do. Open the fleet UI with: ${C_BOLD}asq${C_RESET}"
+    say "Nothing to do. Open rlx with: ${C_BOLD}$(program_word)${C_RESET}"
     return 0
 }
 
@@ -1309,7 +1309,7 @@ short_circuit() {
 # shellcheck disable=SC2088
 banner() {
     say ""
-    say "${C_BOLD}aisquare installer${C_RESET} — this will:"
+    say "${C_BOLD}rlx installer${C_RESET} — this will:"
 
     # A real newline between entries, never an escape a printf expands: the plan
     # holds paths (PROJECT_DIR, AISQUARE_HOME), and a % or a backslash in one is text.
@@ -1390,10 +1390,10 @@ banner() {
     # CLAUDE_CONFIG_DIR and CODEX_HOME redirect them, and the one-liner inherits them.
     note "$(printf '%-33s %s' "$(aisquare_home_shown)/" "config.toml, context.db, projects/")"
     if wants_claude; then
-        note "$(printf '%-33s %s' "$(claude_settings_shown)" "MERGED — aisquare's hook groups only")"
+        note "$(printf '%-33s %s' "$(claude_settings_shown)" "MERGED — rlx's hook groups only")"
     fi
     if wants_codex; then
-        note "$(printf '%-33s %s' "$(codex_home_shown)/hooks.json" "MERGED — aisquare's hook groups only")"
+        note "$(printf '%-33s %s' "$(codex_home_shown)/hooks.json" "MERGED — rlx's hook groups only")"
     fi
     # register_devtools_mcp's writes, for a run that can make them: the extra chosen
     # or still to be asked about, the MCP not there, and not --no-agent. One file per
@@ -1459,7 +1459,7 @@ install_uv() {
         die "the uv installer ($UV_INSTALLER_URL) failed.
 uv is the bootstrap — it brings its own Python, so nothing else can proceed
 without it. Install it another way (your package manager may have it) and
-rerun, or install this CLI by hand with pipx: pipx install $PYPI_PACKAGE"
+rerun, or install rlx by hand with pipx: pipx install $PYPI_PACKAGE"
     fi
 
     # uv installs to ~/.local/bin and edits shell profiles for FUTURE shells;
@@ -1575,7 +1575,7 @@ $_now, not $LATEST_VERSION. That is a silent no-op (a success code over an
 unchanged version) — please report it."
     fi
     CLI_VERSION=$_now
-    good "aisquare $CLI_VERSION"
+    good "rlx $CLI_VERSION"
 }
 
 # ---------------------------------------------------------------------------
@@ -1630,7 +1630,7 @@ ensure_pkg_manager() {
     note "and it is not installed."
     if ! confirm "Install Homebrew? (declining skips tmux/gh/git/Node)" n; then
         _brew_unavailable=1
-        note "leaving Homebrew alone — the CLI works; the fleet UI will not"
+        note "leaving Homebrew alone — rlx works; its UI will not"
         return 1
     fi
     step "Installing Homebrew"
@@ -1736,7 +1736,7 @@ install_tmux() {
     fi
 
     if ! ensure_pkg_manager; then
-        warn "no package manager found for tmux — the fleet UI needs it; everything else works.
+        warn "no package manager found for tmux — the rlx UI needs it; everything else works.
          Install it with: $(pkg_hint tmux)"
         return 0
     fi
@@ -1751,13 +1751,13 @@ install_tmux() {
         if [ -n "$TMUX_VERSION" ] && version_lt "$TMUX_VERSION" "$MIN_TMUX_MAJOR.$MIN_TMUX_MINOR"; then
             # Honest about the one thing a package manager cannot fix.
             warn "this distribution's tmux is $TMUX_VERSION, below the $MIN_TMUX_MAJOR.$MIN_TMUX_MINOR the fleet needs.
-         Everything except the fleet UI works. Build a newer tmux, or use a newer release."
+         Everything except the rlx UI works. Build a newer tmux, or use a newer release."
         else
             good "tmux ${TMUX_VERSION:-installed}"
             INSTALLED_LIST="$INSTALLED_LIST tmux"
         fi
     else
-        warn "could not install tmux — the fleet UI needs it; everything else works.
+        warn "could not install tmux — the rlx UI needs it; everything else works.
          Install it with: $(pkg_hint tmux)"
     fi
 }
@@ -2300,12 +2300,12 @@ install_claude() {
     fi
     if ! have bash; then
         warn "Claude Code's installer needs bash, which is not on this machine.
-         The CLI works; the fleet has nothing to spawn. Install bash, then:
+         rlx works; the fleet has nothing to spawn. Install bash, then:
          curl -fsSL $CLAUDE_INSTALLER_URL | bash"
         return 0
     fi
     if ! fetch_into_shell "$CLAUDE_INSTALLER_URL" bash >/dev/null 2>&1; then
-        warn "the Claude Code installer failed. The CLI works; the fleet has nothing
+        warn "the Claude Code installer failed. rlx works; the fleet has nothing
          to spawn until an agent is installed. See https://claude.com/claude-code"
         return 0
     fi
@@ -2450,12 +2450,12 @@ install_codex() {
     fi
     if ! have tar; then
         warn "Codex's installer needs tar, which is not on this machine.
-         The CLI works; Codex is not installed. Install tar, then:
+         rlx works; Codex is not installed. Install tar, then:
          curl -fsSL $CODEX_INSTALLER_URL | sh"
         return 0
     fi
     if ! fetch_into_shell "$CODEX_INSTALLER_URL" codex_installer_sh >/dev/null 2>&1; then
-        warn "the Codex installer failed. The CLI works; Codex is not installed. Install it
+        warn "the Codex installer failed. rlx works; Codex is not installed. Install it
          with: curl -fsSL $CODEX_INSTALLER_URL | sh  (https://learn.chatgpt.com/docs/codex/cli)"
         return 0
     fi
@@ -2760,7 +2760,7 @@ run_doctor() {
         # lines and lose it. Reported rather than papered over: a script that
         # says "all green" over checks it could not read is worse than one that
         # admits it. Run `aisquare doctor` yourself is always the fallback.
-        warn "read $_parsed of $_total doctor checks — verify by hand with: aisquare doctor"
+        warn "read $_parsed of $_total doctor checks — verify by hand with: $(program_word) doctor"
         UNEXPECTED=$((UNEXPECTED + 1))
         return 0
     fi
@@ -2803,12 +2803,16 @@ codex_awaits_trust_only() {
 }
 
 # Whether DOCTOR_RAW's codex rows show aisquare's hooks in a Codex home: any row but
-# the two a Codex this home never connected reads as (not detected, not selected).
+# the two a Codex this home never connected reads as (not detected, not selected). The
+# doctor wrote "AISquare integration not selected" before the rlx rename (#135) and "rlx
+# integration not selected" since: both are read, as a --no-handoff or offline copy of
+# this script can meet a doctor of another release.
 codex_row_connected() {
     _cx_rows=$(_doctor_row codex)
     [ -n "$_cx_rows" ] || return 1
     printf '%s\n' "$_cx_rows" |
-        grep -v -e 'not detected on this machine' -e 'AISquare integration not selected' >/dev/null
+        grep -v -e 'not detected on this machine' -e 'AISquare integration not selected' \
+            -e 'rlx integration not selected' >/dev/null
 }
 
 # A JSON string's body ($1) as the text it encodes, for printing (RFC 8259 §7).
@@ -2933,7 +2937,7 @@ _actionable_fix() {
             # left to the user only where it could not (the row says "unverified"). Any other
             # amber codex row is unexpected, and the doctor has its fix.
             if codex_awaits_trust_only; then
-                printf '%s' "run codex (sign in if it asks), open /hooks and trust aisquare's hooks"
+                printf '%s' "run codex (sign in if it asks), open /hooks and trust rlx's hooks"
             fi
             ;;
         *) printf '' ;;
@@ -3000,7 +3004,7 @@ summary() {
         # unconditionally would explain a check that was fine.
         if listed "$_expected" claude-account-backoff; then
             note "  claude-account-backoff — an account's usage reads wait out a rate"
-            note "             limit; they resume by themselves (aisquare doctor says until when)."
+            note "             limit; they resume by themselves ($(program_word) doctor says until when)."
         fi
         if listed "$_expected" claude-code; then
             # Information, not an instruction: under --no-agent, or --agent codex, no
@@ -3009,20 +3013,20 @@ summary() {
             # the same row.
             _cc_said=$(_json_text "$(_doctor_detail claude-code)")
             if [ -n "$_cc_said" ]; then
-                note "  claude-code — left alone by $(agent_flag_shown); aisquare doctor here says:"
+                note "  claude-code — left alone by $(agent_flag_shown); $(program_word) doctor here says:"
                 note "             $_cc_said"
             else
                 # A detail that could not be read off the payload (a `{` in a
                 # path splits it): named where it can be read in full.
-                note "  claude-code — left alone by $(agent_flag_shown); aisquare doctor here shows its state."
+                note "  claude-code — left alone by $(agent_flag_shown); $(program_word) doctor here shows its state."
             fi
         fi
         if listed "$_expected" tmux || listed "$_expected" gh; then
             # Named as a group, because --no-system-deps skipped them
             # together and explaining each separately would read as two
             # problems rather than one deliberate choice.
-            note "  tmux/gh  — skipped by --no-system-deps. The CLI works;"
-            note "             the fleet UI needs tmux, and PRs need gh."
+            note "  tmux/gh  — skipped by --no-system-deps. rlx works;"
+            note "             the rlx UI needs tmux, and PRs need gh."
         fi
         # The release's rows for what the next one removes (RELEASE_ERA_AMBER),
         # named as one, and only those actually amber.
@@ -3082,7 +3086,7 @@ summary() {
         done
         IFS=$_su_ifs
         if [ -n "$_from_doctor" ]; then
-            note "the full detail and a fix for each: aisquare doctor"
+            note "the full detail and a fix for each: $(program_word) doctor"
         fi
         if [ -n "$_cc_detail" ]; then
             printf '  claude-code — %s\n' "$_cc_detail"
@@ -3101,7 +3105,7 @@ summary() {
 
     if [ -n "$PATH_HINT" ]; then
         say ""
-        say "Add to your shell profile so new shells find aisquare:"
+        say "Add to your shell profile so new shells find rlx:"
         note "$PATH_HINT"
     fi
 }
@@ -3123,7 +3127,7 @@ handoff() {
 
     if ! have asq; then
         say ""
-        say "Open the fleet UI with: ${C_BOLD}asq${C_RESET}"
+        say "Open rlx with: ${C_BOLD}$(program_word)${C_RESET}"
         exit "$_exit"
     fi
 
@@ -3131,14 +3135,14 @@ handoff() {
     # a provisioning run must not end in a full-screen TUI.
     if [ "$ASSUME_YES" = 1 ] || ! tty_available; then
         say ""
-        say "Open the fleet UI with: ${C_BOLD}asq${C_RESET}"
+        say "Open rlx with: ${C_BOLD}$(program_word)${C_RESET}"
         exit "$_exit"
     fi
 
     say ""
-    if ! confirm "Open the aisquare fleet UI now?" y; then
+    if ! confirm "Open rlx now?" y; then
         say ""
-        say "Open it any time with: ${C_BOLD}asq${C_RESET}"
+        say "Open it any time with: ${C_BOLD}$(program_word)${C_RESET}"
         exit "$_exit"
     fi
 
@@ -3162,7 +3166,7 @@ handoff() {
 
 usage() {
     cat <<'USAGE'
-aisquare installer — one command to a working install and the fleet UI.
+rlx installer — one command to a working install and the rlx UI.
 
   curl -fsSL https://aisquare.studio/rlx/install.sh | sh
 
@@ -3229,7 +3233,7 @@ Exit codes
 
 Not installed, on purpose: explainability tracing (off unless asked for), and
 any credential — `claude`, `codex` and `gh auth login` do their own. Codex runs
-aisquare's hooks once they are trusted: the install records that trust where Codex's own
+rlx's hooks once they are trusted: the install records that trust where Codex's own
 review does, and where it cannot, Codex asks at its start (or open its /hooks menu).
 USAGE
 }
@@ -3373,6 +3377,20 @@ uv_bin_dir() {
         printf '%s' "${XDG_DATA_HOME%/}/../bin"
     else
         printf '%s' "$HOME/.local/bin"
+    fi
+}
+
+# The word a line tells a person to type (#135), by core/program.py's rule: `rlx` while the
+# rlx a shell finds first is this install's own, the one in uv's directory (refuse_taken_commands
+# keeps another program's out of it), or while none is on PATH yet (the profile line below adds
+# that directory); `aisquare` while another program's rlx comes first.
+program_word() {
+    _pw_ours="$(uv_bin_dir)/rlx"
+    _pw_found=$(command -v rlx 2>/dev/null || true)
+    if [ -z "$_pw_found" ] || [ "$_pw_found" = "$_pw_ours" ]; then
+        printf 'rlx'
+    else
+        printf 'aisquare'
     fi
 }
 

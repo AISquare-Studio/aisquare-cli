@@ -65,7 +65,7 @@ def _row(agent: str, slot: int) -> ClaudeAccount:
 #: claude-code --account 5` first, which 0.9.2 reads after a rollback, then claude-code:5.
 BIND_ONE_OF_5 = (
     "Bind one as --agent claude-code --account 5 or claude-code:5, or as --agent codex "
-    "--account 5 or codex:5; see: aisquare accounts"
+    "--account 5 or codex:5; see: rlx accounts"
 )
 
 
@@ -152,7 +152,7 @@ def test_a_read_of_a_claude_only_home_writes_nothing_in_its_accounts_folder(
 REFUSED_RANK = (
     "Claude Code's account 5 shares its number with Codex's, whose place in the order it is: "
     "it is listed last and cannot be moved or made the default. To give it a number of its "
-    "own: aisquare accounts remove claude-code:5, then aisquare accounts add"
+    "own: rlx accounts remove claude-code:5, then rlx accounts add"
 )
 
 
@@ -384,9 +384,7 @@ def test_a_json_refusal_carries_the_ambiguity_and_its_message(
     assert payload["error"] == "ambiguous_account"
     assert payload.get("ref") == ref
     assert payload["detail"].startswith("slot 5 is two accounts, Codex's account 5 (")
-    assert payload["detail"].endswith(
-        "Name one as codex:5 or claude-code:5; see: aisquare accounts"
-    )
+    assert payload["detail"].endswith("Name one as codex:5 or claude-code:5; see: rlx accounts")
 
 
 # --- F: doctor names the number and the commands that fix it -----------------------------------
@@ -400,7 +398,7 @@ def test_doctor_names_a_shared_number_and_the_commands_that_fix_it(signed: Pair)
         "slot 5 is two accounts, Codex's (codex:5) and Claude Code's (claude-code:5): name each "
         "as shown; the one listed last cannot be moved or made the default"
     )
-    assert row.fix == "aisquare accounts remove claude-code:5, then aisquare accounts add"
+    assert row.fix == "rlx accounts remove claude-code:5, then rlx accounts add"
     assert any(check.name == "account-numbers" for check in diagnostics.doctor())
 
 
@@ -473,7 +471,7 @@ def test_a_json_refusal_outside_accounts_carries_the_ambiguity_too(
     assert payload["detail"].endswith(
         BIND_ONE_OF_5
         if argv[0] == "team"
-        else "Name one as codex:5 or claude-code:5; see: aisquare accounts"
+        else "Name one as codex:5 or claude-code:5; see: rlx accounts"
     )
 
 
@@ -506,11 +504,11 @@ def test_team_bind_of_another_agents_account_says_the_agent_that_binds_it(
 
     assert result.exit_code == 1, result.output
     assert _said(result).endswith(
-        "— name a Codex account, or pass --agent claude-code (see: aisquare accounts)"
+        "— name a Codex account, or pass --agent claude-code (see: rlx accounts)"
     ), _said(result)
     assert launched.exit_code != 0 and env == {}, launched.output
     reason = _said(launched).split("names account 'claude-code:5': ", 1)[1]
-    assert _said(result).startswith("✗ " + reason.removesuffix(" (see: aisquare accounts)"))
+    assert _said(result).startswith("✗ " + reason.removesuffix(" (see: rlx accounts)"))
     assert load_config().team.profiles["cx"].account is None, "nothing bound"
 
 
@@ -710,7 +708,7 @@ def test_binds_advice_names_agent_claude_code_first_and_the_launch_runs_it(
     first = f"--agent claude-code --account {ref}"
     assert said.endswith(
         f"Bind one as {first} or claude-code:5, or as --agent codex --account {ref} or codex:5;"
-        " see: aisquare accounts"
+        " see: rlx accounts"
     ), said
     assert said.index(first) < said.index("claude-code:5") < said.index("codex:5"), said
     assert "coder" not in load_config().team.profiles, "nothing bound"
@@ -961,7 +959,7 @@ def test_b5_bind_reads_no_folders_default_where_the_binding_names_no_agent(
     assert result.exit_code == 1, result.output
     assert _said(launched).startswith("✗ the role binding for 'twin' names account '9':")
     assert _said(result) == "✗ " + _said(launched).split("names account '9': ", 1)[1]
-    assert _said(result) == "✗ no Claude account in slot 9 — see: aisquare accounts"
+    assert _said(result) == "✗ no Claude account in slot 9 — see: rlx accounts"
 
 
 @pytest.mark.parametrize("surface", ["team-spawn", "fleet-spawn"])
@@ -1010,7 +1008,7 @@ def test_b5_a_claude_only_bind_of_a_slot_there_is_none_of_reads_as_0_9_2s(
         result = runner.invoke(app, ["team", "bind", "b", "--account", typed])
 
         assert result.exit_code == 1, result.output
-        assert _said(result) == f"✗ no Claude account in slot {typed} — see: aisquare accounts"
+        assert _said(result) == f"✗ no Claude account in slot {typed} — see: rlx accounts"
 
 
 # --- #100's reopen 6: B6-1 (only what the bind changes) and B6-2 (the folder decides only ---

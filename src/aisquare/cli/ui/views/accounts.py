@@ -88,6 +88,7 @@ from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import get_adapter, mark_of, stage_mark_of
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
@@ -157,7 +158,8 @@ def machine_sessions_text(sessions: Sequence[StatuslineSession], now: datetime) 
     text = Text("Sessions on this machine", style="bold")
     if not sessions:
         text.append(
-            " — none reported in the last 15 min; `aisquare accounts statusline --install` "
+            f" — none reported in the last 15 min; `{prog.word()} accounts statusline "
+            "--install` "
             "adds the status line that reports them",
             style="dim",
         )
@@ -976,8 +978,8 @@ def _hooks_did_not_install(error: object, agent: str = core.AGENT) -> str:
     (``complete_sign_in``), or after a cancel that found its login landed (``settle_sign_in``).
     ``agent`` is the slot's, whose ``agents connect`` the line names."""
     return (
-        f"⚠ signed in, but aisquare's hooks did not install: {error} — "
-        f"run: aisquare agents connect {agent} --config-dir <the slot's directory>"
+        f"⚠ signed in, but rlx's hooks did not install: {error} — "
+        f"run: {prog.word()} agents connect {agent} --config-dir <the slot's directory>"
     )
 
 
@@ -2539,9 +2541,9 @@ class AccountsView(Vertical):
         if not args:
             return ""
         command = (
-            f"aisquare accounts add --agent {login.account.agent} --browser"
+            f"{prog.word()} accounts add --agent {login.account.agent} --browser"
             if login.fresh
-            else " ".join(("aisquare accounts run", self._ref_of(login.account), *args))
+            else " ".join((f"{prog.word()} accounts run", self._ref_of(login.account), *args))
         )
         return f"{accounts.browser_sign_in_hint}: {command}"
 

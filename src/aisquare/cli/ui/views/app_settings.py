@@ -120,6 +120,7 @@ from aisquare.cli.ui.views.settings_captain import CaptainToggle
 from aisquare.cli.ui.views.settings_remote import RemoteSection
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths, personas
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.agent_adapters.codex import APPROVAL_POLICIES
 from aisquare.core.agent_adapters.types import (
@@ -488,8 +489,7 @@ def _append_flags(
     text.append(shlex.join(shown) if shown or store else "(no permission flag)", style="dim")
     if store:
         text.append(
-            f" + the aisquare store, read-only in its {store} sandbox (board calls through "
-            "its broker)",
+            f" + the rlx store, read-only in its {store} sandbox (board calls through its broker)",
             style="dim",
         )
     for note in said:  # what the spawn's receipt will say of them (an ``auto`` run as ``ask``)
@@ -581,7 +581,7 @@ def clear_note(role: str) -> Text:
     text = Text("The whole binding of ", style="bold")
     text.append(role, style="bold")
     text.append(
-        " goes: its binary, environment, args and account, as `aisquare team bind <role> "
+        f" goes: its binary, environment, args and account, as `{prog.word()} team bind <role> "
         "--clear` takes them; the role then launches as an unbound one."
     )
     return text
@@ -667,10 +667,16 @@ class AppSettingsView(Vertical):
         "Accounts",
         "when to switch, how long to wait, what they share",
     )
-    BINDINGS_SECTION: ClassVar[tuple[str, str]] = (
-        "Role bindings",
-        "binary, environment and args per role (aisquare team bind), each written at once",
-    )
+
+    @staticmethod
+    def bindings_section() -> tuple[str, str]:
+        """The Role bindings section's title and line, which name the command that binds."""
+        return (
+            "Role bindings",
+            f"binary, environment and args per role ({prog.word()} team bind), each written "
+            "at once",
+        )
+
     SIDEBAR_SECTION: ClassVar[tuple[str, str]] = ("Sidebar", "how the project list reads")
     ALWAYS_SHOW_PATH_ABOUT: ClassVar[str] = (
         "Show each project's path under its name in the sidebar. "
@@ -680,12 +686,12 @@ class AppSettingsView(Vertical):
     CONFIRM_STOP_ABOUT: ClassVar[str] = (
         "Off: they stop it at once, gracefully (no Force), the manager too."
     )
-    UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether asq looks for a new release")
+    UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether rlx looks for a new release")
     # One line: at 80x24, beside the sidebar, three pushed the tab's Advanced one scroll down.
     UPDATES_CHECK_ABOUT: ClassVar[str] = "Off: no PyPI lookup, no ⬆ row in the sidebar."
     PREFERENCES_FROM_A_SHELL: ClassVar[tuple[str, str]] = (
         "Set from a shell (",
-        "), a preference shows after Reload here or when asq next starts, not live.",
+        "), a preference shows after Reload here or when rlx next starts, not live.",
     )
     """The tab's note, around the command it names in bold: ``asq`` holds ``[ui]`` and
     takes it from this page, so a ``config set`` made while it runs waits for one or the
@@ -1059,14 +1065,14 @@ class AppSettingsView(Vertical):
         yield Static(
             Text.assemble(
                 "Model and effort per role: ",
-                ("aisquare team harness", "bold"),
+                (f"{prog.word()} team harness", "bold"),
                 "; each role's binding (binary, environment, args) is under Role bindings "
                 "below, as ",
-                ("aisquare team bind", "bold"),
+                (f"{prog.word()} team bind", "bold"),
                 " writes it; the account select is ",
                 ("team bind <role> --account", "bold"),
                 ". The machine and project account defaults: the Accounts page and ",
-                ("aisquare accounts default", "bold"),
+                (f"{prog.word()} accounts default", "bold"),
                 ". No value on this tab is read from the environment.",
             ),
             id="agent-settings-note",
@@ -1074,7 +1080,7 @@ class AppSettingsView(Vertical):
         )
 
     def _compose_bindings(self) -> ComposeResult:
-        yield Static(section_title(*self.BINDINGS_SECTION), classes="section")
+        yield Static(section_title(*self.bindings_section()), classes="section")
         with Vertical(id="role-bindings"):
             yield from self._binding_rows()
         with Horizontal(classes="row"):
@@ -1085,7 +1091,8 @@ class AppSettingsView(Vertical):
         if not self._role_bindings:
             yield Static(
                 Text(
-                    "no role bindings — `aisquare team bind <role> --bin … --env KEY=VALUE` "
+                    f"no role bindings — `{prog.word()} team bind <role> --bin … --env "
+                    "KEY=VALUE` "
                     "makes one, or + New bind"
                 ),
                 id="bindings-empty",
@@ -1167,7 +1174,9 @@ class AppSettingsView(Vertical):
             yield Static(Text(self.CONFIRM_STOP_ABOUT), id="ui-confirm-stop-about", classes="about")
             yield Static(
                 Text.assemble(
-                    before, ("aisquare config set ui.always_show_project_path true", "bold"), after
+                    before,
+                    (f"{prog.word()} config set ui.always_show_project_path true", "bold"),
+                    after,
                 ),
                 id="preferences-from-a-shell",
                 classes="about",
@@ -1654,7 +1663,9 @@ class AppSettingsView(Vertical):
         except Exception as exc:  # the file could not be written: say so, change nothing shown
             self.notify(f"{key} not unset: {exc}", severity="error", markup=False)
             return
-        self.notify(f"{role}: {key} unset (aisquare team bind {role} --unset {key})", markup=False)
+        self.notify(
+            f"{role}: {key} unset ({prog.word()} team bind {role} --unset {key})", markup=False
+        )
         self.call_later(self.reload_bindings)
 
     def _clear(self, role: str) -> None:
@@ -1663,7 +1674,9 @@ class AppSettingsView(Vertical):
         except Exception as exc:
             self.notify(f"{role}'s binding not cleared: {exc}", severity="error", markup=False)
             return
-        self.notify(f"{role}: binding cleared (aisquare team bind {role} --clear)", markup=False)
+        self.notify(
+            f"{role}: binding cleared ({prog.word()} team bind {role} --clear)", markup=False
+        )
         self.call_later(self.reload_bindings)
 
     # --- reset -------------------------------------------------------------------------

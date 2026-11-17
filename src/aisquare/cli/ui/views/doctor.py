@@ -34,6 +34,7 @@ from textual.message import Message
 from textual.widgets import Button, Static
 
 from aisquare.cli.ui.sidebar import AccountsSelected
+from aisquare.core import program as prog
 from aisquare.core import selfcli
 from aisquare.core.agent_adapters import stage_mark_of
 from aisquare.models import CheckStatus, DoctorCheck
@@ -45,11 +46,16 @@ _STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail:
 FIX_WORKER = "doctor-fix"
 """The worker a one-click fix runs in (and the doctor after it): it writes."""
 ROUTE_WORKER = "doctor-update-route"
-"""The worker the machine Doctor reads how aisquare was installed in, for Update."""
-_UPDATE_TOOLTIP = (
-    "Quits asq and runs `aisquare upgrade` here: it shows what it will do and asks first. "
-    "asq opens again when it is done."
-)
+"""The worker the machine Doctor reads how rlx was installed in, for Update."""
+
+
+def _update_tooltip() -> str:
+    """What Update does, for its tooltip."""
+    return (
+        f"Quits rlx and runs `{prog.word()} upgrade` here: it shows what it will do and asks "
+        "first. rlx opens again when it is done."
+    )
+
 
 Refresh = Callable[[Path | None], list[DoctorCheck]]
 """``cwd -> checks``: how the view re-runs the doctor after a fix. Raising is
@@ -122,7 +128,7 @@ def _update_refusal() -> str | None:
         command = install_route.command_line(install_route.upgrade_argv(route, None))
     except Exception:  # the Doctor view must keep its buttons whatever this finds
         return None
-    return f"aisquare does not upgrade this install itself ({reason}). Upgrade it with: {command}"
+    return f"rlx does not upgrade this install itself ({reason}). Upgrade it with: {command}"
 
 
 class DoctorView(VerticalScroll):
@@ -198,13 +204,13 @@ class DoctorView(VerticalScroll):
         if self.machine:
             with Horizontal(id="doctor-machine"):
                 # Offered once the install route is known (_read_update_refusal).
-                update = Button("Update aisquare", id="doctor-update", disabled=True)
-                update.tooltip = "Checking how aisquare was installed…"
+                update = Button("Update rlx", id="doctor-update", disabled=True)
+                update.tooltip = "Checking how rlx was installed…"
                 yield update
-                uninstall = Button("Uninstall aisquare…", id="doctor-uninstall", variant="error")
+                uninstall = Button("Uninstall rlx…", id="doctor-uninstall", variant="error")
                 uninstall.tooltip = (
-                    "Quits asq and runs `aisquare uninstall` here: it lists what goes and "
-                    "what stays, and asks first. asq opens again if nothing is removed."
+                    f"Quits rlx and runs `{prog.word()} uninstall` here: it lists what goes and "
+                    "what stays, and asks first. rlx opens again if nothing is removed."
                 )
                 yield uninstall
 
@@ -226,7 +232,7 @@ class DoctorView(VerticalScroll):
 
     def _offer_update(self, refusal: str | None) -> None:
         update = self.query_one("#doctor-update", Button)
-        update.tooltip = Text(refusal or _UPDATE_TOOLTIP)
+        update.tooltip = Text(refusal or _update_tooltip())
         update.disabled = refusal is not None
         if refusal is not None:  # said on screen, not only on hover
             note = Static(Text(f"Update: {refusal}", style="dim"), id="doctor-update-note")

@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli import usage_format as fmt
+from aisquare.core import program as prog
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import OutcomeDelta, WeeklyOutcomes
@@ -62,7 +63,7 @@ def outcomes(
     DIRECTION, who steered (never human tokens against agent tokens)
       turn origin  who authored the prompt that started each turn. Human:
                    typed it (slash commands too), or ran the fleet tell or
-                   spawn (terminal, asq, phone). Agent: a manager's tell or
+                   spawn (terminal, rlx, phone). Agent: a manager's tell or
                    spawn, a watch wake, a Stop-hook continuation, a
                    compaction line, a task notification. Recorded at
                    UserPromptSubmit; older turns are inferred, and said so.
@@ -118,7 +119,7 @@ def render_outcomes(result: WeeklyOutcomes) -> list[str]:
     lines += ["", *_effort_lines(result)]
     lines += ["", *_direction_lines(result)]
     lines += ["", *_delta_lines(result)]
-    lines += ["", "How each figure is measured: aisquare outcomes --help"]
+    lines += ["", f"How each figure is measured: {prog.word()} outcomes --help"]
     return lines
 
 

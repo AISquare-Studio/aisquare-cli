@@ -173,7 +173,7 @@ def test_a_stale_binary_is_a_warning_that_names_both_installs_and_the_fix(
     current = _this_install(monkeypatch, tmp_path)
     _real_probe(monkeypatch)
     old = _fake_aisquare(
-        tmp_path / "aisquare-cli" / ".venv" / "bin" / "aisquare", prints=f"aisquare {OLD}"
+        tmp_path / "aisquare-cli" / ".venv" / "bin" / "aisquare", prints=f"rlx {OLD}"
     )
     config = isolated_agent_home / ".claude"
     _write_hooks(config, str(old))
@@ -184,7 +184,7 @@ def test_a_stale_binary_is_a_warning_that_names_both_installs_and_the_fix(
     assert check.status is CheckStatus.warn
     for needle in (str(config), str(old), f"({OLD})", str(current), f"({__version__})"):
         assert needle in check.detail, f"{needle!r} missing from {check.detail!r}"
-    assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
+    assert check.fix == f"rlx agents connect claude-code --config-dir {config}"
 
 
 def test_the_cli_row_renders_the_warning_and_the_fix_line(
@@ -192,7 +192,7 @@ def test_the_cli_row_renders_the_warning_and_the_fix_line(
 ) -> None:
     _this_install(monkeypatch, tmp_path)
     _real_probe(monkeypatch)
-    old = _fake_aisquare(tmp_path / "old" / "bin" / "aisquare", prints=f"aisquare {OLD}")
+    old = _fake_aisquare(tmp_path / "old" / "bin" / "aisquare", prints=f"rlx {OLD}")
     config = isolated_agent_home / ".claude"
     _write_hooks(config, str(old))
     _connect(config)
@@ -201,7 +201,7 @@ def test_the_cli_row_renders_the_warning_and_the_fix_line(
     payload = json.loads(runner.invoke(app, ["--json", "doctor"], catch_exceptions=False).stdout)
 
     assert "⚠ claude-code:" in text and OLD in text
-    assert f"→ aisquare agents connect claude-code --config-dir {config}" in text
+    assert f"→ rlx agents connect claude-code --config-dir {config}" in text
     row = next(row for row in payload if row["name"] == "claude-code")
     assert row["status"] == "warn" and str(old) in row["detail"]
 
@@ -221,7 +221,7 @@ def test_a_missing_binary_is_flagged_and_nothing_is_run(
 
     assert check.status is CheckStatus.warn
     assert f"{gone}, which does not exist" in check.detail
-    assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
+    assert check.fix == f"rlx agents connect claude-code --config-dir {config}"
 
 
 def test_a_script_whose_interpreter_is_gone_cannot_start_and_nothing_is_run(
@@ -249,7 +249,7 @@ def test_a_script_whose_interpreter_is_gone_cannot_start_and_nothing_is_run(
     assert verdict == (agents.HOOK_BINARY_MISSING, None)
     assert check.status is CheckStatus.warn
     assert f"{orphan}, which cannot start" in check.detail, check.detail
-    assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
+    assert check.fix == f"rlx agents connect claude-code --config-dir {config}"
 
 
 #: How each writer puts the Python in a trampoline: ``(the directory it is in, its word)``.
@@ -319,7 +319,7 @@ def test_a_binary_that_will_not_say_its_version_is_not_trusted(
 
     assert check.status is CheckStatus.warn
     assert f"{mute}, whose version could not be read" in check.detail
-    assert check.fix == f"aisquare agents connect claude-code --config-dir {config}"
+    assert check.fix == f"rlx agents connect claude-code --config-dir {config}"
 
 
 def test_the_same_version_at_another_path_is_current(
@@ -423,7 +423,7 @@ def test_a_stale_sibling_on_disk_gets_its_own_fix_line(
 ) -> None:
     _this_install(monkeypatch, tmp_path)
     _real_probe(monkeypatch)
-    old = _fake_aisquare(tmp_path / "old" / "aisquare", prints=f"aisquare {OLD}")
+    old = _fake_aisquare(tmp_path / "old" / "aisquare", prints=f"rlx {OLD}")
     sibling = isolated_agent_home / ".claude3"
     _write_hooks(sibling, str(old))
     monkeypatch.setattr(agents, "on_path", lambda name: None)  # and no ~/.claude to make
@@ -432,7 +432,7 @@ def test_a_stale_sibling_on_disk_gets_its_own_fix_line(
 
     assert check.status is CheckStatus.warn
     assert f"{sibling} (found on disk, not connected in this home)" in check.detail
-    assert check.fix == f"aisquare agents connect claude-code --config-dir {sibling}"
+    assert check.fix == f"rlx agents connect claude-code --config-dir {sibling}"
 
 
 def test_the_readme_account_naming_is_discovered_too(
@@ -452,7 +452,7 @@ def test_claude_config_dir_is_discovered_even_when_never_connected(
 ) -> None:
     _this_install(monkeypatch, tmp_path)
     _real_probe(monkeypatch)
-    old = _fake_aisquare(tmp_path / "old" / "aisquare", prints=f"aisquare {OLD}")
+    old = _fake_aisquare(tmp_path / "old" / "aisquare", prints=f"rlx {OLD}")
     elsewhere = tmp_path / "profiles" / "work"  # not under the home, not named .claude*
     _write_hooks(elsewhere, str(old))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(elsewhere))
@@ -461,7 +461,7 @@ def test_claude_config_dir_is_discovered_even_when_never_connected(
 
     assert check.status is CheckStatus.warn
     assert f"{elsewhere} (found on disk, not connected in this home)" in check.detail
-    assert check.fix == f"aisquare agents connect claude-code --config-dir {elsewhere}"
+    assert check.fix == f"rlx agents connect claude-code --config-dir {elsewhere}"
 
 
 def test_a_dir_without_our_hooks_is_not_shown_and_a_file_is_not_a_dir(

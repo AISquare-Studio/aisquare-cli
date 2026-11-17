@@ -1,5 +1,5 @@
 {
-  "description": "The hooks `aisquare agents connect codex` installs in $CODEX_HOME/hooks.json, each running `aisquare hook codex`. They stand down while that hooks.json runs aisquare's own, so the two routes never both fire.",
+  "description": "The hooks `rlx agents connect codex` installs in $CODEX_HOME/hooks.json, each running `aisquare hook codex`. They stand down while that hooks.json runs rlx's own, so the two routes never both fire.",
   "hooks": {
     "SessionStart": [
       {

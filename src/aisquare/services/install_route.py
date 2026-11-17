@@ -648,7 +648,7 @@ def _option_flags(options: Mapping[str, Any]) -> tuple[list[str], list[str]]:
         if key == "index":
             indexes = _index_flags(value)
             if indexes is None:
-                refused.append("a uv index this CLI cannot restate")
+                refused.append("a uv index rlx cannot restate")
             else:
                 flags.extend(indexes)
             continue
@@ -696,7 +696,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
     held_by_withs: list[str] = []
     for requirement in requirements:
         if not isinstance(requirement, dict):
-            refused.append("a requirement uv wrote in a shape this CLI does not know")
+            refused.append("a requirement uv wrote in a shape rlx does not know")
             continue
         if ours is None and canonical_name(requirement.get("name")) == DISTRIBUTION:
             ours = requirement
@@ -722,7 +722,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         if isinstance(raw_extras, list) and all(isinstance(extra, str) for extra in raw_extras):
             extras = tuple(sorted(set(raw_extras)))
         else:
-            refused.append(f"{DISTRIBUTION} extras in a shape this CLI does not know")
+            refused.append(f"{DISTRIBUTION} extras in a shape rlx does not know")
         for key in _SOURCE_KEYS:
             if key in ours:
                 source = (key, str(ours[key]))
@@ -1221,7 +1221,7 @@ def upgrade_argv(
 
 
 #: When a reinstall a person runs by hand must wait, on Windows: one wording for every route.
-_AFTER_AISQUARE_EXITS = " after aisquare exits (Windows locks the files of a running program)"
+_AFTER_AISQUARE_EXITS = " after rlx exits (Windows locks the files of a running program)"
 
 #: Why each route is reported rather than run. Short, because it is printed
 #: beside the command that does the job.
@@ -1231,7 +1231,7 @@ _NOT_AUTOMATED = {
     HOMEBREW: "Homebrew installs are upgraded with brew",
     UVX: "it runs through uvx from uv's cache, so nothing is installed to upgrade: uvx runs "
     "the release its --from names, and this installs one to keep",
-    VENV: "it lives in a virtual environment this CLI does not manage",
+    VENV: "it lives in a virtual environment rlx does not manage",
     SYSTEM: "it was installed with pip outside a virtual environment",
 }
 
@@ -1259,7 +1259,7 @@ def not_automated(route: InstallRoute) -> str | None:
     if windows is not None:
         return windows
     if route.kind != UV_TOOL:
-        return _NOT_AUTOMATED.get(route.kind, "this install is not one aisquare manages")
+        return _NOT_AUTOMATED.get(route.kind, "this install is not one rlx manages")
     receipt = route.receipt or UvReceipt()
     if receipt.unreadable is not None:
         return f"its uv receipt could not be read ({receipt.unreadable})"
@@ -1298,8 +1298,8 @@ def _windows_blocker(route: InstallRoute, verb: str) -> str | None:
     if route.facts.platform != "win32":
         return None
     return (
-        f"Windows locks the files of a running program, so aisquare cannot {verb} itself "
-        "— run it after aisquare exits"
+        f"Windows locks the files of a running program, so rlx cannot {verb} itself "
+        "— run it after rlx exits"
     )
 
 
@@ -1461,7 +1461,7 @@ def not_removable(route: InstallRoute) -> str | None:
         return {
             PIPX: "pipx installs are removed with pipx",
             HOMEBREW: "Homebrew installs are removed with brew",
-        }.get(route.kind, f"it was installed with {route.manager}, which this CLI does not run")
+        }.get(route.kind, f"it was installed with {route.manager}, which rlx does not run")
     return _uv_tool_blocker(route)
 
 

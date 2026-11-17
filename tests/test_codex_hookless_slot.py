@@ -313,7 +313,7 @@ def _never_connected_plain_codex_home() -> Path:
 
 def _refused_for_its_home(said: str, home: Path, nothing: str) -> None:
     assert f"Codex's hooks are not installed in {home}, a home of yours" in said, said
-    assert f"{nothing}; `aisquare agents connect codex --config-dir {home}`" in said, said
+    assert f"{nothing}; `rlx agents connect codex --config-dir {home}`" in said, said
 
 
 @pytest.mark.parametrize(

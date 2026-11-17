@@ -95,7 +95,7 @@ def test_shlex_quotes_only_what_no_windows_shell_is_told_to_run() -> None:
     [
         pytest.param(
             project_service.onboard_command,
-            ["aisquare", "project", "onboard", "{root}"],
+            ["rlx", "project", "onboard", "{root}"],
             id="onboard",
         ),
         pytest.param(

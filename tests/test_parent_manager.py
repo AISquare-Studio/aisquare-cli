@@ -171,7 +171,7 @@ def test_board_watch_follows_the_named_project(
     assert handed == [(2.0, tree["api"].id)]
     frame = watch_ui.board_frame(40, 160, tree["api"]).plain
     assert "which base, rc/p1 or rc/p2?" in frame, frame
-    assert f"aisquare board — {tree['api'].root.name}" in frame
+    assert f"rlx board — {tree['api'].root.name}" in frame
 
 
 def test_a_pattern_routes_a_matching_note_and_not_another(

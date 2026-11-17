@@ -4076,7 +4076,7 @@ def _needs_kept_whole(raw: object) -> tuple[dict[str, dict[str, str]], dict[str,
         raise ValueError(f"its version is {version!r}, not a version")
     if version is not None and version > _NEEDS_KEPT_VERSION:
         raise LaterNeedsFile(
-            f"remote-needs.json is version {version}, written by a later aisquare: it is left "
+            f"remote-needs.json is version {version}, written by a later rlx: it is left "
             "as it is — run Remote with that version"
         )
     parts: dict[str, dict[str, str]] = {}

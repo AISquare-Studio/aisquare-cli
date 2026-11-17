@@ -168,7 +168,7 @@ class Instance:
     @property
     def label(self) -> str:
         """It, named in a line: ``asq 0.9.2 (ssh on mini, pid 4242)``."""
-        return f"asq {self.version} ({self.kind} on {self.host}, pid {self.pid})"
+        return f"rlx {self.version} ({self.kind} on {self.host}, pid {self.pid})"
 
     @property
     def askable(self) -> bool:
@@ -191,7 +191,7 @@ class QuitRequest:
 
     @property
     def who(self) -> str:
-        return f"asq {self.version} ({self.kind} on {self.host}, pid {self.pid})"
+        return f"rlx {self.version} ({self.kind} on {self.host}, pid {self.pid})"
 
 
 def _zoned(moment: datetime) -> datetime:
@@ -215,7 +215,7 @@ def valid_id(text: str) -> bool:
 
 def _named(instance_id: str, suffix: str) -> Path:
     if not valid_id(instance_id):
-        raise ValueError(f"not an asq instance id: {instance_id!r}")
+        raise ValueError(f"not an rlx instance id: {instance_id!r}")
     return registry_dir() / f"{instance_id}{suffix}"
 
 
@@ -671,7 +671,7 @@ class Registration:
                         next_kind = time.monotonic() + KIND_SECONDS if inside else None
                     self.beat(kind=kind)
                 except Exception:  # a beat missed is one more next time, never a dead thread
-                    _log.debug("the asq instance record could not be written", exc_info=True)
+                    _log.debug("the rlx instance record could not be written", exc_info=True)
                 try:
                     mine = self._instance.id
                     read_at = time.time_ns()

@@ -23496,6 +23496,101 @@ def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
     assert fleet_service.list_agents(project)[0].state == "waiting"
 
 
+ADDED_SCREEN = (
+    (Path(__file__).parent / "fixtures" / "claude_code" / "added_folder_trust_2.1.326.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
+)
+"""Claude Code 2.1.326 at its start, asking about an ``--add-dir`` folder no trust covers, as
+``capture-pane -e`` showed a fleet window of it (R19); its temp path masked to this one:"""
+ADDED_FOLDER = Path("/private/var/tmp/asq-native/extra-dir")
+
+
+def test_an_agent_at_the_question_about_an_added_folder_needs_the_human_for_that_folder(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R19: Claude Code 2.1.326 asks at its start about each ``--add-dir`` folder no trust
+    covers, and fires no hook there, so the row read a healthy ``working`` with no reason, as
+    long as nobody looked. It reads as at the folder-trust question now, and names the added
+    folder, the one ``accounts trust`` must be told: the folder it starts in is trusted."""
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = ADDED_SCREEN
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state == "attention"
+    assert status.detail == fleet_service.trust_prompt_detail(ADDED_FOLDER)
+    trust = install_route.command_line(["aisquare", "accounts", "trust", str(ADDED_FOLDER)])
+    assert trust in status.detail and str(agent.cwd) not in status.detail
+    assert fleet_service.status_of(agent).detail == status.detail
+    told = fleet_service.tell(project, agent.label, "start on the task")
+    assert not told.delivered and "has not started" in told.how and tmux.typed == []
+
+
+def test_spawn_never_types_its_prompt_into_the_question_about_an_added_folder(
+    tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed first message waits for a human to answer 2.1.326's question about an
+    ``--add-dir`` folder, as for the one about the folder it starts in, and the note's
+    ``accounts trust`` names the added folder (R19)."""
+    original = tmux.pane_facts
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = ADDED_SCREEN
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == [] and receipt.prompt_typed == "no"
+    note = next(n for n in receipt.notes if "folder-trust question" in n)
+    trust = ["aisquare", "accounts", "trust", str(ADDED_FOLDER)]
+    assert "NOT typed" in note and install_route.command_line(trust) in note
+    started = ["aisquare", "accounts", "trust", str(receipt.agent.cwd)]
+    assert install_route.command_line(started) not in note, "not the folder it starts in"
+    assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
+
+
+def test_a_start_the_board_waits_for_names_the_added_folder_its_question_is_about(
+    tmux: FakeTmux,
+    session_start_for_real: None,
+    typed_first_lines: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The typed first message waits for the agent's SessionStart, which never comes at
+    2.1.326's question about an ``--add-dir`` folder: past the wait, the note's ``accounts
+    trust`` names that folder, not the one the agent starts in (R19)."""
+    original, text = tmux.pane_facts, tmux.screen_text
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = ADDED_SCREEN
+        return original(pane_id)
+
+    def plain(pane_id: str) -> list[str]:  # `capture-pane -p`, as the real one runs it
+        return [screen_reader.PANE_ESCAPES.sub("", row) for row in text(pane_id)]
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    monkeypatch.setattr(tmux, "screen_text", plain)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == [] and receipt.prompt_typed == "no"
+    said = next(n for n in [*receipt.failures, *receipt.notes] if "folder-trust question" in n)
+    assert "session did not start" in said and "NOT typed" in said, said
+    trust = ["aisquare", "accounts", "trust", str(ADDED_FOLDER)]
+    assert install_route.command_line(trust) in said, said
+    started = ["aisquare", "accounts", "trust", str(receipt.agent.cwd)]
+    assert install_route.command_line(started) not in said, "not the folder it starts in"
+
+
 def test_an_agent_whose_hooks_have_run_is_never_asked_for_its_screen(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

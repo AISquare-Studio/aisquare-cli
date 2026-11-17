@@ -37,6 +37,7 @@ account in as one.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import os
 import re
@@ -326,7 +327,13 @@ _SCREEN_ESCAPES = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)"  # OSC: the dialog's "Security guide" is a link
     r"|\x1b\[[0-?]*[ -/]*[@-~]"  # CSI, SGR included
 )
-_TRUST_QUESTION = re.compile(r"\btrust (?:this folder|the files in this folder)\b", re.IGNORECASE)
+_TRUST_QUESTION = re.compile(
+    r"\btrust (?:this folder|the files in this folder)\b"
+    r"|\ba directory you created or one you trust\b",
+    re.IGNORECASE,
+)
+"""The question's words: the folder Claude Code starts in (2.1.299, the 1.x builds), and
+each ``--add-dir`` folder no trust covers (2.1.326)."""
 _TRUST_EXIT = re.compile(r"(?:\u276f ?|> ?)?(?:\d+\. ?)?No, exit")
 """The dialog's "No, exit" option, a row of its own: its pointer when highlighted, its
 number on the 1.x builds."""
@@ -343,12 +350,16 @@ def shows_trust_prompt(lines: Iterable[str]) -> bool:
 
     2.1.299 draws "Yes, I trust this folder" under a highlighted "No, exit", over its key
     hint; the 1.x builds asked "Do you trust the files in this folder?" over a numbered
-    "2. No, exit", in a rounded box. Read fail-closed, since a screen read as not the
-    question is typed into, and Enter there picks "No, exit": the question's words on the
-    screen and "No, exit" an option of its own (box borders aside), with no input box under
-    it. At work, the screen ends on its input box (:data:`_INPUT_BOX`), and the dialog
-    takes the input box's place, so the words above one are a reviewer reading this module
-    or the captured screen the tests pin (review of #259, round 14). Anything else that
+    "2. No, exit", in a rounded box. 2.1.326 asks the same at its start of each
+    ``--add-dir`` folder no trust covers ("Adding a new directory: … Is this a directory
+    you created or one you trust?" over a highlighted "No, exit" and "Yes, add it"), and an
+    agent there fires no hook either (:func:`trust_prompt_folder` reads which folder).
+    Read fail-closed, since a screen read as not the question is typed into, and Enter
+    there picks "No, exit": the question's words on the screen and "No, exit" an option of
+    its own (box borders aside), with no input box under it. At work, the screen ends on
+    its input box (:data:`_INPUT_BOX`), and the dialog takes the input box's place, so the
+    words above one are a reviewer reading this module or the captured screen the tests pin
+    (review of #259, round 14). Anything else that
     holds both reads as the question — a dialog in a box, a key hint wrapped in a narrow
     pane, a row the build adds under it — rather than a fixed count of rows at the foot,
     which each of those pushed "No, exit" out of (round 15). A Claude Code string, not a
@@ -363,6 +374,51 @@ def shows_trust_prompt(lines: Iterable[str]) -> bool:
     if not exits or not _TRUST_QUESTION.search(" ".join(rows)):
         return False
     return not any(_INPUT_BOX.fullmatch(row) for row in rows[exits[-1] + 1 :])
+
+
+_ADDING = re.compile(r"Adding a new directory:")
+"""The title of 2.1.326's question about an ``--add-dir`` folder, the folder's rows under it."""
+FOLDER_ROWS = 8
+"""The most rows of a wrapped folder :func:`trust_prompt_folder` joins every way (128)."""
+
+
+def trust_prompt_folder(
+    lines: Iterable[str],
+    default: Path | None,
+    *,
+    is_dir: Callable[[str], bool] = os.path.isdir,
+) -> Path | None:
+    """The folder Claude Code's folder-trust question on ``lines`` (a screen
+    :func:`shows_trust_prompt` reads as the question) asks about.
+
+    2.1.326's question about an ``--add-dir`` folder names it, in bold rows under its
+    "Adding a new directory:" title, up to the blank row after them. A folder wider than the
+    pane wraps as words do: at a space, which the wrap drops, and inside a word wider than
+    the pane (measured at 48 columns). So the rows are joined every way, and the folder is
+    the spelling that is a directory here; one row is one spelling. ``None`` where none is
+    (the agent's folder is not on this machine): a command then names ``<dir>``. Any other
+    screen asks about the folder the agent starts in, ``default``. A Claude Code string, not
+    a contract: pinned by a test with the captured screens.
+    """
+    rows = [_SCREEN_ESCAPES.sub("", line).strip(_BORDERS) for line in lines]
+    titles = [at for at, row in enumerate(rows) if _ADDING.fullmatch(" ".join(row.split()))]
+    if not titles:
+        return default
+    shown: list[str] = []
+    for row in rows[titles[-1] + 1 :]:
+        if row:
+            shown.append(row)
+        elif shown:
+            break
+    if not shown or len(shown) > FOLDER_ROWS:
+        return None
+    spellings = [
+        "".join(row + gap for row, gap in zip(shown, (*gaps, ""), strict=True))
+        for gaps in itertools.product(("", " "), repeat=len(shown) - 1)
+    ]
+    if len(spellings) == 1:
+        return Path(spellings[0])
+    return next((Path(spelling) for spelling in spellings if is_dir(spelling)), None)
 
 
 _SECURITY_TITLE = re.compile(r"Security notes:")

@@ -442,13 +442,32 @@ class Native:
     def rows(self, pane: str) -> list[str]:
         return self.screen(pane).splitlines()
 
+    def screens(self) -> str:
+        """Every pane on the server, each under its id and command line: what a wait that
+        names no pane shows when it times out."""
+        try:
+            panes = self.srv.run(
+                "list-panes", "-a", "-F", "#{pane_id} #{session_name} #{pane_current_command}"
+            ).splitlines()
+        except TmuxError as exc:
+            return f"(no tmux server: {exc})"
+        shown = []
+        for line in panes:
+            pane = line.split(" ", 1)[0]
+            try:
+                screen = self.screen(pane)
+            except TmuxError as exc:
+                screen = f"(gone: {exc})"
+            shown.append(f"--- pane {line}\n{screen}")
+        return "\n".join(shown) or "(no panes)"
+
     def until(
         self, check: Callable[[], T | None], seconds: float, what: str, pane: str | None = None
     ) -> T:
         deadline = time.monotonic() + seconds
         while not (found := check()):
             if time.monotonic() >= deadline:
-                raise AssertionError(f"{what}:\n{self.screen(pane) if pane else ''}")
+                raise AssertionError(f"{what}:\n{self.screen(pane) if pane else self.screens()}")
             time.sleep(0.2)
         return found
 
@@ -856,6 +875,85 @@ def test_real_claude_code_whose_start_the_board_cannot_see_gets_the_prompt_past_
         thread.join(timeout=5)
 
 
+#: The first Claude Code measured to ask at its start about an ``--add-dir`` folder no trust
+#: covers (R19, 2026-11-16): 2.1.318 took one without asking.
+ASKS_ABOUT_ADDED_FOLDERS = (2, 1, 326)
+
+
+def claude_version(binary: str) -> tuple[int, ...]:
+    """The version ``binary --version`` prints (``2.1.326 (Claude Code)``), as numbers: run
+    under the test's own config dir, quietly, as ``tests.run_claude_native`` reads it."""
+    shown = subprocess.run(
+        [binary, "--version"],
+        check=True,
+        text=True,
+        capture_output=True,
+        env={**os.environ, **QUIET_ENV},
+    ).stdout.split()
+    return tuple(int(part) for part in shown[0].split(".")) if shown else ()
+
+
+def _trusted_on_the_account(native: Native, folder: Path) -> None:
+    """``folder`` trusted in the account's ``.claude.json``, as a yes at the question about
+    it, or ``accounts trust``, leaves it."""
+    entry = {"hasTrustDialogAccepted": True, "allowedTools": []}
+    _merge_json(native.config_dir / ".claude.json", projects={str(folder): entry})
+
+
+def test_real_claude_code_asks_about_an_added_folder_no_trust_covers_and_the_fleet_says_so(
+    native: Native,
+) -> None:
+    """An ``--add-dir`` folder in the role's arguments that no trust covers (R19). From
+    2.1.326 Claude Code asks at its start whether to trust it, over a highlighted "No, exit",
+    and fires no hook there: the fleet reads the row ``attention``, its detail naming that
+    folder for ``accounts trust``; its screen reader reads a ``trust`` prompt no key answers;
+    a ``tell`` is not typed into it. The human says yes, and the first message, on its command
+    line, runs once, with the folder. 2.1.318 took the folder without asking."""
+    extra = native.outside / "extra-dir"
+    extra.mkdir()
+    config = load_config()
+    config.fleet.roles["coder"].agent_args = {AGENT: ["--add-dir", str(extra)]}
+    save_config(config)
+    receipt = native.spawn(prompt="added and asked")
+    row, pane = receipt.agent, receipt.agent.pane_id
+
+    def asked_or_heard() -> str | None:
+        with native.stub.lock:
+            if any("added and asked" in turn.said for turn in native.stub.turns):
+                return "heard"
+        screen = native.screen(pane)
+        return "asked" if "Adding a new directory" in screen and "Esc to" in screen else None
+
+    seen = native.until(asked_or_heard, 40, "its question, or the turn", pane)
+    if claude_version(native.binary) >= ASKS_ABOUT_ADDED_FOLDERS:
+        assert seen == "asked", native.screen(pane)
+    if seen == "asked":
+        time.sleep(3)  # well past the agent's start
+        assert native.sessions() == [], "no hook fires at the question"
+        assert native.stub.turns == [], "nothing reached the model"
+        rows = native.rows(pane)
+        reader = screen_of(get_adapter(AGENT))
+        assert reader.screen_prompt is not None and reader.modal_on_screen is not None
+        shown = reader.screen_prompt(rows)
+        assert shown is not None and shown.shape == "trust", native.screen(pane)
+        assert (shown.yes_key, shown.no_key) == (None, None), "the owner's to answer"
+        assert reader.modal_on_screen(rows) == "the trust dialog"
+        native.until(lambda: fleet.status_of(row).state == "attention", 20, "attention", pane)
+        detail = fleet.status_of(row).detail
+        assert detail == fleet.trust_prompt_detail(extra), detail
+        told = fleet.tell(native.project, row.label, "not into the question")
+        assert told.typed == "no", told
+        facts = native.srv.pane_facts(pane)
+        assert facts is not None and not facts.dead, "the agent is still there"
+        native.srv.send_keys(pane, "Down")
+        time.sleep(0.3)
+        native.srv.send_keys(pane, "Enter")  # Yes, add it
+    turn = native.heard("added and asked")
+    assert str(extra) in turn.everything, "Claude Code took the added folder"
+    native.until(lambda: "added and asked" in native.prompts(), 20, "the prompt on the board", pane)
+    assert native.prompts().count("added and asked") == 1, "once"
+
+
 # --- launch -----------------------------------------------------------------------------
 
 
@@ -915,9 +1013,13 @@ def test_real_claude_code_launch_with_a_model_pin_extra_args_and_a_persona(nativ
     """The role's model pin (``[agents.models]``), its own arguments for Claude Code
     (``[fleet.roles.coder] agent_args``) and a persona reach Claude Code: the model it asks
     for, the folder it adds to its workspace, and the persona's briefing in what the model
-    reads."""
+    reads. The folder is one the account trusts, as a folder a role adds for good is: from
+    2.1.326 Claude Code asks at its start about one no trust covers (R19), which
+    ``test_real_claude_code_asks_about_an_added_folder_no_trust_covers_and_the_fleet_says_so``
+    is about."""
     extra = native.outside / "extra-dir"
     extra.mkdir()
+    _trusted_on_the_account(native, extra)
     config = load_config()
     config.agents.models[AGENT] = AgentModelSettings(
         roles={"coder": AgentModelDefault(model="claude-sonnet-4-5")}

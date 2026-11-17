@@ -22,8 +22,9 @@ carries the agent's ``--name``, on the pane's last row under a dialog drawn over
   and a footer naming Esc or Enter on the last two lines; *yes* is the digit of the first
   option that says Yes (``1`` on the real permission chooser, never a blind ``1``), *no* is
   Esc;
-- the **trust dialog** (``Quick safety check …``): its own shape, no keys — trusting a
-  folder is the owner's to answer;
+- the **trust dialog** (``Quick safety check …``, and 2.1.326's question about an
+  ``--add-dir`` folder, ``Adding a new directory: …`` over ``Yes, add it``): its own shape,
+  no keys — trusting a folder is the owner's to answer;
 - a ``[y/N]``-style **last line**: ``y`` and ``n``.
 
 :func:`modal_showing` is ``say``'s view of the same screen: those shapes, named, plus two
@@ -60,7 +61,11 @@ MODAL_FOOTER = re.compile(r"Esc to (?:cancel|clear)|Enter to confirm")
 """A dialog's footer: ``Esc to cancel``, ``Enter to confirm`` and, on 2.1.318's ``/config``
 (``Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear``), ``Esc to clear``."""
 YES_NO = re.compile(r"[\[(]\s*[yY](?:es)?\s*/\s*[nN](?:o)?\s*[\])]\s*[:?]?\s*$")
-TRUST = re.compile(r"Quick safety check|Yes, I trust this folder")
+TRUST = re.compile(r"Quick safety check|Yes, I trust this folder|Yes, add it\b")
+"""A folder-trust question's words: the folder Claude Code starts in, and (2.1.326) an
+``--add-dir`` folder no trust covers, at its start or added later."""
+TRUST_TITLE = re.compile(r"Quick safety check|Adding a new directory")
+"""The row a :data:`TRUST` dialog's question is named by."""
 RATING = re.compile(r"How is Claude doing this session")
 WORKING = re.compile(r"esc to interrupt", re.IGNORECASE)
 """What a turn in progress shows at the box: in the footer, or on the spinner line."""
@@ -243,7 +248,7 @@ def prompt_showing(lines: Sequence[str]) -> ScreenPrompt | None:
     whole = " ".join(" ".join(region).replace(PROMPT_MARK, " ").split())
     footer = any(MODAL_FOOTER.search(row) for row in region[-2:])
     if footer and any(TRUST.search(row) for row in region):
-        question = next((row.strip() for row in region if "Quick safety check" in row), "")
+        question = next((row.strip() for row in region if TRUST_TITLE.search(row)), "")
         return ScreenPrompt(
             "trust", question or "the trust dialog", None, None, whole, _yes_option(region)
         )

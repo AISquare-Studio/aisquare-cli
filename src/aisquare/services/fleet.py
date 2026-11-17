@@ -4426,8 +4426,11 @@ directory · fork``): ``attention``, its detail this and the dialog's words
 (:func:`_with_trust_prompts`)."""
 
 
-def trust_prompt_detail(folder: Path) -> str:
-    """The detail of an agent at the folder-trust question in ``folder``: what unblocks it."""
+def trust_prompt_detail(folder: Path | None) -> str:
+    """The detail of an agent at the folder-trust question about ``folder``: what unblocks it.
+    The folder it starts in, or (Claude Code 2.1.326) an ``--add-dir`` folder the question
+    names (``claude_sharing.trust_prompt_folder``); ``None``, one it names that is not on
+    this machine, whose command then says ``<dir>``."""
     return f"{TRUST_PROMPT} — approve it once, or `{claude_accounts_service.trust_command(folder)}`"
 
 
@@ -4477,7 +4480,11 @@ def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
     (:func:`_with_trust_prompts`); ``None`` with none up, or a screen tmux would not show.
 
     Claude Code's folder-trust question, by its words (``claude_sharing.shows_trust_prompt``),
-    and its first-run Security notes (#32, L2). An agent whose adapter reads its own dialogs
+    about the folder it starts in or (2.1.326) an ``--add-dir`` folder, which its detail
+    names (``claude_sharing.trust_prompt_folder``): ``accounts trust`` of the folder it
+    starts in did nothing for that one, which every spawn of the role asks about again
+    until it is trusted, the yes at the question holding for that session alone. And its
+    first-run Security notes (#32, L2). An agent whose adapter reads its own dialogs
     off its screen (``capabilities.dialog_on_screen``) is read by it: Codex's folder trust
     (``screen_prompt``'s ``trust``) reads as Claude Code's does, and any other dialog it
     opens with no hook as :data:`AT_A_DIALOG` with its words. Before, a Codex at its folder
@@ -4491,7 +4498,7 @@ def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
         return None
     if adapter is None or read is None:
         if claude_sharing.shows_trust_prompt(lines):
-            return trust_prompt_detail(agent.cwd)
+            return trust_prompt_detail(claude_sharing.trust_prompt_folder(lines, agent.cwd))
         if claude_sharing.shows_security_notes(lines):
             # Its only key is Enter, which a spawn presses (#32, L2): still there, it is one
             # nobody typed into — a window the human opened first, or a refused key.
@@ -9579,22 +9586,26 @@ def _past_trust_prompt(
             return True
         asked = True
         if _monotonic() >= deadline:
-            notes.append(_trust_note(folder, to))
+            notes.append(_trust_note(claude_sharing.trust_prompt_folder(lines, folder), to))
             return False
         _sleep(_POLL_INTERVAL)
 
 
-def _at_trust_question(pane: PlacedPane) -> bool:
-    """Whether ``pane``'s screen shows Claude Code's folder-trust question; ``False`` when
-    tmux will not show it."""
+def _at_trust_question(pane: PlacedPane) -> list[str] | None:
+    """``pane``'s screen when it shows Claude Code's folder-trust question, else ``None``
+    (and when tmux will not show it): the screen names the folder asked about
+    (``claude_sharing.trust_prompt_folder``)."""
     try:
-        return claude_sharing.shows_trust_prompt(pane.captured())
+        lines = pane.captured()
     except TmuxError:
-        return False
+        return None
+    return lines if claude_sharing.shows_trust_prompt(lines) else None
 
 
 def _trust_note(folder: Path | None, to: tuple[ProjectInfo, str]) -> str:
-    """Why a prompt was left untyped at Claude Code's folder-trust question, and the way on."""
+    """Why a prompt was left untyped at Claude Code's folder-trust question about ``folder``
+    (the one it starts in, or an ``--add-dir`` folder: ``trust_prompt_folder``), and the
+    way on."""
     trust = claude_accounts_service.trust_command(folder)
     return (
         "the agent is waiting at Claude Code's folder-trust question, which no "
@@ -9676,10 +9687,13 @@ def _type_at_its_start(
                 how = f"not filed as a board note either ({exc})"
             waited = PROMPT_TIMEOUT if at_a_dialog else START_TIMEOUT
             attach = project_service.fleet_command("attach", project)
-            if at_a_dialog and _at_trust_question(pane):
+            if at_a_dialog and (asked := _at_trust_question(pane)) is not None:
                 # Claude Code's folder-trust question, which no account has said yes to for
-                # this folder (`share_for_launch` copied nothing): the way past it named.
-                trust = claude_accounts_service.trust_command(folder)
+                # this folder (`share_for_launch` copied nothing), or for an `--add-dir`
+                # folder it names (2.1.326): the way past it named.
+                trust = claude_accounts_service.trust_command(
+                    claude_sharing.trust_prompt_folder(asked, folder)
+                )
                 then = (
                     "It is at Claude Code's folder-trust question, where an Enter picks "
                     f'"No, exit": approve it once in its window (`{attach}`), or run '

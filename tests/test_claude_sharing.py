@@ -570,6 +570,65 @@ def test_the_trust_question_in_any_layout_is_the_question_until_an_input_box_is_
     assert not sharing.shows_trust_prompt([*boxed, "╭────╮", "│ > │", "╰────╯"])
 
 
+def _rows(name: str) -> list[str]:
+    return (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+
+
+ADDED = _rows("added_folder_trust_2.1.326.txt")
+"""Claude Code 2.1.326 at its start, asking about an ``--add-dir`` folder no trust covers, as
+``capture-pane -e`` showed a fleet window of it at 120 columns (R19); its temp path masked."""
+ADDED_48 = _rows("added_folder_trust_2.1.326_48_columns.txt")
+"""The same question at 48 columns, about a folder whose name has spaces and a word wider than
+the pane: its rows wrap at the spaces, which they drop, and inside that word."""
+MASKED = "/private/var/tmp/asq-native"
+
+
+def test_claude_code_2_1_326s_question_about_an_added_folder_is_its_folder_trust_question() -> None:
+    """R19: 2.1.326 asks at its start about each ``--add-dir`` folder no trust covers, over a
+    highlighted "No, exit". It was read as no question, so the fleet listed the agent a
+    healthy ``working``. Read as the question now, fail-closed as the other one is: not with
+    an input box under it."""
+    for screen in (ADDED, ADDED_48):
+        assert "\x1b[" in "".join(screen)  # as `capture-pane -e` gives it, escapes and all
+        assert sharing.shows_trust_prompt(screen)
+        assert sharing.shows_trust_prompt([*screen, "", "", ""])
+        assert not sharing.shows_trust_prompt([*screen, "─" * 40, f"{CURSOR} ", "─" * 40])
+        # Its words alone are no question, nor its "No, exit" alone.
+        assert not sharing.shows_trust_prompt([row for row in screen if "No, exit" not in row])
+        assert not sharing.shows_trust_prompt([row for row in screen if "one you trust" not in row])
+
+
+def test_the_folder_trust_question_names_the_added_folder_it_asks_about(tmp_path: Path) -> None:
+    """The folder ``accounts trust`` must be told: the ``--add-dir`` folder 2.1.326's question
+    names, not the one the agent starts in, which is trusted already; the question about
+    that one asks about it. A folder wrapped across rows is the one way of joining them
+    that is a directory here: the wrap drops a space, and breaks a word wider than the pane
+    inside it."""
+    start = tmp_path / "w"
+    assert sharing.trust_prompt_folder(ADDED, start) == Path(f"{MASKED}/extra-dir")
+    workspace = (FIXTURES / "trust_prompt_2.1.299.txt").read_text(encoding="utf-8").splitlines()
+    assert sharing.trust_prompt_folder(workspace, start) == start
+    assert sharing.trust_prompt_folder(workspace, None) is None
+
+    long = f"{MASKED}/a long folder name {'x' * 50}/{'y' * 40}"
+    asked: list[str] = []
+
+    def is_dir(spelling: str) -> bool:
+        asked.append(spelling)
+        return spelling == long
+
+    assert sharing.trust_prompt_folder(ADDED_48, start, is_dir=is_dir) == Path(long)
+    assert long in asked and len(asked) <= 2 ** (4 - 1), "its four rows, joined every way"
+    # A folder that is not on this machine is not guessed at: a command names `<dir>`.
+    assert sharing.trust_prompt_folder(ADDED_48, start, is_dir=lambda _: False) is None
+    # On disk, by default.
+    folder = tmp_path / "two words" / "x"
+    folder.mkdir(parents=True)
+    head, tail = str(folder).split(" ")
+    screen = [" Adding a new directory:", "", f" \x1b[1m{head}\x1b[0m", f" \x1b[1m{tail}\x1b[0m"]
+    assert sharing.trust_prompt_folder([*screen, "", " This session…"], start) == folder
+
+
 # --- aisquare accounts trust ---------------------------------------------------------------------
 
 

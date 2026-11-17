@@ -588,12 +588,15 @@ def test_a_note_about_another_task_is_no_echo(board: str) -> None:
 
 @pytest.mark.parametrize("answered", [False, True], ids=["unanswered", "answered"])
 def test_a_verdict_after_its_testers_question_wakes(answered: bool, board: str) -> None:
-    """CE1.7: a question asks; the answer to it is no news of the verdict that follows."""
-    _say(board, "question", by="tester", to="manager")
+    """CE1.7: a question asks, about that very task; the answer to it is no news of the
+    verdict that follows."""
+    task = _real_task(board)
+    text = f"#{task.number}: is the error page in scope?"
+    _say(board, "question", by="tester", to="manager", task=task.id, text=text)
     if answered:
         _say(board, "note", by=MANAGER, to="tester")
     _read_all(board)
-    assert not _echo(_say(board, "task_done", by="tester", task="tsk_a"))
+    assert not _echo(_say(board, "task_done", by="tester", task=task.id))
     assert _wakes()
 
 

@@ -133,7 +133,7 @@ def test_the_manifest_leaves_codex_to_find_hooks_json() -> None:
     file Codex keys its trust by (``<plugin>:hooks/hooks.json:...``) is the one it reads."""
     plugin = _load(PLUGIN_JSON)
     assert "hooks" not in plugin
-    assert plugin["interface"]["displayName"] == "aisquare"
+    assert plugin["interface"]["displayName"] == "rlx"
     assert HOOKS_JSON.is_file()
 
 

@@ -1,7 +1,7 @@
 {
   "name": "aisquare",
   "version": "0.10.0",
-  "description": "Portable memory for Codex: aisquare's lifecycle hooks, run by the aisquare CLI, or by uvx when the CLI is not installed.",
+  "description": "Portable memory for Codex: rlx's lifecycle hooks, run by rlx, or by uvx when rlx is not installed.",
   "author": {
     "name": "AISquare",
     "email": "anmol@aisquare.studio",
@@ -12,9 +12,9 @@
   "license": "MIT",
   "keywords": ["memory", "context", "hooks"],
   "interface": {
-    "displayName": "aisquare",
+    "displayName": "rlx",
     "shortDescription": "Portable memory for coding agents",
-    "longDescription": "aisquare's lifecycle hooks: each new session is handed what you saved, and your prompts are captured to your local aisquare memory. They run the aisquare CLI, or the pinned release through uvx, and stand down where $CODEX_HOME/hooks.json already runs aisquare.",
+    "longDescription": "rlx's lifecycle hooks: each new session is handed what you saved, and your prompts are captured to your local rlx memory. They run rlx, or the pinned release through uvx, and stand down where $CODEX_HOME/hooks.json already runs rlx.",
     "developerName": "AISquare",
     "category": "Productivity",
     "websiteURL": "https://github.com/AISquare-Studio/aisquare-cli"

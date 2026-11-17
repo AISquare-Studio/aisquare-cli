@@ -430,12 +430,12 @@ elif _runner=$(_find uvx); then
     _status=$?
 else
     if [ "$event" = "$_start" ]; then
-        printf '%s\n' '{"systemMessage": "aisquare: neither the aisquare CLI nor uv was found, so this session has no aisquare memory. Install uv: https://docs.astral.sh/uv/"}'
+        printf '%s\n' '{"systemMessage": "rlx: neither rlx nor uv was found, so this session has no rlx memory. Install uv: https://docs.astral.sh/uv/"}'
     fi
     exit 0
 fi
 
 if [ "$_status" -ne 0 ] && [ "$event" = "$_start" ]; then
-    printf '{"systemMessage": "aisquare: its session-start hook failed (exit %s), so this session has no aisquare memory."}\n' "$_status"
+    printf '{"systemMessage": "rlx: its session-start hook failed (exit %s), so this session has no rlx memory."}\n' "$_status"
 fi
 exit 0

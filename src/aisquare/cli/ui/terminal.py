@@ -1376,9 +1376,13 @@ class TerminalPane(Widget, can_focus=True):
         """The shown agent's own key names (``AgentAdapter.key_spellings``), which a view
         sets as it learns whose pane this is: Codex's newline is ``C-j``."""
         self.placeholder = placeholder
-        """What the pane says while nothing is attached. A view that shows ONE agent
-        passes :data:`PANE_GONE`: it detaches only from a row with no pane of its own
-        to show (``views.agent.shown_pane``), and "no agent selected" is false there."""
+        """What the pane says while nothing is attached, word-wrapped to its width. A view
+        that shows ONE agent passes why that agent has no pane (``views.agent.pane_words``:
+        :data:`PANE_GONE` for a lost row, a paused agent's own sentence): it detaches only
+        from a row with no pane of its own to show (``views.agent.shown_pane``), and "no
+        agent selected" is false there."""
+        self._placeholder_rows: tuple[str, int, list[str]] | None = None
+        """:attr:`placeholder` as wrapped last, and the width it was wrapped to."""
         self._version: tuple[int, int] | None = None
         """The server's version, read once per attach (``_server_version``)."""
         self._version_read = False
@@ -2250,6 +2254,17 @@ class TerminalPane(Widget, can_focus=True):
             runs.append((text[plain_start:], len(text) - plain_start))
         return runs
 
+    def _placeholder_wrapped(self, width: int) -> list[str]:
+        """:attr:`placeholder`, one row per entry, wrapped at ``width`` cells: a paused agent's
+        sentence reads whole beside a 45-column terminal's sidebar, where its first row alone
+        was cut."""
+        wrapped = self._placeholder_rows
+        if wrapped is None or wrapped[:2] != (self.placeholder, width):
+            lines = Text(self.placeholder).wrap(self.app.console, width)
+            wrapped = (self.placeholder, width, [line.plain.rstrip() for line in lines])
+            self._placeholder_rows = wrapped
+        return wrapped[2]
+
     def _render_row(self, y: int) -> Strip:
         width, height = self.content_size
         if width <= 0:
@@ -2257,10 +2272,9 @@ class TerminalPane(Widget, can_focus=True):
         base = self.rich_style
         self.lines_rendered += 1
         if self.pane_id is None:
-            if y == 0:
-                return Strip([Segment(self.placeholder, base + PLACEHOLDER)]).adjust_cell_length(
-                    width, base
-                )
+            rows = self._placeholder_wrapped(width)
+            if y < len(rows):
+                return Strip([Segment(rows[y], base + PLACEHOLDER)]).adjust_cell_length(width, base)
             return Strip.blank(width, base)
         strip = self._composed_strip(y)
         cursor = self._cursor

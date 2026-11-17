@@ -449,7 +449,41 @@ def test_the_detail_comes_after_the_account_and_the_model_before_the_pane() -> N
     alone = _status(state="unknown", detail="tmux unavailable", session=False, slot=None)
     assert info_line(alone, LABELS).plain == "🔨 coder-auth  · unknown  tmux unavailable  %4"
     bare = _status(state="lost", detail="pane gone", slot=None)
-    assert info_line(bare, LABELS).plain.endswith("claude-opus-5-5 high  pane gone  %4")
+    assert info_line(bare, LABELS).plain.endswith("claude-opus-5-5 high  pane gone")
+
+
+@pytest.mark.parametrize(
+    ("state", "held", "shown"),
+    [
+        ("working", False, True),
+        ("exited", False, True),
+        ("unknown", False, True),
+        ("paused", False, False),
+        ("lost", False, False),
+        ("unknown", True, False),
+    ],
+    ids=["working", "exited", "unknown", "paused", "lost", "held"],
+)
+def test_the_pane_id_shows_only_while_the_row_has_a_pane_of_its_own(
+    state: str, held: bool, shown: bool
+) -> None:
+    """Brief 233's ruling: a paused or lost row's pane id was its killed window's, and a held
+    row's is the next server's. tmux hands it to the next agent, so the header named someone
+    else's pane. An exited row keeps its window (remain-on-exit), and its id with it."""
+    line = info_line(_status(state=state).model_copy(update={"held": held}), LABELS).plain
+    assert ("%4" in line) is shown, line
+    assert line.endswith("high  %4" if shown else "high"), line
+
+
+def test_a_line_with_nothing_after_what_it_keeps_whole_cuts_its_label_to_the_row() -> None:
+    """No cell is kept for a ``…`` that cuts nothing: a paused row with no session and no
+    account ends at its state, its pane id gone with its window."""
+    paused = _status(label="coder-01m5d34v", state="paused", session=False, slot=None)
+    whole = info_line(paused, LABELS)
+    assert whole.plain.endswith("paused"), whole.plain
+    width = whole.cell_len - 3
+    cut = info_line(paused, LABELS, width=width)
+    assert cut.cell_len == width and cut.plain.endswith("paused"), cut.plain
 
 
 def test_no_two_neighbouring_fields_share_a_style() -> None:

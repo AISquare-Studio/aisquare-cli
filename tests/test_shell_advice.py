@@ -165,18 +165,19 @@ ALLOWED: dict[str, str] = {
     ),
     "services/diagnostics.py::_check_claude_code": "doctor-fix: the connects its row's fix names",
     "services/diagnostics.py::_check_database": (
-        "doctor-fix: the database row; its detail names the commands that fail there, a fact"
+        "doctor-fix: the copy (cp) its fix says to keep; the search its detail names is "
+        "detail_advice"
     ),
     "services/diagnostics.py::_check_dead_managers": "doctor-fix: the restarts its row's fix names",
     "services/diagnostics.py::_check_fleet": "doctor-fix: the fleet row's fix",
     "services/diagnostics.py::_check_instances": "data: 'asq instances' is the row's name",
     "services/diagnostics.py::_check_other_agents": "doctor-fix: the coding-agent rows' fixes",
     "services/diagnostics.py::_check_remote_control": "doctor-fix: the Remote Control row's fix",
-    "services/diagnostics.py::_check_resumable_agents": (
-        "doctor-fix: the restarts its row's fix names"
-    ),
     "services/diagnostics.py::_check_role_bindings.unset": "doctor-fix: returns the fix line",
-    "services/diagnostics.py::_coders_missed": "doctor-fix: the connects its row's fix names",
+    "services/diagnostics.py::_coders_missed": (
+        "doctor-fix: the connects its rows' fixes name; its detail's clause says them in "
+        "detail_advice"
+    ),
     "services/diagnostics.py::_disconnect_fix": "doctor-fix: returns the fix",
     "services/diagnostics.py::_left_from_before_capture": (
         "data: the shell's account of the captured projects; its row says it as detail_advice, "
@@ -432,9 +433,11 @@ def test_every_command_a_shared_message_spells_is_shell_advice_or_never_a_person
 
 def test_every_allowed_place_still_spells_a_command() -> None:
     """No stale entry: an allowance outlives the command it was for and would let a new one
-    through unseen."""
-    spelt = {where for where, _, _, _ in _sites()}
-    assert sorted(set(ALLOWED) - spelt) == []
+    through unseen. Nor one whose every command passes on its own, wrapped or in a doctor's
+    fix: fleet-resume's, labelled a fix, let its row's DETAIL name `fleet restart` in asq's
+    Doctor (tester 12783), and it is needed only where a command does not pass."""
+    needed = {where for where, _, _, passes in _sites() if not passes}
+    assert sorted(set(ALLOWED) - needed) == []
 
 
 def test_every_allowance_names_its_kind() -> None:

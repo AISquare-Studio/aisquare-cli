@@ -3925,8 +3925,18 @@ def test_doctor_says_what_a_trigger_it_only_counts_costs() -> None:
         f"project.linked_repos, {', '.join(f'table {table}' for table in tables)} and 1 "
         "more; a command that reads a missing table or column fails"
     ), row.detail
-    cost = diagnostics._TRIGGER_COSTS["entry_ai"].format(program="rlx")
+    cost = diagnostics._TRIGGER_COSTS["entry_ai"].format(search="`rlx context search`")
     assert row.detail.endswith(f"; {cost}"), row.detail
+    # In asq the search is the notes' own, never the command (R13b); the fix is whole.
+    from aisquare.core import program
+
+    program.enter_app()
+    try:
+        shown = diagnostics._check_database()
+    finally:
+        program.leave_app()
+    assert shown.detail == row.detail.replace("`rlx context search`", "the notes' search")
+    assert "context search" not in shown.detail and shown.fix == row.fix
 
 
 @pytest.mark.parametrize(

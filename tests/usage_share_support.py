@@ -1,6 +1,6 @@
 """A fake server and a checker of the wire contract, for the usage-sharing tests.
 
-Not a test module. ``Server`` stands in for the AISquare API's ``/api/v1/cli/metrics/`` as the
+Not a test module. ``Server`` stands in for the AISquare API's ``/api/v1/rlx/metrics/`` as the
 shipper's transport: it records every call and answers as scripted, and no test reaches a real
 one (the BE endpoint is a separate PR). ``check_contract`` holds a body to the contract
 (``docs/usage-telemetry.md``): its keys, types, caps and enumerations.

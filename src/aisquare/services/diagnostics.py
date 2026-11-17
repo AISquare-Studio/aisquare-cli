@@ -150,6 +150,9 @@ def doctor(*, live: bool = False, cwd: Path | None = None) -> list[DoctorCheck]:
         return [
             _check_python(),
             _check_install(),
+            # Only while `rlx` or `relax` on PATH runs another program (#133): ok, as a
+            # program of the user's own is no fault, but said, as the command is not ours.
+            *_optional(_check_commands()),
             _check_provenance(),
             _check_home(),
             _check_home_filesystem(),
@@ -489,6 +492,43 @@ def _check_install() -> DoctorCheck:
             f"For stable Claude Code hooks, install globally: {_GLOBAL_INSTALL}",
         )
     return _ok("install", f"aisquare at {binary}")
+
+
+def _check_commands() -> DoctorCheck | None:
+    """``rlx`` and ``relax``, the commands beside ``aisquare`` and ``asq`` since the rlx rename
+    (#133), when one a shell finds is another program: PyPI's ``relax`` is another project,
+    and one earlier on PATH than this install's own answers to the name. ``None`` while each
+    runs this install, or is not on PATH (nothing found that is not ours).
+
+    This install's own is the script of that name beside its ``aisquare``
+    (``agents.current_install``), compared by the file a link leads to, as uv's
+    ``~/.local/bin`` links are.
+    """
+    ours_dir = agent_core.current_install().parent
+    suffix = ".exe" if sys.platform == "win32" else ""
+    others: list[tuple[str, str]] = []
+    for name in install_route.NEW_COMMANDS:
+        found = shutil.which(name)
+        if found is None:
+            continue
+        try:
+            same = Path(found).resolve() == (ours_dir / f"{name}{suffix}").resolve()
+        except (OSError, RuntimeError):
+            same = False
+        if not same:
+            others.append((name, found))
+    if not others:
+        return None
+    one = len(others) == 1
+    names = " and ".join(name for name, _ in others)
+    where = ", ".join(found for _, found in others)
+    taken = {name for name, _ in others}
+    left = [name for name in ("aisquare", "asq", *install_route.NEW_COMMANDS) if name not in taken]
+    return _ok(
+        "commands",
+        f"{names} on your PATH {'runs another program' if one else 'run other programs'} "
+        f"({where}), not this aisquare: start it with {', '.join(left[:-1])} or {left[-1]}",
+    )
 
 
 def _check_provenance() -> DoctorCheck:

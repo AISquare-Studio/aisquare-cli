@@ -83,7 +83,8 @@ it does for any signed-in API call; the telemetry tables themselves never store 
 ## When it is sent
 
 Never while you are waiting: once a shipment has gone through, the next is due 6 hours later, and
-after a failure it is tried again after 5 minutes, doubling up to 6 hours (a command starts at
+after a failure it is tried again after 5 minutes, doubling up to 6 hours, or later when the
+server names a longer wait with `Retry-After` on a 429 or a 503 (a command starts at
 most one background shipment in half an hour either way); the UI sends from a background
 thread; a shipment has 5-second timeouts and does not
 touch the command or hook that started it. Sharing starts from the day you turn it on: the days
@@ -144,8 +145,9 @@ is agreed by both first. **v1.1** is v1 with the amendments of the team board (s
   `rlx metrics share on|off|status|preview`.
 
 ## Endpoint
-`POST {api_url}/api/v1/cli/metrics/` — `api_url` is the same base rlx's
-AISquare sign-in already uses. JSON body, `Content-Type: application/json`.
+`POST {api_url}/api/v1/rlx/metrics/` — `api_url` is the same base rlx's
+AISquare sign-in already uses. JSON body, `Content-Type: application/json`. Releases up to
+0.10.0 post to `/api/v1/cli/metrics/`, which the BE keeps as a deprecated alias until May 2027.
 
 Auth is OPTIONAL:
 - Signed in → rlx sends `Authorization: Bearer aisq_…` (its existing device-flow
@@ -153,7 +155,7 @@ Auth is OPTIONAL:
 - Not signed in → no header. Accepted, stored unlinked.
 - Invalid / expired / revoked / wrong-scope token → BE MUST still accept the
   batch as anonymous (200, `linked: false`), never 401. (DRF's default auth
-  raises before AllowAny; BE uses a lenient auth class.) Belt and braces: the
+  raises before AllowAny; BE uses a lenient auth class.) Belt and braces:
   rlx retries once without the header if it ever gets a 401.
 
 Throttle: per-IP named rate (env-backed, default 120/hour). Body cap 256 KB.
@@ -265,4 +267,6 @@ Field rules:
 - `language` is `unknown` when no tracked file is in a language rlx knows.
 - A failure of any kind (no network, 404 because the endpoint is not deployed, 4xx, 5xx, 429, a
   reply that is not JSON) is silent on the client and retried after a backoff of 5 minutes
-  doubling to 6 hours, for ever; the days are rebuilt from the local record, so none is lost.
+  doubling to 6 hours, for ever, or after the `Retry-After` of a 429 or a 503 when that is longer
+  (the ingest answers 503 with `Retry-After: 3600` while its kill switch is off); the days are
+  rebuilt from the local record, so none is lost.

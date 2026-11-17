@@ -20,8 +20,35 @@ def _canonical_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-#: The executable names that ARE aisquare, as either platform writes them.
-_PROGRAM_NAMES = frozenset({"aisquare", "asq", "aisquare.exe", "asq.exe"})
+#: The executable names that ARE aisquare, as either platform writes them: ``rlx`` and
+#: ``relax`` too since #133.
+_PROGRAM_NAMES = frozenset(
+    {"aisquare", "asq", "rlx", "relax", "aisquare.exe", "asq.exe", "rlx.exe", "relax.exe"}
+)
+#: The names another package may also run by (PyPI's ``relax`` is another project): a bare
+#: argument naming one is aisquare only after a requirement naming this package
+#: (``uvx --from aisquare-cli rlx serve``), so ``uvx relax`` stays another server.
+_SHARED_NAMES = frozenset({"rlx", "relax", "rlx.exe", "relax.exe"})
+
+
+def _names_aisquare(tokens: list[str], index: int) -> bool:
+    """Whether ``tokens[index]`` is the program, as a bare argument: a name of
+    :data:`_PROGRAM_NAMES`, one of :data:`_SHARED_NAMES` only after an ``aisquare-cli``
+    requirement, or the ``-m aisquare`` pair."""
+    token = tokens[index]
+    if token == "-m":
+        return tokens[index + 1 : index + 2] == ["aisquare"]
+    name = token.lower()
+    if name not in _PROGRAM_NAMES:
+        return False
+    if name not in _SHARED_NAMES:
+        return True
+    return any(
+        _canonical_name(match.group(1)) == DISTRIBUTION
+        for earlier in tokens[:index]
+        for item in _requirement_items(earlier)
+        if (match := _NAMED_REQUIREMENT.match(item)) is not None
+    )
 
 
 def runs_aisquare(spec: object) -> bool:
@@ -42,12 +69,7 @@ def runs_aisquare(spec: object) -> bool:
         return True
     args = spec.get("args")
     tokens = [str(arg) for arg in args] if isinstance(args, list) else []
-    for index, token in enumerate(tokens):
-        if token.lower() in _PROGRAM_NAMES:
-            return True
-        if token == "-m" and tokens[index + 1 : index + 2] == ["aisquare"]:
-            return True
-    return False
+    return any(_names_aisquare(tokens, index) for index in range(len(tokens)))
 
 
 #: A ``--with`` item that NAMES its requirement (PEP 508): the name, then extras, a version,
@@ -135,13 +157,7 @@ def fetches_aisquare(spec: object) -> bool:
     args = spec.get("args")
     tokens = [str(arg) for arg in args] if isinstance(args, list) else []
     end = next(
-        (
-            index
-            for index, token in enumerate(tokens)
-            if token.lower() in _PROGRAM_NAMES
-            or (token == "-m" and tokens[index + 1 : index + 2] == ["aisquare"])
-        ),
-        len(tokens),
+        (index for index in range(len(tokens)) if _names_aisquare(tokens, index)), len(tokens)
     )
     before = tokens[:end]
     if program == "uvx":

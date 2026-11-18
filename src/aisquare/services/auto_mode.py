@@ -337,7 +337,7 @@ def _remedy(
     return (
         f"Until the proxy fix ({SDK_ISSUE_URL}), one of: {mode}; a lighter Claude config dir "
         "for the fleet's account (fewer MCP connectors — their schemas are most of the "
-        f"baseline); or run agents untraced: {prog.word()} explainability disable"
+        "baseline); or run agents untraced: aisquare explainability disable"
     )
 
 
@@ -492,7 +492,7 @@ def spawn_note(
     ) + prog.shell_advice(
         f"; set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
         f"`{_restart_off_auto(project, label)}` (its session resumes), or see "
-        f"`{prog.word()} explainability doctor` ({CHECK_NAME})"
+        f"`aisquare explainability doctor` ({CHECK_NAME})"
     )
 
 

@@ -1434,7 +1434,9 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended(
         await pilot.pause()
         line = shown(modal.query_one("#remote-unlocks", Static))
         assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
-        assert "new unlocks paused; Regenerate sets a new password" in line
+        # Review of #503, m2: a new password alone keeps a leaked link working; New link
+        # replaces both, and the line points at it, in rlx's words (R13: no command).
+        assert "new unlocks paused; if the link leaked, New link replaces it and the" in line
         assert "regenerate-password" not in line, "asq names no command (R13)"
         state_line = shown(modal.query_one("#remote-state", Static))
         # with its date: an extension can cross midnight
@@ -1541,6 +1543,42 @@ def test_the_panels_controls_never_wait_for_remote_jsons_lock_on_textuals_thread
     drive(go, tunnel=missing_ngrok)
 
 
+def test_new_link_replaces_the_link_and_the_password_and_signs_every_device_out() -> None:
+    """Review of #503, m2: 0.10.0's lockout advice was to rotate the LINK. A new password alone
+    (Regenerate) keeps a leaked link working and clears the failed-unlock budget, and rlx had
+    no way to rotate the link. *New link* does: the old link no longer opens, the password is
+    new, every device unlocks again, and the panel shows the new link."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        new_link = modal.query_one("#remote-new-link", Button)
+        assert new_link.disabled, "off: a press would change nothing (review of #542, F1)"
+        modal.query_one("#remote-on", Switch).toggle()
+        await written(pilot)
+        modal.repaint()
+        await pilot.pause()
+        assert not new_link.disabled, "on in this process: New link acts"
+        runtime = remote_server.runtime()
+        assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
+        old_token, old_password = remote_server.remote_link_token(), runtime.password
+        new_link.press()
+        await written(pilot)
+        saved = json.loads(paths.remote_state_path().read_text())
+        assert saved["token"] != old_token and saved["password"] != old_password
+        assert saved["devices"] == [], "every device unlocks again"
+        assert not runtime.token_matches(old_token), "the leaked link no longer opens"
+        assert runtime.token_matches(saved["token"])
+        modal.repaint()
+        await pilot.pause()
+        assert saved["token"] in shown(modal.query_one("#remote-link", Static))
+        assert old_token not in shown(modal.query_one("#remote-link", Static))
+        assert remote_control.NEW_LINK_NEWS in toasts(app)
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1571,6 +1609,18 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
             link = modal.query_one("#remote-link", Static)
             assert shown(link) == remote_view.served_elsewhere_link()
             assert shown(modal.query_one("#remote-password", Static)) == passphrase
+            # Review of #542, F1: New link acts on this process's Remote, as Regenerate does,
+            # so it is off here; at a lockout the line points where Remote runs.
+            assert modal.query_one("#remote-new-link", Button).disabled
+            assert modal.query_one("#remote-regen", Button).disabled
+            budget = UnlockBudget(remote_server.runtime())
+            for _ in range(UNLOCK_GLOBAL_FAILURES):
+                budget.record_failed_unlock()
+            modal.repaint()
+            await pilot.pause()
+            line = shown(modal.query_one("#remote-unlocks", Static))
+            assert "if the link leaked, give it a new link where Remote runs" in line
+            assert "New link replaces" not in line, line
             modal.query_one("#remote-on", Switch).toggle()
             await written(pilot)
             assert not app.remote.running

@@ -85,8 +85,8 @@ servers in it (`tests/private_fleets.py`).
 
 CI (`.github/workflows/ci.yml`) runs a `lint` job (ruff, the format check, mypy and
 `uv lock --check`), the suite on each leg (Python 3.11–3.13, captain off, Windows), a
-packaging job that builds the wheel and smoke-tests the `aisquare` / `asq` console
-scripts, and `ci-ok`, which passes only when every other job did. Each leg's suite
+packaging job that builds the wheel and smoke-tests `rlx`, `relax`, `aisquare` and `asq`,
+and `ci-ok`, which passes only when every other job did. Each leg's suite
 runs in shards, parallel jobs that each run part of it on every core: pytest-split
 (`--splits N --group k`) splits it by the per-test times in `.test_durations`, and the
 `shards` job fails unless each leg's shards ran every collected test exactly once
@@ -149,7 +149,7 @@ there is no bytecode to go stale.
 ## Implementing a feature (stub → service)
 
 Most commands are still stubs that exit `70`. Each one becomes real by replacing
-a single `stub(...)` call in a `services/` module — the CLI wiring and function
+a single `stub(...)` call in a `services/` module — rlx's wiring and function
 signatures already exist. The flow is:
 
 1. **Implement the service** in `src/aisquare/services/<domain>.py`. Services
@@ -313,7 +313,7 @@ for quoted commands — the distinction was missed here once and is worth keepin
 separate.
 
 *Quoted output* rots: one runbook row quoted a message (`the context store is
-corrupt`) the CLI has never printed. A static check that every quoted line exists
+corrupt`) rlx has never printed. A static check that every quoted line exists
 in `src/` **does not work**, measured twice: literal matching fails on
 interpolation (`✓ tracing enabled for target 'stg'` is an f-string in the source,
 so a `grep -F` reports it missing while the command prints it exactly), and
@@ -467,7 +467,7 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   query while debugging.** `credentials` and `explainability-key` are obvious;
   `claude_proxy_inbox.db` is not — its schema carries an `api_key` column, one key
   per buffered row, because the proxy stamps the owning tenant's key on the trace.
-  The CLI's own backlog check selects only `status` and `last_error`, so nothing it
+  rlx's own backlog check selects only `status` and `last_error`, so nothing it
   prints can surface one. But receipts quote artefacts constantly, so when you
   query that file: **name the columns, never `SELECT *`**, open it read-only
   (`file:…?mode=ro`), and confirm the bytes and mtime are unchanged afterwards

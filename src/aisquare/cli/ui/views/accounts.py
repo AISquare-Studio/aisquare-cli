@@ -270,10 +270,10 @@ def next_step(projects: Sequence[ProjectInfo], managed: Collection[str]) -> Next
     ``projects`` are the listed ones, in the sidebar's order; ``managed`` the ids of those
     with a live manager. No project: add one. None of them managed: start the first one's
     manager, which Welcome walks through. Otherwise the fleet is up: spawn an agent, with the
-    sidebar's one *Spawn agent* (at the top, under Fleet: the dialog asks the project).
+    sidebar's one *Spawn agent* (at the top, under the logo: the dialog asks the project).
     """
     if not projects:
-        return NextStep("Next: add a project (+ beside Fleet)")
+        return NextStep("Next: add a project (+ at the top-left)")
     if not any(project.id in managed for project in projects):
         name = project_service.display_name(projects[0])
         return NextStep(f"Next: open {name} and press Start manager", welcome=True)
@@ -1674,7 +1674,11 @@ class AccountsView(Vertical):
         sign_out = self.query_one("#aisquare-sign-out", Button)
         sign_out.display = signed_in and not busy
         sign_out.disabled = env_token
-        hint = f"the token comes from {iam.TOKEN_ENV_VAR}; unset it first" if env_token else None
+        hint = (
+            f"the token comes from {iam.TOKEN_ENV_VAR}, set where rlx started; off while it is"
+            if env_token
+            else None
+        )
         sign_in.tooltip = hint
         sign_out.tooltip = hint
 
@@ -2033,8 +2037,8 @@ class AccountsView(Vertical):
             return
         if self._env_token():
             self._notice(
-                f"{iam.TOKEN_ENV_VAR} is set, so aisquare is using that token. "
-                "Unset it to sign in with the browser.",
+                f"{iam.TOKEN_ENV_VAR} is set where rlx started, so rlx is using that token: "
+                "the browser sign-in is off while it is.",
                 "warn",
             )
             return

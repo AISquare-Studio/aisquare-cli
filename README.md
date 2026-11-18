@@ -55,8 +55,8 @@ The package is `aisquare-cli`. Its command is `rlx`; `relax`, `asq` and
 `rlx` opens on Welcome, three steps to a running fleet:
 
 1. **Project:** use the folder you are in, or choose another.
-2. **Coding agent:** Claude Code or Codex. Connect it: Welcome names the
-   install command if it is missing, and offers the sign-in if it is signed out.
+2. **Coding agent:** Claude Code or Codex. Connect it: Welcome links its
+   install page if it is missing, and offers the sign-in if it is signed out.
 3. **Fleet:** press *Start manager*, then *Open the manager* and answer the
    agent's one-time question about trusting the folder, then *Start the
    coders*: a manager and two coders, each a real session. **Type your goal to

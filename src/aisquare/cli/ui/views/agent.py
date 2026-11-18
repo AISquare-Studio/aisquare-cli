@@ -230,8 +230,15 @@ def _info_line(
     if session is not None and session.effort:
         text.append(" " if session.model else SEPARATOR)
         text.append(session.effort, style=EFFORT_STYLE)
-    # An exited row's detail is its exit code, which the chip has already said.
-    if status.detail and not (exited and status.detail == f"exit {agent.exit_status}"):
+    # An exited row's detail is its exit code, which the chip has already said. A paused row's
+    # (``fleet.PAUSED_DETAIL``) names the command that resumes it, at a shell; here the view says
+    # it in the app's words (``PAUSED_WORDS``: Resume brings it back), so the header has none.
+    paused = status.state == "paused"
+    if (
+        status.detail
+        and not paused
+        and not (exited and status.detail == f"exit {agent.exit_status}")
+    ):
         text.append(SEPARATOR)
         text.append(status.detail, style=DETAIL_STYLE)
     # The pane id only while the row has a pane of its own (:func:`shown_pane`). A paused or

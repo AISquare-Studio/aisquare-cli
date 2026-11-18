@@ -308,4 +308,4 @@ def test_no_other_module_writes_the_clipboard_itself() -> None:
 def test_the_receiver_never_claims_a_copy_it_cannot_see_land() -> None:
     source = (SRC / "cli" / "ui" / "receiver.py").read_text(encoding="utf-8")
     assert 'return f"copied ' not in source
-    assert "asq's toast says whether it reached the clipboard" in source
+    assert "rlx's toast says whether it reached the clipboard" in source

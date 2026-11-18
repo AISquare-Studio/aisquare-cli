@@ -401,12 +401,12 @@ def test_the_doctor_names_another_programs_command_earlier_on_path(
 
     assert one is not None and one.name == "commands" and one.status == "ok"
     assert one.detail == (
-        f"relax on your PATH runs another program ({brew / 'relax'}), not this aisquare: "
+        f"relax on your PATH runs another program ({brew / 'relax'}), not this rlx: "
         "start it with aisquare, asq or rlx"
     )
     assert two is not None and two.detail == (
         f"rlx and relax on your PATH run other programs ({both / 'rlx'}, {both / 'relax'}), "
-        "not this aisquare: start it with aisquare or asq"
+        "not this rlx: start it with aisquare or asq"
     )
 
 
@@ -434,8 +434,10 @@ def test_the_notes_name_the_two_commands_the_guard_and_the_title() -> None:
     added = " ".join(unreleased.split("### Added")[1].split("### ")[0].split())
     changed = " ".join(unreleased.split("### Changed")[1].split("### ")[0].split())
 
-    assert "**`rlx` and `relax` start aisquare, as `asq` and `aisquare` do.**" in added
+    assert (
+        "**Two new commands, `rlx` and `relax`, start rlx, as `asq` and `aisquare` do.**" in added
+    )
     assert "**Another program's `rlx` or `relax` is never replaced or deleted.**" in added
     assert "Hooks still call `aisquare`" in added
     # R23: the top-left is the owner's logo, r\x, since; everything else says rlx.
-    assert r"**asq's top-left shows rlx's logo, `r\x`, where it read `Fleet`.**" in changed
+    assert r"**The app's top-left shows rlx's logo, `r\x`, where it read `Fleet`.**" in changed

@@ -41,3 +41,9 @@ def test_the_unreleased_entry_has_one_blank_line_where_a_blank_line_goes() -> No
     text = CHANGELOG.read_text(encoding="utf-8")
     unreleased = _section(text, "Unreleased")
     assert "\n\n\n" not in unreleased
+
+
+def test_the_unreleased_entry_names_the_app_rlx_never_asq() -> None:
+    """The app is rlx (review of #503, m9): "asq" is only ever the command, in backticks."""
+    unreleased = _section(CHANGELOG.read_text(encoding="utf-8"), "Unreleased")
+    assert re.findall(r"(?<![`\w-])asq(?![`\w-])", unreleased) == []

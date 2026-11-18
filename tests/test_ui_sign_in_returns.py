@@ -310,7 +310,7 @@ def test_the_step_after_a_sign_in_names_the_sidebars_one_spawn_action(tmp_path: 
     of the sidebar, not a row under a project. It names the action as the sidebar labels it."""
     alpha = register(tmp_path / "alpha", project_id="prj_alpha")
 
-    assert next_step([], set()).text == "Next: add a project (+ beside Fleet)"
+    assert next_step([], set()).text == "Next: add a project (+ at the top-left)"
     assert next_step([alpha], set()).welcome, "no manager yet: Welcome walks through it"
     fleet_up = next_step([alpha], {alpha.id})
     assert not fleet_up.welcome

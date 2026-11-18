@@ -1671,7 +1671,9 @@ def test_an_environment_token_can_neither_sign_out_nor_start_a_browser_sign_in(
     shown_, out_disabled, in_disabled, status, said, workers = drive(go)
     assert shown_ and out_disabled and in_disabled
     assert iam.TOKEN_ENV_VAR in status
-    assert said.startswith(f"{iam.TOKEN_ENV_VAR} is set") and "Unset it" in said
+    assert said.startswith(f"{iam.TOKEN_ENV_VAR} is set where rlx started"), said
+    assert "the browser sign-in is off while it is" in said, said
+    assert "Unset" not in said and "unset" not in said, "rlx names no shell step (review of #503)"
     assert workers == [] and seen == []  # no flow ran, nothing was replaced
 
 

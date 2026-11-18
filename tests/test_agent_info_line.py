@@ -475,6 +475,21 @@ def test_the_pane_id_shows_only_while_the_row_has_a_pane_of_its_own(
     assert line.endswith("high  %4" if shown else "high"), line
 
 
+def test_a_paused_rows_header_names_no_command_to_resume_it() -> None:
+    """Review of #503, m5: a paused row's detail (``PAUSED_DETAIL``) ends "wait for fleet
+    resume", a command, and the header drew it beside the Resume button. In rlx the view says
+    what a pause keeps and that Resume brings it back (``PAUSED_WORDS``), so the header draws no
+    detail for it; a working row's detail is still drawn."""
+    from aisquare.services.fleet import PAUSED_DETAIL
+
+    paused = _status(state="paused", detail=PAUSED_DETAIL)
+    line = info_line(paused, LABELS).plain
+    assert "fleet resume" not in line and "no process" not in line, line
+    assert line.endswith("claude-opus-5-5 high"), line  # no detail, and no pane id (#528)
+    working = _status(state="attention", detail="Claude needs your permission")
+    assert info_line(working, LABELS).plain.endswith("Claude needs your permission  %4")
+
+
 def test_a_line_with_nothing_after_what_it_keeps_whole_cuts_its_label_to_the_row() -> None:
     """No cell is kept for a ``…`` that cuts nothing: a paused row with no session and no
     account ends at its state, its pane id gone with its window."""

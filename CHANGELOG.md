@@ -8,28 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **`rlx` and `relax` start aisquare, as `asq` and `aisquare` do.** All four commands run
-  the same thing: bare `rlx` opens the fleet UI, `rlx --help` names itself, and
-  `rlx --install-completion` sets up completion for `rlx`. The one-line installer, `aisquare upgrade` and asq's *Update* put the two new
-  commands in `~/.local/bin` beside the others. Hooks still call `aisquare`, whichever
-  command connected them.
+- **Two new commands, `rlx` and `relax`, start rlx, as `asq` and `aisquare` do.** All four
+  run the same program: bare `rlx` opens the app, `rlx --help` names itself, and
+  `rlx --install-completion` sets up completion for `rlx`. The one-line installer, 0.10.0's
+  `aisquare upgrade` and the app's *Update* put the two new commands in `~/.local/bin`
+  beside the others. Hooks still call `aisquare`, whichever command connected them.
 - **Another program's `rlx` or `relax` is never replaced or deleted.** When `~/.local/bin`
-  already holds one (PyPI's `relax` is another project), the installer, `aisquare upgrade`,
-  asq's *Update* and `aisquare uninstall` stop before they change anything, and say in one
-  line which file it is and what to do: rename or move it, then run again. Left to itself,
-  uv replaces such a file without a word on an upgrade, refuses the whole install on a fresh
-  machine, and deletes it on an uninstall. `aisquare doctor` names an `rlx` or `relax`
-  earlier on your PATH that runs another program.
-  The move to this release is made by the release you have, and on 0.10.0
-  `aisquare upgrade`, asq's *Update* and `uv tool upgrade aisquare-cli` replace such a file
-  without asking: move yours aside first, or upgrade with the one-line installer, which
-  checks.
+  already holds one (PyPI's `relax` is another project), the installer, `rlx upgrade`, the
+  app's *Update* and `rlx uninstall` stop before they change anything and name the file:
+  rename or move it, then run again. `rlx doctor` names one earlier on your PATH. Moving up
+  from 0.10.0 with its `aisquare upgrade`, its *Update* or `uv tool upgrade aisquare-cli`
+  replaces such a file without asking: move yours aside first, or use the one-line
+  installer, which checks.
 - **Pause sits beside Stop and Restart in an agent's view.** A paused agent shows Resume in
-  its place, which brings it back where it was. Pause, Stop and Restart each ask first in one
-  small box, which says what happens and offers *Don't ask again*: tick it and that action
-  acts on one click from then on, for every agent. *Ask again before every action*, under
-  ⚙ Settings ▸ App settings ▸ User preferences ▸ Advanced, brings every box back. Resume
-  never asks.
+  its place, which brings it back where it was, and its view says it is paused and what the
+  pause keeps, where it read "(pane gone)" beside a pane id it no longer had. Pause, Stop
+  and Restart each ask first in one small box, which says what happens and offers *Don't
+  ask again*: tick it and that action acts on one click from then on, for every agent.
+  *Ask again before every action*, under ⚙ Settings ▸ App settings ▸ User preferences ▸
+  Advanced, brings every box back. Resume never asks.
 - **Each agent in the sidebar has a ⋯ menu:** Pause or Resume, Stop, Restart and Rename. It
   shows on the agent you point at or have selected; a right-click or `.` opens it too.
   Rename is greyed, with why, where an agent keeps its name.
@@ -50,30 +47,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   existing page.
 - **A manager waiting on you is not woken by noise.** Watch's lines about its own results
   and questions, its ping for an agent idle by design, and a review that repeats a note it
-  read no longer wake it. `rlx team standby` (or its question to you, with nothing in
-  flight) holds watch's routine lines until your next prompt.
+  read no longer wake it. A manager that goes on standby (`aisquare team standby`), or asks
+  you something with nothing in flight, is not woken by watch's routine lines until your
+  next prompt.
 - **You can see which pane has the keyboard.** While the left pane has it, its highlighted
   project, agent or setting is a bar in the theme's colour; otherwise it is the dark
   highlight it always was.
 - **The product is named rlx.** The README is titled rlx and opens as rlx's page does:
-  "Tell the manager the goal. Then relax.", what rlx is, and the one-line install. Then
-  what it does for you: one place for your Claude Code and Codex agents across your
-  projects, a manager you talk to in plain words, account usage managed for you, memory
-  that carries across sessions, a command for everything, and all of it local-first. It
-  writes its commands as `rlx …` and names only what is live. PyPI's summary and
-  `rlx --help` say what rlx is in the page's words: "rlx is a manager for your AI coding
-  agents. Tell it the goal: it runs Claude Code and Codex on accounts with room. Then
-  relax." Five of the seven pages it links say rlx too: the Codex plugin's page,
-  CONTRIBUTING, SECURITY, and the pages on running more than one rlx and on usage
-  sharing. The package is still `aisquare-cli` on PyPI, and its keywords there name rlx.
+  "Tell the manager the goal. Then relax.", what rlx does for you, and the one-line install.
+  PyPI's summary and `rlx --help` say what rlx is in the page's words: "rlx is a manager for
+  your AI coding agents. Tell it the goal: it runs Claude Code and Codex on accounts with
+  room. Then relax." Five of the seven pages it links say rlx too. The package is still
+  `aisquare-cli` on PyPI, and its keywords there name rlx.
 - The AISquare sign-in keeps its name: `aisquare login`, `logout` and `whoami`, `aisquare
   init --api-key` and `aisquare explainability` are AISquare's, and every page writes them so.
 - **The sidebar no longer shows the AISquare sign-in; it lives in Accounts.** AISquare's own
   messages say rlx where they said "the CLI": "the keys rlx minted", "Sign-in from rlx is
   temporarily paused".
-- **asq's top-left shows rlx's logo, `r\x`, where it read `Fleet`.** The live count beside
-  it is as before (`r\x · 3 live`), and nothing else in the sidebar moves, at any width. The
-  window's title and everything else still say rlx.
+- **The app's top-left shows rlx's logo, `r\x`, where it read `Fleet`.** The live count
+  beside it is as before (`r\x · 3 live`), and nothing else in the sidebar moves, at any
+  width. The window's title and everything else still say rlx.
 - **The repository is now `AISquare-Studio/rlx`**, and every link says so: the one-line
   installers, the README and docs, `rlx doctor`'s issue link and the plugins' manifests.
   Links to the old name keep working, since GitHub redirects them, and the package, the
@@ -87,11 +80,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and on Windows `irm https://aisquare.studio/rlx/install.ps1 | iex`. Both lead to the same
   installers on GitHub, and a release's own pinned URL is unchanged.
 - **rlx names itself everywhere it speaks to you.** Its messages, errors, `--help`, the
-  doctor and asq's screens say rlx where they said aisquare, asq or "the CLI": "Quit the
-  other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title. `rlx --version`
-  prints `rlx 0.10.1`; installers of earlier releases read the version from it as before.
-  No `--json` key changes, and no machine value (names, statuses, ids), the doctor's
-  `asq instances` row included; only the human text inside a value says rlx.
+  doctor and the app's screens say rlx where they said `aisquare`, `asq` or "the CLI": "Quit
+  the other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title.
+  `rlx --version` prints `rlx 0.10.1`; installers of earlier releases read the version from
+  it as before. No `--json` key changes, and no machine value (names, statuses, ids), the
+  doctor's `asq instances` row included; only the human text inside a value says rlx.
 - **Every command it tells you to run starts with `rlx`**: `rlx accounts add`, `rlx doctor`,
   the doctor's one-click fixes. When another program's `rlx` comes first on your PATH, those
   lines say `aisquare …` instead, so a line you paste always runs rlx. Your agents'
@@ -101,89 +94,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   added again. The plugins describe themselves as rlx's; their install names
   (`aisquare@aisquare-cli`) do not change.
 - The package's page on PyPI links to rlx's site and its docs, and the README links the site.
-- **The board names each agent as the left pane does, where it showed `role·<id>`.** In
-  asq's board, `board -w` and `aisquare board`, a line's author, the sessions block, a
-  task's claim and the done archive read the agent's name, such as `coder-auth`. A session
-  the left pane has no name for reads as its role, such as `manager`. A note you wrote from
-  the command line reads `you` in asq's board and `board -w`, and `owner` in
-  `aisquare board`, which agents run too (it read `cli`). A renamed agent shows its new name.
-  An agent keeps its name after it stops, and so does the session it leaves when its
-  conversation is cleared or handed to another account, so the board never renames an
-  agent's lines to `coder`. When two sessions share a name, such as an agent you restarted
-  or cleared and its earlier session, the live one keeps the name and the earlier one adds
-  the time it started: `coder-auth (14:02)`. Two that started in the same minute add their
-  short ids instead. A long name is cut short with `…`, and the sessions block no longer
-  wraps a row onto a second line. The short id is still in a line's or a task's detail,
-  once (a name that carries it already does not repeat it), and `o` still opens the right
-  transcript. Agents still see ids, as they address each other by
-  them, and every `--json` is unchanged.
-- **asq opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
-  blue, #2F74F0, with teal, lime, green, amber and coral on near-black. Press `t` to
-  pick another theme, as before. A theme you picked earlier is kept, and so is one you
-  set in `TEXTUAL_THEME`. Every theme asq offered is still there. `rlx board -w`
-  shares your pick, so it opens in rlx too.
-- **The `rlx` at asq's top-left, and Welcome's heading, take their colour from the
+- **The board names each agent as the left pane does, where it showed `role·<id>`.** In the
+  app's board, `board -w` and `rlx board`, a line's author, the sessions block, a task's
+  claim and the done archive read the agent's name, such as `coder-auth`, or its role where
+  the left pane has none. A note you wrote from the command line reads `you`, and `owner` in
+  `aisquare board`, which agents run (it read `cli`). An agent keeps its name after it stops,
+  is cleared or moves to another account, and a renamed one shows its new name. Of two
+  sessions with one name, the earlier adds the time it started: `coder-auth (14:02)`. Long
+  names end in `…`, the short id stays in a line's detail, and `o` still opens the right
+  transcript. Agents still see ids, and every `--json` is unchanged.
+- **The app opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
+  blue, #2F74F0, with teal, lime, green, amber and coral on near-black. Press `t` to pick
+  another theme, as before. A theme you picked earlier is kept, and so is one you set in
+  `TEXTUAL_THEME`. Every theme it offered is still there. `rlx board -w` shares your pick,
+  so it opens in rlx too.
+- **The logo at the top-left, `r\x`, and Welcome's heading take their colour from the
   theme.** Under rlx they are #2F74F0. Under any other theme they take its main colour,
   or its text colour where the main colour is too faint to read as text (textual-dark's
   is), so they change when you press `t`. They keep that colour while the other pane has
-  the keyboard. Only colours change: nothing moves, at any width. asq cannot set your
+  the keyboard. Only colours change: nothing moves, at any width. rlx cannot set your
   terminal's font. JetBrains Mono, the font on rlx's web page, is the one we recommend.
-- **asq never asks you to type a command.** Its screens, notifications, tooltips and
-  dialogs no longer tell you to run `rlx …` or any other command. Where rlx has a button
-  or a page for it, they point there instead. An agent or tmux that is not installed links
-  its own install page, and an install rlx cannot update says to update it the way you
-  installed it. The Doctor's buttons say what they do ("Connect Claude Code", "Sign in
-  account 3"). A check that needs the command line offers *Ask the manager*, which hands
-  the fix to your project's manager; with no manager running, the check says one can fix
-  it. The messages asq shares with the command line say no command in asq either: a spawn
-  or stop that is refused, a prompt that was not typed, an account that is not found, a
-  usage reading's fix ("press Log in"), Start fresh's refusals, the captain's replies,
-  Remote's and Explainability's states, and the Doctor's details. On the Board, a limited
-  agent's chip and the usage-limit and pause lines leave out the `fleet switch` and
-  `fleet resume` they name; the agents still read them. The command line keeps every
-  command: `rlx doctor`, `--help` and the messages printed in a terminal are unchanged,
-  byte for byte, and so is everything an agent reads.
-- **Notifications in asq are small, sit top-right and are quick to clear.** They start
-  just under the top row, so they leave the agent bar's Stop and Restart clear. They are
-  one width, at most 46 columns, with no empty rows around the text. The newest is on
-  top, and at most three show at once. When a fourth arrives, the oldest one shown
-  waits, with its time stopped, and comes back when a slot frees. A `+N more` line
-  counts the ones waiting, and a click on it clears them. Each notification still goes
-  by itself after its own time, and that time stops while your pointer is over it. The
-  right-most column of each one dismisses it at once, and its `✕` sits on the first row.
-  Close the top one and the next moves up under your pointer, so clicking one spot
-  clears them all, however fast you click. A press and its release both in that column,
-  with no drag, dismiss. The rest of a notification is text: drag across it to select,
-  and the selection is copied, wherever the drag ends, the `✕` column or the pane beside
-  it included; only the notification's own text is copied. Double-click copies a word,
-  and a third click the whole. The `✕` turns to `✓` when it is copied, `↗` when it was
-  only sent to your terminal's clipboard, and `!` when it could not be copied. A click on
-  the text no longer dismisses it.
-- **One copy, the same everywhere in asq, and it says what really happened.** Board,
-  agent panes, notifications, Remote's link, Textual's own fields and the captain's
-  row copy all go through it. A clipboard tool that fails hands the copy to the next
-  one: Windows PowerShell after `clip.exe`, and `xsel` after `xclip`. A tool that
-  failed is skipped for a minute. Inside your own tmux, tmux now carries the copy to
-  your terminal (`tmux load-buffer -w`). An app's own copy never reached the terminal
-  there under tmux's default settings, over SSH included. The copy also goes through
-  tmux's and GNU screen's passthrough, for terminals that allow it. A copy too large
-  for a terminal's clipboard is not cut short: it says it could not be copied. The
-  captain's `copy_row` no longer says "copied" before it knows: asq's own toast says
-  whether it landed.
+- **The app never asks you to type a command.** Its screens, notifications, tooltips and
+  dialogs point to a button or a page instead: a missing agent or tmux links its install
+  page, an install rlx cannot update says to update it the way you installed it, and the
+  Doctor's buttons say what they do ("Connect Claude Code"). A check that needs the command
+  line offers *Ask the manager*, or says a manager can fix it. The messages it shares with
+  the command line leave the command out in the app, the usage-limit and pause lines
+  included; the agents still read it. The command line keeps every command, byte for byte,
+  and so does everything an agent reads.
+- **Notifications are small, sit top-right and are quick to clear.** They start under the
+  top row, clear of the agent bar's buttons, at most 46 columns wide. The newest is on top
+  and at most three show; the rest wait, their time stopped, under a `+N more` line that a
+  click clears. Each goes after its own time, which stops under your pointer. The
+  right-most column dismisses one at once, its `✕` on the first row, so one spot clears
+  them all however fast you click. The rest is text: a drag selects and copies it, a
+  double-click copies a word and a third click the whole, and the `✕` turns to `✓` once
+  copied (`↗` when only sent to your terminal's clipboard, `!` when it could not be). A
+  click on the text no longer dismisses it.
+- **One copy, the same everywhere in the app, and it says what really happened.** The
+  board, agent panes, notifications, Remote's link, text fields and the captain's row copy
+  all use it. A clipboard tool that fails hands the copy to the next (PowerShell after
+  `clip.exe`, `xsel` after `xclip`) and is skipped for a minute. Inside your own tmux, tmux
+  carries the copy to your terminal (`tmux load-buffer -w`), over SSH too, and tmux's and
+  GNU screen's passthrough carry it where the terminal allows. A copy too large for your
+  terminal's clipboard says it could not be copied, never cut short, and the captain's
+  `copy_row` says whether it landed.
 
 ### Fixed
 
 - **A session's end reaches the board on a slow machine.** Claude Code cut its hook off
   after 1.5 s; it now has 10 s. Upgrading gives existing installs the same, every account
-  included, whether with `rlx upgrade`, asq's Update or the one-line installer.
-- On Windows, quitting asq no longer waits behind asq's own timers, and neither does the work
-  it runs in the background.
+  included, whether with 0.10.0's own `aisquare upgrade`, the app's *Update* or the one-line
+  installer.
+- On Windows, quitting the app no longer waits behind its own timers, and neither does the
+  work it runs in the background.
 - **Codex's new default model's usage is priced.** Codex 0.169.1 runs gpt-6.2-sol by default,
   and its usage now has a cost, as does gpt-6.2-astra's and gpt-6.1-terra's. All three are
   priced at OpenAI's list prices as of 2026-11-17.
 - Nothing is typed into `/config`, `/resume` or another picker left open in a Claude Code
   agent, on Claude Code 2.1.327 too: a message told to it goes to the board, and the
   manager's wake-up waits until the picker is closed.
+- **On Claude Code 2.1.326, its question about trusting an `--add-dir` folder reads as the
+  folder-trust question:** the agent needs you and the row names the folder, where it read
+  working.
 
 ## [0.10.0] - 2026-11-16
 

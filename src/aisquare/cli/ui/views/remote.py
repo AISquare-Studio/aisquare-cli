@@ -150,6 +150,12 @@ class RemotePanel(ModalScreen[None]):
             with Horizontal(classes="row"):
                 yield Label("Link")
                 yield Button("Copy", id="remote-copy", compact=True)
+                new_link = Button("New link", id="remote-new-link", compact=True)
+                new_link.tooltip = (
+                    "a new link and a new password: the old link stops opening, and every device "
+                    "unlocks again"
+                )
+                yield new_link
             yield Static("", id="remote-link")
             yield Static("", id="remote-qr")
             with Horizontal(classes="row"):
@@ -210,7 +216,9 @@ class RemotePanel(ModalScreen[None]):
         self.query_one("#remote-write-hint", Static).update(
             "writes reach the fleet" if writes else read_only_reason()
         )
-        self.query_one("#remote-unlocks", Static).update(self._unlocks_text(status))
+        self.query_one("#remote-unlocks", Static).update(
+            self._unlocks_text(status, elsewhere=elsewhere)
+        )
         # With the token remote.json holds now: a --new-link from a shell redraws both.
         url, public = controller.remote_link()
         if (url, elsewhere) != self._qr_url:
@@ -221,6 +229,9 @@ class RemotePanel(ModalScreen[None]):
             # first-time user without ngrok most of all (sweep of #243).
             self.query_one("#remote-qr", Static).update(qr_art(url) if url and public else "")
         self.query_one("#remote-regen", Button).disabled = not running
+        # New link, as Regenerate, acts on the Remote this process serves: off, or served
+        # elsewhere, a press would change nothing (review of #542, F1).
+        self.query_one("#remote-new-link", Button).disabled = not running
         # The timer of a Remote another process serves is that process's: a pick here saved
         # this UI's next one and changed nothing on the Remote the panel said was on.
         self.query_one("#remote-auto-off", Select).disabled = elsewhere
@@ -272,16 +283,23 @@ class RemotePanel(ModalScreen[None]):
             text.append("  · no auto-off", style="dim")
         return text
 
-    def _unlocks_text(self, status: dict[str, Any]) -> Text:
-        """Wrong passphrases lately, and, once they paused new unlocks, what to do about it."""
+    def _unlocks_text(self, status: dict[str, Any], *, elsewhere: bool = False) -> Text:
+        """Wrong passphrases lately, and, once they paused new unlocks, what to do about it:
+        New link here, or where Remote runs when another process serves it (its New link is
+        disabled here, as Regenerate is)."""
         failed, until = self.controller.unlock_failures(status)
         if not failed:
             return Text("")
         if until is None:
             return Text(f"{failed} failed unlocks in 30 min", style="dim")
+        if elsewhere:
+            return Text(
+                f"{failed} failed unlocks in 30 min — new unlocks paused; if the link leaked, "
+                "give it a new link where Remote runs: another process or another rlx"
+            )
         return Text(
-            f"{failed} failed unlocks in 30 min — new unlocks paused; Regenerate sets a new "
-            "password"
+            f"{failed} failed unlocks in 30 min — new unlocks paused; if the link leaked, New "
+            "link replaces it and the password"
         )
 
     def _paint_devices(self, devices: list[dict[str, Any]]) -> None:
@@ -359,6 +377,8 @@ class RemotePanel(ModalScreen[None]):
         thread; the fleet UI says each once it is done (``RemoteController.on_done``)."""
         if event.button.id == "remote-regen":
             self.controller.regenerate_password(wait=False)
+        elif event.button.id == "remote-new-link":
+            self.controller.regenerate_password(wait=False, new_link=True)
         elif event.button.id == "remote-copy":
             url = self.controller.link_url()
             if url is not None:

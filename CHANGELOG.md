@@ -147,6 +147,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Codex's new default model's usage is priced.** Codex 0.169.1 runs gpt-6.2-sol by default,
   and its usage now has a cost, as does gpt-6.2-astra's and gpt-6.1-terra's. All three are
   priced at OpenAI's list prices as of 2026-11-17.
+- Nothing is typed into `/config`, `/resume` or another picker left open in a Claude Code
+  agent, on Claude Code 2.1.327 too: a message told to it goes to the board, and the
+  manager's wake-up waits until the picker is closed.
 - **On Claude Code 2.1.326, its question about trusting an `--add-dir` folder reads as the
   folder-trust question:** the agent needs you and the row names the folder, where it read
   working.

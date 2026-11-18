@@ -175,6 +175,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after 1.5 s; it now has 10 s, and upgrading gives existing installs the same.
 - On Windows, quitting asq no longer waits behind asq's own timers, and neither does the work
   it runs in the background.
+- A message told to a Claude Code agent with `/config`, `/resume` or another picker open is
+  filed on the board, never typed into the picker, on Claude Code 2.1.327 too.
 
 ## [0.10.0] - 2026-11-16
 

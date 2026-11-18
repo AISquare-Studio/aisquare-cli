@@ -14,6 +14,13 @@ fleet's named rule, 72 to 200 columns) still types. Each screen is a real captur
 The same captures pin R6 F2: in a fleet window 2.1.318 leaves its box's named rule under
 its permission chooser, which the reader now reads past, so the captain's ``press``
 answers it (``prompt_showing``) and ``say`` names it.
+
+R25: Claude Code 2.1.327 (2026-11-17) reworded its pickers' footers (``Esc to close``,
+``Esc to go back``), and a short pane cuts a footer off, so ``/config`` and ``/resume`` read
+as no dialog and a tell was pasted into their search box and sent with an Enter, said to be
+typed. Every picker draws the same ``▔`` edge where the box was (``claude_screen.PANEL_EDGE``),
+on 2.1.318 too, where ``/hooks``, and ``/model``, ``/status`` and ``/help`` at 50x22, read as no
+dialog either. Their real captures, at 50x22 and 120x40, are read the same way here.
 """
 
 from __future__ import annotations
@@ -41,11 +48,18 @@ project = fleet_suite.project
 
 SCREENS = Path(__file__).parent / "fixtures" / "agent_screens" / "claude-code.json"
 VERSION = "Claude Code 2.1.318"
+#: R25's: the Claude Code that reworded its pickers' footers.
+NEW = "Claude Code 2.1.327"
 
 
 def _captures(kind: str) -> dict[str, list[str]]:
     shown: list[dict[str, Any]] = json.loads(SCREENS.read_text(encoding="utf-8"))[kind]
-    return {s["what"]: s["rows"] for s in shown if s["what"].startswith(VERSION)}
+    return {s["what"]: s["rows"] for s in shown if s["what"].startswith((VERSION, NEW))}
+
+
+def _picker(what: str) -> str:
+    """The slash command a capture's ``what`` names (``Claude Code 2.1.327's /config …``)."""
+    return what.split("'s ")[1].split(" ")[0]
 
 
 PICKERS = {
@@ -57,13 +71,27 @@ IDLE = {what: rows for what, rows in _captures("not_dialogs").items() if " idle 
 CHOOSERS = {what: rows for what, rows in _captures("dialogs").items() if "chooser" in what}
 
 
+#: Every picker 2.1.327 opens at its idle prompt (R25), each captured at both sizes.
+NEW_PICKERS = {
+    "/config", "/resume", "/model", "/permissions", "/hooks", "/memory", "/status", "/theme",
+    "/help",
+}  # fmt: skip
+
+
 def test_the_captures_cover_every_shape_the_ruling_names() -> None:
     """/resume, /model and /config; idle with a draft, after a turn, named and not, 72 to
-    200 columns; the chooser in a fleet window at two widths and started by hand."""
-    assert {w.split("'s ")[1].split(" ")[0] for w in PICKERS} == {"/resume", "/model", "/config"}
-    assert len(IDLE) == 5 and any("draft" in w for w in IDLE) and any("by hand" in w for w in IDLE)
-    assert {len(max(rows, key=len)) for rows in IDLE.values()} >= {72, 120, 200}
+    200 columns; the chooser in a fleet window at two widths and started by hand. And R25's:
+    every picker 2.1.327 opens, at asq's 50x22 and at 120x40, and its idle screen at both."""
+    old = {w: rows for w, rows in IDLE.items() if w.startswith(VERSION)}
+    picked = {_picker(w) for w in PICKERS if w.startswith(VERSION)}
+    assert picked >= {"/resume", "/model", "/config"}
+    assert len(old) == 5 and any("draft" in w for w in old) and any("by hand" in w for w in old)
+    assert {len(max(rows, key=len)) for rows in old.values()} >= {72, 120, 200}
     assert len(CHOOSERS) == 3
+    for size in ("50x22", "120x40"):
+        shown = {_picker(w) for w in PICKERS if w.startswith(NEW) and f" at {size} " in w}
+        assert shown == NEW_PICKERS, size
+        assert [w for w in IDLE if w.startswith(NEW) and f" at {size} " in w], size
 
 
 @pytest.mark.parametrize("what", sorted(PICKERS))
@@ -123,6 +151,49 @@ def test_the_permission_chooser_reads_with_its_keys_in_a_fleet_window_and_by_han
     assert shown.question == "Do you want to proceed?"
     assert screen.modal(CHOOSERS[what]) == "a numbered choice"
     assert not screen.ready(CHOOSERS[what])
+
+
+# --- R25: a panel is read by the edge it draws where the box was ------------------------------
+
+#: The captures no footer reads: cut off on their pane, or worded as no footer rule knew.
+EDGE_ONLY = sorted(w for w in PICKERS if "footer cut off" in w or "no footer rule knew" in w)
+#: The edge as 2.1.327 draws it over a 50-column pane, the effort label set in it.
+EDGE = "▔" * 29 + " ◐ medium · /effort ▔"
+
+
+def test_the_pickers_no_footer_reads_are_captured_on_both_versions_and_short_panes() -> None:
+    assert any(w.startswith(NEW) and " at 50x22 " in w for w in EDGE_ONLY)
+    assert any(w.startswith(NEW) and " at 50x12 " in w for w in EDGE_ONLY)
+    assert any(w.startswith(VERSION) for w in EDGE_ONLY)
+
+
+@pytest.mark.parametrize("what", EDGE_ONLY)
+def test_a_picker_no_footer_reads_is_read_as_a_dialog_by_its_edge(what: str) -> None:
+    screen = screen_of(get_adapter("claude-code"))
+    rows = PICKERS[what]
+    assert screen.modal(rows) == "a dialog waiting for Enter or Esc"
+    without = [row for row in rows if not row.lstrip().startswith("▔")]
+    assert len(without) == len(rows) - 1, "one edge"
+    assert screen.modal(without) is None, "the edge is what reads it"
+
+
+@pytest.mark.parametrize("what", sorted(w for w in PICKERS if w.startswith(NEW)))
+def test_every_picker_of_claude_2_1_327_is_neither_ready_nor_its_box(what: str) -> None:
+    """Nothing types into it: the fleet's ``ready`` and the captain's ``drawn`` both say no."""
+    screen = screen_of(get_adapter("claude-code"))
+    rows = PICKERS[what]
+    assert screen.modal(rows) in ("a dialog waiting for Enter or Esc", "a numbered choice")
+    assert not screen.ready(rows) and not screen.drawn(rows)
+
+
+@pytest.mark.parametrize("what", sorted(IDLE))
+def test_an_edge_above_a_drawn_box_is_no_dialog(what: str) -> None:
+    """The edge is read only with no box drawn: a reply that quotes a panel (a capture pasted
+    into the conversation) leaves an idle box ready and names nothing."""
+    screen = screen_of(get_adapter("claude-code"))
+    quoted = [EDGE, *IDLE[what]]
+    assert screen.modal(quoted) is None
+    assert screen.ready(quoted) == screen.ready(IDLE[what]) is True
 
 
 # --- #87's N5: a start the board has not seen -------------------------------------------------

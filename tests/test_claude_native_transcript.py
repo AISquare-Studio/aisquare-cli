@@ -256,8 +256,15 @@ def test_real_claude_code_permission_chooser_in_a_fleet_window_is_answered_by_th
     assert not (native.workspace / "no.txt").exists(), "a No runs nothing"
 
 
-#: Claude Code's pickers a human opens at its idle prompt, and the words each one shows.
-PICKERS = {"/resume": "Resume session", "/model": "Select model", "/config": "Esc to clear"}
+#: Claude Code's pickers a human opens at its idle prompt, and the words each one shows: on
+#: 2.1.318, or on 2.1.327, which reworded /config's footer to "Esc to go back" (R25). /hooks
+#: (R25): "Esc to close" on both, a footer no rule read; its edge is what reads it.
+PICKERS = {
+    "/resume": ("Resume session",),
+    "/model": ("Select model",),
+    "/config": ("Esc to clear", "Esc to go back"),
+    "/hooks": ("Enter to view",),
+}
 
 
 def _at_a_picker(on: Native, picker: str) -> tuple[str, str, list[str]]:
@@ -268,7 +275,9 @@ def _at_a_picker(on: Native, picker: str) -> tuple[str, str, list[str]]:
     on.until(lambda: on.state(receipt.agent.session_id) == "waiting", 30, "idle", pane)
     on.ready(pane)
     on.type(pane, picker)
-    on.until(lambda: PICKERS[picker] in on.screen(pane), 20, "the picker", pane)
+    on.until(
+        lambda: any(words in on.screen(pane) for words in PICKERS[picker]), 20, "the picker", pane
+    )
     time.sleep(0.5)
     return receipt.agent.label, pane, on.rows(pane)
 

@@ -2614,6 +2614,16 @@ def test_sites_running_another_install_are_left_and_named(tool: Tool, tmp_path: 
     assert left[0].reason is not None and str(other) in left[0].reason
 
 
+def _runs(site: Path, program: Path) -> list[bool]:
+    """For each aisquare hook in ``site``'s settings.json, whether it runs ``program``: the
+    program of each parsed command (``agent_core.hook_binary``), compared as the upgrade
+    compares them, never a path searched for in the file's text, which escapes a Windows
+    path's backslashes."""
+    wanted = agent_core.dir_identity(program)
+    found = map(agent_core.hook_binary, agent_core.hook_commands("claude-code", site))
+    return [b is not None and agent_core.dir_identity(b.program) == wanted for b in found]
+
+
 def test_the_installers_recorded_refresh_leaves_another_installs_site_as_it_was(
     runner: CliRunner, tool: Tool, tmp_path: Path
 ) -> None:
@@ -2638,7 +2648,7 @@ def test_the_installers_recorded_refresh_leaves_another_installs_site_as_it_was(
     assert [site["config_dir"] for site in said["left"]] == [str(theirs)], said
     assert str(other) in said["left"][0]["reason"], said
     assert (theirs / "settings.json").read_bytes() == before, "another install's, untouched"
-    assert str(tool.script) not in (ours / "settings.json").read_text(encoding="utf-8")
+    assert _runs(ours, tool.script) and not any(_runs(ours, tool.script)), "ours, rewritten"
 
 
 def test_the_installers_recorded_refresh_says_a_failed_rewrite_and_exits_1_after_the_rest(
@@ -2663,8 +2673,8 @@ def test_the_installers_recorded_refresh_says_a_failed_rewrite_and_exits_1_after
     assert result.exit_code == 1, result.output
     assert f"✗ claude-code's hooks in {first}: No space left on device" in result.output
     assert f"✓ claude-code's hooks current in {second}" in result.output
-    assert str(tool.script) in (first / "settings.json").read_text(encoding="utf-8")
-    assert str(tool.script) not in (second / "settings.json").read_text(encoding="utf-8")
+    assert _runs(first, tool.script) and all(_runs(first, tool.script)), "the failed one, as was"
+    assert _runs(second, tool.script) and not any(_runs(second, tool.script)), "rewritten"
 
 
 def test_the_installers_recorded_refresh_says_where_codex_asks_for_a_review(

@@ -12,7 +12,10 @@ page on the web app (``/rlx``, ``/cli``), a device code is bound to the client
 that started it (another client's poll for it is ``invalid_grant``), and a
 token is revoked only by the client it was issued to. ``clients=("aisquare-cli",)``
 is a server from before that: it answers an rlx start with HTTP 401
-``invalid_client``.
+``invalid_client``, as production and staging do (cedar-swan, live, 2026-11-18), or with 400
+(``unknown_client_status``), which RFC 6749 allows where no client authentication is used.
+Ahead of the client check it may answer 429 ``too_many_requests`` with ``Retry-After`` (the
+per-IP device-start limit) or 503 ``temporarily_unavailable`` (the OAuth kill switch).
 
 Same pattern as ``tests/test_explainability_ops._gateway``: a real HTTP
 server on an ephemeral port, so the code under test exercises its actual
@@ -50,6 +53,8 @@ class IdentityProviderStub:
         clients: tuple[str, ...] = (RLX, CLI),
         frontend: str | None = None,
         start_error: str = "temporarily_unavailable",
+        unknown_client_status: int = 401,
+        start_retry_after: int | None = None,
     ) -> None:
         self.token_script = list(token_script or ["pending", "token"])
         self.discovery = discovery
@@ -60,6 +65,10 @@ class IdentityProviderStub:
         self.start_status = start_status
         #: The ``error`` a ``start_status`` other than 200 or 429 answers with.
         self.start_error = start_error
+        #: The status a start by a client not in ``clients`` gets, with ``invalid_client``.
+        self.unknown_client_status = unknown_client_status
+        #: A ``Retry-After`` on a start answered with ``start_status`` (a 503's, say).
+        self.start_retry_after = start_retry_after
         self.clients = clients
         self.requests: list[dict[str, Any]] = []
         self.issued: list[str] = []
@@ -178,16 +187,24 @@ class IdentityProviderStub:
         if path == "/o/device-authorization/":
             if self.start_status == 429:
                 handler._send(
-                    429, {"error": "rate_limited"}, {"Retry-After": str(self.retry_after)}
+                    429,
+                    {"error": "too_many_requests", "error_description": "Too many requests."},
+                    {"Retry-After": str(self.retry_after)},
                 )
                 return
             if self.start_status != 200:
-                handler._send(self.start_status, {"error": self.start_error})
+                said = (
+                    {"Retry-After": str(self.start_retry_after)}
+                    if self.start_retry_after is not None
+                    else None
+                )
+                handler._send(self.start_status, {"error": self.start_error}, said)
                 return
             client = record["form"].get("client_id", "")
             if client not in self.clients:
                 handler._send(
-                    401, {"error": "invalid_client", "error_description": "Unknown client_id."}
+                    self.unknown_client_status,
+                    {"error": "invalid_client", "error_description": "Unknown client_id."},
                 )
                 return
             self.started_by[DEVICE_CODE] = client

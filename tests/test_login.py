@@ -238,14 +238,35 @@ def test_the_links_shown_are_the_ones_the_server_sent(
         idp.close()
 
 
+@pytest.mark.parametrize("status", [401, 400])
+def test_an_old_server_answering_400_or_401_invalid_client_falls_back(
+    runner: CliRunner, status: int
+) -> None:
+    """R26a (the final review of #503, M2): production and staging answer an unknown client
+    401 ``{"error": "invalid_client", "error_description": "Unknown client_id."}`` (cedar-swan,
+    live, 2026-11-18), and RFC 6749 lets a server answer it 400 where no client
+    authentication is used. Either falls back, read from the JSON body."""
+    old = IdentityProviderStub(clients=(CLI,), frontend=FRONTEND, unknown_client_status=status)
+    try:
+        result = _login(runner, old.url)
+        assert result.exit_code == 0, result.output
+        assert f"{FRONTEND}/cli?code={USER_CODE}" in result.output
+        assert old.starts() == [RLX, CLI]
+        assert _stored()["iam_client_id"] == CLI
+    finally:
+        old.close()
+
+
 @pytest.mark.parametrize(
     ("status", "error", "code"),
     [
         (401, "invalid_request", "unsupported_server"),  # a 401, but not invalid_client
-        (400, "invalid_client", "unsupported_server"),  # invalid_client, but not a 401
-        (403, "invalid_client", "unsupported_server"),
-        (429, "rate_limited", "rate_limited"),
-        (503, "temporarily_unavailable", "paused"),
+        (401, "unauthorized_client", "unsupported_server"),  # the client is known, not allowed
+        (400, "unauthorized_client", "unsupported_server"),
+        (400, "invalid_request", "unsupported_server"),  # a 400, but not invalid_client
+        (403, "invalid_client", "unsupported_server"),  # invalid_client, but not 400 or 401
+        (429, "too_many_requests", "rate_limited"),  # the per-IP limit, before the client check
+        (503, "temporarily_unavailable", "paused"),  # the kill switch, before the client check
         (500, "server_error", "unreachable"),
     ],
 )
@@ -257,8 +278,51 @@ def test_no_other_answer_to_the_start_falls_back(
         result = _login(runner, idp.url, json_mode=True)
         assert result.exit_code == 1
         assert json.loads(result.stdout)["error"] == code
-        assert idp.starts() == [RLX], "only exactly HTTP 401 invalid_client is an old server"
+        assert idp.starts() == [RLX], "only HTTP 400 or 401 invalid_client is an old server"
         assert idp.polls() == 0
+    finally:
+        idp.close()
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "said"),
+    [(30, "Try again in 1 minute."), (90, "Try again in 2 minutes."), (600, "in 10 minutes.")],
+)
+def test_a_rate_limited_start_says_when_to_try_again_and_asks_once(
+    runner: CliRunner, retry_after: int, said: str
+) -> None:
+    """The per-IP device-start limit comes before the client check (cedar-swan): 429
+    ``too_many_requests`` with ``Retry-After``. It is no reason to try the other client, and
+    the sign-in does not wait it out: the person is told when to try again, in whole
+    minutes rounded up."""
+    idp = IdentityProviderStub(start_status=429)
+    idp.retry_after = retry_after
+    try:
+        result = _login(runner, idp.url)
+        assert result.exit_code == 1
+        assert "Too many sign-in attempts from this network." in result.output, result.output
+        assert said in result.output, result.output
+        assert idp.starts() == [RLX] and idp.polls() == 0
+    finally:
+        idp.close()
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "said"),
+    [(None, "Try again later."), (300, "Try again in 5 minutes.")],
+)
+def test_a_paused_start_says_when_to_try_again_and_asks_once(
+    runner: CliRunner, retry_after: int | None, said: str
+) -> None:
+    """The OAuth kill switch comes before the client check too (cedar-swan): 503
+    ``temporarily_unavailable``. No fallback; the person is told when to try again, by the
+    server's ``Retry-After`` where it sent one."""
+    idp = IdentityProviderStub(start_status=503, start_retry_after=retry_after)
+    try:
+        result = _login(runner, idp.url)
+        assert result.exit_code == 1
+        assert f"Sign-in from rlx is temporarily paused. {said}" in result.output, result.output
+        assert idp.starts() == [RLX] and idp.polls() == 0
     finally:
         idp.close()
 

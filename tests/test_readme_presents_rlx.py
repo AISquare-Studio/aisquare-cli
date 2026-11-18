@@ -14,8 +14,10 @@ version number in marketing copy."
 Seven rules, each a callable the controls below reach with known input (CONTRIBUTING,
 "Writing a guard that still guards"):
 
-- ``_title`` — the page opens with ``# rlx``, and never explains the name ("short for relax").
-  Nor does any page the README links, or PyPI's summary (``NAMED_PAGES``).
+- ``_title`` — the page opens with the r\\x logo as its H1, alt text ``rlx`` (``LOGO_H1``, RLX
+  R28: the owner wanted the brand logo in place of a plain ``# rlx``), and never explains the
+  name ("short for relax"). Nor does any page the README links, or PyPI's summary
+  (``NAMED_PAGES``). The logo is ``docs/assets/rlx-logo.svg``: the /rlx page's mark, outlined.
 - ``_versions`` — no version number (``v0.10.0``, ``0.9.0``) outside the Requirements section
   and fenced code: a pin is written ``vX.Y.Z``. Requirements' minimums (Codex, tmux, Node,
   Python) are what a machine needs, not copy, and a fence is a command as it is typed.
@@ -51,6 +53,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from xml.etree import ElementTree
 
 REPO = Path(__file__).resolve().parents[1]
 README = REPO / "README.md"
@@ -64,6 +67,12 @@ RENAMED_PAGES = (
     "docs/usage-telemetry.md",
     "plugins/codex/README.md",
 )
+
+#: The README's H1: the r\x logo (RLX R28), an absolute URL because the README is PyPI's page too.
+LOGO_H1 = (
+    "# ![rlx](https://raw.githubusercontent.com/AISquare-Studio/rlx/main/docs/assets/rlx-logo.svg)"
+)
+LOGO = REPO / "docs" / "assets" / "rlx-logo.svg"
 
 #: Where the name could be explained: every renamed page, and PyPI's summary in pyproject.
 NAMED_PAGES = (*RENAMED_PAGES, "pyproject.toml")
@@ -149,8 +158,8 @@ def _segments(markdown: str) -> list[tuple[int, str]]:
 def _title(markdown: str) -> list[str]:
     problems: list[str] = []
     first = markdown.splitlines()[0] if markdown else ""
-    if first != "# rlx":
-        problems.append(f"the page opens with {first!r}, not '# rlx'")
+    if first != LOGO_H1:
+        problems.append(f"the page opens with {first!r}, not the logo {LOGO_H1!r}")
     said = len(_SHORT_FOR.findall(markdown))
     if said:
         problems.append(f"'short for relax' is said {said} times: the name needs no explaining")
@@ -233,6 +242,42 @@ def test_the_readme_is_titled_rlx_and_does_not_explain_the_name() -> None:
     assert not _title(_readme())
 
 
+def _logo_problems(svg: str) -> list[str]:
+    """What keeps an SVG from being the r\\x logo as an <img> shows it on GitHub and PyPI."""
+    root = ElementTree.fromstring(svg)
+    tags = {element.tag.rpartition("}")[2] for element in root.iter()}
+    fills = {fill for element in root.iter() if (fill := element.get("fill"))}
+    problems = [
+        f"draws {tag}: the glyphs must be outlines" for tag in sorted(tags & {"text", "style"})
+    ]
+    problems += [
+        f"runs or loads {tag}" for tag in sorted(tags & {"script", "image", "use", "foreignObject"})
+    ]
+    if "path" not in tags:
+        problems.append("draws no path")
+    if fills != {"#2F74F0"}:
+        problems.append(f"fills {sorted(fills)}, not only the brand blue #2F74F0")
+    if root.get("role") != "img" or root.findtext("{http://www.w3.org/2000/svg}title") != "rlx":
+        problems.append('is not role="img" titled rlx')
+    if not 48 <= float(root.get("height", "0")) <= 64:
+        problems.append(f"is {root.get('height')!r} px tall, not 48-64")
+    if re.search(r"(?:href|url\(|@import)", svg):
+        problems.append("references something outside itself")
+    return problems
+
+
+def test_the_logo_is_the_outlined_mark() -> None:
+    assert not _logo_problems(LOGO.read_text(encoding="utf-8"))
+    # Controls: the rule still sees each way a logo can go wrong.
+    good = LOGO.read_text(encoding="utf-8")
+    assert _logo_problems(
+        good.replace("<path ", '<text font-family="JetBrains Mono">rlx</text><path ')
+    )
+    assert _logo_problems(good.replace("#2F74F0", "#2f74f1"))
+    assert _logo_problems(good.replace("<title>rlx</title>", ""))
+    assert _logo_problems(good.replace("</svg>", '<image href="https://example.com/x.png"/></svg>'))
+
+
 def test_no_page_explains_the_name() -> None:
     offending = [page for page in NAMED_PAGES if _SHORT_FOR.search((REPO / page).read_text())]
     assert not offending, f"'short for relax' (the owner: say less): {offending}"
@@ -298,13 +343,15 @@ def test_no_page_runs_the_aisquare_integration_under_another_name() -> None:
 # --- controls: synthetic input, so they keep controlling whatever the pages say ------------------
 
 
-def test_a_title_that_is_not_rlx_or_explains_the_name_is_caught() -> None:
+def test_a_title_that_is_not_the_logo_or_explains_the_name_is_caught() -> None:
     assert _title("# aisquare\n\nMade by a developer.\n")
-    assert _title("# rlx\n\nrlx is short for relax.\n")
-    assert _title("# rlx\n\nrlx, Short\nfor relax.\n")
-    assert _title("") == ["the page opens with '', not '# rlx'"]
-    assert not _title("# rlx\n\nMade by a developer, for developers.\n")
-    assert not _title("# rlx\n\n`relax` starts it too.\n")
+    assert _title("# rlx\n\nMade by a developer.\n"), "the plain heading the logo replaced passed"
+    assert _title(LOGO_H1.replace("![rlx]", "![]") + "\n"), "a logo with no alt text passed"
+    assert _title(f"{LOGO_H1}\n\nrlx is short for relax.\n")
+    assert _title(f"{LOGO_H1}\n\nrlx, Short\nfor relax.\n")
+    assert _title("") == [f"the page opens with '', not the logo {LOGO_H1!r}"]
+    assert not _title(f"{LOGO_H1}\n\nMade by a developer, for developers.\n")
+    assert not _title(f"{LOGO_H1}\n\n`relax` starts it too.\n")
 
 
 def test_a_version_in_copy_is_caught_and_requirements_and_code_are_not() -> None:

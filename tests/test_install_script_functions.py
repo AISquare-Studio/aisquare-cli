@@ -3813,6 +3813,126 @@ def test_a_run_from_that_repository_lists_hooks_it_could_not_write(
     assert result.returncode == 2
 
 
+def _session_end_timeouts(config_dir: Path) -> list[object]:
+    """The ``timeout`` of each of aisquare's SessionEnd hooks in ``config_dir``: ``None`` for
+    one with none, as 0.10.0 wrote it."""
+    settings = json.loads((config_dir / "settings.json").read_text(encoding="utf-8"))
+    return [
+        item.get("timeout")
+        for group in settings["hooks"]["SessionEnd"]
+        for item in group["hooks"]
+        if agent_core._is_aisquare_hook_command(str(item.get("command", "")))
+    ]
+
+
+def test_an_upgrade_by_the_installer_gives_every_account_home_its_session_end_time(
+    tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """R26a (the final review of #503, M1). An upgrade by this script is `uv tool install
+    --force` and then `init`, which wires the config dir this shell reads, and no account
+    home. A fleet launch loads no plugin, so an account home's own settings.json hooks are
+    what its agents run, and from 0.10.0 they named no SessionEnd timeout: Claude Code cut
+    the hook off at 1.5 s, doctor read the home short, and the run exited 2. init_home now
+    has the new install rewrite every directory an upgrade re-connects (`agents
+    refresh-hooks --recorded`): both get 10 s, doctor is green, and the run exits 0."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.core.agent_adapters.claude_code import SESSION_END_TIMEOUT_SECONDS
+
+    claude = isolated_agent_home / ".claude"
+    claude.mkdir(parents=True)
+    (claude / "settings.json").write_text("{}", encoding="utf-8")
+    slot = accounts_core.accounts_root() / "2"
+    slot.mkdir(parents=True)
+    cli = _the_cli(tmp_path)
+    path = f"{cli}:{base_path(tmp_path)}"
+    env = {**os.environ, "HOME": str(isolated_agent_home), "PATH": path}
+    for directory in (claude, slot):  # connected by 0.10.0, then its session end as it wrote it
+        argv = [str(cli / "aisquare"), "agents", "connect", "claude-code"]
+        connected = subprocess.run(
+            [*argv, "--config-dir", str(directory)],
+            env=env, capture_output=True, text=True, timeout=120, check=False,
+        )  # fmt: skip
+        assert connected.returncode == 0, connected.stdout + connected.stderr
+        settings_path = directory / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        for group in settings["hooks"]["SessionEnd"]:
+            for item in group["hooks"]:
+                item.pop("timeout", None)
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        assert _session_end_timeouts(directory) == [None], directory
+    before = _claude_code_row_from(tmp_path, cli, path, isolated_agent_home)
+    assert before["status"] == "warn" and "too little time" in before["detail"], before
+
+    result = sh(
+        "DRY_RUN=0; WANT_SYSTEM_DEPS=0; WANT_PROJECT=0; init_home; run_doctor >/dev/null; "
+        'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
+        cwd=tmp_path,
+        env={"HOME": str(isolated_agent_home)},
+        path=path,
+        no_terminal=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UNEXPECTED=0" in result.stdout, result.stdout
+    for directory in (claude, slot):
+        assert _session_end_timeouts(directory) == [SESSION_END_TIMEOUT_SECONDS], directory
+    after = _claude_code_row_from(tmp_path, cli, path, isolated_agent_home)
+    assert after["status"] == "ok" and "too little time" not in after["detail"], after
+
+
+def test_a_refresh_that_fails_is_a_warning_and_the_run_goes_on(tmp_path: Path) -> None:
+    """R26a: a CLI whose `agents refresh-hooks --recorded` fails (a release before it, a full
+    disk) costs the run a warning, never the install: init_home goes on and says it is set
+    up, and doctor afterwards names any directory still short."""
+    cli = stub_dir(
+        tmp_path, "cli", "aisquare", body='[ "$1 $2" = "agents refresh-hooks" ] && exit 1\nexit 0'
+    )
+    result = sh(
+        'DRY_RUN=0; WANT_PROJECT=0; init_home; echo "AFTER=$?"', path=f"{cli}:{base_path(tmp_path)}"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "warn `aisquare agents refresh-hooks --recorded` failed" in result.stderr, result.stderr
+    assert "set up" in result.stdout and "AFTER=0" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("flags", "refreshed"),
+    [("--yes --no-project", True), ("--no-agent --yes --no-project", False)],
+    ids=["an agent", "--no-agent"],
+)
+def test_the_refresh_runs_after_init_only_with_an_agent(
+    tmp_path: Path, flags: str, refreshed: bool
+) -> None:
+    """--no-agent skips the agents and their hooks: nothing is refreshed then. With an agent,
+    the refresh runs once, after init."""
+    calls = tmp_path / "calls.log"
+    cli = stub_dir(tmp_path, "cli", "aisquare", body=f'printf "%s\\n" "$*" >> "{calls}"\nexit 0')
+    result = sh(f"parse_args {flags}; DRY_RUN=0; init_home", path=f"{cli}:{base_path(tmp_path)}")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    ran = calls.read_text(encoding="utf-8").splitlines()
+    assert ran[0].startswith("init --local --yes"), ran
+    assert (ran[1:] == ["agents refresh-hooks --recorded"]) is refreshed, ran
+    assert any("refresh-hooks" in line for line in ran) is refreshed, ran
+
+
+@pytest.mark.parametrize(
+    ("flags", "said"),
+    [("--dry-run --yes --no-project", True), ("--dry-run --no-agent --yes --no-project", False)],
+    ids=["an agent", "--no-agent"],
+)
+def test_a_dry_run_says_the_refresh_only_with_an_agent(
+    tmp_path: Path, flags: str, said: bool
+) -> None:
+    result = sh(f"parse_args {flags}; init_home", path=base_path(tmp_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "would run: aisquare init --local --yes" in result.stdout, result.stdout
+    line = "would run: aisquare agents refresh-hooks --recorded"
+    assert (line in result.stdout) is said, result.stdout
+
+
 def _claude_code_doctor(status: str, detail: str) -> str:
     """A doctor payload with an amber brain and this claude-code row."""
     return json.dumps(

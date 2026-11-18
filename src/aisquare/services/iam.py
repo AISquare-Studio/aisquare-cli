@@ -38,6 +38,10 @@ CLIENT_ID = "rlx"
 FALLBACK_CLIENT_ID = "aisquare-cli"
 """The client a server that does not know ``rlx`` yet still serves, at its ``/cli`` page.
 Also the client of every session stored before 0.10.1: 0.7.0 to 0.10.0 recorded it."""
+UNKNOWN_CLIENT_STATUSES = frozenset({400, 401})
+"""The statuses with which an ``invalid_client`` start means "this server does not know rlx":
+401, as production and staging answer, and 400, which RFC 6749 allows where no client
+authentication is used. Either falls back to :data:`FALLBACK_CLIENT_ID`."""
 SCOPE = "openid profile email aisquare"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
@@ -97,11 +101,17 @@ class HttpResult:
     headers: dict[str, str]
 
     def retry_after(self, default: int = 30) -> int:
+        said = self.said_retry_after()
+        return default if said is None else said
+
+    def said_retry_after(self) -> int | None:
+        """The ``Retry-After`` the server sent, in whole seconds (at least one), or ``None``
+        where it sent none, or none in seconds."""
         raw = self.headers.get("retry-after") or self.headers.get("Retry-After") or ""
         try:
             return max(1, int(raw))
         except ValueError:
-            return default
+            return None
 
     @property
     def error(self) -> str | None:
@@ -414,16 +424,34 @@ def _safe_link(value: Any, issuer: str) -> str:
 # --------------------------------------------------------------------------- device flow
 
 
+def _in_minutes(seconds: int) -> str:
+    """A wait as a person reads it: whole minutes, rounded up, at least one."""
+    minutes = max(1, -(-seconds // 60))
+    return f"{minutes} minute{'' if minutes == 1 else 's'}"
+
+
 def _reject_common(result: HttpResult, what: str) -> None:
+    """The answers a server may give before it looks at the request: its per-IP rate limit
+    (429 ``too_many_requests`` with ``Retry-After``) and its kill switch (503
+    ``temporarily_unavailable``), and a server error. Each is said with when to try again, the
+    server's ``Retry-After`` where it sent one: a sign-in is the person's to start again, and a
+    wait of minutes is not one to sit through in silence (R26a)."""
     if result.status == 429:
+        wait = result.retry_after()
         raise IamError(
             "rate_limited",
-            "Too many sign-in attempts from this network. "
-            f"Try again in {max(1, result.retry_after() // 60)} minutes.",
-            retry_after=result.retry_after(),
+            f"Too many sign-in attempts from this network. Try again in {_in_minutes(wait)}.",
+            retry_after=wait,
         )
     if result.status == 503:
-        raise IamError("paused", "Sign-in from rlx is temporarily paused. Try again later.")
+        if result.said_retry_after() is None:
+            raise IamError("paused", "Sign-in from rlx is temporarily paused. Try again later.")
+        wait = result.retry_after()
+        raise IamError(
+            "paused",
+            f"Sign-in from rlx is temporarily paused. Try again in {_in_minutes(wait)}.",
+            retry_after=wait,
+        )
     if result.status >= 500:
         raise IamError("unreachable", f"The server could not {what} (HTTP {result.status}).")
 
@@ -431,18 +459,23 @@ def _reject_common(result: HttpResult, what: str) -> None:
 def start_device_authorization(endpoints: Endpoints) -> DeviceAuthorization:
     """Start the device grant as ``rlx``, or as ``aisquare-cli`` on a server that does not know rlx.
 
-    Such a server answers exactly HTTP 401 ``invalid_client`` (every server does, until the
-    identity provider learns the rlx client), and the grant starts again as
-    ``aisquare-cli``, whose ``/cli`` page signs the person in just the same: a normal
-    fallback, so nothing is said about it. Any other answer is the server's answer, said as
-    it always was; it is never a reason to try the other client.
+    Such a server answers ``invalid_client``, and the grant starts again as ``aisquare-cli``,
+    whose ``/cli`` page signs the person in just the same: a normal fallback, so nothing is
+    said about it. Production and staging answer HTTP 401, ``{"error": "invalid_client",
+    "error_description": "Unknown client_id."}`` (cedar-swan, live, 2026-11-18); a 400 with
+    it falls back too, which RFC 6749 allows where no client authentication is used (R26a,
+    the final review of #503, M2). The error is read from the parsed JSON body. Any other
+    answer is the server's answer, said as it always was, and never a reason to try the other
+    client: ``unauthorized_client``, and the two a server gives before it checks the client,
+    its rate limit (429) and its kill switch (503), said with when to try again
+    (:func:`_reject_common`).
 
     The links come from the response, never from here: the page lives on the web app's
     host, which differs per environment and is not the API's.
     """
     client_id = CLIENT_ID
     result = _start_as(endpoints, client_id)
-    if result.status == 401 and result.error == "invalid_client":
+    if result.status in UNKNOWN_CLIENT_STATUSES and result.error == "invalid_client":
         client_id = FALLBACK_CLIENT_ID
         result = _start_as(endpoints, client_id)
     _reject_common(result, "start a sign-in")

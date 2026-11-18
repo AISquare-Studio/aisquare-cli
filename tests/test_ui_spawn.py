@@ -378,6 +378,18 @@ def select(dialog: SpawnDialog, name: str) -> Select[str]:
     return widget
 
 
+async def pick_until_note_changes(
+    pilot: Pilot[Any], dialog: SpawnDialog, name: str, value: str, reads: str
+) -> None:
+    """Set the ``name`` select to ``value``, then wait until the note at ``reads`` shows
+    something else (bounded: ``settle_until``). The dialog handles a select's change
+    in a later message, and one ``pilot.pause()`` did not always cover it: on a slow Windows
+    runner the rc/rlx gate at 97206baac read the persona line before the change (R29)."""
+    before = note(dialog, reads)
+    select(dialog, name).value = value
+    await settle_until(pilot.app, lambda: note(dialog, reads) != before)
+
+
 def advanced(dialog: SpawnDialog) -> Collapsible:
     return dialog.query_one("#spawn-advanced", Collapsible)
 
@@ -3688,8 +3700,9 @@ def test_a_pick_the_project_also_holds_reads_as_spawn_runs_the_projects_own(
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = [option_prompts(dialog, "persona")]
         for name in ("skeptic", "solo", "mentor"):
-            select(dialog, "persona").value = name
-            await pilot.pause()
+            await pick_until_note_changes(
+                pilot, dialog, "persona", name, "#spawn-persona-description"
+            )
             seen.append(note(dialog, "#spawn-persona-description"))
         return seen
 
@@ -3719,8 +3732,9 @@ def test_a_picked_persona_survives_a_project_switch_silently(
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = []
         for persona, project in (("solo", other_project), ("mentor", git_project)):
-            select(dialog, "persona").value = persona
-            await pilot.pause()
+            await pick_until_note_changes(
+                pilot, dialog, "persona", persona, "#spawn-persona-description"
+            )
             select(dialog, "project").value = project.id
             await settle(pilot)
             seen.append([select(dialog, "persona").value, note(dialog, "#spawn-status")])

@@ -1,6 +1,6 @@
 {
   "name": "aisquare",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Portable memory for Claude Code: rlx's lifecycle hooks, run by rlx, or by uvx when rlx is not installed.",
   "author": {
     "name": "AISquare",

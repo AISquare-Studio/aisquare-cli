@@ -428,9 +428,9 @@ def test_the_commands_row_is_in_the_doctors_report_beside_the_install_row(
 
 
 def test_the_notes_name_the_two_commands_the_guard_and_the_title() -> None:
-    """The [Unreleased] entry says what this ships, under the heading it ships as."""
+    """The [0.10.1] entry says what it ships, under the heading it ships as."""
     text = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = text.split("## [Unreleased]")[1].split("\n## [")[0]
+    unreleased = text.split("## [0.10.1]")[1].split("\n## [")[0]
     added = " ".join(unreleased.split("### Added")[1].split("### ")[0].split())
     changed = " ".join(unreleased.split("### Changed")[1].split("### ")[0].split())
 

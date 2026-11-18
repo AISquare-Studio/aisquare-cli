@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-18
+
 ### Added
 
 - **Two new commands, `rlx` and `relax`, start rlx, as `asq` and `aisquare` do.** All four
@@ -7202,7 +7204,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/rlx/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/rlx/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/AISquare-Studio/rlx/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/AISquare-Studio/rlx/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/AISquare-Studio/rlx/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/AISquare-Studio/rlx/compare/v0.9.0...v0.9.1

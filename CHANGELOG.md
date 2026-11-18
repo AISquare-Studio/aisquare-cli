@@ -69,9 +69,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The sidebar no longer shows the AISquare sign-in; it lives in Accounts.** AISquare's own
   messages say rlx where they said "the CLI": "the keys rlx minted", "Sign-in from rlx is
   temporarily paused".
-- **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count
-  beside it is as before (`rlx · 3 live`), and nothing else in the sidebar moves, at any
-  width.
+- **asq's top-left shows rlx's logo, `r\x`, where it read `Fleet`.** The live count beside
+  it is as before (`r\x · 3 live`), and nothing else in the sidebar moves, at any width. The
+  window's title and everything else still say rlx.
 - **The repository is now `AISquare-Studio/rlx`**, and every link says so: the one-line
   installers, the README and docs, `rlx doctor`'s issue link and the plugins' manifests.
   Links to the old name keep working, since GitHub redirects them, and the package, the

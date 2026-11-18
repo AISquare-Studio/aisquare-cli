@@ -290,7 +290,7 @@ def test_welcome_offers_its_own_installers_on_each_platform(third: AgentAdapter)
 
 
 def test_its_release_stage_marks_its_name_wherever_an_agent_is_chosen_or_seen(
-    third: AgentAdapter,
+    third: AgentAdapter, tmp_path: Path
 ) -> None:
     """0.10.0's R4: a third agent's ``release_stage`` reaches every surface where an agent is
     chosen or seen through ``types.stage_mark``, never through its name. The Gemini-shaped one
@@ -326,10 +326,14 @@ def test_its_release_stage_marks_its_name_wherever_an_agent_is_chosen_or_seen(
     assert accounts_cli.whose_account_help().endswith(f" or {third.id}{mark}.")
     # `aisquare accounts`' last line names the agents `accounts add --agent` takes.
     assert f" | {third.id}{mark}]" in accounts_cli._other_agents_choice()
-    # The persona Export dialog's rows of its skills (GATE #110's F1).
+    # The persona Export dialog's rows of its skills (GATE #110's F1): its personal skills as
+    # asq opens it (no project's root, R27), and its project skills given a root.
     rows = {str(b.id): str(b.label) for b in ExportPersonaScreen("pair", None)._destinations()}
     assert rows[f"export-personal-{third.id}"].startswith(f"{shown} personal skills — ")
-    assert rows[f"export-project-{third.id}"] == f"{shown} project skills — needs a git repository"
+    assert f"export-project-{third.id}" not in rows
+    rooted = ExportPersonaScreen("pair", tmp_path)._destinations()
+    rows = {str(b.id): str(b.label) for b in rooted}
+    assert rows[f"export-project-{third.id}"].startswith(f"{shown} project skills — ")
 
 
 def test_first_run_finds_connects_and_reads_it_as_the_one_agent_here(

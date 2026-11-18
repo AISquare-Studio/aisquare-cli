@@ -225,6 +225,11 @@ class AccountsSelected(Message):
         super().__init__()
 
 
+class PersonasSelected(Message):
+    """The hub's *Personas*: yours and the bundled ones, for every project (R27): no project's
+    own layer, which asq no longer offers."""
+
+
 class UsageStatsSelected(Message):
     """The Usage & stats page: what this machine's Claude Code sessions spent, by range."""
 

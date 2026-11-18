@@ -88,7 +88,7 @@ from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests.ci_support import git
-from tests.ui_workers import settle_page, settle_until_held
+from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 
@@ -400,9 +400,10 @@ def _config_toml() -> dict[str, Any]:
 # --- the tabs -----------------------------------------------------------------------------
 
 
-def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo) -> None:
-    """Manager, Board, Settings, Personas: no Doctor tab — the doctor is the app's page — and
-    no AISquare tab: the explainability view is dormant, mounted by nothing."""
+def test_project_view_has_the_three_tabs_with_their_widgets(project: ProjectInfo) -> None:
+    """Manager, Board, Settings: no Doctor tab — the doctor is the app's page — no AISquare
+    tab: the explainability view is dormant, mounted by nothing — and no Personas tab: they
+    are yours, on Settings ▸ Personas (R27)."""
 
     async def scenario(
         pilot: Pilot[None], host: Host
@@ -414,10 +415,6 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
             ("#tab-settings", SettingsView),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
-        view.active = "tab-personas"  # built when first opened
-        await settle_page(pilot.app)
-        assert view.query_one("#tab-personas").query_one(PersonasTab)
-        view.active = "tab-manager"
         await pilot.pause()
         ids = [pane.id or "" for pane in view.query("TabPane")]
         labels = [view.get_tab(pane_id).label_text for pane_id in ids]
@@ -431,10 +428,10 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
         )
 
     count, ids, active, labels, doctors, explainability = drive(project, scenario)
-    assert count == 4
+    assert count == 3
     assert ids == list(ProjectView.TAB_IDS)
     assert active == "tab-manager"  # the manager first: that is where the goal goes
-    assert labels == ["Manager", "Board", "Settings", "Personas"]
+    assert labels == ["Manager", "Board", "Settings"]
     assert doctors == 0
     assert explainability == 0
 
@@ -460,20 +457,12 @@ def test_the_dormant_explainability_view_opens_on_an_explainability_heading(
     assert first_id == "explainability-heading:bold" and heading == "Explainability"
 
 
-def test_the_personas_tab_reads_nothing_until_it_is_opened(
+def test_no_tab_of_the_project_view_shows_or_reads_the_personas(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Built with the view, the Personas tab read the whole catalogue as every project view
-    mounted, on the UI thread, for a tab that may never be opened (review of #201, R1-F10).
-    It is built when first opened, reads then, and re-reads at each later opening.
-
-    Each count is taken once the page has gone quiet, so a read that comes late is still
-    counted. The first opening's read is in ``PersonasTab.on_mount``, after a mount
-    ``open_personas`` does not await, and one pause after ``active`` did not wait for it: P3's
-    layers row made that mount longer, and every windows-latest job counted the tab before
-    its read (run 40238412702). An opening waits for its read, bounded. The board's opening
-    has nothing to wait for, since no read is the claim, so the page is settled before the
-    count, and a read it started would land in time to fail it."""
+    """R27: personas are the user's, on Settings ▸ Personas, and no longer a tab of each
+    project. Every tab opened in turn, none is a Personas tab, none holds the Personas page,
+    and none reads the catalogue: the project's own persona layer is nowhere in the view."""
     reads: list[Path | None] = []
     read_entries = personas_tab.read_entries
 
@@ -483,28 +472,21 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
 
     monkeypatch.setattr(personas_tab, "read_entries", counted)
 
-    async def read_since(pilot: Pilot[None], before: int) -> None:
-        await settle_until_held(
-            pilot.app, lambda: len(reads) > before, what="a read on opening tab-personas"
-        )
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[int, int]]:
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, int, str]]:
         view = host.query_one(ProjectView)
         await settle_page(pilot.app)
-        seen = [(len(view.query(PersonasTab)), len(reads))]
-        for tab in ("tab-personas", "tab-board", "tab-personas"):
-            before = len(reads)
-            view.active = tab
-            if tab == "tab-personas":
-                await read_since(pilot, before)
+        seen: list[tuple[str, int, str]] = []
+        for pane in list(view.query("TabPane")):
+            view.active = pane.id or ""
             await settle_page(pilot.app)
-            seen.append((len(view.query(PersonasTab)), len(reads)))
+            label = str(view.get_tab(pane.id or "").label_text)
+            seen.append((pane.id or "", len(host.query(PersonasTab)), label))
         return seen
 
     seen = drive(project, scenario)
-
-    assert seen == [(0, 0), (1, 1), (1, 1), (1, 2)]
-    assert reads == [project.root, project.root]  # the project's own layer, as spawn checks
+    assert [tab for tab, _, _ in seen] == ["tab-manager", "tab-board", "tab-settings"]
+    assert all(count == 0 and "Persona" not in label for _, count, label in seen), seen
+    assert reads == []
 
 
 # --- the Manager tab ----------------------------------------------------------------------

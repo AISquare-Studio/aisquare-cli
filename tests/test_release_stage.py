@@ -459,8 +459,8 @@ def test_the_persona_export_dialogs_rows_read_as_the_head(
 ) -> None:
     """Export chooses which agent's skills a persona goes to (GATE #110's F1, seq 11514).
     Every row reads as the head's byte for byte, Codex's with no mark since 0.10.1, the first
-    row is still the one chosen, and outside a repository the project rows are still offered
-    disabled."""
+    row is still the one chosen. With no project's root, as asq opens it since R27 (Settings ▸
+    Personas), the project rows are not offered at all."""
     from aisquare.cli.ui.persona_dialogs import ExportPersonaScreen
     from aisquare.core import agents as agent_core
 
@@ -472,13 +472,13 @@ def test_the_persona_export_dialogs_rows_read_as_the_head(
         "claude_project": str(repo / ".claude" / "skills" / "pair"),
         "codex_project": str(repo / ".agents" / "skills" / "pair"),
     }
-    if not in_a_repo:  # offered, but disabled
-        where.update({key: "needs a git repository" for key in where if key.endswith("project")})
     head = [(ident, label.format(**where)) for ident, label in HEAD_EXPORT]
+    if not in_a_repo:  # no project's root: the personal rows alone (R27)
+        head = [(ident, label) for ident, label in head if "-project-" not in ident]
 
     buttons = ExportPersonaScreen("pair", repo if in_a_repo else None)._destinations()
     shown = [(str(button.id), str(button.label)) for button in buttons]
 
     assert shown == head
-    assert [button.value for button in buttons] == [True, False, False, False]
-    assert [button.disabled for button in buttons] == [False, False, not in_a_repo, not in_a_repo]
+    assert [button.value for button in buttons] == [True, False, False, False][: len(head)]
+    assert not any(button.disabled for button in buttons)

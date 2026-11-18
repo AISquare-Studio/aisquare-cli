@@ -48,7 +48,7 @@ spawns = spawn_suite.spawns
 teammates = spawn_suite.teammates
 git_project = spawn_suite.git_project
 
-MISSING = "ghost — not one of this project's personas"
+MISSING = "ghost — not one of your personas"
 """How the Persona select shows a default the catalogue lacks (``_persona_options``)."""
 
 
@@ -100,7 +100,7 @@ def test_a_role_pick_brings_in_shows_its_missing_default_persona_and_the_app_kee
     assert running is True
     assert (role, binary) == ("coder2", "claude2")
     assert (persona, now_offered) == ("ghost", True)  # a value the select offers, shown as missing
-    assert said == "ghost is not one of this project's personas — spawn refuses it"
+    assert said == "ghost is not one of your personas — spawn refuses it"
     assert sent is None  # still the role's default: the service resolves it, and refuses it
     assert followed == ""  # and it still follows the role: nothing here was the owner's pick
 
@@ -131,7 +131,7 @@ def test_the_missing_default_is_shown_from_a_form_that_was_showing_another_roles
         True,
         "coder2",
         "ghost",
-        "ghost is not one of this project's personas — spawn refuses it",
+        "ghost is not one of your personas — spawn refuses it",
     ]
 
 

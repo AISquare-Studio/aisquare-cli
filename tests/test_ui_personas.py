@@ -209,10 +209,18 @@ class Recorder:
 class Host(App[None]):
     """A bare app around one Personas tab — or around one dialog — recording what surfaces."""
 
-    def __init__(self, project: ProjectInfo | None, dialog: Screen[Any] | None = None) -> None:
+    def __init__(
+        self,
+        project: ProjectInfo | None,
+        dialog: Screen[Any] | None = None,
+        *,
+        app_level: bool = False,
+    ) -> None:
         super().__init__()
         self._project = project
         self._dialog = dialog
+        self._app_level = app_level
+        """The page as Settings ▸ Personas builds it: ``PersonasTab()``, no project (R27)."""
         self.notices: list[tuple[str, str]] = []
         self.attached: list[tuple[str, str]] = []
         self.results: list[object] = []
@@ -220,7 +228,9 @@ class Host(App[None]):
         self.new_accounts = 0
 
     def compose(self) -> ComposeResult:
-        if self._project is not None:
+        if self._app_level:
+            yield PersonasTab(id="personas")
+        elif self._project is not None:
             yield PersonasTab(self._project, id="personas")
 
     def on_mount(self) -> None:
@@ -255,9 +265,10 @@ def drive(
     project: ProjectInfo | None = None,
     dialog: Screen[Any] | None = None,
     size: tuple[int, int] = SIZE,
+    app_level: bool = False,
 ) -> T:
     async def run() -> T:
-        host = Host(project, dialog)
+        host = Host(project, dialog, app_level=app_level)
         async with host.run_test(size=size) as pilot:
             await settle(pilot)
             return await scenario(pilot, host)
@@ -321,6 +332,104 @@ async def select_row(pilot: Pilot[Any], host: Host, key: str) -> None:
 
 def persona(directory: Path, layer: Layer = "user") -> Persona:
     return core.load(directory, layer=layer)
+
+
+# --- Settings ▸ Personas: the user level only (R27) -------------------------------------
+
+
+@pytest.fixture
+def in_the_repo(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The working directory is the repository whose project layer holds a persona: a page
+    that worked its root out from where asq runs would find that layer."""
+    monkeypatch.chdir(repo)
+    return repo
+
+
+def test_the_app_level_page_shows_no_project_layer_and_attaches_nothing(
+    catalogue: dict[str, Path], in_the_repo: Path
+) -> None:
+    """Built as Settings ▸ Personas builds it: no project. Its layers are yours and the
+    bundled ones; the project's skeptic is not listed, the bundled one is. Attach to existing
+    and Attach to new need a project (the picker's agents are one project's, a spawn goes to
+    one), so neither is a button, and ``a`` and ``n`` do nothing and are not in the footer."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> dict[str, Any]:
+        page = tab(host)
+        seen: dict[str, Any] = {
+            "root": page.root,
+            "chips": [str(box.label) for box in page.query(Checkbox)],
+            "rows": [(row[0], row[1]) for row in rows(host)],
+            "buttons": [str(button.id) for button in page.query("#persona-actions Button")],
+        }
+        await select_row(pilot, host, "user:pair")
+        host.query_one("#persona-table", DataTable).focus()
+        for key in ("a", "n"):
+            await pilot.press(key)
+            await settle(pilot)
+        seen["after keys"] = (host.attached, type(host.screen).__name__)
+        seen["footer"] = sorted(
+            active.binding.action
+            for active in host.screen.active_bindings.values()
+            if active.node is page and active.binding.show
+        )
+        return seen
+
+    seen = drive(scenario, app_level=True)
+    assert seen["root"] is None
+    assert seen["chips"] == ["user", "bundled"]
+    assert ("skeptic", "bundled") in seen["rows"] and ("pair", "user") in seen["rows"]
+    assert all(layer != "project" for _, layer in seen["rows"]), seen["rows"]
+    assert seen["buttons"] == [
+        "persona-edit",
+        "persona-export",
+        "persona-remove",
+        "persona-validate",
+    ]
+    assert seen["after keys"] == ([], "Screen")
+    assert "attach_existing" not in seen["footer"] and "attach_new" not in seen["footer"]
+    assert "edit" in seen["footer"]
+
+
+def test_no_dialog_the_app_level_page_opens_offers_the_project_layer(
+    catalogue: dict[str, Path], in_the_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """New, Import, a bundled persona's Save as… and Export, each opened from the page:
+    the user layer is the one place each writes to, and no project choice is offered, not
+    even greyed (R27)."""
+    skills = Recorder(lambda root: [])
+    monkeypatch.setattr(personas_service, "importable_skills", skills)
+
+    async def radios(pilot: Pilot[None], host: Host, kind: type[Screen[Any]]) -> list[str]:
+        dialog = await wait_for(pilot, kind)
+        found = [str(radio.id) for radio in dialog.query(RadioButton)]
+        assert getattr(dialog, "root", "unset") is None, kind.__name__
+        await pilot.press("escape")
+        await settle(pilot)
+        return found
+
+    async def scenario(pilot: Pilot[None], host: Host) -> dict[str, list[str]]:
+        seen: dict[str, list[str]] = {}
+        await press(pilot, "#persona-new")
+        seen["new"] = await radios(pilot, host, NewPersonaScreen)
+        await press(pilot, "#persona-import")
+        seen["import"] = await radios(pilot, host, ImportPersonaScreen)
+        await select_row(pilot, host, "bundled:skeptic")
+        host.query_one("#persona-table", DataTable).focus()
+        await pilot.press("enter")
+        seen["save as"] = await radios(pilot, host, EditPersonaScreen)
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-export")
+        seen["export"] = await radios(pilot, host, ExportPersonaScreen)
+        return seen
+
+    seen = drive(scenario, app_level=True)
+    assert seen == {
+        "new": ["new-user"],
+        "import": ["import-user"],
+        "save as": ["save-as-user"],
+        "export": ["export-personal-claude-code", "export-personal-codex", "export-directory"],
+    }
+    assert skills.calls == [{"args": [None]}]
 
 
 # --- the catalogue --------------------------------------------------------------------
@@ -586,7 +695,7 @@ def test_the_import_dialog_browses_skills_and_guards_the_layer_and_the_name(
     async def outside_git(pilot: Pilot[None], host: Host) -> list[Any]:
         dialog = host.screen
         assert isinstance(dialog, ImportPersonaScreen)
-        project_radio = dialog.query_one("#import-project", RadioButton)
+        layers = [str(radio.id) for radio in dialog.query("#import-layer RadioButton")]
         browse: Select[str] = dialog.query_one("#import-browse", Select)
         prompts = [str(option[0]) for option in browse._options]
         browse.value = str(Path("/claude/skills/code-review"))  # the platform's separators
@@ -598,12 +707,12 @@ def test_the_import_dialog_browses_skills_and_guards_the_layer_and_the_name(
         bad = (submit.disabled, shown(dialog.query_one("#import-name-rule", Static)))
         dialog.query_one("#import-name", Input).value = "good-name"
         await pilot.pause()
-        return [project_radio.disabled, prompts, source, bad, submit.disabled]
+        return [layers, prompts, source, bad, submit.disabled]
 
-    disabled, prompts, source, bad, good_disabled = drive(
+    layers, prompts, source, bad, good_disabled = drive(
         outside_git, dialog=ImportPersonaScreen(None)
     )
-    assert disabled is True  # no git repository: no project layer
+    assert layers == ["import-user"]  # no project's root: no project layer offered (R27)
     assert any("code-review" in p and "imported" in p for p in prompts)
     assert source == str(Path("/claude/skills/code-review"))  # Browse fills the Source field
     assert bad == (True, NAME_RULE)
@@ -1198,14 +1307,18 @@ def test_a_remove_the_filesystem_refuses_is_an_error_toast_and_the_tab_stays_up(
     assert row_count > 0  # the tab re-read the catalogue and is still there
 
 
-def test_export_offers_the_project_skills_only_inside_a_git_repository() -> None:
-    async def scenario(pilot: Pilot[None], host: Host) -> list[bool]:
-        return [
-            host.screen.query_one(f"#export-project-{agent}", RadioButton).disabled
-            for agent in ("claude-code", "codex")
-        ]
+def test_export_offers_no_project_skills_without_a_projects_root() -> None:
+    """As asq opens it (Settings ▸ Personas, R27): each agent's personal skills and a
+    directory, and no project's skills, not even greyed."""
 
-    assert drive(scenario, dialog=ExportPersonaScreen("pair", None)) == [True, True]
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        return [str(button.id) for button in host.screen.query(RadioButton)]
+
+    assert drive(scenario, dialog=ExportPersonaScreen("pair", None)) == [
+        "export-personal-claude-code",
+        "export-personal-codex",
+        "export-directory",
+    ]
 
 
 def test_export_offers_every_agents_skill_directories_by_its_adapter(

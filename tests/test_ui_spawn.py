@@ -75,7 +75,7 @@ from aisquare.cli.ui.spawn import (
 from aisquare.cli.ui.views import accounts as accounts_view
 from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import codenames, experimental, harness, personas
+from aisquare.core import codenames, experimental, harness, paths, personas
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.ids import new_task_id
@@ -1875,7 +1875,14 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
 def test_import_beside_the_persona_select_selects_what_it_imports(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
 ) -> None:
-    def answer(source: str, **_: object) -> personas_service.ImportResult:
+    """*Import…* opens the Import dialog on the user layer, with no project's root and no
+    project choice (R27: the app offers personas at the user level only), even beside a
+    project whose own personas folder exists; what it imports is then selected."""
+    (git_project.root / ".aisquare" / "personas").mkdir(parents=True)
+    asked: list[dict[str, object]] = []
+
+    def answer(source: str, **kwargs: object) -> personas_service.ImportResult:
+        asked.append(kwargs)
         directory = dict(personas.layer_dirs(None))["user"] / "fresh-one"
         directory.mkdir(parents=True)
         (directory / "SKILL.md").write_text("---\ndescription: Fresh.\n---\nWork.\n", "utf-8")
@@ -1890,11 +1897,13 @@ def test_import_beside_the_persona_select_selects_what_it_imports(
         await pilot.click("#spawn-import")
         importer = await wait_for_screen(pilot, ImportPersonaScreen)
         await settle(pilot)
+        opened = [importer.root, [str(radio.id) for radio in importer.query(RadioButton)]]
         importer.query_one("#import-source", Input).value = "./fresh-one"
         await settle(pilot)
         await pilot.click("#import-submit")
         await settle(pilot)
         seen = [
+            opened,
             type(host.screen).__name__,
             select(dialog, "persona").value,
             note(dialog, "#spawn-persona-description"),
@@ -1903,7 +1912,9 @@ def test_import_beside_the_persona_select_selects_what_it_imports(
         await settle(pilot)
         return seen
 
-    screen, value, description = drive(git_project, scenario)
+    opened, screen, value, description = drive(git_project, scenario)
+    assert opened == [None, ["import-user"]]
+    assert [(call["root"], call["layer"]) for call in asked] == [(None, "user")]
     assert (screen, value, description) == ("SpawnDialog", "fresh-one", "Fresh.")
     assert spawns.calls[0][2]["persona"] == "fresh-one"
 
@@ -1941,7 +1952,7 @@ def test_a_persona_this_project_lacks_still_shows_and_says_the_spawn_refuses_it(
 
     value, description = drive(git_project, scenario)
     assert value == "ghost"
-    assert description is not None and "not one of this project's personas" in description
+    assert description is not None and "not one of your personas" in description
 
 
 def test_a_sidebar_agent_row_shows_the_persona_badge_only_when_there_is_one(
@@ -3403,39 +3414,68 @@ def test_a_switch_moves_the_label_unless_it_was_edited(
     assert drive(git_project, edited, projects=projects) == ["coder-auth", "coder-auth"]
 
 
-def test_a_switch_re_reads_the_persona_catalogue_and_the_roles_default_unless_one_was_picked(
+def _write_persona(base: Path, name: str, description: str) -> None:
+    skill = base / name / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(f"---\nname: {name}\ndescription: {description}\n---\nBe {name}.\n", "utf-8")
+
+
+def test_the_persona_list_is_yours_in_every_project_and_never_a_projects_own(
     git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
-    tempo = other_project.root / ".aisquare" / "personas" / "tempo" / "SKILL.md"
-    tempo.parent.mkdir(parents=True)
-    tempo.write_text("---\nname: tempo\ndescription: A tempo.\n---\nKeep tempo.\n", "utf-8")
-    configure_role("coder", persona="tempo")  # this project (git_project) lacks it
-    layer = personas.resolve("tempo", other_project.root).layer
+    """R27: asq offers personas at the user level only. The list is the user's and the bundled
+    ones, the same in every project; a persona in a project's own layer is never listed, in
+    its project or after a switch to it. The role's default naming one is shown as the
+    project's own, which the spawn uses."""
+    for project in (git_project, other_project):
+        _write_persona(project.root / ".aisquare" / "personas", "tempo", "A project tempo.")
+    _write_persona(paths.aisquare_home() / "personas", "solo", "A user solo.")
+    configure_role("coder", persona="tempo")
 
-    async def untouched(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        persona = select(dialog, "persona")
-        seen: list[Any] = [persona.value, note(dialog, "#spawn-persona-description")]
-        seen.append("tempo · " + layer in option_prompts(dialog, "persona"))
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [option_prompts(dialog, "persona")]
+        seen.append(note(dialog, "#spawn-persona-description"))
         select(dialog, "project").value = other_project.id
         await settle(pilot)
-        seen += [persona.value, note(dialog, "#spawn-persona-description")]
-        seen.append("tempo · " + layer in option_prompts(dialog, "persona"))
-        seen.append(dialog.spawn_kwargs()["persona"])  # still the role's default: not sent
+        seen.append(option_prompts(dialog, "persona"))
         return seen
 
-    async def picked(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        select(dialog, "persona").value = "mentor"
-        await pilot.pause()
-        select(dialog, "project").value = other_project.id
-        await settle(pilot)
-        return [select(dialog, "persona").value, dialog.spawn_kwargs()["persona"]]
+    first, described, switched = drive(git_project, scenario, projects=[git_project, other_project])
+    assert "solo · user" in first and "mentor · bundled" in first
+    assert not any(prompt.endswith("· project") for prompt in first), first
+    assert "tempo · project" not in first and "tempo — this project's own persona" in first
+    assert described == "tempo is this project's own persona — spawn uses it"
+    assert switched == first, "the same list in every project"
 
-    projects = [git_project, other_project]
-    seen = drive(git_project, untouched, projects=projects)
-    assert seen[0] == "tempo" and "not one of this project's personas" in str(seen[1])
-    assert seen[2] is False  # the catalogue of the first project lacks it
-    assert seen[3:] == ["tempo", "A tempo.", True, None]
-    assert drive(git_project, picked, projects=projects) == ["mentor", "mentor"]
+
+def test_a_role_default_the_list_lacks_reads_as_spawn_takes_it(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """The list lacks a project's own personas (R27), but ``spawn`` resolves a role default
+    in the project's layer first and runs it: that one reads as the project's own, which the
+    spawn uses, not as a refusal. A default no layer holds still reads as the spawn refusing
+    it, as it does."""
+    _write_persona(git_project.root / ".aisquare" / "personas", "tempo", "A project tempo.")
+    configure_role("coder", persona="tempo")
+    configure_role("tester", persona="ghost")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [option_prompts(dialog, "persona")]
+        seen.append(note(dialog, "#spawn-persona-description"))
+        select(dialog, "role").value = "tester"
+        await settle(pilot)
+        seen += [select(dialog, "persona").value, note(dialog, "#spawn-persona-description")]
+        return seen
+
+    prompts, own, tester_value, refused = drive(git_project, scenario)
+    assert "tempo — this project's own persona" in prompts
+    assert "ghost — not one of your personas" in prompts
+    assert own == "tempo is this project's own persona — spawn uses it"
+    assert tester_value == "ghost"
+    assert refused == "ghost is not one of your personas — spawn refuses it"
+    assert personas.resolve("tempo", git_project.root).layer == "project", "the premise"
+    with pytest.raises(personas.PersonaError):
+        personas.resolve("ghost", git_project.root)  # the premise: spawn refuses it
 
 
 def test_a_switch_keeps_account_binary_permission_mode_args_and_the_first_prompt(
@@ -3633,38 +3673,62 @@ def test_a_switch_frees_every_field_a_take_over_had_locked(
     assert [call[0] for call in spawns.calls] == [second_git_project.id]
 
 
-def test_a_picked_persona_the_new_project_lacks_falls_back_to_the_roles_default_and_says_so(
+def test_a_pick_the_project_also_holds_reads_as_spawn_runs_the_projects_own(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """A listed persona (``skeptic · bundled``) that the project's own personas hold too runs
+    as the project's own, as ``spawn`` resolves the project's layer first: the line under
+    the field says so, and names the one it is not. A pick the project does not hold reads
+    its own description, as before."""
+    own = git_project.root / ".aisquare" / "personas"
+    _write_persona(own, "skeptic", "A project skeptic.")
+    _write_persona(own, "solo", "A project solo.")
+    _write_persona(paths.aisquare_home() / "personas", "solo", "A user solo.")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [option_prompts(dialog, "persona")]
+        for name in ("skeptic", "solo", "mentor"):
+            select(dialog, "persona").value = name
+            await pilot.pause()
+            seen.append(note(dialog, "#spawn-persona-description"))
+        return seen
+
+    prompts, shadowed, user_shadowed, plain = drive(git_project, scenario)
+    assert "skeptic · bundled" in prompts and "skeptic · project" not in prompts
+    assert "solo · user" in prompts and "solo · project" not in prompts
+    assert shadowed == (
+        "skeptic is this project's own persona too — spawn uses the project's own, "
+        "not the bundled one"
+    )
+    assert user_shadowed == (
+        "solo is this project's own persona too — spawn uses the project's own, not the user one"
+    )
+    assert plain == personas.resolve("mentor", git_project.root).description
+    for name in ("skeptic", "solo"):  # the premise: the project's own wins at spawn
+        assert personas.resolve(name, git_project.root).layer == "project", name
+
+
+def test_a_picked_persona_survives_a_project_switch_silently(
     git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
-    tempo = git_project.root / ".aisquare" / "personas" / "tempo" / "SKILL.md"
-    tempo.parent.mkdir(parents=True)
-    tempo.write_text("---\nname: tempo\ndescription: A tempo.\n---\nKeep tempo.\n", "utf-8")
+    """Every project offers the same personas (R27), yours and the bundled ones: a pick is
+    kept through a switch either way, and nothing is said."""
+    _write_persona(paths.aisquare_home() / "personas", "solo", "A user solo.")
     configure_role("coder", persona="minimalist")
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
-        select(dialog, "persona").value = "tempo"  # this project's own
-        await pilot.pause()
-        picked = [select(dialog, "persona").value, note(dialog, "#spawn-status")]
-        select(dialog, "project").value = other_project.id
-        await settle(pilot)
-        fell: list[Any] = [select(dialog, "persona").value, note(dialog, "#spawn-status")]
-        fell += [submit(dialog).disabled, dialog.spawn_kwargs()["persona"]]
-        select(dialog, "persona").value = "mentor"  # a bundled one: in every project
-        await pilot.pause()
-        select(dialog, "project").value = git_project.id
-        await settle(pilot)
-        kept = [select(dialog, "persona").value, note(dialog, "#spawn-status")]
-        return [picked, fell, kept]
+        seen: list[Any] = []
+        for persona, project in (("solo", other_project), ("mentor", git_project)):
+            select(dialog, "persona").value = persona
+            await pilot.pause()
+            select(dialog, "project").value = project.id
+            await settle(pilot)
+            seen.append([select(dialog, "persona").value, note(dialog, "#spawn-status")])
+            seen.append(dialog.spawn_kwargs()["persona"])
+        return seen
 
-    picked, fell, kept = drive(git_project, scenario, projects=[git_project, other_project])
-    assert picked == ["tempo", None]
-    assert fell == [
-        "minimalist",  # the role's default, not "tempo — not one of this project's personas"
-        "persona tempo is not one of plain's personas — using the role's default (minimalist)",
-        False,  # Spawn is not blocked: nothing is left to refuse
-        None,  # and the default is not sent as a choice
-    ]
-    assert kept == ["mentor", None]  # a pick the new project has survives, silently
+    seen = drive(git_project, scenario, projects=[git_project, other_project])
+    assert seen == [["solo", None], "solo", ["mentor", None], "mentor"]
 
 
 def test_the_project_field_takes_the_focus_when_it_is_shown_else_the_role(

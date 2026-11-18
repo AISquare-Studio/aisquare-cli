@@ -69,6 +69,10 @@ from tests.test_ui_shell import script as _script
 no_real_tmux = _no_real_tmux
 script = _script
 
+#: The owner's logo, the sidebar's top-left since R23: r, a backslash, x. Written out, not
+#: read from ``core.version.PRODUCT_LOGO``, so a pin of it fails if the logo changes.
+LOGO = r"r\x"
+
 CODER = "agt_a_coder-auth"
 MANAGER = "agt_a_manager"
 
@@ -845,7 +849,7 @@ def test_display_is_read_as_asq_starts(tmp_path: Path, script: Script) -> None:
         )
 
     row, title, bell = drive(go, headroom=session_use((1, 42.0)))
-    assert "#1" not in row and title.strip() == "rlx" and bell is False
+    assert "#1" not in row and title.strip() == LOGO and bell is False
 
 
 def test_the_fade_and_the_bell_follow_their_switches(

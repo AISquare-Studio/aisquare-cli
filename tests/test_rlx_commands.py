@@ -437,4 +437,5 @@ def test_the_notes_name_the_two_commands_the_guard_and_the_title() -> None:
     assert "**`rlx` and `relax` start aisquare, as `asq` and `aisquare` do.**" in added
     assert "**Another program's `rlx` or `relax` is never replaced or deleted.**" in added
     assert "Hooks still call `aisquare`" in added
-    assert "**asq's top-left reads `rlx`, the product's name, where it read `Fleet`.**" in changed
+    # R23: the top-left is the owner's logo, r\x, since; everything else says rlx.
+    assert r"**asq's top-left shows rlx's logo, `r\x`, where it read `Fleet`.**" in changed

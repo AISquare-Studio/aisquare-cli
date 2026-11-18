@@ -290,12 +290,14 @@ def _filesystem_table(value: object) -> dict[str, str]:
 #: recorded as this one).
 REVIEWERS = {"ask": "user", "auto": "auto_review"}
 #: The hook events AISquare installs (``capabilities.hooks``) and decodes.
-#: OpenAI's Standard-tier list prices for the models Codex runs, read 2026-10-24 off
-#: https://developers.openai.com/api/docs/pricing (:func:`_openai`).
-PRICES_AS_OF = "2026-10-24"
+#: OpenAI's Standard-tier list prices for the models Codex runs, read 2026-11-17 off
+#: https://developers.openai.com/api/docs/pricing (:func:`_openai`): every row again, the day
+#: Codex 0.169.1 made gpt-6.2-sol its default. gpt-6.2-sol, gpt-6.2-astra and gpt-6.1-terra,
+#: in 0.169.1's catalog, joined; the rows read on 2026-10-24 were unchanged.
+PRICES_AS_OF = "2026-11-17"
 PRICES_SOURCE = (
     "OpenAI API list prices, Standard tier: https://developers.openai.com/api/docs/pricing "
-    "(read 2026-10-24)"
+    "(read 2026-11-17)"
 )
 #: The page's short context: ≤272K input tokens.
 _SHORT_CONTEXT = 272_000
@@ -328,7 +330,10 @@ def _openai(
 
 PRICES: Mapping[str, Price] = MappingProxyType(
     {
+        "gpt-6.2-sol": _openai(2.00, 10.00, 0.10, (4.00, 15.00)),
+        "gpt-6.2-astra": _openai(8.00, 40.00, 0.40, (16.00, 60.00)),
         "gpt-6.1-sol": _openai(2.00, 10.00, 0.10, (4.00, 15.00)),
+        "gpt-6.1-terra": _openai(1.00, 5.00, 0.05, (2.00, 7.50)),
         "gpt-6-luna": _openai(0.10, 0.50, 0.01, (0.20, 0.75)),
         "gpt-6-sol": _openai(2.00, 10.00, 0.20, (4.00, 15.00)),
         "gpt-6-astra": _openai(10.00, 50.00, 1.00, (20.00, 75.00)),

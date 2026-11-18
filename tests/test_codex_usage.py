@@ -11,6 +11,12 @@ from typing import Any
 import pytest
 
 from aisquare.core.agent_adapters import codex_usage
+from aisquare.core.agent_adapters.codex import (
+    PRICE_TABLE,
+    PRICES_AS_OF,
+    PRICES_SOURCE,
+    canonical_model,
+)
 from aisquare.core.agent_adapters.usage_tally import RECENT, Tally
 
 STAMP = "2026-10-24T10:00:{:02d}.000Z"
@@ -257,3 +263,71 @@ def test_the_tally_remembers_a_bounded_window_and_reads_garbage_as_fresh() -> No
     assert len(kept.counted) == RECENT and "0" not in kept.counted
     for garbage in (None, "", "[]", "{", '{"offsets": 3}', '{"counted": {"a": "x"}}'):
         assert Tally.parse(garbage) == Tally()
+
+
+# --- R24: Codex 0.169.1's default model, gpt-6.2-sol, and its new catalog ---------------------
+
+#: The rows Codex 0.169.1's catalog brought past the table: its default, gpt-6.2-sol, and
+#: gpt-6.2-astra beside it, and gpt-6.1-terra (in the catalog since 0.167.0). Each as OpenAI's
+#: pricing page printed its Standard tier on 2026-11-17, USD per million tokens: the short
+#: context's (≤272K input tokens) input, output, cached input and 30-minute write, then the
+#: long context's.
+PAGE_ROWS_2026_11_17 = {
+    "gpt-6.2-sol": ((2.00, 10.00, 0.10, 2.50), (4.00, 15.00, 0.20, 5.00)),
+    "gpt-6.2-astra": ((8.00, 40.00, 0.40, 10.00), (16.00, 60.00, 0.80, 20.00)),
+    "gpt-6.1-terra": ((1.00, 5.00, 0.05, 1.25), (2.00, 7.50, 0.10, 2.50)),
+}
+
+
+@pytest.mark.parametrize("model", sorted(PAGE_ROWS_2026_11_17))
+def test_codex_0_169_1s_new_models_are_priced_as_the_page_prints_them(model: str) -> None:
+    short, long = PAGE_ROWS_2026_11_17[model]
+    price = PRICE_TABLE.price_for(model)
+    assert price is not None, f"{model} is unpriced"
+    assert price.cache_write is not None
+    assert price.long_input is not None and price.long_output is not None
+    assert price.long_prompt_over == 272_000
+    rates = (price.input, price.output, price.input * price.cache_read)
+    assert (*rates, price.input * price.cache_write) == pytest.approx(short)
+    long_input, long_output = price.long_input, price.long_output
+    long_rates = (long_input, long_output, long_input * price.cache_read)
+    assert (*long_rates, long_input * price.cache_write) == pytest.approx(long)
+
+
+def test_the_default_model_reaches_its_own_row_with_no_alias_rule() -> None:
+    """``-sol`` is a part of the model's name, as in gpt-6.1-sol, never a suffix to strip:
+    every spelling of it reaches gpt-6.2-sol's own row, and the family's bare name none."""
+    row = PRICE_TABLE.prices["gpt-6.2-sol"]
+    for spelled in (
+        "gpt-6.2-sol",
+        "GPT-6.2-Sol",
+        " gpt-6.2-sol ",
+        "openai/gpt-6.2-sol",
+        "gpt-6.2-sol-2026-11-17",
+    ):
+        assert canonical_model(spelled) == "gpt-6.2-sol", spelled
+        assert PRICE_TABLE.price_for(spelled) is row, spelled
+    assert PRICE_TABLE.price_for("gpt-6.2") is None
+
+
+def test_the_table_is_dated_the_day_its_rows_were_read() -> None:
+    assert PRICES_AS_OF == "2026-11-17"
+    assert "https://developers.openai.com/api/docs/pricing" in PRICES_SOURCE
+    assert PRICES_SOURCE.endswith(f"(read {PRICES_AS_OF})")
+
+
+def test_a_rollout_on_codex_0_169_1s_default_model_is_priced(tmp_path: Path) -> None:
+    """The nightly leg's failure, as a person's usage reads it: gpt-6.2-sol's requests were
+    counted and reported apart, unpriced. Priced now, at the short rates up to 272K input
+    tokens and the long ones over."""
+    found = _scan(
+        tmp_path / "r.jsonl",
+        _turn(0, "t1", "gpt-6.2-sol"),
+        _record(1, "t1", "resp_a", input=1000, cached=600, written=100, output=10),
+        _record(2, "t1", "resp_b", input=300_000, cached=200_000, output=10),
+    ).delta
+    sol = found.models["gpt-6.2-sol"]
+    assert sol.priced
+    short = 300 * 2 + 100 * 2.5 + 600 * 0.1 + 10 * 10
+    long = 100_000 * 4 + 200_000 * 0.2 + 10 * 15
+    assert sol.cost_usd == pytest.approx((short + long) / 1e6)

@@ -235,15 +235,17 @@ def test_the_doctors_own_hints_make_the_same_buttons_whichever_word_they_print(
     ]
 
 
-def test_the_window_title_is_the_products_name_the_sidebar_reads() -> None:
-    """asq's window title and its sidebar's header read one constant (#133's PRODUCT_NAME), so
-    the two cannot drift (#135, Q11)."""
+def test_the_window_title_is_the_products_name_and_the_top_left_is_its_logo() -> None:
+    """asq's window title is the product's name, rlx (#133's PRODUCT_NAME; #135, Q11). The
+    sidebar's header read the same constant until the owner's logo took the top-left corner
+    (R23): r, a backslash, x, while the title stays rlx."""
     from aisquare.cli.ui.app import FleetApp
     from aisquare.cli.ui.sidebar import fleet_title
-    from aisquare.core.version import PRODUCT_NAME
+    from aisquare.core.version import PRODUCT_LOGO, PRODUCT_NAME
 
     assert FleetApp.TITLE == PRODUCT_NAME == "rlx"
-    assert fleet_title(0).plain == PRODUCT_NAME
+    assert fleet_title(0).plain == PRODUCT_LOGO == r"r\x"
+    assert list(PRODUCT_LOGO) == ["r", "\\", "x"]
 
 
 def test_the_command_hints_print_is_one_the_install_writes() -> None:

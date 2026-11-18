@@ -1192,8 +1192,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     """
 
     TITLE = PRODUCT_NAME
-    """The window's title: the product's name, the word the sidebar's header reads
-    (``core.version.PRODUCT_NAME``, #133), so the two cannot drift (#135)."""
+    """The window's title: the product's name (``core.version.PRODUCT_NAME``, #133). The
+    sidebar's header read it too (#135) until the owner's logo took the top-left corner
+    (``PRODUCT_LOGO``, R23): the title stays rlx."""
     COMMAND_PALETTE_BINDING = "f1"
     CSS = (
         """

@@ -1,22 +1,28 @@
-"""Codex ships as beta in 0.10.0 through one adapter slot, and Claude Code reads as it did.
+"""Codex shipped as beta in 0.10.0 through one adapter slot, and left it in 0.10.1.
 
-``AgentAdapter.release_stage`` (``types.ReleaseStage``) is ``beta`` for Codex and ``stable``
-for Claude Code. Wherever a person chooses or sees an agent, the shared code writes
-``types.stage_mark`` after its name: `` (beta)`` for a beta agent, nothing for a stable one.
-tests/test_third_agent_seams.py shows a synthetic third agent's mark reaching those surfaces
-through the slot. This file pins the owner's other half of the bar for the release ("nothing
-that works today in claude code breaks"): with the slot in, what Claude Code shows is byte for
-byte what the head before it showed, and Codex's differs by its mark alone. Where a person
-lists or chooses agents (SMOKE14, seq 11065), Codex is named with its mark: ``agents list``'s
-row, ``aisquare accounts``' last line, every ``--agent`` help that chooses a coding agent, and
-the persona Export dialog's skill destinations (GATE #110's F1, seq 11514).
-The ``HEAD_`` goldens below were rendered at 11cd75ab, the PR's head before the slot, by these
-same calls.
+``AgentAdapter.release_stage`` (``types.ReleaseStage``) is ``stable`` for Claude Code, and
+for Codex since 0.10.1: the owner, 2026-11-17 (R21), "drop beta label, i have not heard of
+any complains so far ... just silently drop beta mentions for codex". Wherever a person
+chooses or sees an agent, the shared code writes ``types.stage_mark`` after its name:
+`` (beta)`` for a beta agent, nothing for a stable one. tests/test_third_agent_seams.py shows a
+synthetic third agent's mark reaching those surfaces through the slot, as a new agent's would.
+
+This file pins the owner's bar for the slot ("nothing that works today in claude code
+breaks"), and now Codex's too: what each surface shows is byte for byte what the head before
+the slot showed, Codex's rows included, with no mark. Where a person lists or chooses agents
+(SMOKE14, seq 11065) Codex is still named: ``agents list``'s row, ``aisquare accounts``' last
+line, every ``--agent`` help that chooses a coding agent, and the persona Export dialog's skill
+destinations (GATE #110's F1, seq 11514). The ``HEAD_`` goldens below were rendered at
+11cd75ab, the PR's head before the slot, by these same calls.
 """
 
 from __future__ import annotations
 
 import io
+import os
+import shutil
+import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,10 +156,6 @@ def printed(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., str]]:
     yield run
 
 
-def _flat(text: str) -> str:
-    return " ".join(text.split())
-
-
 def _slot_dir(slot: int) -> Path:
     return Path(f"/h/.aisquare/claude-accounts/{slot}")
 
@@ -187,12 +189,15 @@ CLAUDE = ClaudeInstall(installed=True, binary="/opt/bin/claude", version="2.1.26
 CODEX = ClaudeInstall(installed=True, binary="/opt/bin/codex", version="0.164.0")
 
 
-def test_claude_code_is_stable_and_codex_beta_in_their_own_adapters() -> None:
-    """The one line each, so the release that takes Codex out of beta flips one word; a stable
-    agent's mark is nothing at all, and every registered agent declares a stage."""
+def test_claude_code_and_codex_are_stable_in_their_own_adapters() -> None:
+    """The one line each: 0.10.1 took Codex out of beta by flipping its word. A stable agent's
+    mark is nothing at all, a beta one's is still `` (beta)``, and every registered agent
+    declares a stage."""
     assert get_adapter("claude-code").release_stage == "stable"
-    assert get_adapter("codex").release_stage == "beta"
+    assert get_adapter("codex").release_stage == "stable"
     stages: dict[ReleaseStage, str] = {"stable": "", "beta": MARK}
+    beta = SimpleNamespace(label="Next", release_stage="beta")
+    assert stage_mark(beta) == MARK and staged_label(beta) == "Next (beta)"
     for adapter in adapters():
         assert stage_mark(adapter) == stages[adapter.release_stage], adapter.id
         assert staged_label(adapter) == adapter.label + stages[adapter.release_stage]
@@ -200,18 +205,16 @@ def test_claude_code_is_stable_and_codex_beta_in_their_own_adapters() -> None:
     assert stage_mark_of("no-such-agent") == ""
 
 
-def test_the_spawn_and_settings_agent_pickers_read_as_the_head_but_for_codexs_mark() -> None:
+def test_the_spawn_and_settings_agent_pickers_read_as_the_head() -> None:
     picking = SimpleNamespace(_role_agent=lambda role, binary: "claude-code")
     spawn = SpawnDialog._agent_options(picking, "coder", "")  # type: ignore[arg-type]
-    assert spawn[:2] == HEAD_SPAWN[:2]  # Claude Code's own rows, byte for byte
-    assert spawn == [*HEAD_SPAWN[:2], ("Codex (beta)", "codex")]
+    assert spawn == HEAD_SPAWN  # Codex's row too, byte for byte
     on_codex = SimpleNamespace(_role_agent=lambda role, binary: "codex")
-    assert SpawnDialog._agent_options(on_codex, "coder", "")[0][0] == "(role's: Codex (beta))"  # type: ignore[arg-type]
-    settings = app_settings._agent_choices()
-    assert settings == [*HEAD_SETTINGS[:2], ("Codex (beta)", "codex")]
+    assert SpawnDialog._agent_options(on_codex, "coder", "")[0][0] == "(role's: Codex)"  # type: ignore[arg-type]
+    assert app_settings._agent_choices() == HEAD_SETTINGS
 
 
-def test_doctors_rows_read_as_the_head_but_for_codexs_mark(
+def test_doctors_rows_read_as_the_head(
     printed: Callable[..., str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -229,11 +232,8 @@ def test_doctors_rows_read_as_the_head_but_for_codexs_mark(
             name="codex", status=CheckStatus.ok, detail="Codex not detected on this machine"
         ),
     ]
-    marked = HEAD_DOCTOR.replace("✓ codex:", "✓ codex (beta):")
-    assert printed(common.emit_doctor, checks) == marked
-    assert render_checks(checks).plain == marked
-    head_lines, lines = HEAD_DOCTOR.splitlines(), marked.splitlines()
-    assert lines[:2] == head_lines[:2]  # python's row and Claude Code's, unchanged
+    assert printed(common.emit_doctor, checks) == HEAD_DOCTOR
+    assert render_checks(checks).plain == HEAD_DOCTOR
 
     monkeypatch.setattr(common, "get_state", lambda: SimpleNamespace(json_output=True))
     capsys.readouterr()
@@ -242,20 +242,18 @@ def test_doctors_rows_read_as_the_head_but_for_codexs_mark(
     assert MARK not in said and '"name": "codex"' in said
 
 
-def test_aisquare_accounts_reads_as_the_head_on_a_claude_only_machine(
+def test_aisquare_accounts_reads_as_the_head_with_codex_or_without(
     printed: Callable[..., str],
 ) -> None:
-    """A machine without Codex: the head's lines exactly, Claude Code's install line and
-    table byte for byte, but for the last, whose list of the agents ``accounts add`` takes
-    marks Codex (SMOKE14, seq 11065). With Codex's accounts too, its install line and its
-    agent cell carry the mark, Claude Code's words none."""
+    """A machine without Codex: the head's lines exactly, the last naming the agents
+    ``accounts add`` takes, Codex among them (SMOKE14, seq 11065). With Codex's accounts too:
+    the head's install lines and table, byte for byte."""
     alone = AccountsOverview(
         claude=CLAUDE, accounts=[_status(1, "claude-code")], installs={"claude-code": CLAUDE}
     )
     head = _native(HEAD_ACCOUNTS_CLAUDE_ONLY).splitlines()
     lines = printed(accounts_cli._emit_overview, alone, with_usage=False).splitlines()
-    assert lines[:-1] == head[:-1]
-    assert lines[-1] == head[-1].replace("[--agent codex]", "[--agent codex (beta)]")
+    assert lines == head
 
     both = AccountsOverview(
         claude=CLAUDE,
@@ -263,43 +261,26 @@ def test_aisquare_accounts_reads_as_the_head_on_a_claude_only_machine(
         installs={"claude-code": CLAUDE, "codex": CODEX},
     )
     said = printed(accounts_cli._emit_overview, both, with_usage=False)
-    assert said.splitlines()[0] == HEAD_ACCOUNTS_BOTH.splitlines()[0]  # Claude Code's install
-    assert said.splitlines()[1] == "✓ Codex (beta) 0.164.0 · /opt/bin/codex"
-    # The table pads its agent column to the wider name; its words are the head's but the mark.
-    expected = (
-        _flat(_native(HEAD_ACCOUNTS_BOTH))
-        .replace("✓ Codex 0.164.0", "✓ Codex (beta) 0.164.0")
-        .replace("2 Codex account 2", "2 Codex (beta) account 2")
-        .replace("[--agent codex]", "[--agent codex (beta)]")
-    )
-    assert _flat(said) == expected
-    assert said.count(MARK) == 3
+    assert said == _native(HEAD_ACCOUNTS_BOTH)
+    assert MARK not in said
 
 
-def test_aisquare_agents_reads_as_the_head_but_for_codexs_mark(
+def test_aisquare_agents_reads_as_the_head(
     printed: Callable[..., str],
 ) -> None:
-    """``agents connect``'s line marks Codex alone. ``agents list`` lists Codex with its mark
-    (SMOKE14, seq 11065) on a line of its row under its id, the column as wide as the ids
-    alone make it: the header and Claude Code's row are the head's, byte for byte."""
+    """``agents connect``'s lines and ``agents list``'s table are the head's, byte for byte:
+    Codex's row has no second line for a mark (it had one in 0.10.0, under its id)."""
     claude = AgentConnection(name="claude-code", hooks_installed=True, imported=2)
     codex = AgentConnection(name="codex", hooks_installed=True, imported=0)
     assert printed(common.emit_connected, claude) == HEAD_CONNECT_CLAUDE
-    assert printed(common.emit_connected, codex) == HEAD_CONNECT_CODEX.replace(
-        "codex —", "codex (beta) —"
-    )
+    assert printed(common.emit_connected, codex) == HEAD_CONNECT_CODEX
     infos = [
         AgentInfo(name="claude-code", detected=True, connected=True, readiness="configured"),
         AgentInfo(name="codex", detected=False),
     ]
-    head = HEAD_AGENTS_LIST.splitlines()
-    lines = printed(common.emit_agents, infos).splitlines()
-    codex_row = head[4]
-    assert codex_row.startswith("│ codex ")
-    blank = "".join(char if char == "│" else " " for char in codex_row)
-    assert lines == [*head[:5], "│ (beta)" + blank[len("│ (beta)") :], *head[5:]]
+    assert printed(common.emit_agents, infos) == HEAD_AGENTS_LIST
     infos[1] = AgentInfo(name="codex", detected=True, detail="found at /opt/bin/codex")
-    assert printed(common.emit_agents, infos).endswith("\ncodex (beta): found at /opt/bin/codex\n")
+    assert printed(common.emit_agents, infos).endswith("\ncodex: found at /opt/bin/codex\n")
 
 
 def _agent_helps() -> dict[str, str]:
@@ -320,15 +301,15 @@ def _agent_helps() -> dict[str, str]:
     return helps
 
 
-#: Where ``--agent`` chooses a coding agent, its help lists them, Codex with its mark
-#: (SMOKE14, seq 11065); ``captain since`` (a fleet agent's label) and ``hook event`` (the
+#: Where ``--agent`` chooses a coding agent, its help lists them (SMOKE14, seq 11065), Codex
+#: with no mark since 0.10.1; ``captain since`` (a fleet agent's label) and ``hook event`` (the
 #: adapter a hook was installed by, which only a hook passes) choose none, and read as the head.
-AGENTS = "claude-code, codex (beta)"
+AGENTS = "claude-code, codex"
 NOW_AGENT_HELPS = {
     "init": f"Agent to connect ({AGENTS}); repeat for several.",
     "launch": f"Coding agent family ({AGENTS}).",
-    "accounts default": "Whose account: claude-code (the default) or codex (beta).",
-    "accounts add": "Whose account: claude-code (the default) or codex (beta).",
+    "accounts default": HEAD_AGENT_HELPS["accounts default"],
+    "accounts add": HEAD_AGENT_HELPS["accounts add"],
     "team spawn": f"Coding agent family ({AGENTS}).",
     "team bind": f"Coding agent family ({AGENTS}).",
     "fleet spawn": f"Coding agent family ({AGENTS}).",
@@ -341,17 +322,15 @@ NOW_AGENT_HELPS = {
 }
 
 
-def test_every_agent_options_help_names_codex_with_its_mark_and_claude_code_without() -> None:
+def test_every_agent_options_help_names_codex_and_claude_code_with_no_mark() -> None:
     """Every ``--agent`` option, none added or lost since the head: each that chooses a coding
-    agent names Codex once, with its mark, and Claude Code unmarked; the rest are the head's."""
+    agent names Codex, and no agent carries a mark; the rest are the head's."""
     helps = _agent_helps()
     assert helps.keys() == HEAD_AGENT_HELPS.keys()
     assert helps == NOW_AGENT_HELPS
     for path, said in helps.items():
-        lists = "codex" in said
-        assert said.count(MARK) == (1 if lists else 0), path
-        assert "claude-code (beta)" not in said, path
-        assert lists or said == HEAD_AGENT_HELPS[path], path
+        assert MARK not in said, path
+        assert "codex" in said or said == HEAD_AGENT_HELPS[path], path
 
 
 @pytest.fixture
@@ -386,7 +365,7 @@ BROWSER_OPTION_ROWS = [
 
 
 @pytest.mark.usefixtures("help_console")
-def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> None:
+def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_browser() -> None:
     result = CliRunner().invoke(app, ["accounts", "add", "--help"])
     assert result.exit_code == 0, result.output
     # Each line as the head drew it, the padding Rich ends a plain line with aside (a box's
@@ -397,14 +376,34 @@ def test_the_accounts_add_help_page_reads_as_the_head_but_for_codexs_mark() -> N
     assert now[at : at + len(BROWSER_OPTION_ROWS)] == BROWSER_OPTION_ROWS, result.output
     assert "--agent  " in now[at - 1], "--browser follows --agent"
     del now[at : at + len(BROWSER_OPTION_ROWS)]
-    assert len(now) == len(head), result.output
-    for was, line in zip(head, now, strict=True):
-        if "--agent  " in was:  # its help grew by the mark, and the box's padding shrank by it
-            assert _flat(line) == _flat(was).replace("or codex.", "or codex (beta)."), line
-        else:
-            assert line == was, result.output
+    assert now == head, result.output  # --agent's row too: no mark (0.10.0 drew one)
     root = CliRunner().invoke(app, ["--help"])
     assert root.exit_code == 0 and MARK not in root.output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh is a POSIX shell script")
+def test_install_sh_help_offers_codex_with_no_mark(tmp_path: Path) -> None:
+    """``install.sh --help``'s ``--agent`` row is the one place Codex's mark was written by
+    hand, not drawn from ``release_stage``: it said ``codex (beta)`` in 0.10.0. The
+    repository's copy, run as a person runs it; ``--help`` prints and exits before the
+    hand-off, so it reaches no network."""
+    script = Path(__file__).resolve().parents[1] / "install.sh"
+    result = subprocess.run(
+        [shutil.which("sh") or "/bin/sh", str(script), "--help"],
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "beta" not in result.stdout.lower(), result.stdout
+    said = " ".join(result.stdout.split())
+    assert (
+        "--agent NAME Coding agent to install and connect: claude-code (the default), codex, "
+        "or both. Repeat it to name both." in said
+    ), result.stdout
 
 
 #: ``aisquare metrics show`` with no turns, as 0.9.2 printed it (6a77e650's cli/common.py),
@@ -413,13 +412,14 @@ HEAD_092_NO_TURNS = "No turns recorded yet. Connect Claude Code: rlx agents conn
 
 
 @pytest.mark.parametrize("codex_here", ["none", "home", "binary"])
-def test_the_empty_metrics_line_names_codex_only_where_it_is_and_marks_it(
+def test_the_empty_metrics_line_names_codex_only_where_it_is(
     printed: Callable[..., str], monkeypatch: pytest.MonkeyPatch, codex_here: str
 ) -> None:
-    """The connect hint names a stable agent always and a beta one only on a machine that has
-    it (its home or a context file, or its binary on PATH), through the adapter's stage and
-    ``core.agents``' detection, never a name. So a machine without Codex reads 0.9.2's line
-    byte for byte (seq 11130), and one with Codex names both, Codex with its mark."""
+    """The connect hint names the default agent always and another only on a machine that has
+    it (its home or a context file, or its binary on PATH), through ``core.agents``'
+    detection, never a name. So a machine without Codex reads 0.9.2's line byte for byte (seq
+    11130), and one with Codex names both. Codex leaving beta (0.10.1) took its mark off that
+    line and changed nothing else: it is still named only where it is."""
     from aisquare.core import agents as agent_core
     from aisquare.models import MetricsSummary
 
@@ -438,12 +438,12 @@ def test_the_empty_metrics_line_names_codex_only_where_it_is_and_marks_it(
     else:
         assert said == (
             "No turns recorded yet. Connect your coding agent: rlx agents connect "
-            "claude-code or rlx agents connect codex (beta)\n"
+            "claude-code or rlx agents connect codex\n"
         )
 
 
 #: The persona Export dialog's destinations (``ExportPersonaScreen._destinations``), by radio
-#: id, as the head before Codex's rows took their mark rendered them (865bfcdc): each agent's
+#: id, as the head before Codex's rows took their mark (865bfcdc) rendered them: each agent's
 #: personal skills, then each one's project skills. ``{…}`` is where the persona goes.
 HEAD_EXPORT = [
     ("export-personal-claude-code", "Claude Code personal skills — {claude_user}"),
@@ -454,13 +454,13 @@ HEAD_EXPORT = [
 
 
 @pytest.mark.parametrize("in_a_repo", [True, False])
-def test_the_persona_export_dialogs_rows_read_as_the_head_but_for_codexs_mark(
+def test_the_persona_export_dialogs_rows_read_as_the_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, in_a_repo: bool
 ) -> None:
     """Export chooses which agent's skills a persona goes to (GATE #110's F1, seq 11514).
-    Claude Code's rows read as the head's byte for byte, Codex's differ by the mark after its
-    name alone, the first row is still the one chosen, and outside a repository the project
-    rows are still offered disabled."""
+    Every row reads as the head's byte for byte, Codex's with no mark since 0.10.1, the first
+    row is still the one chosen, and outside a repository the project rows are still offered
+    disabled."""
     from aisquare.cli.ui.persona_dialogs import ExportPersonaScreen
     from aisquare.core import agents as agent_core
 
@@ -479,7 +479,6 @@ def test_the_persona_export_dialogs_rows_read_as_the_head_but_for_codexs_mark(
     buttons = ExportPersonaScreen("pair", repo if in_a_repo else None)._destinations()
     shown = [(str(button.id), str(button.label)) for button in buttons]
 
-    assert shown[0::2] == head[0::2]  # Claude Code's own rows, byte for byte
-    assert shown == [(ident, label.replace("Codex", f"Codex{MARK}", 1)) for ident, label in head]
+    assert shown == head
     assert [button.value for button in buttons] == [True, False, False, False]
     assert [button.disabled for button in buttons] == [False, False, not in_a_repo, not in_a_repo]

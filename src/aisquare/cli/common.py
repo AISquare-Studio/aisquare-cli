@@ -746,13 +746,14 @@ def emit_onboard(report: OnboardReport) -> None:
 
 def connect_hint() -> str:
     """What an empty prompt, turn or token listing tells the user to run: ``agents connect``
-    for each agent whose hooks aisquare installs, never one by name. A stable agent is named
-    always, as 0.9.2 named Claude Code installed or not; a beta one only once it is on this
-    machine (its home, a context file or its binary on PATH), with its mark. One agent named
-    reads as 0.9.2's line, ``Connect Claude Code: aisquare agents connect claude-code``, so a
-    machine without Codex reads as it did (tests/test_release_stage.py)."""
+    for each agent whose hooks aisquare installs, never one by name. The default agent is
+    named always, as 0.9.2 named Claude Code installed or not; another only once it is on
+    this machine (its home, a context file or its binary on PATH), a beta one with its mark.
+    One agent named reads as 0.9.2's line, ``Connect Claude Code: aisquare agents connect
+    claude-code``, so a machine without Codex reads as it did (tests/test_release_stage.py).
+    Codex leaving beta (0.10.1) took its mark away, and nothing else."""
     from aisquare.core import agents as agent_core
-    from aisquare.core.agent_adapters import adapters
+    from aisquare.core.agent_adapters import adapters, default_adapter
     from aisquare.core.agent_adapters.types import stage_mark
 
     def here(adapter: AgentAdapter) -> bool:
@@ -762,7 +763,8 @@ def connect_hint() -> str:
         return agent_core.on_path(adapter.id) is not None
 
     hooked = [adapter for adapter in adapters() if adapter.capabilities.hooks]
-    named = [a for a in hooked if a.release_stage == "stable" or here(a)] or hooked
+    default = default_adapter()
+    named = [a for a in hooked if a.id == default.id or here(a)] or hooked
     if len(named) == 1:
         return f"Connect {named[0].label}: {prog.word()} agents connect {named[0].id}"
     return "Connect your coding agent: " + " or ".join(

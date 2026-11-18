@@ -521,9 +521,8 @@ def test_an_empty_listing_names_every_agent_it_can_connect(
     said = " ".join(result.stdout.split())
     if codex_home:
         assert (
-            "Connect your coding agent: rlx agents connect claude-code or rlx agents "
-            "connect codex (beta)"
-        ) in said, said
+            "Connect your coding agent: rlx agents connect claude-code or rlx agents connect codex"
+        ) in said and "(beta)" not in said, said
     else:
         assert said.endswith("Connect Claude Code: rlx agents connect claude-code"), said
         assert "codex" not in said, said

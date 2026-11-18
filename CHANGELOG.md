@@ -66,6 +66,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sharing. The package is still `aisquare-cli` on PyPI, and its keywords there name rlx.
 - The AISquare sign-in keeps its name: `aisquare login`, `logout` and `whoami`, `aisquare
   init --api-key` and `aisquare explainability` are AISquare's, and every page writes them so.
+- **The sidebar no longer shows the AISquare sign-in; it lives in Accounts.** AISquare's own
+  messages say rlx where they said "the CLI": "the keys rlx minted", "Sign-in from rlx is
+  temporarily paused".
 - **asq's top-left reads `rlx`, the product's name, where it read `Fleet`.** The live count
   beside it is as before (`rlx · 3 live`), and nothing else in the sidebar moves, at any
   width.

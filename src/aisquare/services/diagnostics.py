@@ -2634,7 +2634,7 @@ def _minted_keys_check(live: bool) -> DoctorCheck | None:
     if revoked:
         return _ok(
             "minted-keys",
-            f"revoked {len(revoked)} key(s) the CLI minted that were still owed a revocation",
+            f"revoked {len(revoked)} key(s) rlx minted that were still owed a revocation",
         )
     return None
 

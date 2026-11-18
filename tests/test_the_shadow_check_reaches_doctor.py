@@ -188,5 +188,5 @@ def test_the_warning_says_who_it_matters_to(
 
     row = _rows(runner)[_ROW]
 
-    assert "Harmless for the CLI" in row["fix"], row["fix"]
+    assert "Harmless for rlx" in row["fix"], row["fix"]
     assert "facade" in row["fix"], row["fix"]

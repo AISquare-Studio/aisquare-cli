@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)
 [![Python versions](https://img.shields.io/pypi/pyversions/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)
-[![CI](https://github.com/AISquare-Studio/rlx/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/rlx/actions/workflows/ci.yml)
+[![CI](https://github.com/AISquare-Studio/rlx/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/AISquare-Studio/rlx/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AISquare-Studio/rlx/blob/main/LICENSE)
 
 **Tell the manager the goal. Then relax.**

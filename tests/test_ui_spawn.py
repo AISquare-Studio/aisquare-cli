@@ -1875,7 +1875,14 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
 def test_import_beside_the_persona_select_selects_what_it_imports(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
 ) -> None:
-    def answer(source: str, **_: object) -> personas_service.ImportResult:
+    """*Import…* opens the Import dialog on the user layer, with no project's root and no
+    project choice (R27: the app offers personas at the user level only), even beside a
+    project whose own personas folder exists; what it imports is then selected."""
+    (git_project.root / ".aisquare" / "personas").mkdir(parents=True)
+    asked: list[dict[str, object]] = []
+
+    def answer(source: str, **kwargs: object) -> personas_service.ImportResult:
+        asked.append(kwargs)
         directory = dict(personas.layer_dirs(None))["user"] / "fresh-one"
         directory.mkdir(parents=True)
         (directory / "SKILL.md").write_text("---\ndescription: Fresh.\n---\nWork.\n", "utf-8")
@@ -1890,11 +1897,13 @@ def test_import_beside_the_persona_select_selects_what_it_imports(
         await pilot.click("#spawn-import")
         importer = await wait_for_screen(pilot, ImportPersonaScreen)
         await settle(pilot)
+        opened = [importer.root, [str(radio.id) for radio in importer.query(RadioButton)]]
         importer.query_one("#import-source", Input).value = "./fresh-one"
         await settle(pilot)
         await pilot.click("#import-submit")
         await settle(pilot)
         seen = [
+            opened,
             type(host.screen).__name__,
             select(dialog, "persona").value,
             note(dialog, "#spawn-persona-description"),
@@ -1903,7 +1912,9 @@ def test_import_beside_the_persona_select_selects_what_it_imports(
         await settle(pilot)
         return seen
 
-    screen, value, description = drive(git_project, scenario)
+    opened, screen, value, description = drive(git_project, scenario)
+    assert opened == [None, ["import-user"]]
+    assert [(call["root"], call["layer"]) for call in asked] == [(None, "user")]
     assert (screen, value, description) == ("SpawnDialog", "fresh-one", "Fresh.")
     assert spawns.calls[0][2]["persona"] == "fresh-one"
 
@@ -3669,24 +3680,32 @@ def test_a_pick_the_project_also_holds_reads_as_spawn_runs_the_projects_own(
     as the project's own, as ``spawn`` resolves the project's layer first: the line under
     the field says so, and names the one it is not. A pick the project does not hold reads
     its own description, as before."""
-    _write_persona(git_project.root / ".aisquare" / "personas", "skeptic", "A project skeptic.")
+    own = git_project.root / ".aisquare" / "personas"
+    _write_persona(own, "skeptic", "A project skeptic.")
+    _write_persona(own, "solo", "A project solo.")
+    _write_persona(paths.aisquare_home() / "personas", "solo", "A user solo.")
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = [option_prompts(dialog, "persona")]
-        for name in ("skeptic", "mentor"):
+        for name in ("skeptic", "solo", "mentor"):
             select(dialog, "persona").value = name
             await pilot.pause()
             seen.append(note(dialog, "#spawn-persona-description"))
         return seen
 
-    prompts, shadowed, plain = drive(git_project, scenario)
+    prompts, shadowed, user_shadowed, plain = drive(git_project, scenario)
     assert "skeptic · bundled" in prompts and "skeptic · project" not in prompts
+    assert "solo · user" in prompts and "solo · project" not in prompts
     assert shadowed == (
         "skeptic is this project's own persona too — spawn uses the project's own, "
         "not the bundled one"
     )
+    assert user_shadowed == (
+        "solo is this project's own persona too — spawn uses the project's own, not the user one"
+    )
     assert plain == personas.resolve("mentor", git_project.root).description
-    assert personas.resolve("skeptic", git_project.root).layer == "project", "the premise"
+    for name in ("skeptic", "solo"):  # the premise: the project's own wins at spawn
+        assert personas.resolve(name, git_project.root).layer == "project", name
 
 
 def test_a_picked_persona_survives_a_project_switch_silently(

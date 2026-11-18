@@ -111,7 +111,7 @@ def login(
             return
         if iam.env_session(resolved) is not None:
             fail(
-                f"{iam.TOKEN_ENV_VAR} is set, so aisquare is using that token. "
+                f"{iam.TOKEN_ENV_VAR} is set, so rlx is using that token. "
                 "Unset it to sign in with the browser.",
                 error="env_token_set",
             )

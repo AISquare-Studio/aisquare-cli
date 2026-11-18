@@ -401,6 +401,10 @@ _KEEP_FUNCS: dict[tuple[str, str], str] = {
     ("services/diagnostics.py", "_minted_keys_check"): "the AISquare integration",
     ("services/diagnostics.py", "_check_remote_control"): "explainability: the integration",
     ("services/lifecycle.py", "_explainability_step"): "explainability: the integration",
+    **{
+        ("services/auto_mode.py", name): "explainability: the integration (owner, seq 12065)"
+        for name in ("_remedy", "spawn_note")
+    },
     ("cli/root.py", "init"): "init --explainability's help: the integration",
     ("cli/team.py", "show"): "its help describes the agents' one-line board update (Q9)",
 }
@@ -481,8 +485,12 @@ def _scan() -> set[tuple[str, int, str, str]]:
     flags = r"(?:(?:--json|--no-color|-q|--quiet|-v|--verbose) )*"
     old = re.compile(lead + r"(?:aisquare|asq)(?= " + flags + r"(?:" + subs + r")\b)")
     new = re.compile(
-        lead + r"rlx(?= " + flags + r"(?:" + subs + r")\b)"
-        r"(?! instances (?:have|on)\b)(?! board — )"  # rlx instances (a noun); a heading
+        # rlx before a subcommand, or quoted before a placeholder that names one: `rlx
+        # {command}` told a person to run another program's rlx (review of #503, m4). Unquoted,
+        # rlx before a placeholder is the product's name before its version: rlx 0.10.1.
+        r"(?:" + lead + r"rlx(?= " + flags + r"(?:" + subs + r")\b)|(?<=`)rlx(?= \{…\}))"
+        # rlx instances (a noun), and a heading:
+        r"(?! instances(?:\?| (?:have|on|run)\b))(?! board — )"
     )
     cli = re.compile(r"\b(?:[Tt]his|[Tt]he|an earlier|our own) CLI\b|\bCLI sign-in\b")
     shield = re.compile(r"`?aisquare hook\b[^`]*`?|-m aisquare\S*|aisquare-[\w-]+|aisquare@\S+")
@@ -593,6 +601,9 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
         'H = ["aisquare", "accounts", "add"]\n'
         'I = (prog.word(), "accounts", "add")\n'
         'J = ["aisquare-cli", "x"]\n'
+        'O = f"then run `rlx {command}` again"\n'
+        'P = f"then run `{prog.words(command)}` again"\n'
+        'Q = f"rlx {version} is up to date"\n'
     )
     root = tmp_path / "aisquare"
     (root / "cli").mkdir(parents=True)
@@ -614,6 +625,7 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
         ("cli/auth.py", "the CLI", "run aisquare login; it forgets the keys the CLI minted"),
         ("cli/fake.py", "argv", "aisquare accounts add"),
         ("cli/fake.py", "hard-coded rlx", "`rlx accounts add` makes one"),
+        ("cli/fake.py", "hard-coded rlx", "then run `rlx {…}` again"),
         ("cli/fake.py", "old word", "run aisquare doctor to see"),
         ("cli/fake.py", "the CLI", "keys the CLI minted"),
     ]

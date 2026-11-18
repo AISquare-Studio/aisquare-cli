@@ -105,6 +105,8 @@ TOKEN_AT_NEXT_START = "new ngrok token saved — ngrok signs in with it at its n
 the one it started with, and a restart would change the link of one with no static domain."""
 SAVING = "saving to remote.json…"
 """The status line's line while a write the controls asked for waits (:data:`SAVING_AFTER`)."""
+NEW_LINK_NEWS = "New link and password — the old link no longer opens; every device unlocks again"
+"""What *New link* says once it is in (:meth:`RemoteController.regenerate_password`)."""
 SAVING_AFTER = 0.5
 """How long a write of ``remote.json`` runs before the status line says it is saving: one
 takes milliseconds, unless another process holds the file's lock."""
@@ -916,12 +918,16 @@ class RemoteController:
 
         self._then(self._remote_json_write(remote_json_job, deadline=True), wait)
 
-    def regenerate_password(self, *, wait: bool = True) -> str | None:
+    def regenerate_password(self, *, wait: bool = True, new_link: bool = False) -> str | None:
         """A new passphrase from the server; ``None`` while Remote is off (nothing to unlock),
         or when ``remote.json`` would not take it, which the status line then says. The
         running server has the new one all the same, and has signed every phone out: the
         panel shows it until the server reads the file again after another process rewrote
         it, which brings back the old passphrase, and the devices with it.
+
+        ``new_link``: a new link too, so a link that leaked stops opening anywhere. A new
+        passphrase alone keeps the leaked link working and clears the failed-unlock budget, so
+        the lockout's advice is this (*New link*; review of #503, m2).
 
         ``wait=False`` returns ``None`` before the write, and :attr:`on_done` is told once
         the new passphrase is in."""
@@ -931,13 +937,15 @@ class RemoteController:
 
         def remote_json_job() -> None:
             try:
-                password = str(self._server.regenerate_password())
+                password = str(self._server.regenerate_password(new_link=new_link))
             except Exception as exc:  # raised into the Regenerate button's handler: the UI ended
                 self.save_problem = f"the new password could not be saved to remote.json — {exc}"
                 return
             self.save_problem = None
             made.append(password)
-            self._done("New password — every device has to unlock again")
+            self._done(
+                NEW_LINK_NEWS if new_link else "New password — every device has to unlock again"
+            )
 
         written = self._remote_json_write(remote_json_job)
         if not wait:

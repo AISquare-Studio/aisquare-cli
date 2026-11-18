@@ -1468,7 +1468,7 @@ class WelcomeView(VerticalScroll):
         if not self.gh:
             status.append(
                 "\ngh is not installed — the coders open pull requests with it: "
-                "https://cli.github.com",
+                f"{diagnostics.GH_INSTALL_PAGE}",
                 style="dim",
             )
         self.query_one("#fleet-title", Static).update(title)

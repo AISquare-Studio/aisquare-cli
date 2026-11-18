@@ -223,7 +223,7 @@ def standby(
 ) -> None:
     """Wait on your person: watch's routine lines stop waking you (managers only).
 
-    Until your person's next prompt, ``--off``, or a task going back into flight on your board.
+    Until your person's next prompt, --off, or a task going back into flight on your board.
     Results, questions, task moves, notes to you, failures, limits and dialogs still wake you.
     """
     if as_session is None:

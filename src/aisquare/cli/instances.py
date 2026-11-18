@@ -48,8 +48,8 @@ def instances() -> None:
     stdout_console().print(table)
     if any(instance.differs_from(live[0]) for instance in live[1:]):
         stderr_console().print(
-            "⚠ these asqs run different releases or store schemas on one home: quit the older "
-            "one (q in it) and start it again with this release",
+            "⚠ these rlx instances run different releases or store schemas on one home: quit "
+            "the older one (q in it) and start it again with this release",
             markup=False,
             highlight=False,
         )

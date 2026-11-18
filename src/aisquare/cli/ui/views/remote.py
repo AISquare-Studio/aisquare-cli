@@ -150,6 +150,12 @@ class RemotePanel(ModalScreen[None]):
             with Horizontal(classes="row"):
                 yield Label("Link")
                 yield Button("Copy", id="remote-copy", compact=True)
+                new_link = Button("New link", id="remote-new-link", compact=True)
+                new_link.tooltip = (
+                    "a new link and a new password: the old link stops opening, and every device "
+                    "unlocks again"
+                )
+                yield new_link
             yield Static("", id="remote-link")
             yield Static("", id="remote-qr")
             with Horizontal(classes="row"):
@@ -280,8 +286,8 @@ class RemotePanel(ModalScreen[None]):
         if until is None:
             return Text(f"{failed} failed unlocks in 30 min", style="dim")
         return Text(
-            f"{failed} failed unlocks in 30 min — new unlocks paused; Regenerate sets a new "
-            "password"
+            f"{failed} failed unlocks in 30 min — new unlocks paused; if the link leaked, New "
+            "link replaces it and the password"
         )
 
     def _paint_devices(self, devices: list[dict[str, Any]]) -> None:
@@ -359,6 +365,8 @@ class RemotePanel(ModalScreen[None]):
         thread; the fleet UI says each once it is done (``RemoteController.on_done``)."""
         if event.button.id == "remote-regen":
             self.controller.regenerate_password(wait=False)
+        elif event.button.id == "remote-new-link":
+            self.controller.regenerate_password(wait=False, new_link=True)
         elif event.button.id == "remote-copy":
             url = self.controller.link_url()
             if url is not None:

@@ -15,7 +15,9 @@ import asyncio
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
+import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Static
 
@@ -273,6 +275,98 @@ def test_the_tmux_row_links_its_page_in_asq_and_keeps_its_command_for_the_shell(
     row = diagnostics._check_tmux(Missing())  # type: ignore[arg-type]
     assert row.ui_fix is not None and diagnostics.TMUX_INSTALL_PAGE in row.ui_fix
     assert row.fix is not None and row.fix.startswith("Install it: "), "the shell keeps it"
+
+
+#: (platform, /etc/os-release): macOS, a Debian-family Linux, a Fedora one, one the hint table
+#: does not know (it then names every package manager), and Windows (the fleet's WSL2, apt).
+_PLATFORMS: dict[str, tuple[str, str | None]] = {
+    "macos": ("darwin", None),
+    "debian": ("linux", 'ID=ubuntu\nID_LIKE="debian"\n'),
+    "fedora": ("linux", "ID=fedora\n"),
+    "unknown-linux": ("linux", "ID=arch\n"),
+    "windows-wsl": ("win32", None),
+}
+
+
+class _Tmux:
+    """A tmux seam at ``version`` (``None``: not installed)."""
+
+    def __init__(self, version: tuple[int, int] | None) -> None:
+        self._version = version
+
+    def available(self) -> bool:
+        return self._version is not None
+
+    def version(self) -> tuple[int, int] | None:
+        return self._version
+
+    def binary(self) -> str:
+        return "/usr/bin/tmux"
+
+
+@pytest.mark.parametrize("where", sorted(_PLATFORMS))
+def test_the_install_rows_name_no_command_in_asq_on_any_platform(
+    where: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #503, m1: on Linux and WSL ``install_hint`` names apt or dnf, which COMMAND did
+    not know, so asq's Doctor showed "Upgrade it: apt install tmux" and "Install GitHub CLI: apt
+    install gh, then: gh auth login" as plain words. On every platform each row's shell fix keeps
+    its command, which COMMAND knows for one, and what asq shows (:func:`ui_way`) names none."""
+    from aisquare.services import diagnostics
+
+    platform, release = _PLATFORMS[where]
+    os_release = tmp_path / "os-release"
+    if release is not None:
+        os_release.write_text(release, encoding="utf-8")
+    real = diagnostics.install_hint
+
+    def hint(package: str) -> str:
+        return real(package, platform=platform, os_release=os_release)
+
+    def nowhere(name: str, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(diagnostics, "install_hint", hint)
+    monkeypatch.setattr("shutil.which", nowhere)
+    rows = [
+        diagnostics._check_tmux(_Tmux(None)),  # type: ignore[arg-type]
+        diagnostics._check_tmux(_Tmux((3, 0))),  # type: ignore[arg-type]
+        diagnostics._check_gh(),
+    ]
+    assert [row.status for row in rows] == [CheckStatus.warn] * 3
+    pages = [
+        diagnostics.TMUX_INSTALL_PAGE,
+        diagnostics.TMUX_INSTALL_PAGE,
+        diagnostics.GH_INSTALL_PAGE,
+    ]
+    for row, page in zip(rows, pages, strict=True):
+        assert row.fix is not None and COMMAND.search(row.fix), (row.name, row.fix)
+        way = ui_way(row, {})
+        assert way is not None and not COMMAND.search(way), (row.name, way)
+        assert page in way, f"{row.name}: asq links its install page: {way}"
+
+
+def test_the_gh_rows_sign_in_note_names_its_command_at_a_shell_and_none_in_asq(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #503, m1: an ok gh row's detail ended "(no login found: gh auth login)" in asq
+    too. The shell keeps the command; asq says what is missing (``detail_advice``)."""
+    from aisquare.core import program as prog
+    from aisquare.services import diagnostics
+
+    def found(name: str, *args: Any, **kwargs: Any) -> str:
+        return "/usr/bin/gh"
+
+    for variable in ("GH_TOKEN", "GITHUB_TOKEN", prog.IN_APP_ENV):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr(diagnostics, "_gh_config_dir", lambda: tmp_path)  # no hosts.yml
+    monkeypatch.setattr("shutil.which", found)
+    shell = diagnostics._check_gh()
+    assert shell.status is CheckStatus.ok and "(no login found: gh auth login)" in shell.detail
+    monkeypatch.setenv(prog.IN_APP_ENV, "1")
+    app = diagnostics._check_gh()
+    assert app.detail.endswith("(not signed in to GitHub CLI)"), app.detail
+    assert not COMMAND.search(app.detail), app.detail
 
 
 def test_no_doctor_row_s_asq_wording_names_a_command() -> None:

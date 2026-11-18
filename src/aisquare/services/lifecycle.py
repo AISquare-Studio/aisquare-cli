@@ -2302,7 +2302,7 @@ def launchers_refusal(
             app=f"{len(launchers)} sessions rlx started in terminals are",
         )
     )
-    again = again or f"run `rlx {command}` again"
+    again = again or prog.shell_advice(f"run `{prog.words(command)}` again", app="try again")
     named = ", ".join(launchers)
     return (
         f"{waiting} waiting on {'its agent' if one else 'their agents'} on this home "
@@ -2336,9 +2336,9 @@ def asqs_refusal(command: str, asqs: Sequence[str], *, again: str | None = None)
     cost = _ASQ_COST.get(command, "{they} would be left running").format(
         it=it, they=they, runs="runs" if one else "run"
     )
-    running = "another rlx runs" if one else f"{len(asqs)} other asqs run"
+    running = "another rlx runs" if one else f"{len(asqs)} other rlx run"
     each = "it" if one else "each"
-    again = again or f"run `rlx {command}` again"
+    again = again or prog.shell_advice(f"run `{prog.words(command)}` again", app="try again")
     named = ", ".join(asqs)
     return f"{running} on this home ({named}): {cost}. Quit {it} first (q in {each}), then {again}."
 

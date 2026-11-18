@@ -151,7 +151,7 @@ def _quit_others(
     hand = "; ".join(_by_hand(other) for other in differing)
     if not (_interactive() if interactive is None else interactive):
         raise _refuse(f"No terminal to ask in: quit {'them' if many else 'it'} first — {hand}.")
-    question = "Quit the other asqs?" if many else QUESTION
+    question = "Quit the other rlx instances?" if many else QUESTION
     if not (ask or _confirm)(question):
         raise _refuse(
             f"Quit {'them' if many else 'it'} first — {hand} — then start {prog.word()} again."

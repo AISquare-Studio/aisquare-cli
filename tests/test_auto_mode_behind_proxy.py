@@ -369,7 +369,8 @@ def test_the_doctor_line_exists_only_for_auto_mode_behind_a_configured_proxy(
     assert "manager" in check.detail and "not measurable yet" in check.detail
     assert check.fix and "--permission-mode acceptEdits" in check.fix
     assert "AISquare-Explainability-SDK/issues/1144" in check.fix
-    assert "explainability disable" in check.fix
+    # The AISquare integration keeps its name (owner, seq 12065): never `rlx explainability`.
+    assert "untraced: aisquare explainability disable" in check.fix
     assert _doctor_row() is not None, "it reaches `explainability doctor`"
 
 
@@ -580,7 +581,7 @@ def test_the_spawn_note_points_at_the_command_that_carries_the_line(
     note = _note("auto")
 
     assert note is not None
-    assert note.endswith(f"or see `rlx explainability doctor` ({auto_mode.CHECK_NAME})"), note
+    assert note.endswith(f"or see `aisquare explainability doctor` ({auto_mode.CHECK_NAME})"), note
     named = runner.invoke(app, ["--json", "explainability", "doctor"]).stdout
     assert auto_mode.CHECK_NAME in {row["name"] for row in json.loads(named)}
     plain = runner.invoke(app, ["--json", "doctor"]).stdout

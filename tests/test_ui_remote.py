@@ -1434,7 +1434,9 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended(
         await pilot.pause()
         line = shown(modal.query_one("#remote-unlocks", Static))
         assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
-        assert "new unlocks paused; Regenerate sets a new password" in line
+        # Review of #503, m2: a new password alone keeps a leaked link working; New link
+        # replaces both, and the line points at it, in rlx's words (R13: no command).
+        assert "new unlocks paused; if the link leaked, New link replaces it and the" in line
         assert "regenerate-password" not in line, "asq names no command (R13)"
         state_line = shown(modal.query_one("#remote-state", Static))
         # with its date: an extension can cross midnight
@@ -1537,6 +1539,37 @@ def test_the_panels_controls_never_wait_for_remote_jsons_lock_on_textuals_thread
         assert saved["password"] != passphrase and saved["devices"] == []
         assert remote_control.SAVING not in shown(modal.query_one("#remote-status", Static))
         assert "New password — every device has to unlock again" in toasts(app)
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_new_link_replaces_the_link_and_the_password_and_signs_every_device_out() -> None:
+    """Review of #503, m2: 0.10.0's lockout advice was to rotate the LINK. A new password alone
+    (Regenerate) keeps a leaked link working and clears the failed-unlock budget, and rlx had
+    no way to rotate the link. *New link* does: the old link no longer opens, the password is
+    new, every device unlocks again, and the panel shows the new link."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await written(pilot)
+        runtime = remote_server.runtime()
+        assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
+        old_token, old_password = remote_server.remote_link_token(), runtime.password
+        modal.query_one("#remote-new-link", Button).press()
+        await written(pilot)
+        saved = json.loads(paths.remote_state_path().read_text())
+        assert saved["token"] != old_token and saved["password"] != old_password
+        assert saved["devices"] == [], "every device unlocks again"
+        assert not runtime.token_matches(old_token), "the leaked link no longer opens"
+        assert runtime.token_matches(saved["token"])
+        modal.repaint()
+        await pilot.pause()
+        assert saved["token"] in shown(modal.query_one("#remote-link", Static))
+        assert old_token not in shown(modal.query_one("#remote-link", Static))
+        assert remote_control.NEW_LINK_NEWS in toasts(app)
 
     drive(go, tunnel=missing_ngrok)
 

@@ -427,6 +427,9 @@ def _fail(name: str, detail: str, fix: str, *, ui_fix: str | None = None) -> Doc
 TMUX_INSTALL_PAGE = "https://github.com/tmux/tmux/wiki/Installing"
 """tmux's own install page: what asq links where tmux is missing, never an install command to
 type (R13, ruled Q1). The shell's row keeps :func:`install_hint`."""
+GH_INSTALL_PAGE = "https://cli.github.com"
+"""GitHub CLI's own page, which says how to install it and sign in: what asq links where gh is
+missing (review of #503, m1), as Welcome does. The shell's row keeps :func:`install_hint`."""
 
 
 def _check_python() -> DoctorCheck:
@@ -542,7 +545,7 @@ def _check_commands() -> DoctorCheck | None:
     return _ok(
         "commands",
         f"{names} on your PATH {'runs another program' if one else 'run other programs'} "
-        f"({where}), not this aisquare: start it with {', '.join(left[:-1])} or {left[-1]}",
+        f"({where}), not this rlx: start it with {', '.join(left[:-1])} or {left[-1]}",
     )
 
 
@@ -2900,6 +2903,7 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
                 f"tmux {found} is too old — the fleet needs {minimum} or newer; "
                 "everything else works",
                 f"Upgrade it: {install_hint('tmux')}",
+                ui_fix=f"Upgrade tmux as {TMUX_INSTALL_PAGE} says, then re-run the checks",
             )
         if version < _RECOMMENDED_TMUX:
             wanted = f"{_RECOMMENDED_TMUX[0]}.{_RECOMMENDED_TMUX[1]}"
@@ -3348,7 +3352,8 @@ def _gh_login_note() -> str:
             return ""
     except (OSError, UnicodeDecodeError):
         return ""
-    return " (no login found: gh auth login)"
+    # In asq, the row's detail says what is missing, never the command (review of #503, m1).
+    return prog.detail_advice(" (no login found: gh auth login)", " (not signed in to GitHub CLI)")
 
 
 #: Plugins and MCP servers that actually PROVIDE browser control, by the
@@ -3761,6 +3766,8 @@ def _check_gh() -> DoctorCheck:
                 "gh not found — the fleet's PR flow for coder/reviewer needs it; "
                 "everything else works",
                 f"Install GitHub CLI: {install_hint('gh')}, then: gh auth login",
+                ui_fix=f"Install GitHub CLI and sign in to it as {GH_INSTALL_PAGE} says, then "
+                "re-run the checks",
             )
         return _ok(name, f"gh at {found} — PR flow available{_gh_login_note()}")
     except Exception as exc:  # diagnostics must never crash

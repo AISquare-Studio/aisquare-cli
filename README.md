@@ -1,4 +1,4 @@
-# rlx
+# ![rlx](https://raw.githubusercontent.com/AISquare-Studio/rlx/main/docs/assets/rlx-logo.svg)
 
 [![PyPI](https://img.shields.io/pypi/v/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)
 [![Python versions](https://img.shields.io/pypi/pyversions/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)

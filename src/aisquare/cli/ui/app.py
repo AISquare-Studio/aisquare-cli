@@ -108,6 +108,7 @@ from aisquare.cli.ui.sidebar import (
     DoctorSelected,
     OpenAgentMenu,
     OpenProjectMenu,
+    PersonasSelected,
     ProjectCard,
     ProjectRenamed,
     ProjectSelected,
@@ -1556,6 +1557,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return False
         elif kind == "accounts":
             self.post_message(AccountsSelected())
+            return False
+        elif kind == "personas":
+            self.post_message(PersonasSelected())
             return False
         elif kind == "usage-stats":
             self.post_message(UsageStatsSelected())
@@ -3613,7 +3617,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _reopen_picker(self, back: ReturnTo, slot: str) -> None:
         """The persona picker again, from the Personas tab that opened it, the new slot
         highlighted (#215): what it is chosen for stays that tab's. ``slot`` is its number,
-        or ``codex:5`` where two agents' accounts hold it (``SignInLanded.ref``)."""
+        or ``codex:5`` where two agents' accounts hold it (``SignInLanded.ref``). No project
+        view has that tab since R27, and the Settings page attaches nothing: a path for the
+        0.10.2 clean-up, which answers that the project is no longer open."""
         try:
             tab = self.query_one(f"#project-{back.project_id}").query_one(PersonasTab)
         except NoMatches:
@@ -4129,6 +4135,17 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         )
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("usage-stats")
+
+    async def on_personas_selected(self, event: PersonasSelected) -> None:
+        """The hub's *Personas*: yours and the bundled ones, for every project, on a page of
+        Settings' own (R27: no longer a tab of each project). Built when first opened, as it
+        reads the catalogue; read again each later time, as the disk may have changed."""
+        kept = next(iter(self.content.query_children(PersonasTab)), None)
+        await self._show("personas", lambda: PersonasTab(id="personas"))
+        if kept is not None:
+            kept.reload()
+        self.sidebar.select(SETTINGS_KEY)
+        self._remember_selection("personas")
 
     async def on_resources_selected(self, event: ResourcesSelected) -> None:
         """The hub's *Agent resources*: what each live agent consumes, sampled while it shows

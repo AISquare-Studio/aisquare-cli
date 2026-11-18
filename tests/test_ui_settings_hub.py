@@ -43,12 +43,14 @@ from aisquare.cli.ui.sidebar import (
     headroom_dot,
     status_line_text,
 )
+from aisquare.cli.ui.views import personas_tab
 from aisquare.cli.ui.views.app_settings import (
     AGENT_TAB,
     PREFERENCES_TAB,
     REMOTE_TAB,
     AppSettingsView,
 )
+from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings_captain import CaptainToggle
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
 from aisquare.cli.ui.views.settings_remote import RemoteSection
@@ -159,7 +161,8 @@ def test_settings_opens_the_hub_and_each_link_opens_its_page_under_settings() ->
         await pilot.click(app.query_one(SettingsRow))
         await settle_page(app)
         seen.append((app.content.current, app.sidebar.selected_key))
-        for link in ("#hub-app-settings", "#hub-accounts", "#hub-usage-stats", "#hub-doctor"):
+        links = ("#hub-app-settings", "#hub-accounts", "#hub-personas", "#hub-usage-stats")
+        for link in (*links, "#hub-doctor"):
             await pilot.click(app.query_one(SettingsRow))
             await settle_page(app)
             await pilot.click(link)
@@ -172,9 +175,48 @@ def test_settings_opens_the_hub_and_each_link_opens_its_page_under_settings() ->
         ("settings-hub", SETTINGS_KEY),
         ("app-settings", SETTINGS_KEY),
         ("accounts", SETTINGS_KEY),
+        ("personas", SETTINGS_KEY),
         ("usage-stats", SETTINGS_KEY),
         ("doctor", SETTINGS_KEY),
     ]
+
+
+def test_settings_personas_opens_your_personas_with_no_project_and_reads_them_each_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R27: Personas is one of Settings' own pages, at the user level: the Personas page with
+    no project, so no project layer and no Attach, under *⚙ Settings*. Built when first
+    opened, it reads the catalogue then, and again each later time it is opened."""
+    reads: list[Path | None] = []
+    read_entries = personas_tab.read_entries
+
+    def counted(root: Path | None) -> list[personas_tab.Entry]:
+        reads.append(root)
+        return read_entries(root)
+
+    monkeypatch.setattr(personas_tab, "read_entries", counted)
+
+    async def go(pilot: Pilot[None]) -> dict[str, Any]:
+        app = _app(pilot)
+        seen: dict[str, Any] = {}
+        for _ in range(2):
+            await pilot.click(app.query_one(SettingsRow))
+            await settle_page(app)
+            await pilot.click("#hub-personas")
+            await settle_page(app)
+        page = app.query_one("#personas", PersonasTab)
+        seen["page"] = (app.content.current, app.sidebar.selected_key, page.project, page.root)
+        seen["chips"] = [str(box.id) for box in page.query("#personas-layers Checkbox")]
+        seen["attach"] = len(page.query("#persona-attach-existing, #persona-attach-new"))
+        seen["pages"] = len(app.query(PersonasTab))
+        return seen
+
+    seen = _drive(go)
+    assert seen["page"] == ("personas", SETTINGS_KEY, None, None)
+    assert seen["chips"] == ["layer-user", "layer-bundled"]
+    assert seen["attach"] == 0
+    assert seen["pages"] == 1, "one page, kept"
+    assert reads == [None, None], "read at the first opening and again at the second"
 
 
 def test_app_settings_shown_again_reads_the_bindings_a_shell_wrote_meanwhile() -> None:
@@ -317,6 +359,7 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
         "Remote control",
         "Captain",
         "Accounts",
+        "Personas",
         "Usage & stats",
         "Agent resources",
         "Doctor",
@@ -325,7 +368,7 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
         "Pause all…",
         "Resume all…",
     ]
-    assert len(about) == 8 and all(about)  # the Fleet section's four share one line
+    assert len(about) == 9 and all(about)  # the Fleet section's four share one line
 
 
 def test_the_usage_link_names_no_agent() -> None:

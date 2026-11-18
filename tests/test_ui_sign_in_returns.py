@@ -1,10 +1,11 @@
 """A sign-in started somewhere comes back there once it lands (#286, #215).
 
-Welcome's *Sign in*, the persona picker's *+ New account* and the Spawn dialog's *Pick… ▸
-+ New account* each leave for the Accounts page. Before, nothing brought the user back:
-the content stayed on Accounts, and what the dialog held was gone. Each round trip here
-runs the real shell; the Claude Code sign-in is the Accounts tests' script, and Welcome's
-machine is the Welcome tests' one.
+Welcome's *Sign in* and the Spawn dialog's *Pick… ▸ + New account* each leave for the
+Accounts page. Before, nothing brought the user back: the content stayed on Accounts, and
+what the dialog held was gone. Each round trip here runs the real shell; the Claude Code
+sign-in is the Accounts tests' script, and Welcome's machine is the Welcome tests' one.
+(The persona picker's *+ New account* went with the project view's Personas tab in R27:
+Settings ▸ Personas attaches nothing, as it has no project.)
 """
 
 from __future__ import annotations
@@ -20,16 +21,14 @@ from typing import Any, TypeVar
 import pytest
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, OptionList, Select
+from textual.widgets import Button, Input, Select
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.attach import AttachTargetScreen
-from aisquare.cli.ui.sidebar import AccountsSelected, ProjectSelected, SpawnAgent, action_text
+from aisquare.cli.ui.sidebar import AccountsSelected, SpawnAgent, action_text
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.views import welcome
 from aisquare.cli.ui.views.accounts import AccountsView, next_step
-from aisquare.cli.ui.views.personas_tab import AttachRequested, PersonasTab
-from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import tmux as tmux_core
 from aisquare.core.tmux import Completed, TmuxServer
@@ -172,52 +171,6 @@ def test_welcomes_sign_in_comes_back_to_step_three(
     assert seen["back_on"] == "welcome"
     assert seen["focused"] == "fleet-manager", "step 3's next button"
     assert seen["opened"] is not None and seen["presses"] <= 3, seen
-
-
-def test_the_pickers_new_account_comes_back_with_the_new_slot_selected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline: dict[str, Any]
-) -> None:
-    """#215: *+ New account* was one way. The picker is back, the new slot highlighted, and
-    confirming it opens the Spawn dialog on that account for the persona."""
-    project = register(tmp_path / "alpha", project_id="prj_alpha")
-    _script_claude_sign_in(monkeypatch, tmp_path, lands=True)
-
-    async def go(pilot: Pilot[None], app: Shell) -> dict[str, Any]:
-        app.post_message(ProjectSelected(project.id))
-        await settle_page(app)
-        view = app.query_one(f"#project-{project.id}", ProjectView)
-        view.active = "tab-personas"  # built when first opened (review of #201, R1-F10)
-        await settle_page(app)
-        tab = view.query_one(PersonasTab)
-        tab.post_message(AttachRequested("skeptic", "new"))
-        await settle_page(app)
-        picker = app.screen
-        assert isinstance(picker, AttachTargetScreen)
-        picker.query_one("#picker-new-account", Button).press()
-        await settle_page(app)
-        seen: dict[str, Any] = {"left_for": app.content.current}
-        await sign_in_lands(pilot, app, offline)
-        again = app.screen
-        seen["reopened"] = type(again).__name__
-        if isinstance(again, AttachTargetScreen):
-            listing = again.query_one("#picker-list", OptionList)
-            highlighted = listing.highlighted
-            option = listing.get_option_at_index(highlighted) if highlighted is not None else None
-            seen["highlighted"] = option.id if option is not None else None
-            seen["persona"] = again.persona_name
-            listing.action_select()
-            await settle_page(app)
-            dialog = app.screen
-            if isinstance(dialog, SpawnDialog):
-                seen["spawn_account"] = dialog.query_one("#spawn-account", Select).value
-                seen["spawn_persona"] = dialog.query_one("#spawn-persona", Select).value
-        return seen
-
-    seen = drive(go)
-    assert seen["left_for"] == "accounts"
-    assert seen["reopened"] == "AttachTargetScreen"
-    assert (seen["highlighted"], seen["persona"]) == ("account:2", "skeptic")
-    assert (seen["spawn_account"], seen["spawn_persona"]) == ("2", "skeptic")
 
 
 def test_the_spawn_dialogs_new_account_comes_back_as_it_was_typed(

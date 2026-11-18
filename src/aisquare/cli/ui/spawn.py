@@ -83,7 +83,7 @@ through their own change handlers — an open form keeps what was typed — and 
 *+ New account* hands over to the Accounts page with :meth:`SpawnDialog.form_state`.
 Once that sign-in lands the shell opens the dialog again from it, on the new account
 (#286): what was typed is not lost to a sign-in. *Import…* beside the Persona
-select opens the Personas tab's import dialog and selects what it imports.
+select opens the Personas page's import dialog and selects what it imports.
 
 **Changing Project** re-reads everything that hangs on the project, as the dialog does
 when it opens: the header, git (the worktree switch), whether a manager already runs (the
@@ -710,9 +710,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return [task for task in tasks if task.status in OPEN_TASK_STATUSES], None
 
     def _read_personas(self) -> tuple[list[Persona], str | None]:
-        """The personas ``spawn`` accepts here: the project's catalogue, winners only."""
+        """The personas asq offers: yours and the bundled ones, winners only, the same for
+        every project — no project's own layer (R27, as on Settings ▸ Personas)."""
         try:
-            found, _invalid = personas.catalogue(personas.project_root(self.project))
+            found, _invalid = personas.catalogue(None)
         except Exception as exc:  # a layer we cannot read costs the list, never the dialog
             return [], f"personas unavailable — {type(exc).__name__}: {exc}"
         return found, None
@@ -823,7 +824,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         known = {p.name for p in self._personas}
         wanted = {self._persona_shown, *(self._persona_default(role) for role in self._roles)}
         for name in sorted(wanted - known - {NO_PERSONA}):
-            options.append((f"{name} — not one of this project's personas", name))
+            options.append((f"{name} — not one of your personas", name))
         return options
 
     def _account_options(
@@ -1702,7 +1703,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             text, style = "(no persona — the agent runs as its role alone)", "dim"
         elif found is None:
             text, style = (
-                f"{value} is not one of this project's personas — spawn refuses it",
+                f"{value} is not one of your personas — spawn refuses it",
                 "yellow",
             )
         else:
@@ -2276,9 +2277,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     @on(Button.Pressed, "#spawn-import")
     def _import_persona(self) -> None:
-        self.app.push_screen(
-            ImportPersonaScreen(personas.project_root(self.project)), callback=self._imported
-        )
+        # No project's root: the import lands in the user layer, as on Settings ▸ Personas.
+        self.app.push_screen(ImportPersonaScreen(None), callback=self._imported)
 
     def _imported(self, result: personas_service.ImportResult | None) -> None:
         """Select what was just imported — re-reading the catalogue it landed in."""

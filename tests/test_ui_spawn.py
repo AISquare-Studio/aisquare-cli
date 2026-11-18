@@ -3662,6 +3662,33 @@ def test_a_switch_frees_every_field_a_take_over_had_locked(
     assert [call[0] for call in spawns.calls] == [second_git_project.id]
 
 
+def test_a_pick_the_project_also_holds_reads_as_spawn_runs_the_projects_own(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """A listed persona (``skeptic · bundled``) that the project's own personas hold too runs
+    as the project's own, as ``spawn`` resolves the project's layer first: the line under
+    the field says so, and names the one it is not. A pick the project does not hold reads
+    its own description, as before."""
+    _write_persona(git_project.root / ".aisquare" / "personas", "skeptic", "A project skeptic.")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [option_prompts(dialog, "persona")]
+        for name in ("skeptic", "mentor"):
+            select(dialog, "persona").value = name
+            await pilot.pause()
+            seen.append(note(dialog, "#spawn-persona-description"))
+        return seen
+
+    prompts, shadowed, plain = drive(git_project, scenario)
+    assert "skeptic · bundled" in prompts and "skeptic · project" not in prompts
+    assert shadowed == (
+        "skeptic is this project's own persona too — spawn uses the project's own, "
+        "not the bundled one"
+    )
+    assert plain == personas.resolve("mentor", git_project.root).description
+    assert personas.resolve("skeptic", git_project.root).layer == "project", "the premise"
+
+
 def test_a_picked_persona_survives_a_project_switch_silently(
     git_project: ProjectInfo, other_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:

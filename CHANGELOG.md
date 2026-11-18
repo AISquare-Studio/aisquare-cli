@@ -45,7 +45,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Personas live in Settings ▸ Personas, for you across all projects.** A project's view
-  has no Personas tab now, and asq offers your personas and the bundled ones.
+  has no Personas tab now, and the app offers your personas and the bundled ones.
 - **Signing in to AISquare uses rlx's own page once the server offers it;** until then, the
   existing page.
 - **A manager waiting on you is not woken by noise.** Watch's lines about its own results

@@ -831,11 +831,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return options
 
     def _project_own(self, name: str) -> bool:
-        """Whether ``name``, which the list lacks, is one of the project's own personas.
+        """Whether ``name`` is one of the project's own personas, which ``spawn`` runs.
 
         The list is yours and the bundled ones (R27), but ``spawn`` still resolves a name in
-        the project's layer first, so a role default naming one of its own is used, not
-        refused. A name no layer holds (or a layer that cannot be read) is not."""
+        the project's layer first: a role default the list lacks that the project holds is
+        used, not refused, and a listed name the project holds too (``skeptic · bundled``)
+        runs as the project's own. A name no layer holds (or a layer that cannot be read)
+        is not."""
         try:
             found = personas.resolve(name, personas.project_root(self.project))
         except Exception:
@@ -1722,6 +1724,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             text, style = (
                 f"{value} is not one of your personas — spawn refuses it",
                 "yellow",
+            )
+        elif self._project_own(value):
+            text, style = (
+                f"{value} is this project's own persona too — spawn uses the project's own, "
+                f"not the {found.layer} one",
+                "dim",
             )
         else:
             text, style = found.description, ""

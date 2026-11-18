@@ -818,14 +818,29 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def _persona_options(self) -> list[tuple[str, str]]:
         """``(none)``, the catalogue — and any name a preset or a role default asks for
-        that the catalogue lacks, so the field can show it (the spawn then refuses it
-        with the reason, as the CLI would)."""
+        that the catalogue lacks, so the field can show it: one of the project's own, which
+        the spawn uses (:meth:`_project_own`), or else one the spawn refuses with the
+        reason, as the CLI would."""
         options = [("(none)", NO_PERSONA), *((persona_choice(p), p.name) for p in self._personas)]
         known = {p.name for p in self._personas}
         wanted = {self._persona_shown, *(self._persona_default(role) for role in self._roles)}
         for name in sorted(wanted - known - {NO_PERSONA}):
-            options.append((f"{name} — not one of your personas", name))
+            own = self._project_own(name)
+            why = "this project's own persona" if own else "not one of your personas"
+            options.append((f"{name} — {why}", name))
         return options
+
+    def _project_own(self, name: str) -> bool:
+        """Whether ``name``, which the list lacks, is one of the project's own personas.
+
+        The list is yours and the bundled ones (R27), but ``spawn`` still resolves a name in
+        the project's layer first, so a role default naming one of its own is used, not
+        refused. A name no layer holds (or a layer that cannot be read) is not."""
+        try:
+            found = personas.resolve(name, personas.project_root(self.project))
+        except Exception:
+            return False
+        return found.layer == "project"
 
     def _account_options(
         self, statuses: Iterable[ClaudeAccountStatus], agent: str | None
@@ -1701,6 +1716,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             text, style = f"(plain {self._plain_agent()}: no role, no persona)", "dim"
         elif not value:
             text, style = "(no persona — the agent runs as its role alone)", "dim"
+        elif found is None and self._project_own(value):
+            text, style = f"{value} is this project's own persona — spawn uses it", "dim"
         elif found is None:
             text, style = (
                 f"{value} is not one of your personas — spawn refuses it",

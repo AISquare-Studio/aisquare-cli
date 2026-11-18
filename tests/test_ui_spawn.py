@@ -3414,8 +3414,8 @@ def test_the_persona_list_is_yours_in_every_project_and_never_a_projects_own(
 ) -> None:
     """R27: asq offers personas at the user level only. The list is the user's and the bundled
     ones, the same in every project; a persona in a project's own layer is never listed, in
-    its project or after a switch to it, and the role's default naming one says it is not
-    one of yours."""
+    its project or after a switch to it. The role's default naming one is shown as the
+    project's own, which the spawn uses."""
     for project in (git_project, other_project):
         _write_persona(project.root / ".aisquare" / "personas", "tempo", "A project tempo.")
     _write_persona(paths.aisquare_home() / "personas", "solo", "A user solo.")
@@ -3432,9 +3432,39 @@ def test_the_persona_list_is_yours_in_every_project_and_never_a_projects_own(
     first, described, switched = drive(git_project, scenario, projects=[git_project, other_project])
     assert "solo · user" in first and "mentor · bundled" in first
     assert not any(prompt.endswith("· project") for prompt in first), first
-    assert "tempo · project" not in first and "tempo — not one of your personas" in first
-    assert described == "tempo is not one of your personas — spawn refuses it"
+    assert "tempo · project" not in first and "tempo — this project's own persona" in first
+    assert described == "tempo is this project's own persona — spawn uses it"
     assert switched == first, "the same list in every project"
+
+
+def test_a_role_default_the_list_lacks_reads_as_spawn_takes_it(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """The list lacks a project's own personas (R27), but ``spawn`` resolves a role default
+    in the project's layer first and runs it: that one reads as the project's own, which the
+    spawn uses, not as a refusal. A default no layer holds still reads as the spawn refusing
+    it, as it does."""
+    _write_persona(git_project.root / ".aisquare" / "personas", "tempo", "A project tempo.")
+    configure_role("coder", persona="tempo")
+    configure_role("tester", persona="ghost")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [option_prompts(dialog, "persona")]
+        seen.append(note(dialog, "#spawn-persona-description"))
+        select(dialog, "role").value = "tester"
+        await settle(pilot)
+        seen += [select(dialog, "persona").value, note(dialog, "#spawn-persona-description")]
+        return seen
+
+    prompts, own, tester_value, refused = drive(git_project, scenario)
+    assert "tempo — this project's own persona" in prompts
+    assert "ghost — not one of your personas" in prompts
+    assert own == "tempo is this project's own persona — spawn uses it"
+    assert tester_value == "ghost"
+    assert refused == "ghost is not one of your personas — spawn refuses it"
+    assert personas.resolve("tempo", git_project.root).layer == "project", "the premise"
+    with pytest.raises(personas.PersonaError):
+        personas.resolve("ghost", git_project.root)  # the premise: spawn refuses it
 
 
 def test_a_switch_keeps_account_binary_permission_mode_args_and_the_first_prompt(

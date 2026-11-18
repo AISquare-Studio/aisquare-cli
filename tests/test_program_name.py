@@ -493,6 +493,8 @@ def _scan() -> set[tuple[str, int, str, str]]:
         r"(?! instances(?:\?| (?:have|on|run)\b))(?! board — )"
     )
     cli = re.compile(r"\b(?:[Tt]his|[Tt]he|an earlier|our own) CLI\b|\bCLI sign-in\b")
+    # The app's old name in the plural, "the other asqs" (review of #542, F2): rlx instances.
+    plural = re.compile(r"\b[Aa]sqs\b")
     shield = re.compile(r"`?aisquare hook\b[^`]*`?|-m aisquare\S*|aisquare-[\w-]+|aisquare@\S+")
     found: set[tuple[str, int, str, str]] = set()
     for path in sorted(_SRC.rglob("*.py")):
@@ -561,6 +563,8 @@ def _scan() -> set[tuple[str, int, str, str]]:
                     ("old word", None if kept else old.search(plain)),
                     ("hard-coded rlx", None if kept or static else new.search(plain)),
                     ("the CLI", cli.search(plain)),
+                    # ... but not the --json key "asqs": a machine value, never renamed.
+                    ("asqs", None if kept or text == "asqs" else plural.search(plain)),
                 )
                 if hit
             ]
@@ -604,6 +608,7 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
         'O = f"then run `rlx {command}` again"\n'
         'P = f"then run `{prog.words(command)}` again"\n'
         'Q = f"rlx {version} is up to date"\n'
+        'R = "Quit the other asqs?"\n'
     )
     root = tmp_path / "aisquare"
     (root / "cli").mkdir(parents=True)
@@ -624,6 +629,7 @@ def test_the_guard_finds_what_it_should_and_passes_what_it_should(
         ("cli/auth.py", "the CLI", "CLI sign-in is temporarily paused."),
         ("cli/auth.py", "the CLI", "run aisquare login; it forgets the keys the CLI minted"),
         ("cli/fake.py", "argv", "aisquare accounts add"),
+        ("cli/fake.py", "asqs", "Quit the other asqs?"),
         ("cli/fake.py", "hard-coded rlx", "`rlx accounts add` makes one"),
         ("cli/fake.py", "hard-coded rlx", "then run `rlx {…}` again"),
         ("cli/fake.py", "old word", "run aisquare doctor to see"),

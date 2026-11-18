@@ -457,6 +457,28 @@ def test_doctor_reads_declared_browser_tools_from_every_config_dir(
     )
 
 
+def test_the_no_browser_tools_row_names_its_command_at_a_shell_and_none_in_the_app(
+    tmp_path: Path, config_dirs: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #542: the ok row's advice named `claude mcp add …` in the app's Doctor too. The
+    shell keeps the command; the app says what to add (``detail_advice``), naming none."""
+    from aisquare.cli.ui.views.doctor import COMMAND
+    from aisquare.core import program as prog
+
+    bare = tmp_path / "claude-a"
+    bare.mkdir()
+    config_dirs(bare)
+    monkeypatch.delenv(prog.IN_APP_ENV, raising=False)
+    shell = diagnostics._check_browser_tools(tmp_path)
+    assert "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp@latest`" in shell.detail
+    assert COMMAND.search(shell.detail), "COMMAND knows it for a command"
+    monkeypatch.setenv(prog.IN_APP_ENV, "1")
+    app = diagnostics._check_browser_tools(tmp_path)
+    assert app.status is CheckStatus.ok
+    assert "add the Chrome DevTools MCP to Claude Code" in app.detail, app.detail
+    assert not COMMAND.search(app.detail) and "install.sh" not in app.detail, app.detail
+
+
 def test_doctor_names_the_directory_beside_each_tool(
     tmp_path: Path, config_dirs: Callable[..., None]
 ) -> None:

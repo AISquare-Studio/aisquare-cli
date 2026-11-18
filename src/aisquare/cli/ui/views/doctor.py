@@ -95,6 +95,7 @@ COMMAND = re.compile(
     # Linux's package managers, as install_hint names them there and on WSL, and gh's sign-in
     # (review of #503, m1: asq's Doctor passed these through as plain words).
     r"|\b(?:apt|apt-get|dnf|yum|zypper) install\b|\bpacman -S\b|\bgh auth login\b"
+    r"|\bclaude mcp add\b"
 )
 """What a command to type looks like in text asq would show (R13): ours, a package manager's,
 tmux's, gh's, a backticked flag. ``tests/test_asq_names_no_command.py`` sweeps asq's strings

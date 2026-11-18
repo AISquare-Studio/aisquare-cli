@@ -678,7 +678,7 @@ class Registration:
                     self._others = [i for i in live_instances() if i.id != mine]
                     self._others_read_ns = read_at
                 except Exception:
-                    _log.debug("the other asqs could not be read", exc_info=True)
+                    _log.debug("the other rlx could not be read", exc_info=True)
                 next_beat = time.monotonic() + HEARTBEAT_SECONDS
             try:
                 self._look_for_quit()

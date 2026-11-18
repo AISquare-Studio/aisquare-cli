@@ -45,9 +45,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   existing page.
 - **A manager waiting on you is not woken by noise.** Watch's lines about its own results
   and questions, its ping for an agent idle by design, and a review that repeats a note it
-  read no longer wake it. A manager that goes on standby (`rlx team standby`), or asks you
-  something with nothing in flight, is not woken by watch's routine lines until your next
-  prompt.
+  read no longer wake it. A manager that goes on standby (`aisquare team standby`), or asks
+  you something with nothing in flight, is not woken by watch's routine lines until your
+  next prompt.
 - **You can see which pane has the keyboard.** While the left pane has it, its highlighted
   project, agent or setting is a bar in the theme's colour; otherwise it is the dark
   highlight it always was.
@@ -78,11 +78,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and on Windows `irm https://aisquare.studio/rlx/install.ps1 | iex`. Both lead to the same
   installers on GitHub, and a release's own pinned URL is unchanged.
 - **rlx names itself everywhere it speaks to you.** Its messages, errors, `--help`, the
-  doctor and the app's screens say rlx where they said aisquare, asq or "the CLI": "Quit the
-  other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title. `rlx --version`
-  prints `rlx 0.10.1`; installers of earlier releases read the version from it as before.
-  No `--json` key changes, and no machine value (names, statuses, ids), the doctor's
-  `asq instances` row included; only the human text inside a value says rlx.
+  doctor and the app's screens say rlx where they said `aisquare`, `asq` or "the CLI": "Quit
+  the other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title.
+  `rlx --version` prints `rlx 0.10.1`; installers of earlier releases read the version from
+  it as before. No `--json` key changes, and no machine value (names, statuses, ids), the
+  doctor's `asq instances` row included; only the human text inside a value says rlx.
 - **Every command it tells you to run starts with `rlx`**: `rlx accounts add`, `rlx doctor`,
   the doctor's one-click fixes. When another program's `rlx` comes first on your PATH, those
   lines say `aisquare …` instead, so a line you paste always runs rlx. Your agents'
@@ -96,7 +96,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   app's board, `board -w` and `rlx board`, a line's author, the sessions block, a task's
   claim and the done archive read the agent's name, such as `coder-auth`, or its role where
   the left pane has none. A note you wrote from the command line reads `you`, and `owner` in
-  `rlx board`, which agents run too (it read `cli`). An agent keeps its name after it stops,
+  `aisquare board`, which agents run (it read `cli`). An agent keeps its name after it stops,
   is cleared or moves to another account, and a renamed one shows its new name. Of two
   sessions with one name, the earlier adds the time it started: `coder-auth (14:02)`. Long
   names end in `…`, the short id stays in a line's detail, and `o` still opens the right

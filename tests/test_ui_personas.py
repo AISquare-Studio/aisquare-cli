@@ -92,7 +92,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from tests.fleet_fakes import list_agents_as
-from tests.ui_workers import settle_page, settle_until_held
+from tests.ui_workers import settle_page, settle_until, settle_until_held
 
 T = TypeVar("T")
 SIZE = (160, 50)
@@ -698,15 +698,21 @@ def test_the_import_dialog_browses_skills_and_guards_the_layer_and_the_name(
         layers = [str(radio.id) for radio in dialog.query("#import-layer RadioButton")]
         browse: Select[str] = dialog.query_one("#import-browse", Select)
         prompts = [str(option[0]) for option in browse._options]
+        # Each change is handled in a later message, which one pilot.pause() did not always
+        # cover on a slow Windows runner (R29): wait until what is read next has changed.
+        source_field = dialog.query_one("#import-source", Input)
+        empty = source_field.value
         browse.value = str(Path("/claude/skills/code-review"))  # the platform's separators
-        await pilot.pause()
-        source = dialog.query_one("#import-source", Input).value
+        await settle_until(pilot.app, lambda: source_field.value != empty)
+        source = source_field.value
         submit = dialog.query_one("#import-submit", Button)
+        rule = dialog.query_one("#import-name-rule", Static)
+        before = shown(rule)
         dialog.query_one("#import-name", Input).value = "Bad Name"
-        await pilot.pause()
-        bad = (submit.disabled, shown(dialog.query_one("#import-name-rule", Static)))
+        await settle_until(pilot.app, lambda: shown(rule) != before)
+        bad = (submit.disabled, shown(rule))
         dialog.query_one("#import-name", Input).value = "good-name"
-        await pilot.pause()
+        await settle_until(pilot.app, lambda: shown(rule) != bad[1])
         return [layers, prompts, source, bad, submit.disabled]
 
     layers, prompts, source, bad, good_disabled = drive(

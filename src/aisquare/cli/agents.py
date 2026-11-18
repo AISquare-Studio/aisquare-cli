@@ -167,10 +167,13 @@ Recorded = Annotated[
     typer.Option(
         "--recorded",
         help="Every directory an upgrade re-connects, account homes included, not one.",
+        hidden=True,
     ),
 ]
 
 
+# `--recorded`, hidden in this command's help too, is the one-line installer's: every directory
+# the upgrade would re-connect, rewritten in this install at once (lifecycle.refresh_recorded).
 @app.command("refresh-hooks", hidden=True)
 def refresh_hooks(
     name: RefreshedAgent = None, config_dir: ConfigDir = None, recorded: Recorded = False
@@ -180,8 +183,7 @@ def refresh_hooks(
     Plumbing for ``rlx upgrade``, which runs it in the NEW install for each
     directory it re-connects. Kept hidden: ``agents connect`` is the command a
     person types. Later releases must keep it, or an upgrade from this one
-    cannot refresh hooks. ``--recorded`` is the one-line installer's: every
-    directory the upgrade would re-connect, in this install, at once (R26a).
+    cannot refresh hooks.
     """
     from aisquare.core import claude_accounts as accounts_core
 
@@ -260,7 +262,15 @@ def _refresh_recorded() -> None:
     else:
         out = stdout_console()
         for r in done:
-            if r.ok:
+            if r.ok and r.review:
+                # As `rlx upgrade` says it: Codex runs a changed definition once trusted again.
+                label = lifecycle.agent_label(r.agent)
+                out.print(
+                    f"✓ {r.agent}'s hooks current in {r.config_dir} — {label} asks to review "
+                    f"them again: open /hooks in {label} and trust them",
+                    markup=False,
+                )
+            elif r.ok:
                 out.print(f"✓ {r.agent}'s hooks current in {r.config_dir}", markup=False)
             else:
                 stderr_console().print(

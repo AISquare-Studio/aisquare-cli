@@ -2614,6 +2614,81 @@ def test_sites_running_another_install_are_left_and_named(tool: Tool, tmp_path: 
     assert left[0].reason is not None and str(other) in left[0].reason
 
 
+def test_the_installers_recorded_refresh_leaves_another_installs_site_as_it_was(
+    runner: CliRunner, tool: Tool, tmp_path: Path
+) -> None:
+    """R26a: ``agents refresh-hooks --recorded``, which the one-line installer runs, takes the
+    upgrade's own verdicts. A site whose hooks run another install that starts is left,
+    named with that install, and its settings.json is not touched; this install's is
+    rewritten."""
+    other = tmp_path / "checkout" / ".venv" / "bin" / "aisquare"
+    other.parent.mkdir(parents=True)
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    other.chmod(0o755)  # one that starts: another install, as the launcher would run it
+    ours = _hooked(tmp_path / "c-ours", tool.script)
+    theirs = _hooked(tmp_path / "c-theirs", other)
+    _record(ours, theirs)
+    before = (theirs / "settings.json").read_bytes()
+
+    result = runner.invoke(app, ["--json", "agents", "refresh-hooks", "--recorded"])
+
+    assert result.exit_code == 0, result.output
+    said = _one_object(result.stdout)
+    assert [(r["config_dir"], r["ok"]) for r in said["refreshed"]] == [(str(ours), True)], said
+    assert [site["config_dir"] for site in said["left"]] == [str(theirs)], said
+    assert str(other) in said["left"][0]["reason"], said
+    assert (theirs / "settings.json").read_bytes() == before, "another install's, untouched"
+    assert str(tool.script) not in (ours / "settings.json").read_text(encoding="utf-8")
+
+
+def test_the_installers_recorded_refresh_says_a_failed_rewrite_and_exits_1_after_the_rest(
+    runner: CliRunner, tool: Tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One site's rewrite failing (a full disk) is said with its error, the sites after it
+    are still rewritten, and the command exits 1: the installer warns on that exit."""
+    first = _hooked(tmp_path / "c-first", tool.script)
+    second = _hooked(tmp_path / "c-second", tool.script)
+    _record(first, second)
+    real = agents_service.refresh_hooks
+
+    def refresh(name: str, config_dir: Path | None = None) -> bool:
+        if config_dir == first:
+            raise OSError("No space left on device")
+        return real(name, config_dir)
+
+    monkeypatch.setattr(agents_service, "refresh_hooks", refresh)
+
+    result = runner.invoke(app, ["agents", "refresh-hooks", "--recorded"])
+
+    assert result.exit_code == 1, result.output
+    assert f"✗ claude-code's hooks in {first}: No space left on device" in result.output
+    assert f"✓ claude-code's hooks current in {second}" in result.output
+    assert str(tool.script) in (first / "settings.json").read_text(encoding="utf-8")
+    assert str(tool.script) not in (second / "settings.json").read_text(encoding="utf-8")
+
+
+def test_the_installers_recorded_refresh_says_where_codex_asks_for_a_review(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's nit 2 on #503: where the rewrite changed a definition Codex runs only once
+    trusted, the installer's refresh says so, as ``rlx upgrade`` does; the rest say current."""
+    codex, claude = tmp_path / "codex-home", tmp_path / "claude-home"
+    done = (
+        lifecycle.HookRefresh(codex, True, agent="codex", review=True),
+        lifecycle.HookRefresh(claude, True, agent="claude-code"),
+    )
+    monkeypatch.setattr(lifecycle, "refresh_recorded", lambda: (done, ()))
+
+    result = runner.invoke(app, ["agents", "refresh-hooks", "--recorded"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        f"✓ codex's hooks current in {codex} — Codex asks to review them again: "
+        "open /hooks in Codex and trust them"
+    ) in result.output
+    assert f"✓ claude-code's hooks current in {claude}\n" in result.output
+
+
 def test_a_site_whose_program_is_gone_is_refreshed_not_left(tool: Tool, tmp_path: Path) -> None:
     """Negative control for the one above: a missing program is no other install —
     those hooks fail every session, and re-connecting is the fix."""

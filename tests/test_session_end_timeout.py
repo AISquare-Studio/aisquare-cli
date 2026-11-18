@@ -16,6 +16,7 @@ writes one entry, and leaves other tools' hooks as they were.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -237,6 +238,16 @@ def test_refresh_hooks_takes_one_agent_or_recorded_never_neither_nor_both(
     assert neither.exit_code == 1 and "--recorded" in neither.output, neither.output
     both = runner.invoke(app, ["agents", "refresh-hooks", "claude-code", "--recorded"])
     assert both.exit_code == 1 and "name no agent" in both.output, both.output
+
+
+def test_recorded_is_hidden_in_refresh_hooks_own_help(runner: CliRunner) -> None:
+    """The installer's flag, like the command, is plumbing: ``refresh-hooks --help`` names
+    neither it nor the review that added it."""
+    shown = re.sub(
+        r"\x1b\[[0-9;]*m", "", runner.invoke(app, ["agents", "refresh-hooks", "--help"]).output
+    )
+    assert "--config-dir" in shown, shown
+    assert "--recorded" not in shown and "R26a" not in shown, shown
 
 
 def test_codex_clamps_its_session_end_so_a_reconnect_writes_the_spec_s(tmp_path: Path) -> None:

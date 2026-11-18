@@ -3880,6 +3880,59 @@ def test_an_upgrade_by_the_installer_gives_every_account_home_its_session_end_ti
     assert after["status"] == "ok" and "too little time" not in after["detail"], after
 
 
+def test_a_refresh_that_fails_is_a_warning_and_the_run_goes_on(tmp_path: Path) -> None:
+    """R26a: a CLI whose `agents refresh-hooks --recorded` fails (a release before it, a full
+    disk) costs the run a warning, never the install: init_home goes on and says it is set
+    up, and doctor afterwards names any directory still short."""
+    cli = stub_dir(
+        tmp_path, "cli", "aisquare", body='[ "$1 $2" = "agents refresh-hooks" ] && exit 1\nexit 0'
+    )
+    result = sh(
+        'DRY_RUN=0; WANT_PROJECT=0; init_home; echo "AFTER=$?"', path=f"{cli}:{base_path(tmp_path)}"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "warn `aisquare agents refresh-hooks --recorded` failed" in result.stderr, result.stderr
+    assert "set up" in result.stdout and "AFTER=0" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("flags", "refreshed"),
+    [("--yes --no-project", True), ("--no-agent --yes --no-project", False)],
+    ids=["an agent", "--no-agent"],
+)
+def test_the_refresh_runs_after_init_only_with_an_agent(
+    tmp_path: Path, flags: str, refreshed: bool
+) -> None:
+    """--no-agent skips the agents and their hooks: nothing is refreshed then. With an agent,
+    the refresh runs once, after init."""
+    calls = tmp_path / "calls.log"
+    cli = stub_dir(tmp_path, "cli", "aisquare", body=f'printf "%s\\n" "$*" >> "{calls}"\nexit 0')
+    result = sh(f"parse_args {flags}; DRY_RUN=0; init_home", path=f"{cli}:{base_path(tmp_path)}")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    ran = calls.read_text(encoding="utf-8").splitlines()
+    assert ran[0].startswith("init --local --yes"), ran
+    assert (ran[1:] == ["agents refresh-hooks --recorded"]) is refreshed, ran
+    assert any("refresh-hooks" in line for line in ran) is refreshed, ran
+
+
+@pytest.mark.parametrize(
+    ("flags", "said"),
+    [("--dry-run --yes --no-project", True), ("--dry-run --no-agent --yes --no-project", False)],
+    ids=["an agent", "--no-agent"],
+)
+def test_a_dry_run_says_the_refresh_only_with_an_agent(
+    tmp_path: Path, flags: str, said: bool
+) -> None:
+    result = sh(f"parse_args {flags}; init_home", path=base_path(tmp_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "would run: aisquare init --local --yes" in result.stdout, result.stdout
+    line = "would run: aisquare agents refresh-hooks --recorded"
+    assert (line in result.stdout) is said, result.stdout
+
+
 def _claude_code_doctor(status: str, detail: str) -> str:
     """A doctor payload with an amber brain and this claude-code row."""
     return json.dumps(

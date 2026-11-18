@@ -19,6 +19,7 @@ drawn the way W0 captured it on 2.1.309.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -193,6 +194,82 @@ def test_a_deferred_nudge_is_dropped_once_the_human_sent_the_draft(
 
     assert fleet_service.retry_deferred_nudges() == 0
     assert tmux.typed == [] and _deferred(manager) is None
+
+
+# --- R25: never into a picker the human left open ----------------------------------------------
+
+#: Claude Code 2.1.327's real screens (``tests/fixtures/agent_screens/claude-code.json``): each
+#: picker a human opens at the idle prompt, and its idle box, at 50x22 and 120x40.
+_SCREENS = json.loads(
+    (Path(__file__).parent / "fixtures" / "agent_screens" / "claude-code.json").read_text(
+        encoding="utf-8"
+    )
+)
+NEW_PICKERS = {
+    shown["what"]: shown["rows"]
+    for kind in ("dialogs", "not_dialogs")
+    for shown in _SCREENS[kind]
+    if shown["what"].startswith("Claude Code 2.1.327's ") and " picker " in shown["what"]
+}
+NEW_IDLE = {
+    shown["what"]: shown["rows"]
+    for shown in _SCREENS["not_dialogs"]
+    if shown["what"].startswith("Claude Code 2.1.327 idle ")
+}
+
+
+def test_the_nudge_is_pinned_on_every_picker_and_the_idle_box_at_both_sizes() -> None:
+    for size in ("50x22", "120x40"):
+        assert len([w for w in NEW_PICKERS if f" at {size} " in w]) == 9, size
+        assert [w for w in NEW_IDLE if f" at {size} " in w], size
+
+
+@pytest.mark.parametrize("what", sorted(NEW_PICKERS))
+def test_a_nudge_never_types_into_a_picker_the_human_left_open(
+    what: str, tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R25: with a picker open the manager's hooks still say waiting, and the nudge's Enter
+    would answer the picker (a resume, in ``/resume``). As ``tell`` does, the nudge asks the
+    screen reader first: nothing is pasted, no key is sent, and the nudge waits."""
+    manager = _waiting(tmux, project)
+    tmux.screens[manager.pane_id] = NEW_PICKERS[what]
+
+    assert fleet_service.nudge_manager(project.id, reason="task_done") is False
+
+    assert tmux.typed == [], "nothing pasted, no Enter for the picker to take"
+    assert _deferred(manager) is not None, "the nudge waits for the picker to close"
+
+
+@pytest.mark.parametrize("what", sorted(NEW_IDLE))
+def test_a_nudge_types_into_claude_2_1_327s_idle_box(
+    what: str, tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    manager = _waiting(tmux, project)
+    tmux.screens[manager.pane_id] = NEW_IDLE[what]
+
+    assert fleet_service.nudge_manager(project.id, reason="task_done") is True
+    assert (manager.pane_id, "paste", NUDGE_TEXT) in tmux.typed
+    assert _deferred(manager) is None
+
+
+def test_a_nudge_a_picker_held_back_goes_out_once_it_is_closed(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The manager is not left unwoken: ``asq``'s refresh retries the held-back nudge every
+    frame, and once the human closes the picker it goes out, once."""
+    manager = _waiting(tmux, project)
+    resume = next(w for w in NEW_PICKERS if "/resume picker" in w and " at 50x22 " in w)
+    tmux.screens[manager.pane_id] = NEW_PICKERS[resume]
+    assert fleet_service.nudge_manager(project.id, reason="task_done") is False
+
+    assert fleet_service.retry_deferred_nudges() == 0, "the picker is still open"
+    assert tmux.typed == []
+
+    tmux.screens[manager.pane_id] = next(rows for w, rows in NEW_IDLE.items() if "50x22" in w)
+    assert fleet_service.retry_deferred_nudges() == 1
+    assert (manager.pane_id, "paste", NUDGE_TEXT) in tmux.typed
+    assert _deferred(manager) is None
+    assert fleet_service.retry_deferred_nudges() == 0, "sent once"
 
 
 def test_a_nudge_left_in_the_box_is_sent_not_typed_twice(

@@ -28,10 +28,13 @@ carries the agent's ``--name``, on the pane's last row under a dialog drawn over
   no keys — trusting a folder is the owner's to answer;
 - a ``[y/N]``-style **last line**: ``y`` and ``n``.
 
-:func:`modal_showing` is ``say``'s view of the same screen: those shapes, named, plus two
+:func:`modal_showing` is ``say``'s view of the same screen: those shapes, named, plus three
 that are not prompts to ANSWER but are still not places to TYPE text into — the
-session-rating survey Claude Code draws in the one or two lines just above its box, and
-any other dialog by an Enter/Esc footer on the last line with no box drawn.
+session-rating survey Claude Code draws in the one or two lines just above its box, any
+other dialog by an Enter/Esc footer on the last line with no box drawn, and, with no box
+drawn, a **panel** by the ``▔`` edge it draws where the box was (:data:`PANEL_EDGE`): every
+picker a human opens at the idle prompt (``/config``, ``/resume``, ``/permissions``…), whose
+footers 2.1.327 reworded and a short pane cuts off (R25).
 
 This module imports nothing of aisquare but the adapters' types: ``brain`` and ``actions``
 both import it.
@@ -80,6 +83,16 @@ TRUST_TITLE = re.compile(r"Quick safety check|Adding a new directory|" + FOLDER_
 one cut off (:data:`FOLDER_LINE`), ``Adding:`` alone too, with the row under it, where the
 folder starts (review of #520). It names the question, never makes one: which screens are
 the dialog is :data:`TRUST`'s and the folder line's."""
+PANEL_EDGE = re.compile(r"^\s*▔{8,}(?: \S.*? ▔{1,8})?\s*$")
+"""The top edge of a panel Claude Code draws in its input box's place: a run of ``▔``
+(U+2594) across the pane, the effort label set in it on most (``▔▔▔ ◐ medium · /effort ▔``).
+Measured on 2.1.318 and 2.1.327 (R25), at 50x22, 120x40 and down to 80x10: every picker opened
+at the idle prompt draws it (``/config``, ``/resume``, ``/model``, ``/permissions``, ``/hooks``,
+``/memory``, ``/status``, ``/theme``, ``/help``), and it stays on screen where the panel's footer
+does not (2.1.327 cuts the footer, never the edge, on a short pane). 2.1.327 also reworded the
+footers (``Esc to close``, ``Esc to go back``), so the edge, not a footer, is what is read. The
+box's own rules are ``─``: no idle or working screen draws it, and it is read only with no box
+drawn."""
 RATING = re.compile(r"How is Claude doing this session")
 WORKING = re.compile(r"esc to interrupt", re.IGNORECASE)
 """What a turn in progress shows at the box: in the footer, or on the spinner line."""
@@ -307,8 +320,11 @@ def modal_showing(lines: Sequence[str]) -> str | None:
 
     :func:`prompt_showing`'s shapes, named — plus the session-rating survey in the one or
     two lines just above a drawn box, and any other dialog by an Enter/Esc footer on the
-    last line with no box drawn. A ``[y/N]`` line is a prompt to answer, not a dialog: the
-    captain's own pane is Claude Code, which never shows one, and ``say`` types text.
+    last line with no box drawn, or by a panel's edge anywhere on the screen with no box
+    drawn (:data:`PANEL_EDGE`: the edge sits above the :data:`TAIL_LINES` read for the rest,
+    up to 36 rows above the bottom of a 120x40 pane). A ``[y/N]`` line is a prompt to answer,
+    not a dialog: the captain's own pane is Claude Code, which never shows one, and ``say``
+    types text.
     """
     rows = tail(lines)
     if not rows:
@@ -328,5 +344,7 @@ def modal_showing(lines: Sequence[str]) -> str | None:
     if region and RATING.search("\n".join(region)):
         return "the session-rating prompt"
     if region and MODAL_FOOTER.search(region[-1]):
+        return "a dialog waiting for Enter or Esc"
+    if any(PANEL_EDGE.match(row) for row in strip_escapes(lines)):
         return "a dialog waiting for Enter or Esc"
     return None

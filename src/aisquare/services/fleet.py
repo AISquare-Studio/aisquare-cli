@@ -219,8 +219,9 @@ that project's manager and could not send: tmux refused the writer (a command in
 sandbox, :func:`nudge_manager`). Its value is when; :func:`deliver_owed_nudge` takes it."""
 
 NUDGE_DEFERRED = "nudge_deferred:"
-"""The ``team_meta`` prefix of a nudge a draft held back (P0-W2): ``nudge_deferred:<session>``
-→ when it was held back. :func:`retry_deferred_nudges` sends it once the box is clear."""
+"""The ``team_meta`` prefix of a nudge a draft held back (P0-W2), or a dialog on the manager's
+screen (R25): ``nudge_deferred:<session>`` → when it was held back. :func:`retry_deferred_nudges`
+sends it once the box is clear and no dialog is open."""
 
 _NUDGE_RE_PRESS: tuple[float, ...] = (2.0,)
 _NUDGE_LAST_WAIT = 2.0
@@ -19391,6 +19392,13 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
     next board write or by ``asq``'s refresh once the box is clear
     (:func:`retry_deferred_nudges`). Nothing is lost meanwhile: the human's own submit runs
     ``UserPromptSubmit``, which hands the manager the same delta.
+
+    Nor into a dialog of the manager's own that its screen reader names, as ``tell`` asks it
+    (:func:`_dialog_on_its_screen`): a picker the human opened and left open (Claude Code's
+    ``/config`` or ``/resume``, read by its edge since R25), where the nudge's Enter would
+    answer it. It waits the same way, and goes out once the picker is closed. It is held
+    back, not filed as a tell is: it carries nothing, and the news it wakes the manager for
+    is already on the board.
     """
     return _nudge(project_id, owe=True, board=board)
 
@@ -19475,6 +19483,14 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
             state, _ = _derive(manager, session, view, observed=True, now=now)
             if not _at_its_prompt(pane, manager, session, state, now):
                 return False
+            deferred = f"{NUDGE_DEFERRED}{session.id}"
+            if _dialog_on_its_screen(pane, recorded_adapter(manager.agent)) is not None:
+                # A dialog of its own on its screen, as `tell` asks: a picker the human left
+                # open (Claude Code's /config, /resume, R25), where the Enter after the line
+                # would answer it. Held back as a draft holds it back, and retried the same way.
+                if not store.get_meta(deferred):
+                    store.set_meta(deferred, now.isoformat())
+                return False
             # Typed as `tell` types a line (`PlacedPane.deliver_typed`): its Enter a key of its
             # own, so a Codex manager does not keep it unsent in its composer.
             done = pane.deliver_typed(
@@ -19490,7 +19506,6 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
                 origin=prompt_origin.WAKE,
                 gap=_enter_gap(recorded_adapter(manager.agent)),
             )
-            deferred = f"{NUDGE_DEFERRED}{session.id}"
             if done.refused is not None:
                 if not store.get_meta(deferred):
                     store.set_meta(deferred, now.isoformat())
@@ -19504,8 +19519,9 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
 
 
 def retry_deferred_nudges() -> int:
-    """Send each manager nudge a draft held back (:data:`NUDGE_DEFERRED`), now that its input
-    box may be clear: ``asq``'s refresh asks every frame. How many were sent.
+    """Send each manager nudge a draft or a dialog held back (:data:`NUDGE_DEFERRED`), now that
+    its input box may be clear and the dialog closed: ``asq``'s refresh asks every frame. How
+    many were sent.
 
     One indexed read when nothing is held back. A nudge whose manager has prompted since it
     was held back is dropped unsent: that prompt's ``UserPromptSubmit`` handed it the delta
@@ -19551,7 +19567,7 @@ def send_deferred_nudges(targets: Sequence[FleetAgent]) -> int:
     return sum(
         nudge_manager(
             row.project_id,
-            reason="deferred: a draft was in its input box",
+            reason="deferred: a draft or a dialog held it back",
             board=_board_of_row(row),
         )
         for row in targets

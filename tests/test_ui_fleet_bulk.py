@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,9 @@ from tests.ui_workers import settle_page, settle_until, watch_until
 
 T = TypeVar("T")
 SIZE = (140, 44)
+SCROLL_S = 10.0
+"""How long :func:`scrolled` waits for the pick-list to stop scrolling: Textual's scrolls take a
+second at most, and a loaded windows-latest runs them slower still."""
 
 
 class Script(dict[str, list[FleetAgentStatus]]):
@@ -197,6 +201,35 @@ def _listed(dialog: ConfirmBulk) -> list[str]:
         else:
             lines.append(shown(child))  # type: ignore[arg-type]
     return lines
+
+
+async def scrolled(app: FleetApp, listing: VerticalScroll) -> None:
+    """Settle, then wait until the pick-list has stopped scrolling: no scroll of it running or
+    due in Textual's animator, seen after two settles in a row, its offset the same at both.
+
+    The list scrolls itself, animated: Home, End, PgUp and PgDn while a checkbox has the focus
+    are the list's own bindings (``ScrollableContainer``'s come before the dialog's), and a
+    focus moved out of sight is scrolled to. Both scrolls begin in a callback after the key is
+    handled, so Textual's own wait for animations after a key can find none yet. A settle on a
+    loaded runner can then end with the scroll under way: on windows-py3.12 the list read
+    ``scroll_y`` 10.41 just after Home had asked for 0 (matrix 44131382716, shard 10; the gate
+    44208338907, shard 4). The look is Textual's own end condition, bounded by
+    :data:`SCROLL_S`; a list still scrolling then fails here, saying so."""
+    deadline = time.monotonic() + SCROLL_S
+    last: float | None = None
+    while True:
+        await settle(app)
+        moving = any(
+            app.animator.is_being_animated(listing, axis) for axis in ("scroll_x", "scroll_y")
+        )
+        if not moving and listing.scroll_y == last:
+            return
+        last = None if moving else listing.scroll_y
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"the list was still scrolling after {SCROLL_S} s: {listing.scroll_y}"
+            )
+        await asyncio.sleep(0.02)
 
 
 def _ticks(dialog: ConfirmBulk) -> dict[str, bool]:
@@ -474,7 +507,7 @@ def test_the_keys_move_through_a_list_of_thirty_and_scroll_it_as_they_go(
 
         async def press(*keys: str) -> None:
             await pilot.press(*keys)
-            await settle(app)
+            await scrolled(app, listing)
             seen.append((keys, where()))
 
         await press("down")  # Cancel → Select all
@@ -482,7 +515,7 @@ def test_the_keys_move_through_a_list_of_thirty_and_scroll_it_as_they_go(
         await press("space")  # unticks coder-1
         for _ in range(24):
             await pilot.press("down")
-        await settle(app)
+        await scrolled(app, listing)
         seen.append((where(), listing.scroll_y > 0, in_sight()))  # coder-25, scrolled to
         await press("end")
         seen.append(listing.scroll_y == listing.max_scroll_y)

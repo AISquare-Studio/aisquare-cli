@@ -1065,6 +1065,44 @@ def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tup
     return tuple(refresh), tuple(left)
 
 
+def refresh_recorded() -> tuple[tuple[HookRefresh, ...], tuple[HookSite, ...]]:
+    """Rewrite, in THIS install, the hooks of every site an upgrade re-connects
+    (:func:`refresh_sites`), and say which it left and why: ``agents refresh-hooks
+    --recorded``.
+
+    The one-line installer's upgrade is ``uv tool install --force`` and then ``init``, which
+    wires the config dir sessions from its shell read and no account slot. A fleet launch loads
+    no plugin, so a slot's own settings.json hooks are what its agents run, and they kept the
+    release before's: 0.10.0's session end with no ``timeout``, cut off at 1.5 s (R26a, the
+    final review of #503, M1). ``aisquare upgrade`` and asq's *Update* rewrite them from the
+    new install (:func:`_refresh`, a process each); the installer runs this, which IS the new
+    install, once. The sites and their verdicts are the upgrade's own: only those this home
+    connected or made, still carrying our hooks, not one another install of aisquare runs,
+    and other tools' hooks and an operator's longer timeout kept (``agents_service
+    .refresh_hooks``)."""
+    refresh, left = refresh_sites(install_route.facts())
+    done: list[HookRefresh] = []
+    for site in refresh:
+        before = _definition(site)
+        try:
+            written = agents_service.refresh_hooks(site.agent, site.config_dir)
+        except (KeyError, ValueError, OSError) as exc:  # AgentFileUnreadableError is a ValueError
+            done.append(HookRefresh(site.config_dir, False, str(exc), agent=site.agent))
+            continue
+        if not written:
+            said = f"{site.agent} has no hooks for rlx to write"
+            done.append(HookRefresh(site.config_dir, False, said, agent=site.agent))
+            continue
+        after = _definition(site) if before is not None else None
+        review = after is not None and after != before and not _trusted(site)
+        done.append(
+            HookRefresh(
+                site.config_dir, True, hooks_off=site.hooks_off, agent=site.agent, review=review
+            )
+        )
+    return tuple(done), left
+
+
 def _cannot_rewrite(agent: str, why: str) -> str:
     """Why a site whose hooks are ours is left: aisquare may not write its settings file."""
     return f"its {settings_name(agent)} cannot be rewritten: {why}"

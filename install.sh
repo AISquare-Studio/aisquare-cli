@@ -2512,6 +2512,9 @@ init_home() {
 
     if [ "$DRY_RUN" = 1 ]; then
         printf '  %swould run:%s aisquare %s\n' "$C_DIM" "$C_RESET" "$*"
+        if wants_claude || wants_codex; then
+            printf '  %swould run:%s aisquare agents refresh-hooks --recorded\n' "$C_DIM" "$C_RESET"
+        fi
         if wants_codex && ! wants_claude; then
             printf '  %swould run:%s aisquare agents use codex\n' "$C_DIM" "$C_RESET"
         fi
@@ -2519,6 +2522,17 @@ init_home() {
     fi
     if ! run aisquare "$@"; then
         die "\`aisquare $*\` failed. Rerun with --verbose to see its output."
+    fi
+    # The hooks of every directory this home connected or made, its account homes too, as
+    # this release writes them, the way `aisquare upgrade` and asq's Update rewrite them. An
+    # upgrade here is `uv tool install --force` and the init above, which wires the config dir
+    # this shell reads and no account home, and a fleet launch runs a home's own settings.json
+    # hooks: 0.10.0's session end, with no timeout, was cut off at 1.5 s (R26a). Said, never
+    # fatal: a release before 0.10.1 has no --recorded, and doctor below names what is short.
+    if wants_claude || wants_codex; then
+        if ! run aisquare agents refresh-hooks --recorded; then
+            warn "\`aisquare agents refresh-hooks --recorded\` failed: some agent directories may keep their old hooks. Rerun with --verbose to see its output."
+        fi
     fi
     # Codex alone: the agent launches use, which is Claude Code until told otherwise
     # (the account order, `core.agent_adapters`). With both, Claude Code stays it.

@@ -184,6 +184,61 @@ def test_a_longer_session_end_timeout_an_operator_set_is_kept_by_the_upgrade_and
     assert "too little time" not in diagnostics._check_claude_code().detail
 
 
+@SHORT
+def test_the_installers_refresh_gives_every_account_home_its_timeout_and_keeps_theirs(
+    short: int | None, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """R26a (the final review of #503, M1): ``agents refresh-hooks --recorded``, which the
+    one-line installer runs after its ``init``. It rewrites, in this install, every directory
+    an upgrade re-connects: the default one, and the account home ``init`` never wires, whose
+    own hooks a fleet launch runs. Both short sessions ends get 10 s, in one entry each, and
+    the other tools' hooks and keys beside ours stay where they were."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    default = _with_session_end(runner, isolated_agent_home / ".claude", short)
+    slot = accounts_core.accounts_root() / "2"
+    slot.mkdir(parents=True)
+    argv = ["agents", "connect", "claude-code", "--config-dir", str(slot)]
+    assert runner.invoke(app, argv).exit_code == 0
+    path = slot / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    (ours,) = _ours(settings["hooks"]["SessionEnd"])
+    if short is None:
+        del ours["timeout"]
+    else:
+        ours["timeout"] = short
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    assert "too little time" in diagnostics._check_claude_code().detail
+
+    result = runner.invoke(app, ["--json", "agents", "refresh-hooks", "--recorded"])
+
+    assert result.exit_code == 0, result.output
+    said = json.loads(result.stdout)
+    refreshed = {Path(r["config_dir"]).resolve() for r in said["refreshed"] if r["ok"]}
+    assert refreshed == {default.parent.resolve(), slot.resolve()}, said
+    assert said["left"] == [], said
+    for settings_path in (default, path):
+        written = json.loads(settings_path.read_text(encoding="utf-8"))
+        (ours,) = _ours(written["hooks"]["SessionEnd"])
+        assert ours["timeout"] == SESSION_END_TIMEOUT_SECONDS, settings_path
+    kept = json.loads(default.read_text(encoding="utf-8"))
+    assert json.dumps(kept["hooks"]["SessionEnd"][-1]) == json.dumps(FOREIGN_END)
+    assert json.dumps(kept["hooks"]["Stop"][0]) == json.dumps(FOREIGN_STOP)
+    assert kept["theme"] == "dark"
+    assert "too little time" not in diagnostics._check_claude_code().detail
+
+
+def test_refresh_hooks_takes_one_agent_or_recorded_never_neither_nor_both(
+    runner: CliRunner,
+) -> None:
+    """The upgrade's call (``refresh-hooks <agent> --config-dir <dir>``) is unchanged; the
+    installer's is ``--recorded`` alone."""
+    neither = runner.invoke(app, ["agents", "refresh-hooks"])
+    assert neither.exit_code == 1 and "--recorded" in neither.output, neither.output
+    both = runner.invoke(app, ["agents", "refresh-hooks", "claude-code", "--recorded"])
+    assert both.exit_code == 1 and "name no agent" in both.output, both.output
+
+
 def test_codex_clamps_its_session_end_so_a_reconnect_writes_the_spec_s(tmp_path: Path) -> None:
     """Codex declares the events it clamps at the spec's own value
     (``AgentCapabilities.clamped_hook_events``): its ``SessionEnd`` and ``Interrupt``, at 3 s.

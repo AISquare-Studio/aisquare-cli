@@ -160,22 +160,50 @@ def use(
         typer.echo(f"Default coding agent: {name} ({scope})")
 
 
+#: An agent to refresh, or none with ``--recorded`` (every site an upgrade re-connects).
+RefreshedAgent = Annotated[str | None, typer.Argument(help="Agent name, e.g. 'claude-code'.")]
+Recorded = Annotated[
+    bool,
+    typer.Option(
+        "--recorded",
+        help="Every directory an upgrade re-connects, account homes included, not one.",
+    ),
+]
+
+
 @app.command("refresh-hooks", hidden=True)
-def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
+def refresh_hooks(
+    name: RefreshedAgent = None, config_dir: ConfigDir = None, recorded: Recorded = False
+) -> None:
     """Rewrite rlx's hooks for this version and import nothing.
 
     Plumbing for ``rlx upgrade``, which runs it in the NEW install for each
     directory it re-connects. Kept hidden: ``agents connect`` is the command a
     person types. Later releases must keep it, or an upgrade from this one
-    cannot refresh hooks.
+    cannot refresh hooks. ``--recorded`` is the one-line installer's: every
+    directory the upgrade would re-connect, in this install, at once (R26a).
     """
     from aisquare.core import claude_accounts as accounts_core
 
+    if recorded and (name is not None or config_dir is not None):
+        fail(
+            "--recorded refreshes every recorded directory: name no agent or --config-dir",
+            error="usage",
+        )
+    if not recorded and name is None:
+        fail(
+            "name an agent, or --recorded for every directory an upgrade re-connects",
+            error="usage",
+        )
     # An upgrade's last step in the new install: the numbers of another agent's accounts a
     # build before the reserve made are kept from 0.9.2 from here on, before any read of the
     # order (#100's reopen 2, A2). Best effort, and said nowhere: this command's output is
     # what every release has printed, which the upgrade that runs it reads.
     accounts_core.reserve_every_number()
+    if recorded:
+        _refresh_recorded()
+        return
+    assert name is not None
     before = _hooks_text(name, config_dir)
     try:
         written = agents_service.refresh_hooks(name, config_dir)
@@ -197,6 +225,53 @@ def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
         stdout_console().print(f"✓ hooks rewritten for {name}")
     else:
         stdout_console().print(f"✓ hooks already current for {name}")
+
+
+def _refresh_recorded() -> None:
+    """``refresh-hooks --recorded``: every site an upgrade re-connects, rewritten here
+    (``lifecycle.refresh_recorded``), each said, and the sites left with why. Exit 1 when a
+    rewrite failed; a site left (another install's hooks, a file it may not write) is the
+    upgrade's own verdict, said and not a failure."""
+    from aisquare.services import lifecycle
+
+    done, left = lifecycle.refresh_recorded()
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "refreshed": [
+                        {
+                            "agent": r.agent,
+                            "config_dir": str(r.config_dir),
+                            "ok": r.ok,
+                            "error": r.error,
+                            "hooks_off": str(r.hooks_off) if r.hooks_off else None,
+                            "review": r.review,
+                        }
+                        for r in done
+                    ],
+                    "left": [
+                        {"agent": s.agent, "config_dir": str(s.config_dir), "reason": s.reason}
+                        for s in left
+                    ],
+                }
+            )
+        )
+    else:
+        out = stdout_console()
+        for r in done:
+            if r.ok:
+                out.print(f"✓ {r.agent}'s hooks current in {r.config_dir}", markup=False)
+            else:
+                stderr_console().print(
+                    f"✗ {r.agent}'s hooks in {r.config_dir}: {r.error}", markup=False
+                )
+        for s in left:
+            out.print(
+                f"· {s.agent}'s hooks in {s.config_dir} left as they are: {s.reason}", markup=False
+            )
+    if any(not r.ok for r in done):
+        raise typer.Exit(1)
 
 
 def _hooks_text(name: str, config_dir: Path | None) -> bytes | None:

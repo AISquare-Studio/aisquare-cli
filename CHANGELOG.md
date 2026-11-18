@@ -172,7 +172,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **A session's end reaches the board on a slow machine.** Claude Code cut its hook off
-  after 1.5 s; it now has 10 s, and upgrading gives existing installs the same.
+  after 1.5 s; it now has 10 s. Upgrading gives existing installs the same, every account
+  included, whether with `rlx upgrade`, asq's Update or the one-line installer.
 - On Windows, quitting asq no longer waits behind asq's own timers, and neither does the work
   it runs in the background.
 - **Codex's new default model's usage is priced.** Codex 0.169.1 runs gpt-6.2-sol by default,

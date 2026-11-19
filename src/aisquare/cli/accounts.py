@@ -38,6 +38,7 @@ from aisquare.cli.fleet import not_interactive_reason
 from aisquare.cli.native_args import PassthroughCommand
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, default_adapter, get_adapter, stage_mark_of
 from aisquare.core.agent_adapters.types import stage_mark
 from aisquare.core.console import stderr_console, stdout_console
@@ -55,7 +56,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
 
 app = typer.Typer(
-    help="Claude Code and Codex accounts this CLI manages: list, add, remove, run, usage, "
+    help="Claude Code and Codex accounts rlx manages: list, add, remove, run, usage, "
     "default, alias, order, move, disable, enable, trust, settings.",
     no_args_is_help=False,
     invoke_without_command=True,
@@ -82,7 +83,7 @@ ProjectOpt = Annotated[
 def whose_account_help() -> str:
     """``--agent``'s help: the default agent, then every other agent with account slots, by
     their ids, a beta one's with its mark (``types.stage_mark``): ``Whose account:
-    claude-code (the default) or codex (beta).``"""
+    claude-code (the default) or codex.``"""
     first = default_adapter()
     named = [f"{first.id}{stage_mark(first)} (the default)"]
     named += [
@@ -94,7 +95,7 @@ def whose_account_help() -> str:
 
 
 def _other_agents_choice() -> str:
-    """`` [--agent codex (beta)]``: the other agents with account slots ``accounts add`` takes,
+    """`` [--agent codex]``: the other agents with account slots ``accounts add`` takes,
     a beta one's with its mark (``types.stage_mark``); ``""`` with none."""
     first = default_adapter()
     others = [
@@ -118,7 +119,7 @@ RoleOpt = Annotated[
     typer.Option(
         "--role",
         help="Act on a ROLE's binding instead of the machine default (what "
-        "`aisquare team bind <role> --account` writes).",
+        "`rlx team bind <role> --account` writes).",
         metavar="ROLE",
     ),
 ]
@@ -141,12 +142,12 @@ _DASH = "—"
 
 @app.callback(invoke_without_command=True)
 def _group(ctx: typer.Context) -> None:
-    """Claude Code and Codex accounts this CLI manages: list, add, remove, run, usage.
+    """Claude Code and Codex accounts rlx manages: list, add, remove, run, usage.
 
-    Bare ``aisquare accounts`` lists them, offline. Slot 1 is the plain
+    Bare ``rlx accounts`` lists them, offline. Slot 1 is the plain
     ``claude`` of this machine and slot 0 the plain ``codex``; every other slot
-    is a directory the CLI created with ``add`` and launches with ``run`` (or
-    ``aisquare launch --account``), numbered on one ladder across both agents.
+    is a directory rlx created with ``add`` and launches with ``run`` (or
+    ``rlx launch --account``), numbered on one ladder across both agents.
     """
     if ctx.invoked_subcommand is None:
         list_(usage=False)
@@ -372,8 +373,9 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
             console.print(f"{status.label}: {status.detail}", markup=False, style="yellow")
     console.print(
         Text(
-            f"add one: aisquare accounts add{_other_agents_choice()} · open one: aisquare "
-            "accounts run <slot> · the Accounts page in asq does both",
+            f"add one: {prog.word()} accounts add{_other_agents_choice()} · open one: "
+            f"{prog.word()} "
+            "accounts run <slot> · the Accounts page in rlx does both",
             style="dim",
         )
     )
@@ -545,7 +547,7 @@ def usage_(
     """Session (5-hour) and weekly usage per signed-in account — percent USED, as /usage shows it.
 
     40% used is 60% left. A reading is shared for five minutes between this
-    command, `list --usage` and asq's Accounts page; `--refresh` fetches now. A
+    command, `list --usage` and rlx's Accounts page; `--refresh` fetches now. A
     Codex account's is what its newest session recorded, read from its home with
     no request — "as of" says how old that reading is. An agent whose windows are
     others (a daily quota per model) shows each by its name under "windows used",
@@ -682,7 +684,7 @@ def statusline_(
         bool,
         typer.Option(
             "--uninstall",
-            help="Remove only the status line aisquare set (a wrapped one goes back).",
+            help="Remove only the status line rlx set (a wrapped one goes back).",
         ),
     ] = False,
     slot: Annotated[
@@ -786,7 +788,7 @@ def sessions_(
     console = stdout_console()
     if not sessions:
         console.print(
-            f"no session reported in the last {since}: `aisquare accounts statusline` says "
+            f"no session reported in the last {since}: `{prog.word()} accounts statusline` says "
             "which accounts carry the status line",
             markup=False,
         )
@@ -1025,7 +1027,7 @@ def default(
             # of #406, m1): say so, or the line above promises what the next launch skips.
             stdout_console().print(
                 f"  · it is not signed in, so launches skip it until it is: "
-                f"aisquare accounts run {accounts_service.ref_for(chosen)}",
+                f"{prog.word()} accounts run {accounts_service.ref_for(chosen)}",
                 markup=False,
             )
     else:
@@ -1195,14 +1197,14 @@ def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
     if get_state().json_output:
         fail(
             "accounts add hands the terminal to Claude Code and has no --json form — "
-            "list accounts with `aisquare --json accounts list`",
+            f"list accounts with `{prog.word()} --json accounts list`",
             error="no_json_form",
         )
     reason = not_interactive_reason()
     if reason is not None:
         fail(
             f"accounts add needs an interactive terminal ({reason}) — run it in a terminal, "
-            "or add the account from asq → Accounts",
+            "or add the account from rlx → Accounts",
             error="not_a_tty",
             detail=reason,
         )
@@ -1245,7 +1247,7 @@ def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
             f"{how}) — nothing was added"
         )
         if not browser and slots.browser_sign_in_args():  # its other way, the browser's
-            browser_add = f"aisquare accounts add --agent {whose} --browser"
+            browser_add = f"{prog.word()} accounts add --agent {whose} --browser"
             said += f". {slots.browser_sign_in_hint}: {browser_add}"
         fail(said, error="not_signed_in")
     described = accounts_service.complete_sign_in(account)
@@ -1257,7 +1259,7 @@ def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
         console.print(described.detail, markup=False, style="yellow")
     if not described.hooks_installed:
         console.print(
-            "  ⚠ aisquare's hooks did not install into it — run: "
+            "  ⚠ rlx's hooks did not install into it — run: "
             + agents_service.config_dir_command("connect", whose, account.config_dir),
             style="yellow",
         )
@@ -1267,8 +1269,8 @@ def add(agent: AgentOpt = None, browser: BrowserOpt = False) -> None:
         "coder" if _role_agent("coder", str(account.slot)) == whose else f"coder --agent {whose}"
     )
     console.print(
-        f"  open it: aisquare accounts run {account.slot} · "
-        f"as a role: aisquare launch {as_role} --account {account.slot}",
+        f"  open it: {prog.word()} accounts run {account.slot} · "
+        f"as a role: {prog.word()} launch {as_role} --account {account.slot}",
         style="dim",
     )
 
@@ -1443,7 +1445,7 @@ def settings(
     the model and the status line then change once for all; the logins stay apart —
     .claude.json and .credentials.json are never shared, and a settings.json that sets
     what decides a login (an API key, a token, a cloud provider) is never shared or
-    replaced. `aisquare config set accounts.share_settings true` relinks at each launch.
+    replaced. `rlx config set accounts.share_settings true` relinks at each launch.
     """
     if sync and unshare:
         fail("pass --sync or --unshare — not both", error="usage")
@@ -1490,7 +1492,7 @@ def settings(
             console.print(f"  ⚠ cannot be shared: {refusal}", markup=False, style="yellow")
         if not changes:
             console.print(
-                "  · no managed accounts — `aisquare accounts add` makes one", markup=False
+                f"  · no managed accounts — `{prog.word()} accounts add` makes one", markup=False
             )
         for change in changes:
             line = f"  · {core.label(change.account)} {_SETTINGS_WORDS[change.outcome]}"

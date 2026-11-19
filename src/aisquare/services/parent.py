@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from aisquare.core import program as prog
 from aisquare.core.store import ContextStore, GroupSettings
 from aisquare.models import ProjectGroup, ProjectInfo, TeamEvent
 
@@ -363,7 +364,8 @@ def cap_refusal(store: ContextStore, project_id: str) -> str | None:
             name = group.name if group is not None else group_id
             return (
                 f"group {name} already runs {len(live)} agents (its cap is "
-                f"{settings.max_agents}) — stop one, or `aisquare project group cap {name} <n>`"
+                f"{settings.max_agents}) — stop one"
+                + prog.shell_advice(f", or `aisquare project group cap {name} <n>`")
             )
     return None
 

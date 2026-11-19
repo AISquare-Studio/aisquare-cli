@@ -31,6 +31,7 @@ from pathlib import Path
 import typer
 
 from aisquare.core import instance_scan, instances, paths
+from aisquare.core import program as prog
 from aisquare.core.console import stderr_console
 from aisquare.core.instance_scan import UnregisteredUi
 from aisquare.core.instances import Instance, Unreadable
@@ -39,7 +40,7 @@ QUIT_WAIT_SECONDS = 15.0
 """How long a yes waits for the other asq to quit: its own quit waits up to a few seconds
 for its saves and its Remote's stop."""
 
-QUESTION = "Quit the other asq?"
+QUESTION = "Quit the other rlx?"
 
 SIGTERM_LOSES = (
     "a SIGTERM skips its clean quit: what it has not saved yet (its theme, its layout) is "
@@ -81,17 +82,17 @@ def _confirm(question: str) -> bool:
 
 
 def _release(instance: Instance) -> str:
-    return f"asq {instance.version} (store schema {instance.schema})"
+    return f"rlx {instance.version} (store schema {instance.schema})"
 
 
 def _by_hand(instance: Instance) -> str:
     """How a person quits ``instance`` where it runs."""
     tty = f", {instance.tty}" if instance.tty else ""
-    return f"press q in that asq ({instance.kind} on {instance.host}, pid {instance.pid}{tty})"
+    return f"press q in that rlx ({instance.kind} on {instance.host}, pid {instance.pid}{tty})"
 
 
 def _refuse(why: str) -> typer.Exit:
-    _say(f"asq did not start. {why}")
+    _say(f"rlx did not start. {why}")
     return typer.Exit(1)
 
 
@@ -110,50 +111,54 @@ def _quit_others(
     return once they have quit on a yes, or raise :class:`typer.Exit` (1). An unreadable record
     (an asq of an unknown release) and a stray (an asq of a release before the registry, found
     in ``ps``, #21) cannot be asked to quit, so with either there is nothing to ask."""
-    _say(f"⚠ {_release(me)} cannot run beside a running asq of another release:")
+    _say(f"⚠ {_release(me)} cannot run beside a running rlx of another release:")
     for other in differing:
         _say(f"  {_release(other)} — {other.where}")
     for record in unreadable:
         written = record.written_at.astimezone().strftime("%H:%M:%S")
         _say(
-            f"  asq of a release this one cannot read — its record {record.path}, written {written}"
+            f"  rlx of a release this one cannot read — its record {record.path}, written {written}"
         )
     for stray in strays:
-        _say(f"  asq of a release before the registry — {stray.where}: {stray.shown_command}")
+        _say(f"  rlx of a release before the registry — {stray.where}: {stray.shown_command}")
     _say("Two releases on one home would run two codebases against one store and one tmux.")
     unaskable = [other for other in differing if not other.askable]
     if unaskable or unreadable or strays:
         for other in unaskable:
             on = "" if other.host == me.host else f" on {other.host}"
             _say(
-                f"asq {other.version} (pid {other.pid}) predates being asked to quit, so it "
+                f"rlx {other.version} (pid {other.pid}) predates being asked to quit, so it "
                 f"cannot be asked from here. Quit it in its own terminal (q), or end it with "
                 f"`kill {other.pid}`{on}: {SIGTERM_LOSES}."
             )
         for record in unreadable:
             _say(
-                f"The asq whose record is {record.path.name} cannot be asked to quit from here: "
-                f"quit it in its own terminal (q). If no asq runs, the record is a leftover, "
+                f"The rlx whose record is {record.path.name} cannot be asked to quit from here: "
+                f"quit it in its own terminal (q). If no rlx runs, the record is a leftover, "
                 f"ignored once a minute old; or delete it."
             )
         for stray in strays:
             _say(
-                f"The asq of pid {stray.pid} predates the registry: its release is unknown, and "
+                f"The rlx of pid {stray.pid} predates the registry: its release is unknown, and "
                 f"it cannot be asked to quit from here. Quit it in its own terminal (q), or end "
                 f"it with `kill {stray.pid}`: {SIGTERM_LOSES}."
             )
         those = len(unaskable) + len(unreadable) + len(strays) > 1
-        raise _refuse(f"Start it again once {'those asqs have' if those else 'that asq has'} quit.")
+        # "those have", not "those rlx instances have": no longer than base's "those asqs
+        # have", so the refusal wraps no more than it did at 60 columns (seq 12524, F3).
+        raise _refuse(f"Start it again once {'those have' if those else 'that rlx has'} quit.")
     many = len(differing) > 1
     hand = "; ".join(_by_hand(other) for other in differing)
     if not (_interactive() if interactive is None else interactive):
         raise _refuse(f"No terminal to ask in: quit {'them' if many else 'it'} first — {hand}.")
-    question = "Quit the other asqs?" if many else QUESTION
+    question = "Quit the other rlx instances?" if many else QUESTION
     if not (ask or _confirm)(question):
-        raise _refuse(f"Quit {'them' if many else 'it'} first — {hand} — then start asq again.")
+        raise _refuse(
+            f"Quit {'them' if many else 'it'} first — {hand} — then start {prog.word()} again."
+        )
     for other in differing:
         _say(
-            f"asking asq {other.version} (pid {other.pid}) to quit: it saves what it can, and "
+            f"asking rlx {other.version} (pid {other.pid}) to quit: it saves what it can, and "
             f"says what it could not in its own terminal…"
         )
         try:
@@ -164,11 +169,12 @@ def _quit_others(
     for other in differing:
         if not instances.wait_gone(other, wait_s, held=other.id in held):
             raise _refuse(
-                f"asq {other.version} (pid {other.pid}) has not quit within {wait_s:g} s: it "
+                f"rlx {other.version} (pid {other.pid}) has not quit within {wait_s:g} s: it "
                 f"may be finishing work it does not cut off (a restart of the fleet), which it "
-                f"says on its screen. Quit it there — {_by_hand(other)} — then start asq again."
+                f"says on its screen. Quit it there — {_by_hand(other)} — then start "
+                f"{prog.word()} again."
             )
-        _say(f"✓ asq {other.version} (pid {other.pid}) quit")
+        _say(f"✓ rlx {other.version} (pid {other.pid}) quit")
 
 
 def _accounted(found: instances.Roll, me: Instance) -> set[int]:
@@ -208,8 +214,8 @@ def _pass(
             # Another asq's gate held past its wait: started now, this one would run unchecked
             # and, unregistered, unseen by every asq after it (review of #462).
             raise _refuse(
-                f"Another asq is checking this home and has held its gate over "
-                f"{instances.GATE_WAIT_SECONDS:g} s. Start asq again in a moment."
+                f"Another rlx is checking this home and has held its gate over "
+                f"{instances.GATE_WAIT_SECONDS:g} s. Start {prog.word()} again in a moment."
             ) from None
         except OSError as exc:
             # A home asq cannot write in: it runs, as it did before there was a registry, and
@@ -218,7 +224,10 @@ def _pass(
             home = paths.aisquare_home()
             if home not in _SAID_UNCHECKED:
                 _SAID_UNCHECKED.add(home)
-                _say(f"⚠ asq could not check the other asqs on this home ({exc}); none will see it")
+                _say(
+                    f"⚠ rlx could not check the other rlx instances on this home ({exc}); none "
+                    "will see it"
+                )
             return None
         _quit_others(
             me,

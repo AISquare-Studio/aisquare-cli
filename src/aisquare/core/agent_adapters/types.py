@@ -162,7 +162,7 @@ def stage_mark(adapter: AgentAdapter) -> str:
 
 
 def staged_label(adapter: AgentAdapter) -> str:
-    """``adapter.label`` with its :func:`stage_mark`: ``Codex (beta)``, ``Claude Code``."""
+    """``adapter.label`` with its :func:`stage_mark`: ``Claude Code``, ``<Label> (beta)``."""
     return adapter.label + stage_mark(adapter)
 
 
@@ -350,6 +350,12 @@ class AgentCapabilities:
     the wall-clock figures, ``ContextStore.close_turn``'s rule, as 0.9.2's ``session-end``
     left Claude Code's: one the human interrupted (Esc fires no ``Stop`` there) was given its
     session's end as a made-up end time (review r40 of #113, finding 4)."""
+    clamped_hook_events: frozenset[str] = frozenset()
+    """The hook events whose ``timeout`` the agent itself clamps at the spec's own value
+    (Codex's ``SessionEnd`` and ``Interrupt``, at 3 s: ``codex_config._SHORT_EVENTS``), so a
+    longer installed one buys nothing: ``core.agents.install_hooks`` reconciles it to the
+    spec's. Without it an operator's longer timeout on a budgeted hook is kept, as drift calls
+    it sufficient: Claude Code's session end, which it honours up to 60 s (RLX R20)."""
     limits_in_transcript: bool = False
     """No turn-failed event: a usage limit is read off the end of the session's
     transcript (``accounts.limit_from_transcript``) when a turn stops, is interrupted
@@ -1602,6 +1608,10 @@ class AgentAdapter(Protocol):
     settings_name: str
     capabilities: AgentCapabilities
     install_hint: str
+    install_page: str
+    """The agent's own install page (``https://…``): what asq links where it would have named an
+    install command, which asq never asks a person to type (R13, #146). The shell's surfaces
+    keep ``install_routes``."""
     install_routes: tuple[InstallRoute, ...]
     """Every way to install the agent, best first (:class:`InstallRoute`): its own installer,
     a package manager's, ``install_hint`` among them. At least one."""

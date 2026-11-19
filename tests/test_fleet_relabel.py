@@ -418,6 +418,34 @@ def test_the_old_label_resolves_nothing_and_says_what_the_agent_is_called_now(
     assert stopped.agent.id == coder.id and stopped.agent.label == "login-fix"
 
 
+def test_the_old_label_says_whether_the_renamed_agent_runs_is_paused_or_has_ended(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """R17's G, from the rename rig (ev/c/04): the old label's pointer follows the renamed
+    agent through all three of its states. A pause ends its row but not the agent, which a
+    resume brings back under its new name: it read ``which has since ended`` while paused."""
+    _coder(project, label="coder-1")
+    fleet_service.relabel(project, "coder-1", "login fix")
+
+    def pointer() -> str:
+        with pytest.raises(NoSuchAgent) as refused:
+            fleet_service.tell(project, "coder-1", "hello")
+        said = str(refused.value)
+        assert "no live agent 'coder-1'" in said, said
+        start = said.index(" (renamed")
+        return said[start : said.index(")", start) + 1]
+
+    running = pointer()
+    fleet_service.pause_agent(project, "login-fix", grace=0)
+    paused = pointer()
+    fleet_service.stop(project, "login-fix", force=True)  # ends the pause for good
+    ended = pointer()
+
+    assert running == " (renamed: it is login-fix now)"
+    assert paused == " (renamed login-fix, which is paused)"
+    assert ended == " (renamed login-fix, which has since ended)"
+
+
 def test_the_hint_is_gone_once_another_agent_takes_the_old_label(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

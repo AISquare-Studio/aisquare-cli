@@ -87,7 +87,7 @@ def test_the_cli_warns_on_stderr_and_succeeds(home: ProjectInfo) -> None:
     result = CliRunner().invoke(app, ["project", "onboard", str(home.root)])
 
     assert result.exit_code == 0, result.output
-    assert "warning: this folder is aisquare's own home" in result.output + (
+    assert "warning: this folder is rlx's own home" in result.output + (
         result.stderr if result.stderr_bytes is not None else ""
     )
 

@@ -17,6 +17,7 @@ the slot that must not be discarded.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
@@ -43,6 +44,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as shell_module
+from aisquare.cli.ui import timers
 from aisquare.cli.ui.app import ACCOUNTS_WORKER, FLEET_WORKER, SIDEBAR_WIDTH_KEY, FleetApp
 from aisquare.cli.ui.sidebar import SETTINGS_KEY, AccountsSelected, StatusLine
 from aisquare.cli.ui.terminal import TerminalPane
@@ -59,7 +61,7 @@ from aisquare.cli.ui.views.accounts import (
     needs_login,
     usage_bar,
 )
-from aisquare.core import browser, credentials, paths
+from aisquare.core import browser, credentials, paths, program
 from aisquare.core import claude_accounts as core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import adapters
@@ -80,6 +82,7 @@ from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
+from tests import windows_timers as windows_timers_module
 from tests.pane_harness import asks_a_server, socket_of
 from tests.ui_workers import settle_page, settle_until
 
@@ -426,7 +429,7 @@ def test_account_cells_say_who_how_much_what_is_wrong_and_the_plan_last() -> Non
     assert absent["name"] == "account 3" and absent["session"] == "!"
     assert absent["email"] == absent["plan"] == absent["week"] == ""
     assert accounts_view.problem_tooltip(_status(3, None), usage) == (
-        "not signed in\nfix: press Log in (in a terminal: aisquare accounts run 3, then /login)"
+        "not signed in\nfix: press Log in (in a terminal: rlx accounts run 3, then /login)"
     )
 
     def said(status: ClaudeAccountStatus, reading: ClaudeUsage | None) -> str:
@@ -498,10 +501,11 @@ def test_grant_text_puts_the_code_first_and_says_what_the_browser_did() -> None:
     grant = iam.DeviceAuthorization(
         device_code="d",
         user_code="WDJB-MJHT",
-        verification_uri="https://home.aisquare.studio/cli",
-        verification_uri_complete="https://home.aisquare.studio/cli?code=WDJB-MJHT",
+        verification_uri="https://home.aisquare.studio/rlx",
+        verification_uri_complete="https://home.aisquare.studio/rlx?code=WDJB-MJHT",
         expires_in=900,
         interval=5,
+        client_id=iam.CLIENT_ID,
     )
     opened = grant_text(grant, opened=True).plain
     assert opened.index("WDJB-MJHT") < opened.index("https://")
@@ -510,17 +514,19 @@ def test_grant_text_puts_the_code_first_and_says_what_the_browser_did() -> None:
     assert "Waiting for the approval" in grant_text(grant, opened=None).plain
 
 
-def test_the_status_line_says_aisquare_and_opens_the_page_with_settings_selected(
+def test_the_status_line_opens_the_page_with_settings_selected_and_the_sign_in_is_there(
     no_network: dict[str, Any],
 ) -> None:
     """The human: "clicking on that should directly take me to accounts page but still that
-    line wont be highlighted/in focus, still settings would be in focus"."""
+    line wont be highlighted/in focus, still settings would be in focus". The AISquare sign-in
+    is on that page alone: the owner, R21, "hide aisquare mention altogether in sidebar just
+    keep it in account view"."""
     no_network["session"] = _session()
     overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
 
     async def go(pilot: Pilot[None]) -> tuple[Any, ...]:
         app = fleet_app(pilot)
-        signed_in = app.sidebar.aisquare
+        signed_in = shown(app.query_one(StatusLine))
         before = app.content.current
         view = await open_accounts(pilot)
         rows = [line(view, 1), line(view, 2)]
@@ -529,7 +535,8 @@ def test_the_status_line_says_aisquare_and_opens_the_page_with_settings_selected
         return signed_in, before, rows, status, claude, app.sidebar.selected_key, app.focused
 
     signed_in, before, rows, status, claude, selected, focused = drive(go, overview=overview)
-    assert signed_in is True  # the AISquare dot is green
+    assert "aisquare" not in signed_in.lower(), signed_in  # the sidebar's line names no sign-in
+    assert "Signed in as" in status, status  # the page does
     assert before == "welcome"
     assert selected == SETTINGS_KEY  # Settings is the highlighted row, not the line
     assert not isinstance(focused, StatusLine)
@@ -969,44 +976,53 @@ def test_a_backed_off_row_with_no_reading_repaints_when_its_wait_ends(
     assert "until" not in after and after.startswith("the rate limit has ended"), after
 
 
+@contextlib.contextmanager
+def in_asq() -> Iterator[None]:
+    """What a shared message says while asq is up (``core.program.shell_advice``, R13b): the
+    page shows it so, and a test compares the page with it said so."""
+    program.enter_app()
+    try:
+        yield
+    finally:
+        program.leave_app()
+
+
 @pytest.fixture
-def windows_timers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Textual's timers as they sleep on Windows (``textual._win_sleep``), on any OS.
+def windows_timers(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Textual's timers as they sleep on Windows, Textual's alone (``tests.windows_timers``):
+    a pending timer holds a thread for its whole interval."""
+    return windows_timers_module.emulate(monkeypatch, asq=False)
 
-    Each timer's sleep is a blocking wait in asyncio's default executor, and its cancel is
-    set from that executor too; the executor has 8 threads, a 4-vCPU runner's
-    ``min(32, cpu + 4)``. So a pending timer holds a thread for its whole interval.
-    """
-    import concurrent.futures
 
-    import textual.timer as textual_timer
+@pytest.fixture
+def asq_on_windows(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The same, with asq's own sleep installed as on Windows (``cli.ui.timers``)."""
+    return windows_timers_module.emulate(monkeypatch, asq=True)
 
-    real_init = concurrent.futures.ThreadPoolExecutor.__init__
 
-    def eight(
-        self: Any, max_workers: Any = None, thread_name_prefix: str = "", *a: Any, **k: Any
-    ) -> None:
-        if max_workers is None and thread_name_prefix == "asyncio":
-            max_workers = 8
-        real_init(self, max_workers, thread_name_prefix, *a, **k)
+def test_no_timer_of_asq_s_holds_a_thread_past_the_ceiling_on_windows(
+    asq_on_windows: list[float], no_network: dict[str, Any]
+) -> None:
+    """On Windows a Textual timer waits in a thread of asyncio's default executor, the one
+    the workers and the quit run on (``cli.ui.timers``). asq's own (the refresh, headroom
+    60 s, housekeeping and Remote's tunnel 30 s, the Accounts page's usage 60 s, a toast's
+    10 s) took a thread each, for good. Each wait asks for a thread for the last
+    :data:`~aisquare.cli.ui.timers.CEILING` of its time at most, whoever set it, and as much
+    again as asyncio's own wait may end early (``timers.longest_hold``): 71 ms on
+    windows-py3.12, where a flat 50 ms failed (#526's run 44083919544)."""
 
-    async def win_sleep(secs: float) -> None:
-        sleep_for = max(0.0, secs - 0.001)
-        if sleep_for < 0.0005:
-            return
-        cancel = threading.Event()
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, cancel.wait, sleep_for)
-        except asyncio.CancelledError:
-            await loop.run_in_executor(None, cancel.set)
-            raise
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await open_accounts(pilot)
+        app.notify("a toast with its own time", timeout=10)
+        app.set_interval(3600, lambda: None)
+        app.set_timer(30, lambda: None)
+        await pilot.pause(0.5)
 
-    async def sleep(secs: float) -> None:
-        await asyncio.create_task(win_sleep(secs))
+    drive(go)
 
-    monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "__init__", eight)
-    monkeypatch.setattr(textual_timer, "sleep", sleep)
+    assert asq_on_windows, "the emulation saw the timers' last moments"
+    assert max(asq_on_windows) <= timers.longest_hold(), sorted(asq_on_windows)[-5:]
 
 
 @pytest.mark.usefixtures("windows_timers")
@@ -1105,19 +1121,23 @@ def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
 def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() -> None:
     overview = _overview(_status(1, None, signed_in=False), installed=False)
 
-    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool | None]:
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         return (
             shown(view.query_one("#claude-title", Static)),
             view.query_one("#claude-add", Button).disabled,
-            app.sidebar.aisquare,
+            shown(app.query_one(StatusLine)) + shown(view.query_one("#aisquare-status", Static)),
         )
 
     claude, disabled, signed_in = drive(go, overview=overview)
-    assert "Claude Code is not installed" in claude and core.INSTALL_COMMAND in claude
+    assert "Claude Code is not installed" in claude
+    # Its install page, linked; asq names no command to type (R13, ruled Q1).
+    assert "install it from https://code.claude.com/docs/en/setup" in claude
+    assert core.INSTALL_COMMAND not in claude
     assert disabled
-    assert signed_in is False  # the status line's AISquare dot is red
+    line, page = signed_in.split("Not signed in", 1)  # the page's, never the sidebar's (R21)
+    assert "aisquare" not in line.lower() and "AISquare" in page, signed_in
 
 
 def test_usage_is_fetched_only_for_signed_in_slots_and_painted_into_their_rows(
@@ -1343,6 +1363,9 @@ def _script_device_flow(
         verification_uri_complete="https://home.aisquare.studio/cli?code=WDJB-MJHT",
         expires_in=900,
         interval=5,
+        # A server that does not know rlx yet: the grant is aisquare-cli's, and so is the
+        # session it ends in.
+        client_id=iam.FALLBACK_CLIENT_ID,
     )
     monkeypatch.setattr(iam, "resolve_api_url", lambda explicit=None: "https://api.aisquare.studio")
     monkeypatch.setattr(iam, "discover", lambda api_url, refresh=False: endpoints)
@@ -1357,9 +1380,10 @@ def _script_device_flow(
     monkeypatch.setattr(device_flow, "wait_for_token", wait)
 
     def commit(
-        api_url: str, e: iam.Endpoints, token: dict[str, Any], *, cancelled: Any
+        api_url: str, e: iam.Endpoints, token: dict[str, Any], *, client_id: str, cancelled: Any
     ) -> iam.Session:
         seen.append(f"complete:{token['access_token']}")
+        script["client_id"] = client_id
         session = dataclasses.replace(_session("new@aisquare.studio"), unrestricted=unrestricted)
         script["session"] = session
         return session
@@ -1375,7 +1399,7 @@ def test_sign_in_shows_the_code_then_the_new_session(
         monkeypatch, no_network, outcome={"access_token": "aisq_new", "expires_in": 1}
     )
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str, bool, bool | None]:
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool, str]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         assert not view.query_one("#aisquare-sign-out", Button).display  # nobody to sign out
@@ -1387,18 +1411,19 @@ def test_sign_in_shows_the_code_then_the_new_session(
             shown(view.query_one("#aisquare-status", Static)),
             notice(view),
             view.query_one("#aisquare-code", Static).display,
-            app.sidebar.aisquare,
+            shown(app.query_one(StatusLine)),
         )
 
     status, said, code_shown, signed_in = drive(go)
     assert seen == ["wait:WDJB-MJHT", "complete:aisq_new"]
+    assert no_network["client_id"] == "aisquare-cli", "stored as the client that started it"
     # The browser helper decides (an explicit BROWSER beats the headless heuristics),
     # so it is asked even where is_headless() says no.
     assert no_network["opened"] == ["https://home.aisquare.studio/cli?code=WDJB-MJHT"]
     assert "Signed in as new@aisquare.studio" in status
     assert said == "✓ Signed in to AISquare as new@aisquare.studio"
     assert not code_shown  # the card folds away once the session is stored
-    assert signed_in is True  # the status line was re-read from the stored session
+    assert "aisquare" not in signed_in.lower(), signed_in  # the sign-in is the page's (R21)
 
 
 def test_a_sign_in_whose_token_could_not_be_restricted_says_so_on_the_page(
@@ -1566,7 +1591,7 @@ def test_sign_out_takes_the_keys_the_cli_minted_with_it_as_logout_does(
     said = drive(go)
     assert sorted(order[:2]) == ["key-api", "key-web"], order
     assert order[2:] == ["session"], "the keys go before the session: their revoke takes it"
-    assert said.startswith("✓ Signed out of AISquare; 1 key the CLI minted is still live"), said
+    assert said.startswith("✓ Signed out of AISquare; 1 key rlx minted is still live"), said
     assert "acme for api (the API answered HTTP 403: not yours)" in said
     assert not any(
         explainability_service.project_key_path(project.id).exists() for project in projects
@@ -1592,6 +1617,7 @@ def test_a_sign_out_whose_rewrite_could_not_be_restricted_says_so_on_the_page(
         expires_in=3600,
         scope="",
         claims={"email": "me@aisquare.studio", "sub": "usr_1"},
+        client_id=iam.CLIENT_ID,
     )
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: iam.stored_session())
 
@@ -1645,14 +1671,23 @@ def test_an_environment_token_can_neither_sign_out_nor_start_a_browser_sign_in(
     shown_, out_disabled, in_disabled, status, said, workers = drive(go)
     assert shown_ and out_disabled and in_disabled
     assert iam.TOKEN_ENV_VAR in status
-    assert said.startswith(f"{iam.TOKEN_ENV_VAR} is set") and "Unset it" in said
+    assert said.startswith(f"{iam.TOKEN_ENV_VAR} is set where rlx started"), said
+    assert "the browser sign-in is off while it is" in said, said
+    assert "Unset" not in said and "unset" not in said, "rlx names no shell step (review of #503)"
     assert workers == [] and seen == []  # no flow ran, nothing was replaced
 
 
+@pytest.mark.parametrize("windows", [False, True], ids=["here", "asq on Windows"])
 def test_quitting_mid_sign_in_cancels_the_device_flow(
-    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any], windows: bool
 ) -> None:
-    """Textual cancelling a thread worker does not stop its callable; the page's own flag must."""
+    """Textual cancelling a thread worker does not stop its callable; the page's own flag must.
+
+    On Windows too (``tests.windows_timers``): asq's timers, 30 s, 60 s and longer, each held a
+    thread of the 8 the worker and the quit run on, and the quit came after the wait's 5 s
+    (windows-py3.12: R17's run 44051094043, the rc/rlx gate run 44072523971)."""
+    if windows:
+        windows_timers_module.emulate(monkeypatch, asq=True)
     seen = _script_device_flow(monkeypatch, no_network, outcome={"access_token": "aisq_new"})
     waiting, released = threading.Event(), threading.Event()
     observed: dict[str, bool] = {}
@@ -2006,7 +2041,7 @@ def test_a_cancel_whose_settling_fails_never_says_nothing_changed(
     assert seen["abandoned"] == [] and "nothing changed" not in said, said
     if fails == "its hooks":
         assert said.startswith(
-            "⚠ signed in, but aisquare's hooks did not install: settings.json is read-only"
+            "⚠ signed in, but rlx's hooks did not install: settings.json is read-only"
         ), said
     else:
         assert said.startswith("✗ sign-in cancelled — cancelled; whether its login landed"), said
@@ -2929,8 +2964,8 @@ def test_a_name_the_service_refuses_is_said_and_the_field_stays_open_to_correct_
     core.create_account()
     core.create_account()
     accounts_service.set_alias("3", "work")
-    with pytest.raises((ValueError, accounts_service.AccountsError)) as refused:
-        accounts_service.set_alias("2", typed)  # what the service says, to compare the page with
+    with in_asq(), pytest.raises((ValueError, accounts_service.AccountsError)) as refused:
+        accounts_service.set_alias("2", typed)  # what the service says in asq, to compare
     before = aliases()
 
     async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], bool, str, bool]:
@@ -2946,6 +2981,7 @@ def test_a_name_the_service_refuses_is_said_and_the_field_stays_open_to_correct_
 
     said, still_open, value, focused = drive_registry(go)
     assert said == [(f"✗ {refused.value}", "error")]
+    assert "rlx accounts" not in said[0][0], "asq names no command (R13b)"
     assert (still_open, value, focused) == (True, typed, True)  # as typed, ready to fix
     assert aliases() == before == {1: None, 2: None, 3: "work"}  # nothing written
 
@@ -3180,10 +3216,11 @@ def test_a_slot_removed_while_its_field_is_open_is_said_and_its_row_leaves(
         return said, before, [r.slot for r in view.rows()]
 
     said, before, after = drive_registry(go)
-    with pytest.raises(accounts_service.NoSuchAccount) as vanished:
-        accounts_service.set_alias("2", "work")  # what the service says, to compare the page with
+    with in_asq(), pytest.raises(accounts_service.NoSuchAccount) as vanished:
+        accounts_service.set_alias("2", "work")  # what the service says in asq, to compare
     assert before == [1, 2]
     assert said == [(f"✗ {vanished.value}", "error")]
+    assert "rlx accounts" not in said[0][0], "asq names no command (R13b)"
     assert after == [1]  # the next frame took the row away, and its field with it
     assert aliases() == {1: None}  # the name landed nowhere else
 
@@ -3650,7 +3687,7 @@ def test_every_button_of_a_row_is_on_screen_at_200_columns_unscrolled(
     assert out["right"] <= out["screen"]
     table_width, shown_width = out["width"]
     assert out["scrolls"] == 0 and table_width <= shown_width and out["whole"]
-    assert out["marks"] == {1: "✻ ", 4: ">_"} and out["tip"] == "Codex (beta)"
+    assert out["marks"] == {1: "✻ ", 4: ">_"} and out["tip"] == "Codex"
     assert out["marked"] == [True] * 4  # rows mounted into a table of both agents carry the mark
 
 

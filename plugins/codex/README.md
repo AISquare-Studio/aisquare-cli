@@ -1,11 +1,11 @@
-# The aisquare plugin for Codex
+# The rlx plugin for Codex
 
 This folder is the plugin (`.codex-plugin/plugin.json`, `hooks/hooks.json`, `scripts/aisquare-hook`); the marketplace that lists it is `.agents/plugins/marketplace.json` at the top of this repository.
 
-The aisquare plugin gives Codex the hooks that `aisquare agents connect codex` writes into `$CODEX_HOME/hooks.json`, without an installer and without writing hooks into that file. Installing it writes to Codex's `config.toml`: Codex records there the marketplace, that the plugin is enabled (`[plugins."aisquare@aisquare-cli"]`), and, once you trust them, its hooks (`[hooks.state]`). From a shell:
+This plugin, `aisquare@aisquare-cli` in Codex, gives Codex the hooks that `rlx agents connect codex` writes into `$CODEX_HOME/hooks.json`, without an installer and without writing hooks into that file. Installing it writes to Codex's `config.toml`: Codex records there the marketplace, that the plugin is enabled (`[plugins."aisquare@aisquare-cli"]`), and, once you trust them, its hooks (`[hooks.state]`). From a shell:
 
 ```sh
-codex plugin marketplace add AISquare-Studio/aisquare-cli
+codex plugin marketplace add AISquare-Studio/rlx
 codex plugin add aisquare@aisquare-cli
 ```
 
@@ -15,15 +15,15 @@ Or add the marketplace as above and install the plugin from the plugin browser: 
 
 Installing a plugin trusts none of its hooks, and Codex runs none of them until you do. Start a new Codex session: it says "Hooks need review". Choose **Review hooks** to read them (each runs `sh ".../scripts/aisquare-hook" codex <event>`, from source "Plugin - aisquare@aisquare-cli"), or **Trust all and continue**. You can come back to them at any time with `/hooks`, where `t` trusts them all.
 
-Codex keeps that trust across plugin updates whose hooks are unchanged, and asks again when they change. `aisquare doctor` says when the plugin's hooks are waiting for it.
+Codex keeps that trust across plugin updates whose hooks are unchanged, and asks again when they change. `rlx doctor` says when the plugin's hooks are waiting for it.
 
 ## What runs
 
 The hooks are SessionStart, UserPromptSubmit, Stop, SessionEnd, Interrupt, PermissionRequest, PreToolUse (for `request_user_input`) and PostToolUse. Each one runs `aisquare hook codex`, the same entry point the `hooks.json` hooks use, told which Codex home the plugin was installed in:
 
-- the aisquare CLI on your `PATH`, or in `~/.local/bin` where `uv tool install` puts it;
-- otherwise the aisquare release the plugin pins, through `uvx`. On a machine with only [uv](https://docs.astral.sh/uv/), the hooks run with nothing else installed: they capture your prompts and hand each new session what is saved. The first session start downloads the release, which takes a few seconds;
-- with neither, the session starts as usual and says once that aisquare is not available.
+- the `aisquare` command on your `PATH`, or in `~/.local/bin` where `uv tool install` puts it;
+- otherwise the release the plugin pins, through `uvx`. On a machine with only [uv](https://docs.astral.sh/uv/), the hooks run with nothing else installed: they capture your prompts and hand each new session what is saved. The first session start downloads the release, which takes a few seconds;
+- with neither, the session starts as usual and says once that it found neither.
 
 A hook that fails never blocks a prompt or a session. Codex runs hooks from its background app server, in the session's folder, so the `PATH` they see is the one Codex was first started with.
 
@@ -31,34 +31,34 @@ The plugin's launcher is the Claude Code plugin's, the same file in both plugins
 
 ## Saving memory on purpose
 
-The hooks hand your saved context to every new session. To save something, use the CLI. Install it once, and the plugin runs that same install from then on:
+The hooks hand your saved context to every new session. To save something, use rlx's commands. Install it once, and the plugin runs that same install from then on:
 
 ```sh
 uv tool install aisquare-cli
-aisquare remember --user "I prefer pytest"
+rlx remember --user "I prefer pytest"
 ```
 
 ## The plugin and the hooks.json hooks together
 
-The one-line installer and `aisquare agents connect codex` install the hooks into `$CODEX_HOME/hooks.json`. Codex runs a plugin's hooks and that file's side by side, so if you also install the plugin, its hooks stand down while that file runs aisquare's, and nothing fires twice. `hooks.json` gives every event the same command, so the plugin stands down for all of them; if that file lacks some, `aisquare doctor` asks for `aisquare agents connect codex`, which writes the whole set. `aisquare doctor` warns until you keep one route:
+The one-line installer and `rlx agents connect codex` install the hooks into `$CODEX_HOME/hooks.json`. Codex runs a plugin's hooks and that file's side by side, so if you also install the plugin, its hooks stand down while that file runs rlx's, and nothing fires twice. `hooks.json` gives every event the same command, so the plugin stands down for all of them; if that file lacks some, `rlx doctor` asks for `rlx agents connect codex`, which writes the whole set. `rlx doctor` warns until you keep one route:
 
 ```sh
-aisquare doctor
+rlx doctor
 # keep the plugin, and remove the hooks.json hooks:
-aisquare agents disconnect codex
+rlx agents disconnect codex
 # or keep the hooks.json hooks, and remove the plugin:
 codex plugin remove aisquare@aisquare-cli
 ```
 
-Each route's hooks are trusted on their own. `aisquare agents connect codex` and `aisquare upgrade` record Codex's trust of the `hooks.json` hooks they write, where Codex keeps a review's yes (`[hooks.state]` in `config.toml`); the plugin's you trust in `/hooks` yourself, as above. Where that record could not be made (a read-only `config.toml`), `aisquare doctor` says so, and the plugin still stands down beside those untrusted `hooks.json` hooks, which Codex skips: trust them in `/hooks`, or keep one route. Beside `hooks.json` hooks whose aisquare is gone (uninstalled after `agents connect`), the plugin runs in their place, and `aisquare doctor` says to remove them.
+Each route's hooks are trusted on their own. `rlx agents connect codex` and `rlx upgrade` record Codex's trust of the `hooks.json` hooks they write, where Codex keeps a review's yes (`[hooks.state]` in `config.toml`); the plugin's you trust in `/hooks` yourself, as above. Where that record could not be made (a read-only `config.toml`), `rlx doctor` says so, and the plugin still stands down beside those untrusted `hooks.json` hooks, which Codex skips: trust them in `/hooks`, or keep one route. Beside `hooks.json` hooks whose rlx is gone (uninstalled after `agents connect`), the plugin runs in their place, and `rlx doctor` says to remove them.
 
-`aisquare agents status codex` names the route the Codex home a session from your shell reads takes (`"route": "plugin"`, `"hooks"` or `"both"` under `--json`), and `aisquare doctor` grades each Codex home's.
+`rlx agents status codex` names the route the Codex home a session from your shell reads takes (`"route": "plugin"`, `"hooks"` or `"both"` under `--json`), and `rlx doctor` grades each Codex home's.
 
 ## Limits
 
-- macOS, Linux and WSL. Native Windows keeps the `hooks.json` route (`aisquare agents connect codex`): the hooks run `sh`, and `aisquare doctor` there reads only that route.
+- macOS, Linux and WSL. Native Windows keeps the `hooks.json` route (`rlx agents connect codex`): the hooks run `sh`, and `rlx doctor` there reads only that route.
 - Plugins belong to one Codex home. One installed in `~/.codex` does not reach another `CODEX_HOME`, nor the fleet's account homes (`~/.aisquare/codex-accounts/<slot>`), which keep their `hooks.json` hooks.
-- After an aisquare release, refresh the marketplace and install the new version, then start a new Codex session:
+- After an rlx release, refresh the marketplace and install the new version, then start a new Codex session:
 
   ```sh
   codex plugin marketplace upgrade aisquare-cli
@@ -71,7 +71,7 @@ Each route's hooks are trusted on their own. `aisquare agents connect codex` and
 
 Run `codex plugin remove aisquare@aisquare-cli`, and `codex plugin marketplace remove aisquare-cli` if you no longer want the marketplace. For a home other than the one your shell's `codex` reads, set `CODEX_HOME` for them. Your memory stays in `~/.aisquare`.
 
-`aisquare uninstall` leaves the plugin to you, because the plugin is Codex's: it names the command that removes it from each Codex home that enables it, and `--purge` waits until it is gone, since the plugin would run aisquare again and make `~/.aisquare` anew.
+`rlx uninstall` leaves the plugin to you, because the plugin is Codex's: it names the command that removes it from each Codex home that enables it, and `--purge` waits until it is gone, since the plugin would run rlx again and make `~/.aisquare` anew.
 
 ## Sources
 

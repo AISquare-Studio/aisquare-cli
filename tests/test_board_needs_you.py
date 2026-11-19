@@ -342,3 +342,55 @@ def test_in_the_shell_the_strip_still_fits_after_the_terminal_shrinks_to_80(
         "needs-you-blocked",
     ]
     assert all(end <= right for _, end in shown), f"past the strip's edge {right}: {shown}"
+
+
+def test_a_restart_tells_the_earlier_session_s_feed_lines_apart(board: dict[str, Any]) -> None:
+    """#140: the feed names a line's author as the left pane names its agent. A restart gives
+    the label to a new session; the earlier one's lines, drawn when the name was its own, are
+    redrawn with the time it started, and the new one's keep the plain name."""
+    from textual.widgets import OptionList
+
+    earlier = CODER.model_copy(update={"id": "ses_earlier", "state": "working"})
+    board["sessions"] = [MANAGER, earlier]
+    board["events"] = [_event(1, earlier.id, "note", "first try")]
+    restarted = CODER.model_copy(
+        update={"id": "ses_restarted", "state": "working", "started_at": NOW}
+    )
+
+    async def go(app: Host, panel: BoardPanel) -> tuple[str, str, str]:
+        feed = panel.query_one("#feed", OptionList)
+        before = str(feed.get_option("evt_1").prompt)
+        board["sessions"] = [
+            MANAGER,
+            earlier.model_copy(update={"ended_at": NOW}),
+            restarted,
+        ]
+        board["events"] = [_event(2, restarted.id, "note", "second try")]
+        panel.refresh_data()
+        await settle_page(app)
+        return before, str(feed.get_option("evt_1").prompt), str(feed.get_option("evt_2").prompt)
+
+    before, redrawn, new = drive(go)
+    stamp = f"{earlier.started_at.astimezone():%H:%M}"
+    assert " coder-auth 💬 noted: first try" in before
+    assert f" coder-auth ({stamp}) 💬 noted: first try" in redrawn
+    assert " coder-auth 💬 noted: second try" in new
+
+
+def test_a_long_name_never_wraps_the_sessions_block(board: dict[str, Any]) -> None:
+    """#140: names are longer than ``role·<id>``. The sessions block is one row a session, its
+    end cut with ``…`` at the border, so it never grows and pushes the task table down."""
+    from textual.widgets import Static
+
+    long = CODER.model_copy(
+        update={"label": "reviewer-board-audit-of-the-whole-release", "state": "waiting"}
+    )
+    board["sessions"] = [MANAGER, long]
+
+    async def go(app: Host, panel: BoardPanel) -> int:
+        panel.refresh_data()
+        await settle_page(app)
+        return panel.query_one("#sessions", Static).region.height
+
+    # Two sessions, a row each, the block's closing newline, and the border's two.
+    assert drive(go) == 2 + 1 + 2, "a long name wrapped the sessions block"

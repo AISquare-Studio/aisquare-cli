@@ -111,7 +111,7 @@ def login(
             return
         if iam.env_session(resolved) is not None:
             fail(
-                f"{iam.TOKEN_ENV_VAR} is set, so aisquare is using that token. "
+                f"{iam.TOKEN_ENV_VAR} is set, so rlx is using that token. "
                 "Unset it to sign in with the browser.",
                 error="env_token_set",
             )
@@ -125,7 +125,9 @@ def login(
         grant = iam.start_device_authorization(endpoints)
         _show_verification(grant, no_browser=no_browser)
         token = _wait_for_approval(endpoints, grant)
-        session = auth_service.complete_sign_in(resolved, endpoints, token)
+        session = auth_service.complete_sign_in(
+            resolved, endpoints, token, client_id=grant.client_id
+        )
     except iam.IamError as exc:
         _fail(exc)
     except KeyboardInterrupt:
@@ -194,7 +196,7 @@ def _wait_for_approval(
                     error="expired",
                 )
             try:
-                outcome = iam.poll_token(endpoints, grant.device_code)
+                outcome = iam.poll_token(endpoints, grant)
             except iam.IamError as exc:
                 if exc.code != "unreachable":
                     raise
@@ -222,7 +224,7 @@ def _wait_for_approval(
                     error="expired",
                 )
             if outcome.kind == "paused":
-                fail("CLI sign-in is temporarily paused. Try again later.", error="paused")
+                fail("Sign-in from rlx is temporarily paused. Try again later.", error="paused")
             raise iam.IamError(
                 "unsupported_server", f"Unexpected answer from {endpoints.issuer} while waiting."
             )
@@ -391,7 +393,7 @@ def logout() -> None:
         )
         return
     if keys.detached:
-        _say(f"✓ Forgot {keys.detached} ingest key(s) the CLI had minted for your projects.")
+        _say(f"✓ Forgot {keys.detached} ingest key(s) rlx had minted for your projects.")
     if keys.revocations.owed:
         # Kept owed, not forgotten: the next sign-in's `use` or `doctor --live` tries again.
         _say(f"⚠ {destinations.describe_owed(keys.revocations.owed)} — {destinations.REVOKE_RETRY}")

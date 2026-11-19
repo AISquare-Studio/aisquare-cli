@@ -234,7 +234,7 @@ def test_an_editable_install_on_windows_is_still_told_to_pull_first(tmp_path: Pa
 
     assert reason is not None
     assert install_route.command_line(["git", "-C", str(checkout), "pull"]) in reason
-    assert "after aisquare exits" in reason
+    assert "after rlx exits" in reason
 
 
 def test_an_editable_install_in_a_uv_made_venv_reinstalls_with_uv_pip(tmp_path: Path) -> None:
@@ -264,23 +264,22 @@ def test_the_same_url_without_editable_is_a_local_source(tmp_path: Path) -> None
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "main"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git@main",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git@main",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd"},
             "cli",
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git"
-            "#subdirectory=cli",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git#subdirectory=cli",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "v0.8.0"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git",
         ),
         (
             {"vcs": "git", "commit_id": "0123abcd", "requested_revision": "0123abcd"},
             None,
-            "aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli.git",
+            "aisquare-cli @ git+https://github.com/AISquare-Studio/rlx.git",
         ),
     ],
     ids=["branch", "subdirectory", "release-tag", "commit"],
@@ -291,7 +290,7 @@ def test_a_vcs_install_is_reinstalled_from_a_reference_pip_can_read(
     """PEP 610 records the URL without ``git+``; pip reads a bare https URL as an
     archive to download, so the reference is rebuilt (review of #251, finding 5)."""
     record: dict[str, Any] = {
-        "url": "https://github.com/AISquare-Studio/aisquare-cli.git",
+        "url": "https://github.com/AISquare-Studio/rlx.git",
         "vcs_info": vcs_info,
     }
     if subdirectory:
@@ -431,8 +430,7 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
     launcher = (root / "plugins" / "claude-code" / "scripts" / "aisquare-hook").read_text("utf-8")
 
     assert (
-        "`aisquare upgrade`" in changed
-        and f"`aisquare {' '.join(lifecycle.REFRESH_HOOKS[:2])}`" in changed
+        "`rlx upgrade`" in changed and f"`rlx {' '.join(lifecycle.REFRESH_HOOKS[:2])}`" in changed
     )
     assert install_route.PYPI_JSON_URL in sent and "User-Agent" in sent
     upgrades = " ".join(sent.split("**Upgrades.**")[1].split("\n- **")[0].split())
@@ -449,7 +447,7 @@ def test_security_md_lists_what_upgrade_and_the_plugin_change_and_send() -> None
         "the launcher still asks uv for a Python"
     )
     assert "CPython" in plugin and "UV_PYTHON_DOWNLOADS" in plugin, plugin
-    assert "`aisquare uninstall`" in changed and "`--purge`" in changed, "uninstall too"
+    assert "`rlx uninstall`" in changed and "`--purge`" in changed, "uninstall too"
     assert "Keychain" in changed, "a purge leaves the macOS slots' tokens, and says so"
 
 
@@ -635,7 +633,7 @@ def test_an_index_no_flag_can_carry_is_refused_not_dropped(
 
     reason = install_route.not_automated(route)
 
-    assert reason is not None and "a uv index this CLI cannot restate" in reason
+    assert reason is not None and "a uv index rlx cannot restate" in reason
 
 
 @pytest.mark.parametrize(
@@ -1471,7 +1469,7 @@ def test_off_a_terminal_without_yes_it_is_a_dry_run(
     result = runner.invoke(app, ["upgrade"])
 
     assert result.exit_code == 0, result.output
-    assert "aisquare 0.9.0 → 0.9.1 (latest on PyPI)" in result.stdout
+    assert "rlx 0.9.0 → 0.9.1 (latest on PyPI)" in result.stdout
     assert "dry run: nothing installed" in result.stdout
     assert machine.installs == []
 
@@ -1544,7 +1542,7 @@ def test_at_a_terminal_it_asks_and_no_means_nothing_runs(
     declined = runner.invoke(app, ["upgrade"])
 
     assert declined.exit_code == 0, declined.output
-    assert asked == [("Upgrade aisquare 0.9.0 → 0.9.1?", False)], "the default is NOT to do it"
+    assert asked == [("Upgrade rlx 0.9.0 → 0.9.1?", False)], "the default is NOT to do it"
     assert "nothing changed" in declined.stdout
     assert machine.installs == []
 
@@ -1569,7 +1567,7 @@ def test_a_site_left_for_its_settings_file_is_not_told_its_hooks_were_removed(
 
     left = _one_object(result.stdout)["hooks_left"]
     assert [entry["config_dir"] for entry in left] == [str(site)], left
-    assert left[0]["reason"].endswith("so aisquare cannot rewrite it safely"), left
+    assert left[0]["reason"].endswith("so rlx cannot rewrite it safely"), left
     assert "removed" not in left[0]["reason"], left
 
 
@@ -1964,7 +1962,7 @@ def test_a_move_back_plans_no_reconnect_and_asks_to_move_back(
     assert [entry["config_dir"] for entry in back["hooks_left"]] == [str(site)], back
     assert back["hooks_left"][0]["reason"].startswith("0.7.0 predates"), back
     assert forward["refresh_hooks"] == [str(site)], "control: a move forward re-connects"
-    assert asked == ["Move aisquare 0.9.0 back to 0.7.0?", "Upgrade aisquare 0.9.0 → 0.9.1?"]
+    assert asked == ["Move rlx 0.9.0 back to 0.7.0?", "Upgrade rlx 0.9.0 → 0.9.1?"]
 
 
 def test_a_move_back_to_a_release_that_reads_config_whole_names_what_it_reads_otherwise(
@@ -1993,7 +1991,7 @@ def test_a_move_back_to_a_release_that_reads_config_whole_names_what_it_reads_ot
     assert layered["config_defaults_lost"] == [], "0.8.1 lays the file over its defaults too"
     assert forward["config_defaults_lost"] == [], "control: a move forward reads it the same"
     assert "⚠ 0.8.0 reads config.toml without this release's defaults under it" in said, said
-    assert "`aisquare config set fleet.max_agents_per_project …`" in said.replace("\n", " "), said
+    assert "`rlx config set fleet.max_agents_per_project …`" in said.replace("\n", " "), said
     assert chosen["config_defaults_lost"] == [
         "fleet.max_agents_per_project 4 (here auto)",
         "accounts.on_limit wait (here switch)",
@@ -2048,7 +2046,7 @@ def test_a_move_back_to_a_deny_by_extra_args_release_names_the_tools_a_role_rega
         "⚠ 0.8.1 denies a role only the tools its extra_args name, which your config leaves "
         "without them: reviewer (Edit, NotebookEdit, Write) would launch there with those "
         "tools. To keep them denied there, add the deny to its extra_args before the move "
-        "(`aisquare config set fleet.roles.reviewer.extra_args "
+        "(`rlx config set fleet.roles.reviewer.extra_args "
         "'--disallowedTools=Edit NotebookEdit Write'`)"
     )
 
@@ -2138,10 +2136,10 @@ def test_live_fleet_agents_are_named_before_the_install_is_replaced_under_them(
     warning = "⚠ 1 fleet agent is running (coder-1 (repo)): a hook it fires while the install"
     assert plan["live_agents"] == ["coder-1 (repo)"], plan
     assert asked == [
-        "Upgrade aisquare 0.9.0 → 0.9.1?",
-        "Upgrade aisquare 0.9.0 → 0.9.1 while 1 fleet agent runs?",
+        "Upgrade rlx 0.9.0 → 0.9.1?",
+        "Upgrade rlx 0.9.0 → 0.9.1 while 1 fleet agent runs?",
     ]
-    assert warning in declined.stdout and "aisquare fleet shutdown --all --yes" in declined.stdout
+    assert warning in declined.stdout and "rlx fleet shutdown --all --yes" in declined.stdout
     assert warning in agreed.stdout and len(machine.installs) == 1, "--yes upgrades, having said it"
     assert "fleet agent" not in quiet.stdout, "control: no fleet, no warning"
 
@@ -2175,17 +2173,15 @@ def test_a_remote_on_in_another_process_is_named_before_the_install_is_replaced_
     warning = f"⚠ Remote is on ({named}): while the install is being replaced, its page"
     assert plan["remote"] == named, plan
     assert asked == [
-        "Upgrade aisquare 0.9.0 → 0.9.1?",
-        "Upgrade aisquare 0.9.0 → 0.9.1 while Remote is on?",
+        "Upgrade rlx 0.9.0 → 0.9.1?",
+        "Upgrade rlx 0.9.0 → 0.9.1 while Remote is on?",
     ]
-    assert warning in declined.stdout and "Ctrl-C where `aisquare remote serve` runs" in (
+    assert warning in declined.stdout and "Ctrl-C where `rlx remote serve` runs" in (
         declined.stdout
     )
-    assert reopened == [["ui"]], "asq's Update comes back after a no"
+    assert reopened == [["ui"]], "rlx's Update comes back after a no"
     assert warning in agreed.stdout and len(machine.installs) == 1, "--yes upgrades, having said it"
-    assert "`aisquare remote serve` processes that were already running keep 0.9.0" in (
-        agreed.stdout
-    )
+    assert "`rlx remote serve` processes that were already running keep 0.9.0" in (agreed.stdout)
     assert "Remote is on" not in quiet.stdout, "control: no Remote, no warning"
 
 
@@ -2213,18 +2209,118 @@ def test_another_asq_on_this_home_refuses_the_upgrade_and_is_named(
         refused = runner.invoke(app, ["--json", "upgrade", "--yes"])
         one_click = runner.invoke(app, ["upgrade", "--one-click"])
 
-    named = f"asq {other.version} (ssh on {other.host}, pid {other.pid})"
+    named = f"rlx {other.version} (ssh on {other.host}, pid {other.pid})"
     assert plan["asqs"] == [named], plan
     said = " ".join(reopen.stdout.split())
     assert reopen.exit_code == 1, reopen.output
-    assert f"✗ it will not run: another asq runs on this home ({named})" in said
+    assert f"✗ it will not run: another rlx runs on this home ({named})" in said
     assert asked == [], "no question whose yes is refused"
     assert refused.exit_code == 1 and _one_object(refused.stdout)["error"] == "asq_running"
     assert one_click.exit_code == 1 and named in " ".join(one_click.stderr.split())
     assert machine.installs == [], "nothing installed"
-    assert reopened[0] == ["ui"], "asq's Update comes back"
+    assert reopened[0] == ["ui"], "rlx's Update comes back"
     agreed = runner.invoke(app, ["upgrade", "--yes"])
     assert agreed.exit_code == 0 and len(machine.installs) == 1, "control: alone, it upgrades"
+
+
+def _commands_installed(tool: Tool, bin_dir: Path, *, exe: str = "") -> None:
+    """``tool``'s receipt and ``bin_dir`` as uv 0.11.6 leaves an install of this release
+    (measured): links to the tool's own scripts, the five recorded by path (#133)."""
+    names = ("aisquare", "asq", "asq-statusline", "rlx", "relax")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    rows = ",\n".join(
+        f"    {{ name = {_toml(name)}, install-path = {_toml(str(bin_dir / f'{name}{exe}'))}, "
+        'from = "aisquare-cli" }'
+        for name in names
+    )
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        _receipt(_OURS_PINNED, _TIKTOKEN, tail=f"entrypoints = [\n{rows},\n]\n"),
+        encoding="utf-8",
+    )
+    if not exe:
+        for name in names:
+            (bin_dir / name).symlink_to(tool.prefix / "bin" / name)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uv links the scripts on POSIX only")
+def test_another_programs_relax_refuses_the_upgrade_before_uv_runs_and_is_named(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#133: `uv tool install --force` replaced another program's `relax` without a word
+    (measured, uv 0.11.6). Refused as another asq is, in one line naming it and what to do:
+    in the plan, under --yes, --json and --one-click; nothing is installed and that `relax`
+    is left as it was."""
+    monkeypatch.setattr(install_cli, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    reopened: list[list[str]] = []
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: reopened.append(list(args)))
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    _commands_installed(tool, bin_dir)
+    (bin_dir / "relax").unlink()
+    (bin_dir / "relax").write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+
+    plan = _one_object(runner.invoke(app, ["--json", "upgrade", "--dry-run"]).stdout)
+    shown = runner.invoke(app, ["upgrade", "--dry-run"])
+    refused = runner.invoke(app, ["upgrade", "--yes"])
+    as_json = runner.invoke(app, ["--json", "upgrade", "--yes"])
+    one_click = runner.invoke(app, ["upgrade", "--one-click"])
+
+    line = (
+        f"{bin_dir / 'relax'} is another program, which the reinstall would replace without a "
+        "word: rename or move it first, then run `aisquare upgrade` again."
+    )
+    assert plan["commands_taken"] == [str(bin_dir / "relax")], plan
+    assert f"✗ it will not run: {line}" in " ".join(shown.stdout.split()), shown.stdout
+    assert refused.exit_code == 1 and line in " ".join(refused.stderr.split()), refused.output
+    assert as_json.exit_code == 1 and _one_object(as_json.stdout)["error"] == "command_taken"
+    assert one_click.exit_code == 1 and line in " ".join(one_click.stderr.split())
+    assert reopened and reopened[0][:1] == ["ui"], "asq's Update comes back"
+    assert machine.installs == [], "nothing installed"
+    assert (bin_dir / "relax").read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
+    (bin_dir / "relax").unlink()
+    (bin_dir / "relax").symlink_to(tool.prefix / "bin" / "relax")
+    agreed = runner.invoke(app, ["upgrade", "--yes"])
+    assert agreed.exit_code == 0 and len(machine.installs) == 1, "control: ours, it upgrades"
+
+
+def test_the_command_a_person_runs_on_windows_says_another_programs_rlx_first(
+    runner: CliRunner,
+    tool: Tool,
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """On Windows the reinstall is run by hand, and that command too would replace another
+    program's ``rlx.exe``: the line says so, beside the command. uv copies the scripts there,
+    so a copy the receipt records is ours (``relax.exe``) and one it does not is not."""
+    windows = replace(tool.facts, platform="win32")
+    monkeypatch.setattr(install_route, "facts", lambda: windows)
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    _commands_installed(tool, bin_dir, exe=".exe")
+    receipt = (tool.prefix / install_route.RECEIPT_NAME).read_text(encoding="utf-8")
+    rlx = _toml(str(bin_dir / "rlx.exe"))
+    (tool.prefix / install_route.RECEIPT_NAME).write_text(
+        "\n".join(line for line in receipt.splitlines() if rlx not in line) + "\n",
+        encoding="utf-8",
+    )
+    for name in ("rlx", "relax"):
+        (bin_dir / f"{name}.exe").write_text("MZ", encoding="utf-8")
+
+    run = runner.invoke(app, ["upgrade", "--yes"])
+
+    said = " ".join(run.stderr.split())
+    assert run.exit_code == 1, run.output
+    assert "Upgrade it with: uv tool install --force" in said, said
+    assert (
+        f"{bin_dir / 'rlx.exe'} is another program, which the reinstall would replace "
+        "without a word: rename or move it first, then run it."
+    ) in said, said
+    assert "relax.exe" not in said, "the copy the receipt records is ours"
+    assert machine.installs == []
 
 
 def test_yes_runs_the_restated_command_checks_the_version_and_refreshes_the_hooks(
@@ -2256,7 +2352,7 @@ def test_yes_runs_the_restated_command_checks_the_version_and_refreshes_the_hook
     assert machine.connects() == [
         [str(tool.script), "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
     ], "hooks only, BY the new install's own script, so the hooks name it"
-    assert "✓ aisquare 0.9.1 (was 0.9.0)" in result.stdout
+    assert "✓ rlx 0.9.1 (was 0.9.0)" in result.stdout
     assert f"✓ hooks re-connected in {site}" in result.stdout
 
 
@@ -2391,7 +2487,7 @@ def test_a_failed_install_offers_a_reinstall_only_when_the_release_that_ran_is_g
     kept = answers == "0.9.0"
     assert human.exit_code == 1
     assert f"Run it again by hand: {command}" in human.stderr, human.stderr
-    assert ("aisquare 0.9.0 is still installed" in human.stderr) is kept, human.stderr
+    assert ("rlx 0.9.0 is still installed" in human.stderr) is kept, human.stderr
     assert (install_route.INSTALLER_ONE_LINER in human.stderr) is not kept, human.stderr
     assert error["error"] == "upgrade_failed" and error["hint"] == command, error
     assert machine.connects() == [], "no hook refresh after a failed install"
@@ -2518,6 +2614,91 @@ def test_sites_running_another_install_are_left_and_named(tool: Tool, tmp_path: 
     assert left[0].reason is not None and str(other) in left[0].reason
 
 
+def _runs(site: Path, program: Path) -> list[bool]:
+    """For each aisquare hook in ``site``'s settings.json, whether it runs ``program``: the
+    program of each parsed command (``agent_core.hook_binary``), compared as the upgrade
+    compares them, never a path searched for in the file's text, which escapes a Windows
+    path's backslashes."""
+    wanted = agent_core.dir_identity(program)
+    found = map(agent_core.hook_binary, agent_core.hook_commands("claude-code", site))
+    return [b is not None and agent_core.dir_identity(b.program) == wanted for b in found]
+
+
+def test_the_installers_recorded_refresh_leaves_another_installs_site_as_it_was(
+    runner: CliRunner, tool: Tool, tmp_path: Path
+) -> None:
+    """R26a: ``agents refresh-hooks --recorded``, which the one-line installer runs, takes the
+    upgrade's own verdicts. A site whose hooks run another install that starts is left,
+    named with that install, and its settings.json is not touched; this install's is
+    rewritten."""
+    other = tmp_path / "checkout" / ".venv" / "bin" / "aisquare"
+    other.parent.mkdir(parents=True)
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    other.chmod(0o755)  # one that starts: another install, as the launcher would run it
+    ours = _hooked(tmp_path / "c-ours", tool.script)
+    theirs = _hooked(tmp_path / "c-theirs", other)
+    _record(ours, theirs)
+    before = (theirs / "settings.json").read_bytes()
+
+    result = runner.invoke(app, ["--json", "agents", "refresh-hooks", "--recorded"])
+
+    assert result.exit_code == 0, result.output
+    said = _one_object(result.stdout)
+    assert [(r["config_dir"], r["ok"]) for r in said["refreshed"]] == [(str(ours), True)], said
+    assert [site["config_dir"] for site in said["left"]] == [str(theirs)], said
+    assert str(other) in said["left"][0]["reason"], said
+    assert (theirs / "settings.json").read_bytes() == before, "another install's, untouched"
+    assert _runs(ours, tool.script) and not any(_runs(ours, tool.script)), "ours, rewritten"
+
+
+def test_the_installers_recorded_refresh_says_a_failed_rewrite_and_exits_1_after_the_rest(
+    runner: CliRunner, tool: Tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One site's rewrite failing (a full disk) is said with its error, the sites after it
+    are still rewritten, and the command exits 1: the installer warns on that exit."""
+    first = _hooked(tmp_path / "c-first", tool.script)
+    second = _hooked(tmp_path / "c-second", tool.script)
+    _record(first, second)
+    real = agents_service.refresh_hooks
+
+    def refresh(name: str, config_dir: Path | None = None) -> bool:
+        if config_dir == first:
+            raise OSError("No space left on device")
+        return real(name, config_dir)
+
+    monkeypatch.setattr(agents_service, "refresh_hooks", refresh)
+
+    result = runner.invoke(app, ["agents", "refresh-hooks", "--recorded"])
+
+    assert result.exit_code == 1, result.output
+    assert f"✗ claude-code's hooks in {first}: No space left on device" in result.output
+    assert f"✓ claude-code's hooks current in {second}" in result.output
+    assert _runs(first, tool.script) and all(_runs(first, tool.script)), "the failed one, as was"
+    assert _runs(second, tool.script) and not any(_runs(second, tool.script)), "rewritten"
+
+
+def test_the_installers_recorded_refresh_says_where_codex_asks_for_a_review(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's nit 2 on #503: where the rewrite changed a definition Codex runs only once
+    trusted, the installer's refresh says so, as ``rlx upgrade`` does; the rest say current."""
+    codex, claude = tmp_path / "codex-home", tmp_path / "claude-home"
+    done = (
+        lifecycle.HookRefresh(codex, True, agent="codex", review=True),
+        lifecycle.HookRefresh(claude, True, agent="claude-code"),
+    )
+    monkeypatch.setattr(lifecycle, "refresh_recorded", lambda: (done, ()))
+
+    result = runner.invoke(app, ["agents", "refresh-hooks", "--recorded"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        f"✓ codex's hooks current in {codex} — Codex asks to review them again: "
+        "open /hooks in Codex and trust them"
+    ) in result.output
+    assert f"✓ claude-code's hooks current in {claude}\n" in result.output
+
+
 def test_a_site_whose_program_is_gone_is_refreshed_not_left(tool: Tool, tmp_path: Path) -> None:
     """Negative control for the one above: a missing program is no other install —
     those hooks fail every session, and re-connecting is the fix."""
@@ -2590,10 +2771,10 @@ def test_a_site_that_fails_to_reconnect_is_named_with_its_command_and_exits_1(
     result = runner.invoke(app, ["upgrade", "--yes"])
 
     assert result.exit_code == 1
-    assert "✓ aisquare 0.9.1 (was 0.9.0)" in result.stdout, "the upgrade itself succeeded"
+    assert "✓ rlx 0.9.1 (was 0.9.0)" in result.stdout, "the upgrade itself succeeded"
     assert "claude-code is not installed on this machine" in result.stdout
     remedy = install_route.command_line(
-        ["aisquare", "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
+        ["rlx", "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
     )
     assert remedy in result.stdout
 
@@ -2823,8 +3004,8 @@ def test_an_install_on_its_own_index_does_not_take_pypis_word_for_latest(
     report = _one_object(check.stdout)
     assert report["latest"] is None and f"({key})" in report["latest_error"]
     assert run.exit_code == 0, run.output
-    assert "upgrading aisquare 0.9.0 → the release uv picks:" in run.stdout, run.stdout
-    assert "✓ aisquare 0.9.0 is the release uv picks for this install" in run.stdout
+    assert "upgrading rlx 0.9.0 → the release uv picks:" in run.stdout, run.stdout
+    assert "✓ rlx 0.9.0 is the release uv picks for this install" in run.stdout
     assert "newest" not in run.stdout, run.stdout
 
 
@@ -2886,19 +3067,19 @@ def test_an_install_under_a_uv_cutoff_is_compared_with_the_newest_release_it_all
     assert run.exit_code == 0, run.output
     if newer_allowed:
         assert f"{held} (an update is available)" in lines, lines
-        assert "upgrade with: aisquare upgrade" in lines, lines
+        assert "upgrade with: rlx upgrade" in lines, lines
         assert machine.installs[0][0][-5:] == [
             *restated.split(),
             "--refresh-package",
             "aisquare-cli",
             "aisquare-cli[serve]>=0.8.0",
         ]
-        assert "✓ aisquare 0.8.1 (was 0.8.0)" in run.stdout, run.stdout
+        assert "✓ rlx 0.8.1 (was 0.8.0)" in run.stdout, run.stdout
     else:
         assert f"{held} (you have it)" in lines and "nothing to upgrade" in lines, lines
         assert machine.installs == [], "nothing newer is allowed: no reinstall"
         assert (
-            f"aisquare 0.8.0 is up to date (0.8.0 is the newest release your uv cutoff "
+            f"rlx 0.8.0 is up to date (0.8.0 is the newest release your uv cutoff "
             f"allows: {restated}) — nothing to do"
         ) in run.stdout, run.stdout
 
@@ -2935,23 +3116,23 @@ def test_the_newest_release_this_installs_python_can_take_is_the_one_compared(
     argv = machine.installs[0][0]
     assert argv[argv.index("--python") + 1] == python, argv
     assert planned["latest"] == picked and planned["update_available"] is True, planned
-    assert f"✓ aisquare {picked} (was 0.8.0)" in run.stdout, run.stdout
+    assert f"✓ rlx {picked} (was 0.8.0)" in run.stdout, run.stdout
     if older:
         assert planned["latest_python"] == "3.11", planned
         assert "latest for Python 3.11: 0.8.5 (an update is available)" in check.stdout
-        assert "aisquare 0.8.0 → 0.8.5 (the newest for Python 3.11)" in plan.stdout, plan.stdout
+        assert "rlx 0.8.0 → 0.8.5 (the newest for Python 3.11)" in plan.stdout, plan.stdout
         assert "PyPI's latest is 0.8.5" not in run.stdout + check.stdout + plan.stdout
     else:
         assert planned["latest_python"] is None, planned
         assert "latest: 0.9.0 (an update is available)" in check.stdout, check.stdout
-        assert "aisquare 0.8.0 → 0.9.0 (latest on PyPI)" in plan.stdout, plan.stdout
+        assert "rlx 0.8.0 → 0.9.0 (latest on PyPI)" in plan.stdout, plan.stdout
 
     monkeypatch.setattr(lifecycle, "__version__", picked)
     again = runner.invoke(app, ["upgrade", "--yes"])
 
     assert again.exit_code == 0 and len(machine.installs) == 1, "up to date: no reinstall"
     held = "PyPI's latest is 0.9.0; 0.8.5 is the newest for Python 3.11" if older else ""
-    assert f"aisquare {picked} is up to date (" in again.stdout, again.stdout
+    assert f"rlx {picked} is up to date (" in again.stdout, again.stdout
     assert held in again.stdout, again.stdout
 
 
@@ -3007,10 +3188,10 @@ def test_a_pin_this_installs_python_cannot_take_is_said_not_advised(
             "installing it needs a Python that meets >=3.12"
         )
         assert "upgrade with" not in check.stdout, check.stdout
-        assert f"`aisquare upgrade --version 0.9.0` cannot install it: {why}" in check.stdout
+        assert f"`rlx upgrade --version 0.9.0` cannot install it: {why}" in check.stdout
         assert planned["runnable"] is False and planned["reason"] == why, planned
     else:
-        assert "upgrade with: aisquare upgrade --version 0.9.0" in check.stdout, check.stdout
+        assert "upgrade with: rlx upgrade --version 0.9.0" in check.stdout, check.stdout
         assert planned["runnable"] is True and planned["reason"] is None, planned
 
 
@@ -3063,7 +3244,7 @@ def test_a_pin_pypi_does_not_list_is_said_beside_the_command_a_uv_tool_runs(
     )
 
     why = "PyPI lists no aisquare-cli 0.9.9"
-    assert "upgrade with: aisquare upgrade --version 0.9.9" in check.stdout, check.stdout
+    assert "upgrade with: rlx upgrade --version 0.9.9" in check.stdout, check.stdout
     assert f"({why}: the command finds it only on an index set up for it)" in check.stdout
     assert "cannot install it" not in check.stdout, check.stdout
     assert planned["runnable"] is True and planned["reason"] is None, planned
@@ -3161,7 +3342,7 @@ def test_a_pin_of_the_version_that_runs_is_nothing_to_do_on_any_route(
     assert planned["reason"] == install_route.not_automated(route), "not that it cannot pin it"
     assert "with:" not in check.stdout, check.stdout
     assert run.exit_code == 0, run.output
-    assert "aisquare 0.9.0 is already the version asked for — nothing to do" in run.stdout
+    assert "rlx 0.9.0 is already the version asked for — nothing to do" in run.stdout
     assert machine.installs == []
 
 
@@ -3188,7 +3369,7 @@ def test_a_pin_the_uv_cutoff_excludes_is_said_not_advised(
 
     why = "your uv cutoff (--exclude-newer P7D) excludes 0.8.1, uploaded after it"
     assert "upgrade with" not in pinned.stdout, pinned.stdout
-    assert f"`aisquare upgrade --version 0.8.1` cannot install it: {why}" in pinned.stdout
+    assert f"`rlx upgrade --version 0.8.1` cannot install it: {why}" in pinned.stdout
     assert planned["runnable"] is False and planned["reason"] == why, planned
     assert "cannot install it" not in allowed.stdout, "control: one before the cutoff"
 
@@ -3604,7 +3785,7 @@ def test_an_unchanged_version_under_uvs_own_settings_is_the_newest_they_allow(
     recorded = ", ".join(added.holds)
     note = f"PyPI's latest is 0.9.1; uv picks 0.9.0 here — its uv settings now record: {recorded}"
     assert result.exit_code == 0, result.output
-    assert "✓ aisquare 0.9.0 is the release uv picks for this install" in result.stdout
+    assert "✓ rlx 0.9.0 is the release uv picks for this install" in result.stdout
     assert f"· {note}" in result.stdout, result.stdout
     assert "package index" not in result.output and "§3.9.1" not in result.output, result.output
     assert report["upgraded"] is True and note in report["notes"], report
@@ -3615,7 +3796,7 @@ def test_check_with_a_pin_advises_the_pin(runner: CliRunner, tool: Tool, machine
     result = runner.invoke(app, ["upgrade", "--check", "--version", "0.7.0"])
 
     assert result.exit_code == 0, result.output
-    assert "upgrade with: aisquare upgrade --version 0.7.0" in result.stdout
+    assert "upgrade with: rlx upgrade --version 0.7.0" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -3623,7 +3804,7 @@ def test_check_with_a_pin_advises_the_pin(runner: CliRunner, tool: Tool, machine
     [
         ("0.7.0", "latest: 0.7.0 (yours is newer)", "nothing to upgrade"),
         ("0.8.0", "latest: 0.8.0 (you have it)", "nothing to upgrade"),
-        ("0.8.1", "latest: 0.8.1 (an update is available)", "upgrade with: aisquare upgrade"),
+        ("0.8.1", "latest: 0.8.1 (an update is available)", "upgrade with: rlx upgrade"),
     ],
     ids=["pypi-older", "the-same", "pypi-newer"],
 )
@@ -3646,7 +3827,7 @@ def test_check_tells_a_newer_build_from_the_latest_and_advises_only_an_upgrade(
     lines = result.stdout.splitlines()
     assert result.exit_code == 0, result.output
     assert verdict in lines and advice in lines, lines
-    assert ("upgrade with: aisquare upgrade" in lines) is (latest == "0.8.1"), lines
+    assert ("upgrade with: rlx upgrade" in lines) is (latest == "0.8.1"), lines
 
 
 @pytest.mark.parametrize(
@@ -3688,7 +3869,7 @@ def test_an_install_running_a_pre_release_is_offered_the_newest_one(
         assert f"latest: {offered} (an update is available)" in lines, lines
         [(argv, _env, _to_stderr)] = machine.installs
         assert argv[-1] == f"aisquare-cli[serve]>={running}", argv
-        assert f"✓ aisquare {offered} (was {running})" in run.stdout, run.stdout
+        assert f"✓ rlx {offered} (was {running})" in run.stdout, run.stdout
 
 
 @pytest.mark.parametrize(
@@ -3754,7 +3935,7 @@ def test_a_failing_sites_remedy_survives_a_space_in_its_path(
     result = runner.invoke(app, ["upgrade", "--yes"])
 
     quoted = install_route.command_line(
-        ["aisquare", "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
+        ["rlx", "agents", "refresh-hooks", "claude-code", "--config-dir", str(site)]
     )
     assert result.exit_code == 1
     assert quoted in result.stdout
@@ -4054,8 +4235,8 @@ def test_a_codex_hooks_file_it_cannot_rewrite_is_left_and_named(
     [site] = left
     assert site.agent == "codex" and site.config_dir == codex
     assert site.reason == (
-        "its hooks.json holds aisquare hooks but has a hooks event that is not an array, "
-        "so aisquare cannot rewrite it safely"
+        "its hooks.json holds rlx hooks but has a hooks event that is not an array, "
+        "so rlx cannot rewrite it safely"
     )
 
 
@@ -4074,7 +4255,7 @@ def test_a_move_back_to_a_release_without_codex_hooks_leaves_them_and_names_the_
     result = runner.invoke(app, ["upgrade", "--version", "0.8.0", "--yes"])
 
     remove = install_route.command_line(
-        ["aisquare", "agents", "disconnect", "codex", "--config-dir", str(codex)]
+        ["rlx", "agents", "disconnect", "codex", "--config-dir", str(codex)]
     )
     assert planned["refresh_hooks"] == [str(claude)], planned
     [left] = planned["hooks_left"]
@@ -4122,7 +4303,7 @@ def test_a_move_back_to_0_9_2_leaves_a_codex_accounts_hooks_and_ends_well(
     result = runner.invoke(app, ["upgrade", "--version", "0.9.2", "--yes"])
 
     remove = install_route.command_line(
-        ["aisquare", "agents", "disconnect", "codex", "--config-dir", str(codex)]
+        ["rlx", "agents", "disconnect", "codex", "--config-dir", str(codex)]
     )
     assert planned["refresh_hooks"] == [str(claude)], planned
     [left] = planned["hooks_left"]
@@ -4160,7 +4341,7 @@ def test_a_hook_a_move_back_could_not_refresh_is_a_warning_and_a_move_forwards_f
     assert result.exit_code == code, result.output
     said = [line for line in result.stdout.splitlines() if "were not re-connected" in line]
     assert len(said) == 1 and said[0].startswith(f"{mark} hooks in "), result.stdout
-    assert " — run: aisquare agents refresh-hooks claude-code --config-dir " in said[0]
+    assert " — run: rlx agents refresh-hooks claude-code --config-dir " in said[0]
 
 
 def test_the_refresh_the_upgrade_runs_for_codex_is_a_command_this_cli_has(

@@ -93,7 +93,7 @@ def test_on_the_captain_is_a_launch_role_in_its_window_and_refused_by_hand(
     result = runner.invoke(app, ["launch", "captain"])
 
     assert result.exit_code == 1
-    assert "`aisquare captain` starts it" in result.output
+    assert "`rlx captain` starts it" in result.output
 
 
 def test_the_seat_rule_and_fleet_spawn_say_unknown_role_while_off(

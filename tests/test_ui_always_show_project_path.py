@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Button, Static, Switch
+from textual.widgets import Button, Checkbox, Static
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import (
@@ -62,9 +62,9 @@ async def _open_app_settings(app: FleetApp) -> None:
 
 
 async def _save_preference(app: FleetApp, on: bool) -> None:
+    """App settings ▸ Display's switch, ticked: it saves and applies as it is (R17)."""
     await _open_app_settings(app)
-    app.query_one("#ui-always-show-path", Switch).value = on
-    app.query_one("#save-settings", Button).press()
+    app.query_one("#ui-always-show-path", Checkbox).value = on
     await settle(app)
 
 

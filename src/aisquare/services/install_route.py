@@ -69,6 +69,7 @@ from typing import Any, NoReturn
 from urllib.parse import parse_qsl, unquote, urlparse, urlsplit, urlunsplit
 
 from aisquare.core import agents as agent_core
+from aisquare.core import program as prog
 from aisquare.core.shell_line import command_line as command_line  # pasted lines, everywhere
 from aisquare.core.shell_line import split_line as split_line  # a fix line read back
 from aisquare.core.version import DISTRIBUTION, __version__
@@ -94,10 +95,10 @@ _UV_CACHE_ENVIRONMENTS = re.compile(r"(?:archive|environments)-v\d+")
 PYPI_JSON_URL = f"https://pypi.org/pypi/{DISTRIBUTION}/json"
 LOOKUP_TIMEOUT_SECONDS = 5.0
 
-INSTALLER_ONE_LINER = (
-    "curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh"
-)
-"""The last resort every failure names: it repairs a broken install from nothing."""
+INSTALLER_ONE_LINER = "curl -fsSL https://aisquare.studio/rlx/install.sh | sh"
+"""The last resort every failure names: it repairs a broken install from nothing. The short URL
+redirects (307) to main's install.sh on GitHub, which is what it runs; a person types it, so it
+is the short one (scripts/stamp_installers.py ``SH_ONE_LINER``, held equal by the tests)."""
 
 RECEIPT_NAME = "uv-receipt.toml"
 PIPX_METADATA_NAME = "pipx_metadata.json"
@@ -554,6 +555,9 @@ class UvReceipt:
     """The project's directory inside a ``url`` or ``git`` source, when uv recorded one."""
     bin_dir: Path | None = None
     """Where uv put the ``aisquare`` executable — so a reinstall puts it there again."""
+    entrypoints: tuple[Path, ...] = ()
+    """Every executable uv recorded putting there for this tool, by the path it took:
+    ``uv tool uninstall`` deletes whatever is at each (:func:`taken_commands`)."""
     unrestatable: tuple[str, ...] = ()
     holds: tuple[str, ...] = ()
     """What may change which aisquare-cli release uv resolves, named as recorded: ``--with``
@@ -645,7 +649,7 @@ def _option_flags(options: Mapping[str, Any]) -> tuple[list[str], list[str]]:
         if key == "index":
             indexes = _index_flags(value)
             if indexes is None:
-                refused.append("a uv index this CLI cannot restate")
+                refused.append("a uv index rlx cannot restate")
             else:
                 flags.extend(indexes)
             continue
@@ -693,7 +697,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
     held_by_withs: list[str] = []
     for requirement in requirements:
         if not isinstance(requirement, dict):
-            refused.append("a requirement uv wrote in a shape this CLI does not know")
+            refused.append("a requirement uv wrote in a shape rlx does not know")
             continue
         if ours is None and canonical_name(requirement.get("name")) == DISTRIBUTION:
             ours = requirement
@@ -719,7 +723,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         if isinstance(raw_extras, list) and all(isinstance(extra, str) for extra in raw_extras):
             extras = tuple(sorted(set(raw_extras)))
         else:
-            refused.append(f"{DISTRIBUTION} extras in a shape this CLI does not know")
+            refused.append(f"{DISTRIBUTION} extras in a shape rlx does not know")
         for key in _SOURCE_KEYS:
             if key in ours:
                 source = (key, str(ours[key]))
@@ -753,6 +757,7 @@ def read_receipt(prefix: Path) -> UvReceipt | None:
         source=source,
         subdirectory=subdirectory,
         bin_dir=_bin_dir(tool.get("entrypoints")),
+        entrypoints=_entrypoint_paths(tool.get("entrypoints")),
         unrestatable=tuple(refused),
         holds=tuple(holds),
     )
@@ -796,6 +801,19 @@ def _bin_dir(entrypoints: object) -> Path | None:
             if isinstance(where, str) and where:
                 return Path(where).parent
     return None
+
+
+def _entrypoint_paths(entrypoints: object) -> tuple[Path, ...]:
+    """Each ``install-path`` the receipt's ``entrypoints`` records."""
+    if not isinstance(entrypoints, list):
+        return ()
+    return tuple(
+        Path(entry["install-path"])
+        for entry in entrypoints
+        if isinstance(entry, dict)
+        and isinstance(entry.get("install-path"), str)
+        and entry["install-path"]
+    )
 
 
 # --- the route --------------------------------------------------------------------------
@@ -1204,7 +1222,7 @@ def upgrade_argv(
 
 
 #: When a reinstall a person runs by hand must wait, on Windows: one wording for every route.
-_AFTER_AISQUARE_EXITS = " after aisquare exits (Windows locks the files of a running program)"
+_AFTER_AISQUARE_EXITS = " after rlx exits (Windows locks the files of a running program)"
 
 #: Why each route is reported rather than run. Short, because it is printed
 #: beside the command that does the job.
@@ -1214,7 +1232,7 @@ _NOT_AUTOMATED = {
     HOMEBREW: "Homebrew installs are upgraded with brew",
     UVX: "it runs through uvx from uv's cache, so nothing is installed to upgrade: uvx runs "
     "the release its --from names, and this installs one to keep",
-    VENV: "it lives in a virtual environment this CLI does not manage",
+    VENV: "it lives in a virtual environment rlx does not manage",
     SYSTEM: "it was installed with pip outside a virtual environment",
 }
 
@@ -1232,9 +1250,14 @@ def not_automated(route: InstallRoute) -> str | None:
     if route.kind == EDITABLE:
         # First on every platform: the pull is the step the printed reinstall
         # cannot carry, and Windows only changes WHEN the reinstall can run.
-        pull = command_line(["git", "-C", route.source or ".", "pull"])
         reason = (
-            f"an editable install follows its checkout — pull it first ({pull}), then reinstall it"
+            "an editable install follows its checkout — pull it first"
+            # Not in an f-string, whose single quotes would respell the argv the git guard
+            # reads as written (tests/test_ci_snapshot.py).
+            + prog.shell_advice(
+                " (" + command_line(["git", "-C", route.source or ".", "pull"]) + ")"
+            )
+            + ", then reinstall it"
         )
         if windows is not None:
             reason += _AFTER_AISQUARE_EXITS
@@ -1242,7 +1265,7 @@ def not_automated(route: InstallRoute) -> str | None:
     if windows is not None:
         return windows
     if route.kind != UV_TOOL:
-        return _NOT_AUTOMATED.get(route.kind, "this install is not one aisquare manages")
+        return _NOT_AUTOMATED.get(route.kind, "this install is not one rlx manages")
     receipt = route.receipt or UvReceipt()
     if receipt.unreadable is not None:
         return f"its uv receipt could not be read ({receipt.unreadable})"
@@ -1281,8 +1304,8 @@ def _windows_blocker(route: InstallRoute, verb: str) -> str | None:
     if route.facts.platform != "win32":
         return None
     return (
-        f"Windows locks the files of a running program, so aisquare cannot {verb} itself "
-        "— run it after aisquare exits"
+        f"Windows locks the files of a running program, so rlx cannot {verb} itself "
+        "— run it after rlx exits"
     )
 
 
@@ -1358,6 +1381,55 @@ def find_uv() -> str | None:
     return shutil.which("uv")
 
 
+# --- another program's rlx or relax ------------------------------------------------------
+
+NEW_COMMANDS = ("rlx", "relax")
+"""The commands this package installs beside ``aisquare`` and ``asq`` since the rlx rename
+(#133): names another program may already have where uv puts a tool's executables (PyPI's
+``relax`` is another project). install.sh's ``NEW_COMMANDS`` holds the same two."""
+
+
+def taken_commands(route: InstallRoute) -> tuple[Path, ...]:
+    """Each of :data:`NEW_COMMANDS` where uv puts this uv tool's executables that is another
+    program's: anything there but uv's link to this package's own script, or on Windows,
+    where uv copies the script instead, the copy the receipt records.
+
+    Measured with uv 0.11.6: ``uv tool install --force``, the reinstall ``aisquare upgrade``
+    runs, replaces one without a word, and ``uv tool uninstall`` deletes one at a path the
+    receipt records, so both refuse while one is there (``services.lifecycle``). A uv tool's
+    only: pipx leaves another program's executable where it is, and every other route's
+    command is run by hand.
+    """
+    receipt = route.receipt
+    if receipt is None or receipt.bin_dir is None:
+        return ()
+    windows = route.facts.platform == "win32"
+    taken: list[Path] = []
+    for name in NEW_COMMANDS:
+        path = receipt.bin_dir / (f"{name}.exe" if windows else name)
+        if os.path.lexists(path) and not _our_command(path, receipt, windows=windows):
+            taken.append(path)
+    return tuple(taken)
+
+
+def _our_command(path: Path, receipt: UvReceipt, *, windows: bool) -> bool:
+    """Whether ``path`` is this package's own: uv's link to ``<tools>/aisquare-cli/bin/<name>``
+    (any tool directory: the one the receipt is in may be reached by another spelling), or on
+    Windows a copy the receipt records. A file of any other kind is another program's, as is
+    a link that cannot be read."""
+    if path.is_symlink():
+        try:
+            target = Path(os.readlink(path))
+        except OSError:
+            return False
+        return (
+            target.name == path.name
+            and target.parent.name == "bin"
+            and target.parent.parent.name == DISTRIBUTION
+        )
+    return windows and path in receipt.entrypoints
+
+
 # --- what removes it --------------------------------------------------------------------
 
 
@@ -1395,7 +1467,7 @@ def not_removable(route: InstallRoute) -> str | None:
         return {
             PIPX: "pipx installs are removed with pipx",
             HOMEBREW: "Homebrew installs are removed with brew",
-        }.get(route.kind, f"it was installed with {route.manager}, which this CLI does not run")
+        }.get(route.kind, f"it was installed with {route.manager}, which rlx does not run")
     return _uv_tool_blocker(route)
 
 

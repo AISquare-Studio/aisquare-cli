@@ -92,12 +92,14 @@ def longer_ranges_hint(range_: UsageRange) -> str:
     return f"press {', '.join(keys[:-1])} or {keys[-1]} for a longer range"
 
 
-EMPTY = (
-    "No usage recorded yet.\n\n"
-    "The agents' transcripts are read when this page opens, and each session aisquare "
-    "launches adds its turns as it goes. If you use an agent and still see this, run "
-    "`aisquare metrics backfill`."
-)
+def empty_text() -> str:
+    """The page with no usage yet, and how to read the transcripts again: its own ``r``."""
+    return (
+        "No usage recorded yet.\n\n"
+        "The agents' transcripts are read when this page opens, and each session rlx "
+        "launches adds its turns as it goes. If you use an agent and still see this, press "
+        "r to read them again."
+    )
 
 
 def default_loader(range_: UsageRange, sweep: bool, progress: Progress | None) -> UsageStats:
@@ -297,7 +299,7 @@ class UsageStatsView(VerticalScroll):
                     compact=True,
                 )
         yield Static("", id="usage-status")
-        yield Static(Text(EMPTY), id="usage-empty")
+        yield Static(Text(empty_text()), id="usage-empty")
         with Vertical(id="usage-body"):
             with Grid(id="usage-tiles"):
                 for stem, label in TILES:
@@ -438,7 +440,7 @@ class UsageStatsView(VerticalScroll):
                         hint=longer_ranges_hint(stats.range),
                     )
                     if elsewhere
-                    else EMPTY
+                    else empty_text()
                 )
             )
             return

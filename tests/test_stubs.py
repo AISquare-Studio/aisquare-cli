@@ -129,6 +129,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "on",
             "status",
             "focus",
+            "standby",
             "role",
             "log",
             "prune",

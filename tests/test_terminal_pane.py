@@ -69,6 +69,7 @@ from aisquare.cli.ui.views.agent import AgentView, info_line
 from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, PASTE_BUFFER, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
+from aisquare.services import settings as settings_service
 from tests import toast_log
 from tests.pane_harness import (
     FakePane,
@@ -270,11 +271,61 @@ async def _mirrored(pilot: Pilot[None], host: Any, copy: str) -> None:
     The mirror reads on a timer (``BUFFER_MIRROR_DELAY``, ``BUFFER_MIRROR_RETRY``), and a
     fixed pause a little longer than that was read before it on a loaded runner: ``'' ==
     "the drag's copy"`` (#107, CI 42293248624, ubuntu captain-off shard 2/4). The copy is not
-    lost there, only late: it is the clipboard's once the timer has fired. A test that asserts
-    NO copy keeps its fixed pause, which a slow runner can only make pass."""
+    lost there, only late: it is the clipboard's once the timer has fired. A test whose steps
+    must land INSIDE a delay holds the timers instead (:class:`MirrorTimers`): no wait puts a
+    press back before a read that has already gone by (rc/rlx push CI 44029727978)."""
     deadline = time.monotonic() + 5.0
     while host.clipboard != copy and time.monotonic() < deadline:
         await pilot.pause(0.02)
+
+
+class MirrorTimers:
+    """The paste-buffer mirror's timers (``BUFFER_MIRROR_DELAY``, ``BUFFER_MIRROR_RETRY``),
+    held for the test to run, never the wall clock. A press "inside the first delay" is then
+    one made before :meth:`fire` has run the first read, by construction; on wall time it was
+    a press the runner happened to deliver within 0.5 s, and a loaded one did not: the first
+    read had gone by, and the late-copy wait ended at the press, read before the copy was
+    written (``'' == "the drag's copy"``, rc/rlx push CI 44029727978, py3.11 shard 2/4)."""
+
+    def __init__(self) -> None:
+        self.pending: list[tuple[float, Callable[[], object]]] = []
+
+    async def fire(self, pilot: Pilot[None]) -> float:
+        """The oldest pending timer's time is up: its read runs on the pane's own loop, as
+        a timer's does. Returns the delay it was armed with."""
+        delay, callback = self.pending.pop(0)
+        pilot.app.call_later(callback)
+        await pilot.pause()
+        return delay
+
+    async def run_out(self, pilot: Pilot[None]) -> list[float]:
+        """Every pending timer, and each one they arm, oldest first: all of the reads left."""
+        fired = []
+        while self.pending:
+            fired.append(await self.fire(pilot))
+        return fired
+
+
+@pytest.fixture
+def mirror_timers(monkeypatch: pytest.MonkeyPatch) -> MirrorTimers:
+    held = MirrorTimers()
+    real = TerminalPane.set_timer
+
+    def set_timer(
+        pane: TerminalPane,
+        delay: float,
+        callback: Any = None,
+        *,
+        name: str | None = None,
+        pause: bool = False,
+    ) -> Any:
+        if name == "buffer-mirror":
+            held.pending.append((delay, callback))
+            return None
+        return real(pane, delay, callback, name=name, pause=pause)
+
+    monkeypatch.setattr(TerminalPane, "set_timer", set_timer)
+    return held
 
 
 def scroll_event(pane: TerminalPane, *, up: bool) -> events.MouseScrollUp | events.MouseScrollDown:
@@ -464,34 +515,63 @@ def test_a_pane_taller_than_the_widget_shows_its_last_rows(fake: FakeTmux, tmp_p
 
 
 def test_render_loop_runs_fast_while_streaming_and_backs_off_when_idle(
-    fake: FakeTmux, tmp_path: Path
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ticks = {"n": 0, "frozen": False}
+    """Counted in ticks, not in seconds: once the pane has its size, each tick that captured
+    a frame that changed asks for the next one :attr:`FAST_INTERVAL` on, and each that
+    captured the same frame again, with no input, :attr:`IDLE_INTERVAL` on. Frames counted
+    in fixed windows of wall time (at least 4 in 0.4 s, 1 or 2 in 0.6 s) measured the runner
+    as much as the loop. Before the resize lands, a frame's new line is above the rows shown,
+    a change no one sees: those ticks are not the cadence asked about.
+
+    The cadence RUN, too, not only the one chosen: each such tick arms its frame timer with
+    the delay it chose. A loop that recorded IDLE_INTERVAL and armed FAST_INTERVAL passed
+    when only the choice was read (tester-rlx-quiet's mutant J4, #525, note 12790)."""
+    phase = {"now": "sizing"}
+    lines = itertools.count(1)
+    # Each tick that captured: its phase, the delay it chose, the delay its timer was armed with.
+    chosen: list[tuple[str, float, float | None]] = []
+    real_tick = TerminalPane._tick
+
+    def counting_tick(pane: TerminalPane) -> None:
+        now, frames = phase["now"], pane.frames
+        real_tick(pane)
+        if now != "sizing" and pane.frames > frames:
+            armed = pane._timer._interval if pane._timer is not None else None
+            chosen.append((now, pane.interval, armed))
+
+    monkeypatch.setattr(TerminalPane, "_tick", counting_tick)
 
     def stream(pane: FakePane) -> None:
-        if not ticks["frozen"]:
-            ticks["n"] += 1
-            pane.screen = [f"line {ticks['n']}"]
+        if phase["now"] == "streaming":
+            pane.screen = [f"line {next(lines)}"]
 
     fake.before_capture = stream
 
-    async def drive() -> tuple[float, int, float, int]:
+    def captured(now: str) -> int:
+        return sum(1 for was, _, _ in chosen if was == now)
+
+    async def drive() -> list[tuple[str, float, float | None]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
-            pane = host.pane
-            await pilot.pause(0.4)
-            streaming_interval, streamed = pane.interval, pane.frames
-            ticks["frozen"] = True
-            await pilot.pause(0.7)
-            idle_interval, idle_frames = pane.interval, pane.frames
-            await pilot.pause(0.6)
-            return streaming_interval, streamed, idle_interval, pane.frames - idle_frames
+            await wait_until(pilot, lambda: synced(host.pane))
+            phase["now"] = "streaming"
+            await wait_until(pilot, lambda: captured("streaming") >= 4, timeout=10.0)
+            phase["now"] = "idle"
+            await wait_until(pilot, lambda: captured("idle") >= 3, timeout=10.0)
+            return list(chosen)
 
-    streaming_interval, streamed, idle_interval, idle_delta = run(drive())
-    assert streaming_interval == TerminalPane.FAST_INTERVAL
-    assert streamed >= 4  # 0.4 s at 50 ms is ~8 frames; well above the idle rate
-    assert idle_interval == TerminalPane.IDLE_INTERVAL
-    assert 1 <= idle_delta <= 2  # 0.6 s at 500 ms: one frame, two at the edge
+    ticks = run(drive())
+    assert [(chose, armed) for _, chose, armed in ticks if armed != chose] == [], (
+        "each tick armed the delay it chose",
+        ticks,
+    )
+    assert {chose for now, chose, _ in ticks if now == "streaming"} == {
+        TerminalPane.FAST_INTERVAL
+    }, ticks
+    assert {chose for now, chose, _ in ticks if now == "idle"} == {TerminalPane.IDLE_INTERVAL}, (
+        ticks
+    )
 
 
 def test_a_hidden_pane_is_not_captured_and_catches_up_when_shown(
@@ -803,7 +883,8 @@ def test_a_scrolled_frame_is_bounded_to_one_screen(fake: FakeTmux, tmp_path: Pat
             await wait_until(pilot, lambda: synced(pane))
             fake.capture_rows.clear()  # the pre-resize frames are a 24-row pane
             pane.scroll_history(3000)
-            await pilot.pause(0.2)  # several ticks, all of them deep in history
+            # Several ticks, all of them deep in history: counted, not timed.
+            await wait_until(pilot, lambda: len(fake.capture_rows) >= 2)
             return list(fake.capture_rows), screen_text(pane), pane.scrollback
 
     rows_per_capture, text, scrollback = run(drive())
@@ -4126,7 +4207,10 @@ def test_no_usable_tmux_is_a_notice_not_a_traceback(fake: FakeTmux, tmp_path: Pa
         host = Host(server, "%1")
         async with host.run_test(size=(40, 4)) as pilot:
             pane = host.pane
-            await pilot.pause(0.2)
+            # Waited for, not timed: the first tick may come late on a loaded runner.
+            await wait_until(pilot, lambda: screen_text(pane)[3] == TMUX_UNAVAILABLE)
+            await wait_until(pilot, lambda: bool(host.notices))
+            await pilot.pause()
             return screen_text(pane), list(host.notices)
 
     text, notices = run(drive())
@@ -4279,7 +4363,8 @@ def test_a_long_detail_is_what_the_agent_view_cuts_never_the_account_or_its_use(
     assert "🔔 attention  dev · 87%  claude-opus-5-5 high  " in shown, shown  # all whole
     assert shown.rstrip().endswith("…"), shown  # the cut is said, and it falls in the detail
     detail_start = shown.index("claude-opus-5-5 high") + len("claude-opus-5-5 high  ")
-    assert shown[detail_start:].startswith("waiting"), shown
+    # The detail's first word, cut: R17's Pause beside Stop and Restart took 4 of its cells.
+    assert shown[detail_start:].startswith("wait"), shown
     assert "%1" not in shown and "trust <" not in shown
 
 
@@ -4719,7 +4804,7 @@ def test_a_double_click_is_two_presses_for_the_program_not_a_local_word(
 
 
 def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboard(
-    fake: FakeTmux, tmp_path: Path
+    fake: FakeTmux, tmp_path: Path, mirror_timers: MirrorTimers
 ) -> None:
     """Claude Code's copy-on-select writes tmux's paste buffer (its ``wl-copy`` may
     have no display in the server's environment). A buffer WRITTEN between the
@@ -4729,7 +4814,7 @@ def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboar
     pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
     fake.buffer = "stale copy"
 
-    async def drive() -> tuple[str, list[str], str, list[str]]:
+    async def drive() -> tuple[str, list[str], list[list[float]], str, list[str]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             widget = host.pane
@@ -4737,19 +4822,23 @@ def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboar
             await pilot.mouse_down(widget, offset=(0, 0))
             fake.buffer = "what Claude selected"  # the program's release handler ran
             await pilot.mouse_up(widget, offset=(9, 0))
-            await _mirrored(pilot, host, "what Claude selected")
+            reads = [await mirror_timers.run_out(pilot)]
             copied, toasts = host.clipboard, list(host.notices)
             await pilot.mouse_down(widget, offset=(0, 1))  # a click: the buffer stands
             await pilot.mouse_up(widget, offset=(0, 1))
-            # Both of the click's reads — the second waits for a late copy.
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + widget.BUFFER_MIRROR_RETRY + 0.1)
+            reads.append(await mirror_timers.run_out(pilot))  # the second waits for a late copy
             await pilot.mouse_down(widget, offset=(0, 1), button=3)  # right: never read
             fake.buffer = "changed under a right click"
             await pilot.mouse_up(widget, offset=(0, 1))
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
-            return copied, toasts, host.clipboard, list(host.notices)
+            reads.append(await mirror_timers.run_out(pilot))
+            return copied, toasts, reads, host.clipboard, list(host.notices)
 
-    copied, toasts, after, toasts_after = run(drive())
+    copied, toasts, timed, after, toasts_after = run(drive())
+    assert timed == [
+        [TerminalPane.BUFFER_MIRROR_DELAY],
+        [TerminalPane.BUFFER_MIRROR_DELAY, TerminalPane.BUFFER_MIRROR_RETRY],
+        [],
+    ]
     assert copied == "what Claude selected"
     assert toasts == ["copied 20 characters — the agent's own selection"], toasts
     assert after == "what Claude selected" and toasts_after == toasts
@@ -4761,7 +4850,7 @@ def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboar
 
 
 def test_a_quick_second_press_leaves_a_standing_paste_buffer_where_it_is(
-    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake: FakeTmux, tmp_path: Path, mirror_timers: MirrorTimers
 ) -> None:
     """Review of #203, round 1 of the terminal-ux fold. Every pending mirror
     read one before-press snapshot, and the first to run emptied it: a
@@ -4769,9 +4858,6 @@ def test_a_quick_second_press_leaves_a_standing_paste_buffer_where_it_is(
     an hour-old one to the clipboard, toast and all. A right press inside the
     delay emptied it the same way. Each gesture's release now takes its own
     press's snapshot, and a buffer that stood before either press stays put."""
-    # Long enough that the second press always lands inside the first mirror's
-    # delay, however slow the runner: the fix does not depend on it.
-    monkeypatch.setattr(TerminalPane, "BUFFER_MIRROR_DELAY", 0.5)
     pane = fake.panes["%1"]
     pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
     fake.buffer = "an old copy from an hour ago"
@@ -4781,12 +4867,13 @@ def test_a_quick_second_press_leaves_a_standing_paste_buffer_where_it_is(
         async with host.run_test(size=(40, 6)) as pilot:
             widget = host.pane
             await wait_until(pilot, lambda: synced(widget))
+            # The second press inside the first mirror's delay: its timer is held.
             await click(pilot, widget, (1, 1), times=2)
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            await mirror_timers.run_out(pilot)
             double, double_toasts = host.clipboard, list(host.notices)
             await click(pilot, widget, (1, 1))
-            await click(pilot, widget, (1, 1), button=3)
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            await click(pilot, widget, (1, 1), button=3)  # inside the click's delay too
+            await mirror_timers.run_out(pilot)
             return double, double_toasts, host.clipboard, list(host.notices)
 
     double, double_toasts, right, right_toasts = run(drive())
@@ -4795,47 +4882,44 @@ def test_a_quick_second_press_leaves_a_standing_paste_buffer_where_it_is(
 
 
 def test_a_double_click_the_program_copies_is_mirrored_once(
-    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake: FakeTmux, tmp_path: Path, mirror_timers: MirrorTimers
 ) -> None:
     """The other half of the same review: Claude Code selects a word on the
     second click and writes the buffer from that release, which BOTH pending
     mirrors then read, so the word went out twice with two toasts. A release
     while a mirror is still pending folds into it: one read, after the last
     release, against the buffer from before the first press."""
-    monkeypatch.setattr(TerminalPane, "BUFFER_MIRROR_DELAY", 0.5)
     pane = fake.panes["%1"]
     pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
     fake.buffer = "an old copy from an hour ago"
 
-    async def drive() -> tuple[str, list[str]]:
+    async def drive() -> tuple[str, list[str], list[float]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             widget = host.pane
             await wait_until(pilot, lambda: synced(widget))
             await click(pilot, widget, (1, 1))
-            await click(pilot, widget, (1, 1))
+            await click(pilot, widget, (1, 1))  # inside the first's delay: its timer is held
             fake.buffer = "word"  # the program's handler for the second release ran
-            # Waited for, not paused for: a fixed 0.2 s past the delay missed the read on
-            # a loaded Windows runner (main's scheduled run 38695758190, '' == 'word').
-            with contextlib.suppress(AssertionError):
-                await wait_until(pilot, lambda: host.clipboard == "word")
-            # A second mirror would read within one more delay of the first.
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
-            return host.clipboard, list(host.notices)
+            # Both timers run: the first finds the second release took its mirror over.
+            fired = await mirror_timers.run_out(pilot)
+            return host.clipboard, list(host.notices), fired
 
-    clipboard, toasts = run(drive())
+    clipboard, toasts, fired = run(drive())
+    assert fired == [TerminalPane.BUFFER_MIRROR_DELAY, TerminalPane.BUFFER_MIRROR_DELAY], (
+        "each release armed one; the copy was there at the first read"
+    )
     assert clipboard == "word"
     assert toasts == ["copied 4 characters — the agent's own selection"], toasts
 
 
 def test_a_mirror_pending_across_an_attach_reads_the_server_its_press_went_to(
-    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake: FakeTmux, tmp_path: Path, mirror_timers: MirrorTimers
 ) -> None:
     """The shell switches a pane to another agent by setting ``server`` and
     attaching, and the attach emptied the snapshot: a mirror still pending then
     read the NEW server's buffer against nothing and copied it. Carried with
     its snapshot, the mirror reads the server the click went to."""
-    monkeypatch.setattr(TerminalPane, "BUFFER_MIRROR_DELAY", 0.5)
     pane = fake.panes["%1"]
     pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
     fake.buffer = "a copy on the first server"
@@ -4849,9 +4933,9 @@ def test_a_mirror_pending_across_an_attach_reads_the_server_its_press_went_to(
             widget = host.pane
             await wait_until(pilot, lambda: synced(widget))
             await click(pilot, widget, (1, 1))
-            widget.server = other.server(tmp_path, socket="other")
+            widget.server = other.server(tmp_path, socket="other")  # inside the click's delay
             widget.attach("%7")
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
+            await mirror_timers.run_out(pilot)
             return host.clipboard, list(host.notices)
 
     assert run(drive()) == ("", [])
@@ -4890,7 +4974,7 @@ def test_the_same_words_copied_again_are_mirrored_again(fake: FakeTmux, tmp_path
 
 
 def test_a_copy_that_lands_after_the_first_read_is_mirrored_by_the_second(
-    fake: FakeTmux, tmp_path: Path
+    fake: FakeTmux, tmp_path: Path, mirror_timers: MirrorTimers
 ) -> None:
     """#207 follow-up. The mirror read the buffers once, ``BUFFER_MIRROR_DELAY``
     after the release, so a copy the program wrote later than that — a loaded
@@ -4900,25 +4984,29 @@ def test_a_copy_that_lands_after_the_first_read_is_mirrored_by_the_second(
     pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
     fake.buffer = "an old copy"
 
-    async def drive() -> tuple[str, list[str]]:
+    async def drive() -> tuple[str, list[str], list[float]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             widget = host.pane
             await wait_until(pilot, lambda: synced(widget))
             await press(pilot, widget, (0, 0))
             await release(pilot, widget, (9, 0))
+            first = await mirror_timers.fire(pilot)
             # The press's read, then the first after the release: nothing new yet.
-            await wait_until(pilot, lambda: _buffer_reads(fake) == 2)
-            fake.buffer = "a late copy"
-            await _mirrored(pilot, host, "a late copy")
-            return host.clipboard, list(host.notices)
+            assert (_buffer_reads(fake), host.clipboard) == (2, "")
+            fake.buffer = "a late copy"  # before the second read, by construction
+            fired = [first, *await mirror_timers.run_out(pilot)]
+            return host.clipboard, list(host.notices), fired
 
-    clipboard, toasts = run(drive())
+    clipboard, toasts, fired = run(drive())
+    assert fired == [TerminalPane.BUFFER_MIRROR_DELAY, TerminalPane.BUFFER_MIRROR_RETRY]
     assert clipboard == "a late copy"
     assert toasts == ["copied 11 characters — the agent's own selection"], toasts
 
 
-def test_a_press_ends_the_wait_for_a_late_copy(fake: FakeTmux, tmp_path: Path) -> None:
+def test_a_press_ends_the_wait_for_a_late_copy(
+    fake: FakeTmux, tmp_path: Path, mirror_timers: MirrorTimers
+) -> None:
     """The second read waits ``BUFFER_MIRROR_RETRY`` for a late copy, and left
     alone it would mirror a buffer written in that time even once the user had
     begun something else, over whatever that had copied. A press anywhere in
@@ -4935,14 +5023,14 @@ def test_a_press_ends_the_wait_for_a_late_copy(fake: FakeTmux, tmp_path: Path) -
             await wait_until(pilot, lambda: synced(widget))
             await press(pilot, widget, (0, 0))
             await release(pilot, widget, (9, 0))
-            await wait_until(pilot, lambda: _buffer_reads(fake) == 2)
+            await mirror_timers.fire(pilot)  # the first read: nothing new yet
             fake.buffer = "the drag's late copy"
             header = host.query_one("#other", Static)
-            await press(pilot, header, (1, 0))
+            await press(pilot, header, (1, 0))  # inside the wait for the second, by construction
             at_press = host.clipboard
             fake.buffer = "a copy made after the press"  # another agent on the server, say
             await release(pilot, header, (1, 0))
-            await pilot.pause(widget.BUFFER_MIRROR_RETRY + 0.1)
+            await mirror_timers.run_out(pilot)  # the second read's time comes: it is over
             return at_press, host.clipboard, list(host.notices)
 
     at_press, clipboard, toasts = run(drive())
@@ -4954,20 +5042,21 @@ def test_a_press_ends_the_wait_for_a_late_copy(fake: FakeTmux, tmp_path: Path) -
 
 
 def test_a_press_inside_the_first_delay_leaves_the_copy_to_its_read(
-    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake: FakeTmux, tmp_path: Path, mirror_timers: MirrorTimers
 ) -> None:
     """The other side of that line. ``BUFFER_MIRROR_DELAY`` is the program's own
     time to copy, and a press straight after the release — a click on the
     header before Claude Code has written the buffer — does not cut it short:
     read there, before the copy was written, it would never be mirrored. Only
-    the wait for a LATE copy ends at a press."""
-    # Long enough that the header's press always lands inside the first delay.
-    monkeypatch.setattr(TerminalPane, "BUFFER_MIRROR_DELAY", 0.5)
+    the wait for a LATE copy ends at a press.
+
+    The header's press is inside the first delay by construction (:class:`MirrorTimers`):
+    on wall time, a loaded runner delivered it after the delay (rc/rlx push CI 44029727978)."""
     pane = fake.panes["%1"]
     pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
     fake.buffer = "an old copy"
 
-    async def drive() -> tuple[str, list[str]]:
+    async def drive() -> tuple[str, list[str], list[float]]:
         host = Host(fake.server(tmp_path), "%1", with_header=True)
         async with host.run_test(size=(40, 7)) as pilot:
             widget = host.pane
@@ -4975,19 +5064,22 @@ def test_a_press_inside_the_first_delay_leaves_the_copy_to_its_read(
             await press(pilot, widget, (0, 0))
             await release(pilot, widget, (9, 0))
             header = host.query_one("#other", Static)
-            await press(pilot, header, (1, 0))
+            await press(pilot, header, (1, 0))  # before the first read: its timer is held
             fake.buffer = "the drag's copy"  # written after the header's press
             await release(pilot, header, (1, 0))
-            await _mirrored(pilot, host, "the drag's copy")
-            return host.clipboard, list(host.notices)
+            fired = await mirror_timers.run_out(pilot)
+            return host.clipboard, list(host.notices), fired
 
-    clipboard, toasts = run(drive())
+    clipboard, toasts, fired = run(drive())
+    assert fired == [TerminalPane.BUFFER_MIRROR_DELAY], (
+        "the first read, at the program's own delay, found the copy"
+    )
     assert clipboard == "the drag's copy"
     assert toasts == ["copied 15 characters — the agent's own selection"], toasts
 
 
 def test_the_fleet_s_own_paste_on_its_way_in_is_never_mirrored_out(
-    fake: FakeTmux, tmp_path: Path
+    fake: FakeTmux, tmp_path: Path, mirror_timers: MirrorTimers
 ) -> None:
     """The mirror lists every buffer by name, and a ``fleet tell`` in another
     process holds its prompt in a buffer of its own between loading and pasting
@@ -4999,17 +5091,21 @@ def test_the_fleet_s_own_paste_on_its_way_in_is_never_mirrored_out(
     pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
     fake.buffer = "an old copy"
 
-    async def drive() -> tuple[str, list[str]]:
+    async def drive() -> tuple[str, list[str], list[float]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             widget = host.pane
             await wait_until(pilot, lambda: synced(widget))
             await click(pilot, widget, (1, 1))
             fake.buffers.insert(0, (f"{PASTE_BUFFER}-4242-0", "a prompt for another agent"))
-            await pilot.pause(widget.BUFFER_MIRROR_DELAY + widget.BUFFER_MIRROR_RETRY + 0.1)
-            return host.clipboard, list(host.notices)
+            fired = await mirror_timers.run_out(pilot)
+            return host.clipboard, list(host.notices), fired
 
-    assert run(drive()) == ("", [])
+    assert run(drive()) == (
+        "",
+        [],
+        [TerminalPane.BUFFER_MIRROR_DELAY, TerminalPane.BUFFER_MIRROR_RETRY],
+    ), "both reads ran, and neither copied"
 
 
 def test_a_lost_release_ends_the_program_s_drag_where_it_got_to_and_frees_the_pointer(
@@ -5371,6 +5467,9 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     fresh frame — the view guesses nothing. Stop only ASKS: it posts ``StopAgent``
     and the shell's dialog owns the service call (P21, ``cli/ui/stop.py``), so the
     view never calls ``stop`` itself."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     from textual.widgets import Button
 
     from aisquare.cli.ui.sidebar import StopAgent
@@ -5471,6 +5570,9 @@ def test_agent_view_buttons_come_back_when_their_own_worker_ends_whatever_other_
     between the steps, which is what hid it. Since P21 a stop runs inside its own
     modal dialog and greys nothing here, so the rule is Restart's: a view's OWN
     running restart greys its buttons, another view's does not."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     import threading
 
     from textual.containers import Vertical

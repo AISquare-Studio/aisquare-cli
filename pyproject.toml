@@ -4,15 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.10.0"
-description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
+version = "0.10.1"
+description = "rlx is a manager for your AI coding agents. Tell it the goal: it runs Claude Code and Codex on accounts with room. Then relax."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AISquare", email = "anmol@aisquare.studio" }]
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = [
-  "cli",
+  "rlx",
+  "relax",
   "tui",
   "terminal",
   "coding-agents",
@@ -278,13 +279,16 @@ dev = [
 [project.scripts]
 aisquare = "aisquare.cli.app:main"
 asq = "aisquare.cli.app:main"
+rlx = "aisquare.cli.app:main"
+relax = "aisquare.cli.app:main"
 asq-statusline = "aisquare.statusline:main"
 
 [project.urls]
-Homepage = "https://aisquare.studio"
-Repository = "https://github.com/AISquare-Studio/aisquare-cli"
-Issues = "https://github.com/AISquare-Studio/aisquare-cli/issues"
-Changelog = "https://github.com/AISquare-Studio/aisquare-cli/blob/main/CHANGELOG.md"
+Homepage = "https://aisquare.studio/rlx"
+Documentation = "https://docs.aisquare.studio/docs/rlx/overview/"
+Repository = "https://github.com/AISquare-Studio/rlx"
+Issues = "https://github.com/AISquare-Studio/rlx/issues"
+Changelog = "https://github.com/AISquare-Studio/rlx/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aisquare"]

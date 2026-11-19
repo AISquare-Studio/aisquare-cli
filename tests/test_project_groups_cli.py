@@ -203,11 +203,11 @@ def test_a_filter_that_matches_nothing_says_so_not_that_nothing_is_registered(
         return " ".join(result.stdout.split())
 
     pinned = shown("--pinned")
-    assert pinned == "No pinned projects — pin one: aisquare project pin <project>", pinned
+    assert pinned == "No pinned projects — pin one: rlx project pin <project>", pinned
     assert runner.invoke(app, ["project", "group", "create", "empty set"]).exit_code == 0
     grouped = shown("--group", "empty set")
     assert grouped == (
-        "No projects in group empty set — add one: aisquare project group add "
+        "No projects in group empty set — add one: rlx project group add "
         f"{install_route.command_line(['empty set'])} <project>"
     ), grouped
     assert runner.invoke(app, ["project", "group", "create", "site", "web"]).exit_code == 0
@@ -240,18 +240,16 @@ def test_a_filter_whose_matches_are_hidden_points_to_them_not_to_a_step_already_
     grouped = shown("--group", "exp")
     assert grouped == (
         "No listed projects in group exp — 1 captured directory hidden (a hooked session ran "
-        "there): aisquare project list --all --group exp; add one: aisquare project onboard "
+        "there): rlx project list --all --group exp; add one: rlx project onboard "
         "<path>"
     ), grouped
     assert [row["name"] for row in _listed(runner, "--all", "--group", "exp")] == ["scratch"]
     assert runner.invoke(app, ["project", "pin", "prj_scratch"]).exit_code == 0
     pinned = shown("--pinned")
     assert pinned.startswith("No listed pinned projects — 1 captured directory hidden"), pinned
-    assert pinned.endswith(
-        "aisquare project list --all --pinned; add one: aisquare project onboard <path>"
-    )
+    assert pinned.endswith("rlx project list --all --pinned; add one: rlx project onboard <path>")
     both = shown("--pinned", "--group", "exp")
-    assert "aisquare project list --all --pinned --group exp;" in both, both
+    assert "rlx project list --all --pinned --group exp;" in both, both
     # With nothing hidden that matches, the step that fills the filter is still named.
     assert "scratch" in shown("--pinned", "--group", "exp", "--all")
     assert runner.invoke(app, ["project", "group", "create", "site"]).exit_code == 0
@@ -268,10 +266,8 @@ def test_the_step_named_for_an_empty_group_reads_a_dashed_name_as_the_group(
     result = runner.invoke(app, ["project", "list", "--group", "-wip"])
     assert result.exit_code == 0, result.output
     said = " ".join(result.stdout.split())
-    assert (
-        said == "No projects in group -wip — add one: aisquare project group add -- -wip <project>"
-    )
-    step = said.split(": aisquare ", 1)[1].replace("<project>", "web").split()
+    assert said == "No projects in group -wip — add one: rlx project group add -- -wip <project>"
+    step = said.split(": rlx ", 1)[1].replace("<project>", "web").split()
     added = runner.invoke(app, step)
     assert added.exit_code == 0, added.output
     assert _names(runner, "--group", "-wip") == ["web"]

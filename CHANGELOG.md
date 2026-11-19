@@ -6,6 +6,160 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-18
+
+### Added
+
+- **Two new commands, `rlx` and `relax`, start rlx, as `asq` and `aisquare` do.** All four
+  run the same program: bare `rlx` opens the app, `rlx --help` names itself, and
+  `rlx --install-completion` sets up completion for `rlx`. The one-line installer, 0.10.0's
+  `aisquare upgrade` and the app's *Update* put the two new commands in `~/.local/bin`
+  beside the others. Hooks still call `aisquare`, whichever command connected them.
+- **Another program's `rlx` or `relax` is never replaced or deleted.** When `~/.local/bin`
+  already holds one (PyPI's `relax` is another project), the installer, `rlx upgrade`, the
+  app's *Update* and `rlx uninstall` stop before they change anything and name the file:
+  rename or move it, then run again. `rlx doctor` names one earlier on your PATH. Moving up
+  from 0.10.0 with its `aisquare upgrade`, its *Update* or `uv tool upgrade aisquare-cli`
+  replaces such a file without asking: move yours aside first, or use the one-line
+  installer, which checks.
+- **Pause sits beside Stop and Restart in an agent's view.** A paused agent shows Resume in
+  its place, which brings it back where it was, and its view says it is paused and what the
+  pause keeps, where it read "(pane gone)" beside a pane id it no longer had. Pause, Stop
+  and Restart each ask first in one small box, which says what happens and offers *Don't
+  ask again*: tick it and that action acts on one click from then on, for every agent.
+  *Ask again before every action*, under ⚙ Settings ▸ App settings ▸ User preferences ▸
+  Advanced, brings every box back. Resume never asks.
+- **Each agent in the sidebar has a ⋯ menu:** Pause or Resume, Stop, Restart and Rename. It
+  shows on the agent you point at or have selected; a right-click or `.` opens it too.
+  Rename is greyed, with why, where an agent keeps its name.
+- **The Pause, Resume, Stop and Restart boxes for many agents list each one with a tick**,
+  and a *Select all* at the top, so you choose which ones they act on. Pausing only some of a
+  project's agents leaves its manager free to start new ones; picking them all pauses the
+  project as before.
+- **App settings has a Display tab:** on/off switches for the account usage after each
+  agent, the agent marks in a mixed fleet, the live count in the sidebar's title, the fade
+  of the side without the keyboard, the bell when an agent needs you, the board following
+  its live feed, and the project directory under each name. Each applies as you tick it.
+
+### Changed
+
+- **Personas live in Settings ▸ Personas, for you across all projects.** A project's view
+  has no Personas tab now, and the app offers your personas and the bundled ones.
+- **Signing in to AISquare uses rlx's own page once the server offers it;** until then, the
+  existing page.
+- **A manager waiting on you is not woken by noise.** Watch's lines about its own results
+  and questions, its ping for an agent idle by design, and a review that repeats a note it
+  read no longer wake it. A manager that goes on standby (`aisquare team standby`), or asks
+  you something with nothing in flight, is not woken by watch's routine lines until your
+  next prompt.
+- **You can see which pane has the keyboard.** While the left pane has it, its highlighted
+  project, agent or setting is a bar in the theme's colour; otherwise it is the dark
+  highlight it always was.
+- **The product is named rlx.** The README is titled rlx and opens as rlx's page does:
+  "Tell the manager the goal. Then relax.", what rlx does for you, and the one-line install.
+  PyPI's summary and `rlx --help` say what rlx is in the page's words: "rlx is a manager for
+  your AI coding agents. Tell it the goal: it runs Claude Code and Codex on accounts with
+  room. Then relax." Five of the seven pages it links say rlx too. The package is still
+  `aisquare-cli` on PyPI, and its keywords there name rlx.
+- The AISquare sign-in keeps its name: `aisquare login`, `logout` and `whoami`, `aisquare
+  init --api-key` and `aisquare explainability` are AISquare's, and every page writes them so.
+- **The sidebar no longer shows the AISquare sign-in; it lives in Accounts.** AISquare's own
+  messages say rlx where they said "the CLI": "the keys rlx minted", "Sign-in from rlx is
+  temporarily paused".
+- **The app's top-left shows rlx's logo, `r\x`, where it read `Fleet`.** The live count
+  beside it is as before (`r\x · 3 live`), and nothing else in the sidebar moves, at any
+  width. The window's title and everything else still say rlx.
+- **The repository is now `AISquare-Studio/rlx`**, and every link says so: the one-line
+  installers, the README and docs, `rlx doctor`'s issue link and the plugins' manifests.
+  Links to the old name keep working, since GitHub redirects them, and the package, the
+  plugin and its marketplace keep their names.
+- Usage sharing, once you turn it on, posts to `/api/v1/rlx/metrics/`, and sends the same
+  counts as before. Releases up to 0.10.0 post to `/api/v1/cli/metrics/`, which AISquare
+  keeps answering until May 2027. A server that answers 503 with `Retry-After` is asked
+  again after that wait, as a 429 already was, not after the first five-minute retry; either
+  waits a day at most.
+- The one-line install is shorter: `curl -fsSL https://aisquare.studio/rlx/install.sh | sh`,
+  and on Windows `irm https://aisquare.studio/rlx/install.ps1 | iex`. Both lead to the same
+  installers on GitHub, and a release's own pinned URL is unchanged.
+- **rlx names itself everywhere it speaks to you.** Its messages, errors, `--help`, the
+  doctor and the app's screens say rlx where they said `aisquare`, `asq` or "the CLI": "Quit
+  the other rlx?", "rlx 0.10.1 is up to date", *Update rlx*, the window title.
+  `rlx --version` prints `rlx 0.10.1`; installers of earlier releases read the version from
+  it as before. No `--json` key changes, and no machine value (names, statuses, ids), the
+  doctor's `asq instances` row included; only the human text inside a value says rlx.
+- **Every command it tells you to run starts with `rlx`**: `rlx accounts add`, `rlx doctor`,
+  the doctor's one-click fixes. When another program's `rlx` comes first on your PATH, those
+  lines say `aisquare …` instead, so a line you paste always runs rlx. Your agents'
+  instructions keep `aisquare …`, the same commands.
+- **The installers say rlx too**, and end with "Open rlx with: rlx". The Remote page is
+  titled *rlx remote*; a phone that added it to its Home Screen shows the new name once it is
+  added again. The plugins describe themselves as rlx's; their install names
+  (`aisquare@aisquare-cli`) do not change.
+- The package's page on PyPI links to rlx's site and its docs, and the README links the site.
+- **The board names each agent as the left pane does, where it showed `role·<id>`.** In the
+  app's board, `board -w` and `rlx board`, a line's author, the sessions block, a task's
+  claim and the done archive read the agent's name, such as `coder-auth`, or its role where
+  the left pane has none. A note you wrote from the command line reads `you`, and `owner` in
+  `aisquare board`, which agents run (it read `cli`). An agent keeps its name after it stops,
+  is cleared or moves to another account, and a renamed one shows its new name. Of two
+  sessions with one name, the earlier adds the time it started: `coder-auth (14:02)`. Long
+  names end in `…`, the short id stays in a line's detail, and `o` still opens the right
+  transcript. Agents still see ids, and every `--json` is unchanged.
+- **The app opens in rlx, a theme of its own, until you pick another.** It is built on rlx's
+  blue, #2F74F0, with teal, lime, green, amber and coral on near-black. Press `t` to pick
+  another theme, as before. A theme you picked earlier is kept, and so is one you set in
+  `TEXTUAL_THEME`. Every theme it offered is still there. `rlx board -w` shares your pick,
+  so it opens in rlx too.
+- **The logo at the top-left, `r\x`, and Welcome's heading take their colour from the
+  theme.** Under rlx they are #2F74F0. Under any other theme they take its main colour,
+  or its text colour where the main colour is too faint to read as text (textual-dark's
+  is), so they change when you press `t`. They keep that colour while the other pane has
+  the keyboard. Only colours change: nothing moves, at any width. rlx cannot set your
+  terminal's font. JetBrains Mono, the font on rlx's web page, is the one we recommend.
+- **The app never asks you to type a command.** Its screens, notifications, tooltips and
+  dialogs point to a button or a page instead: a missing agent or tmux links its install
+  page, an install rlx cannot update says to update it the way you installed it, and the
+  Doctor's buttons say what they do ("Connect Claude Code"). A check that needs the command
+  line offers *Ask the manager*, or says a manager can fix it. The messages it shares with
+  the command line leave the command out in the app, the usage-limit and pause lines
+  included; the agents still read it. The command line keeps every command, byte for byte,
+  and so does everything an agent reads.
+- **Notifications are small, sit top-right and are quick to clear.** They start under the
+  top row, clear of the agent bar's buttons, at most 46 columns wide. The newest is on top
+  and at most three show; the rest wait, their time stopped, under a `+N more` line that a
+  click clears. Each goes after its own time, which stops under your pointer. The
+  right-most column dismisses one at once, its `✕` on the first row, so one spot clears
+  them all however fast you click. The rest is text: a drag selects and copies it, a
+  double-click copies a word and a third click the whole, and the `✕` turns to `✓` once
+  copied (`↗` when only sent to your terminal's clipboard, `!` when it could not be). A
+  click on the text no longer dismisses it.
+- **One copy, the same everywhere in the app, and it says what really happened.** The
+  board, agent panes, notifications, Remote's link, text fields and the captain's row copy
+  all use it. A clipboard tool that fails hands the copy to the next (PowerShell after
+  `clip.exe`, `xsel` after `xclip`) and is skipped for a minute. Inside your own tmux, tmux
+  carries the copy to your terminal (`tmux load-buffer -w`), over SSH too, and tmux's and
+  GNU screen's passthrough carry it where the terminal allows. A copy too large for your
+  terminal's clipboard says it could not be copied, never cut short, and the captain's
+  `copy_row` says whether it landed.
+
+### Fixed
+
+- **A session's end reaches the board on a slow machine.** Claude Code cut its hook off
+  after 1.5 s; it now has 10 s. Upgrading gives existing installs the same, every account
+  included, whether with 0.10.0's own `aisquare upgrade`, the app's *Update* or the one-line
+  installer.
+- On Windows, quitting the app no longer waits behind its own timers, and neither does the
+  work it runs in the background.
+- **Codex's new default model's usage is priced.** Codex 0.169.1 runs gpt-6.2-sol by default,
+  and its usage now has a cost, as does gpt-6.2-astra's and gpt-6.1-terra's. All three are
+  priced at OpenAI's list prices as of 2026-11-17.
+- Nothing is typed into `/config`, `/resume` or another picker left open in a Claude Code
+  agent, on Claude Code 2.1.327 too: a message told to it goes to the board, and the
+  manager's wake-up waits until the picker is closed.
+- **On Claude Code 2.1.326, its question about trusting an `--add-dir` folder reads as the
+  folder-trust question:** the agent needs you and the row names the folder, where it read
+  working.
+
 ## [0.10.0] - 2026-11-16
 
 **Codex support, in beta: run OpenAI's Codex CLI beside Claude Code, or instead of it, with
@@ -7050,18 +7204,19 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.10.0...HEAD
-[0.10.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.2...v0.10.0
-[0.9.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.1...v0.9.2
-[0.9.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...v0.9.0
-[0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2
-[0.8.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0
-[0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
-[0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1
-[0.2.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/AISquare-Studio/aisquare-cli/releases/tag/v0.1.0
+[Unreleased]: https://github.com/AISquare-Studio/rlx/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/AISquare-Studio/rlx/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/AISquare-Studio/rlx/compare/v0.9.2...v0.10.0
+[0.9.2]: https://github.com/AISquare-Studio/rlx/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/AISquare-Studio/rlx/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/AISquare-Studio/rlx/compare/v0.8.2...v0.9.0
+[0.8.2]: https://github.com/AISquare-Studio/rlx/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/AISquare-Studio/rlx/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/AISquare-Studio/rlx/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/AISquare-Studio/rlx/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/AISquare-Studio/rlx/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/AISquare-Studio/rlx/compare/v0.4.0rc2...v0.5.0
+[0.4.0rc2]: https://github.com/AISquare-Studio/rlx/compare/v0.4.0rc1...v0.4.0rc2
+[0.4.0rc1]: https://github.com/AISquare-Studio/rlx/compare/v0.2.0...v0.4.0rc1
+[0.2.0]: https://github.com/AISquare-Studio/rlx/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/AISquare-Studio/rlx/releases/tag/v0.1.0

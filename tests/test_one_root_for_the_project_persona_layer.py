@@ -3,7 +3,8 @@
 The project layer's root was worked out in seven places: launch, the session-start
 briefing, the owed briefing, spawn, the Personas tab, ``aisquare persona`` and the Spawn
 dialog's import. F1, F6 and F8 of the first review were one of them out of step, and the
-R1 review found two more:
+R1 review found two more (since R27, asq's Personas page and Spawn dialog read no project
+layer at all):
 
 - R1-F6: the tab and the ``persona`` command asked git (``git_common_root``), while spawn
   and launch read ``<project root>/.aisquare/personas``. A project that is not a git
@@ -256,10 +257,16 @@ def test_the_briefings_ask_the_helper(elsewhere: Path, project: ProjectInfo) -> 
         assert _block("solo") in "\n".join(lines), lines
 
 
-def test_the_tab_and_the_spawn_dialog_ask_the_helper(elsewhere: Path, project: ProjectInfo) -> None:
+def test_the_tab_asks_the_helper_and_the_spawn_dialog_offers_no_project_layer(
+    elsewhere: Path, project: ProjectInfo
+) -> None:
+    """A tab built with a project asks the helper. The Spawn dialog asks nothing: since R27
+    asq offers the user's and the bundled personas only, so the project layer's ``solo``
+    is not one of its choices (``fleet spawn`` by name still finds it)."""
     dialog = SimpleNamespace(project=project)
     offered, _unavailable = SpawnDialog._read_personas(dialog)  # type: ignore[arg-type]
 
-    assert "solo" in [persona.name for persona in offered]
+    assert "solo" not in [persona.name for persona in offered]
+    assert {persona.layer for persona in offered} <= {"user", "bundled"}
     assert PersonasTab(project).root == elsewhere
     assert "solo" in {row[0] for row in _tab_rows(project)}

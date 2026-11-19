@@ -190,7 +190,7 @@ def _progress_line(done: int, total: int) -> None:
 @app.command("backfill")
 def backfill() -> None:
     """Read the transcripts of every agent session on this machine (Claude Code's, Codex's) —
-    every repository, every account home, whether or not aisquare launched it — and record
+    every repository, every account home, whether or not rlx launched it — and record
     what they spent.
 
     Idempotent and incremental: a session already counted (by its Stop hook or an earlier
@@ -248,9 +248,9 @@ def share_on() -> None:
     """Share anonymous daily usage counts with AISquare (off by default).
 
     What is sent is counts: tokens, sessions, commands used and a salted hash per repository,
-    never names, paths, remotes, prompts or arguments (`aisquare metrics share preview` prints
+    never names, paths, remotes, prompts or arguments (`rlx metrics share preview` prints
     the exact body). Usage is counted for every repo you run Claude Code in, including ones you
-    haven't added to aisquare; capture settings don't change this. Not available with
+    haven't added to rlx; capture settings don't change this. Not available with
     DO_NOT_TRACK=1, AISQUARE_NO_TELEMETRY=1 or CI set.
     """
     try:

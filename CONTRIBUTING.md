@@ -1,17 +1,17 @@
-# Contributing to aisquare
+# Contributing to rlx
 
-Thanks for your interest in aisquare! This is an early-stage, open-source
-project and contributions are welcome.
+Thanks for your interest in rlx! It is an open-source project, and
+contributions are welcome.
 
 ## Where to start
 
 - **Pick up a
-  [good first issue](https://github.com/AISquare-Studio/aisquare-cli/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22).**
+  [good first issue](https://github.com/AISquare-Studio/rlx/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22).**
   Each one names the files and lines involved and says what done looks like.
   Say on the issue that you are taking it, so two people do not build the
   same thing.
 - **Ask when unsure.**
-  [Discussions, Q&A](https://github.com/AISquare-Studio/aisquare-cli/discussions/categories/q-a)
+  [Discussions, Q&A](https://github.com/AISquare-Studio/rlx/discussions/categories/q-a)
   is the place for "where does this live?" and "would you take a PR that…?".
 - **Find your way around.** `src/aisquare/cli/` parses the command line and
   holds the full-screen UI (`src/aisquare/cli/ui/`), `src/aisquare/services/`
@@ -85,8 +85,8 @@ servers in it (`tests/private_fleets.py`).
 
 CI (`.github/workflows/ci.yml`) runs a `lint` job (ruff, the format check, mypy and
 `uv lock --check`), the suite on each leg (Python 3.11–3.13, captain off, Windows), a
-packaging job that builds the wheel and smoke-tests the `aisquare` / `asq` console
-scripts, and `ci-ok`, which passes only when every other job did. Each leg's suite
+packaging job that builds the wheel and smoke-tests `rlx`, `relax`, `aisquare` and `asq`,
+and `ci-ok`, which passes only when every other job did. Each leg's suite
 runs in shards, parallel jobs that each run part of it on every core: pytest-split
 (`--splits N --group k`) splits it by the per-test times in `.test_durations`, and the
 `shards` job fails unless each leg's shards ran every collected test exactly once
@@ -149,7 +149,7 @@ there is no bytecode to go stale.
 ## Implementing a feature (stub → service)
 
 Most commands are still stubs that exit `70`. Each one becomes real by replacing
-a single `stub(...)` call in a `services/` module — the CLI wiring and function
+a single `stub(...)` call in a `services/` module — rlx's wiring and function
 signatures already exist. The flow is:
 
 1. **Implement the service** in `src/aisquare/services/<domain>.py`. Services
@@ -313,7 +313,7 @@ for quoted commands — the distinction was missed here once and is worth keepin
 separate.
 
 *Quoted output* rots: one runbook row quoted a message (`the context store is
-corrupt`) the CLI has never printed. A static check that every quoted line exists
+corrupt`) rlx has never printed. A static check that every quoted line exists
 in `src/` **does not work**, measured twice: literal matching fails on
 interpolation (`✓ tracing enabled for target 'stg'` is an f-string in the source,
 so a `grep -F` reports it missing while the command prints it exactly), and
@@ -467,7 +467,7 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   query while debugging.** `credentials` and `explainability-key` are obvious;
   `claude_proxy_inbox.db` is not — its schema carries an `api_key` column, one key
   per buffered row, because the proxy stamps the owning tenant's key on the trace.
-  The CLI's own backlog check selects only `status` and `last_error`, so nothing it
+  rlx's own backlog check selects only `status` and `last_error`, so nothing it
   prints can surface one. But receipts quote artefacts constantly, so when you
   query that file: **name the columns, never `SELECT *`**, open it read-only
   (`file:…?mode=ro`), and confirm the bytes and mtime are unchanged afterwards
@@ -513,8 +513,8 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   real home in a test or example.
 - Keep CLI modules thin and services free of CLI concerns.
 - New shared plumbing goes in `core/`; new domain shapes go in `models.py`.
-- A change that makes the CLI keep something new on disk, change Claude Code's
-  settings, or reach the network updates SECURITY.md's "What the CLI stores,
+- A change that makes rlx keep something new on disk, change Claude Code's
+  settings, or reach the network updates SECURITY.md's "What rlx stores,
   changes and sends" (its Stored, Changed or Sent list) in the same PR.
 
 ## Reporting bugs / proposing features

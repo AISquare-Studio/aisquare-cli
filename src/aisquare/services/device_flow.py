@@ -40,7 +40,7 @@ def wait_for_token(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     jitter: Callable[[float, float], float] = random.uniform,
-    poll: Callable[[iam.Endpoints, str], iam.PollOutcome] = iam.poll_token,
+    poll: Callable[[iam.Endpoints, iam.DeviceAuthorization], iam.PollOutcome] = iam.poll_token,
 ) -> dict[str, Any]:
     """Poll until the browser approves the grant; the token response comes back.
 
@@ -61,7 +61,7 @@ def wait_for_token(
         if monotonic() > deadline:
             raise iam.IamError("expired", "The code expired before it was approved.")
         try:
-            outcome = poll(endpoints, grant.device_code)
+            outcome = poll(endpoints, grant)
         except iam.IamError as exc:
             if exc.code != "unreachable":
                 raise
@@ -88,7 +88,7 @@ def wait_for_token(
         if outcome.kind == "expired":
             raise iam.IamError("expired", "The code expired before it was approved.")
         if outcome.kind == "paused":
-            raise iam.IamError("paused", "CLI sign-in is temporarily paused. Try again later.")
+            raise iam.IamError("paused", "Sign-in from rlx is temporarily paused. Try again later.")
         raise iam.IamError(
             "unsupported_server", f"Unexpected answer from {endpoints.issuer} while waiting."
         )
@@ -99,6 +99,7 @@ def commit_sign_in(
     endpoints: iam.Endpoints,
     token_response: dict[str, Any],
     *,
+    client_id: str,
     cancelled: Callable[[], bool],
 ) -> iam.Session:
     """``services.auth.complete_sign_in`` with the cancel check at the commit boundary.
@@ -111,7 +112,8 @@ def commit_sign_in(
     belongs to ``previous.api_url``; sent to another server's revocation
     endpoint it would hand that server a live bearer for the first). Kept
     interchangeable with the terminal's so that, when the dependency grows a
-    cancel hook of its own, this collapses back into it.
+    cancel hook of its own, this collapses back into it. ``client_id`` is the
+    client that started the grant, as it is for the terminal's.
     """
     access_token = str(token_response["access_token"])
     expires_in = token_response.get("expires_in")
@@ -126,15 +128,15 @@ def commit_sign_in(
         expires_in=int(expires_in) if expires_in else None,
         scope=scope,
         claims=claims,
+        client_id=client_id,
     )
     if (
         previous is not None
         and previous.token != access_token
         and previous.api_url.rstrip("/") == api_url.rstrip("/")
     ):
-        iam.revoke(
-            endpoints, previous.token
-        )  # best effort: a failed revoke is not a failed sign-in
+        # Best effort: a failed revoke is not a failed sign-in. As its own client.
+        iam.revoke(endpoints, previous)
     return session
 
 

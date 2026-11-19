@@ -184,7 +184,7 @@ def test_the_fleet_refuses_a_captain_without_the_captains_launch(
     ``aisquare captain`` would then attach to it and type into it. Its tools are never the
     caller's: whatever arguments a spawn gives, the fleet confines them itself."""
     home = captain_state.home_project()
-    with pytest.raises(fleet_service.FleetError, match="started by `aisquare captain`"):
+    with pytest.raises(fleet_service.FleetError, match="started by `rlx captain`"):
         fleet_service.spawn(home, "captain")
     assert tmux.spawned == []
     fleet_service.spawn(home, "captain", cwd=brain.brain_dir(), agent_args=["--tools", "Bash"])

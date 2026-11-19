@@ -10,10 +10,11 @@ install exactly the tagged one:
 * install.sh: ``STAMPED_VERSION=""`` becomes ``STAMPED_VERSION="0.9.0"``, the
   default pin. ``--version V`` and ``AISQUARE_INSTALL_VERSION=V`` still win.
   The one-liner its header and ``--help`` print names that release's own
-  install.sh asset instead of main's.
+  install.sh asset instead of the short URL.
 * install.ps1: ``$StampedVersion`` gets the version, which it passes on as
   ``--version``, and ``$InstallUrl`` names that release's install.sh asset
-  instead of main's; the one-liner in its header names its own asset.
+  instead of main's; the one-liner in its header names its own asset instead of
+  the short URL.
 
 Every replacement must match exactly as often as expected: a stamp line that a
 later edit renamed or duplicated fails here, before upload, rather than shipping
@@ -32,7 +33,7 @@ import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-GITHUB_REPO = "AISquare-Studio/aisquare-cli"
+GITHUB_REPO = "AISquare-Studio/rlx"
 
 #: The assets every release carries, in upload order.
 ASSETS = ("install.sh", "install.ps1")
@@ -45,10 +46,13 @@ SH_STAMP = 'STAMPED_VERSION=""'
 PS1_STAMP = "$StampedVersion = ''"
 PS1_URL = '$InstallUrl = "https://raw.githubusercontent.com/$Repo/main/install.sh"'
 RAW_MAIN = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main"
+#: The short URLs a person types. Each redirects (307, AISquare-Homepage-Next #190) to the
+#: file of the same name in RAW_MAIN, which is what the scripts fetch themselves.
+SHORT = "https://aisquare.studio/rlx"
 #: The one-liners the scripts print, as on main: install.sh's header and --help
 #: (twice), install.ps1's header (once).
-SH_ONE_LINER = f"curl -fsSL {RAW_MAIN}/install.sh | sh"
-PS1_ONE_LINER = f"irm {RAW_MAIN}/install.ps1 | iex"
+SH_ONE_LINER = f"curl -fsSL {SHORT}/install.sh | sh"
+PS1_ONE_LINER = f"irm {SHORT}/install.ps1 | iex"
 
 
 class StampError(Exception):

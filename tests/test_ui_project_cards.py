@@ -41,7 +41,6 @@ from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectForgetReport, ProjectInfo
-from aisquare.services import install_route
 from aisquare.services import project as project_service
 from tests.fleet_fakes import SessionsOnly, tmux_sessions_as
 from tests.test_ui_shell import (
@@ -266,10 +265,8 @@ def test_a_double_click_renames_in_place_and_enter_saves_at_once(
     # project's sessions by the tmux id its records hold, never one found by a name built
     # from its codename (review r7, finding 2), so this one is left as it is.
     assert sessions.renamed == []
-    assert (
-        "✓ Payments v2 · fleet codename payments-v2 (tmux asq-payments-v2) — was amber-otter, "
-        "and --project amber-otter still works"
-    ) in str(seen["toasts"])
+    # The codename and the one it replaced; no tmux session, no --project (R13).
+    assert "✓ Payments v2 · fleet codename payments-v2 — was amber-otter" in str(seen["toasts"])
     assert seen["subtitle"] is None, "the codename is the name's: the card need not say it"
     assert seen["undo"] == 0 and seen["order"], "a double-click is no drag: nothing moved"
     assert seen["view"] == "project-prj_a", "the first click of the two opened it"
@@ -305,10 +302,9 @@ def test_a_card_says_a_codename_its_name_does_not_give_and_its_tooltip_always_do
     assert seen["a"] == "· earnest-hawk"
     assert seen["b"] is False, "beta's codename is its name's: no line"
     assert str(seen["a tip"]).startswith(
-        "fleet codename earnest-hawk (tmux asq-earnest-hawk, --project earnest-hawk) · "
-        "double-click or F2 to rename"
+        "fleet codename earnest-hawk · double-click or F2 to rename"
     )
-    assert str(seen["b tip"]).startswith("fleet codename beta (tmux asq-beta, --project beta)")
+    assert str(seen["b tip"]).startswith("fleet codename beta · ")
     assert seen["a after"] == "· quiet-lynx" and "quiet-lynx" in str(seen["a tip after"])
 
 
@@ -781,11 +777,9 @@ def test_removing_a_project_moves_to_a_neighbour_the_next_frame_still_lists(
     assert drive(go) == ("project-prj_a", "project:prj_a")
 
 
-def test_remove_names_the_command_that_brings_it_back_quoted(
-    tmp_path: Path, script: Script
-) -> None:
-    """The way back is a command to copy, in the toast after the removal: a root with a space
-    is one argument in it (``install_route.command_line``: this shell's quotes)."""
+def test_remove_says_the_way_back_is_the_sidebar_s_plus(tmp_path: Path, script: Script) -> None:
+    """The way back, in the toast after the removal, is asq's own + (R13): it named a command
+    to copy, quoted for this shell (``project onboard <root>``)."""
     (project,) = seed(tmp_path, ("prj_a", "my app", None))
 
     async def go(pilot: Pilot[None]) -> str:
@@ -796,11 +790,8 @@ def test_remove_names_the_command_that_brings_it_back_quoted(
         return await _toasts(app)
 
     toasts = drive(go, notifications=True)
-    onboard = install_route.command_line(["aisquare", "project", "onboard", str(project.root)])
-    assert f"{onboard} brings it back" in toasts
-    assert install_route.split_line(onboard)[-1] == str(project.root), (
-        "quoted: the space is inside the argument"
-    )
+    assert "its folder and history are kept; + in the sidebar adds it back" in toasts
+    assert "project onboard" not in toasts and str(project.root) not in toasts
 
 
 def test_removing_the_last_project_shows_welcome(tmp_path: Path, script: Script) -> None:
@@ -845,7 +836,8 @@ def test_remove_is_refused_while_the_project_has_live_agents(
         return toasts, [card.project.id for card in app.sidebar.query(ProjectCard)]
 
     toasts, cards = drive(go, notifications=True)
-    assert "coder-auth" in toasts and "fleet shutdown" in toasts, toasts
+    assert "coder-auth" in toasts and "stop them first" in toasts, toasts
+    assert "fleet shutdown" not in toasts, "asq names no command (R13b)"
     assert cards == ["prj_a"] and _stored("prj_a") is not None
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual.pilot import Pilot
+from textual.widgets import Button
 
 from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.models import ClaudeAccount
@@ -101,17 +102,24 @@ def test_each_rows_buttons_and_name_act_on_its_own_account(signed: Pair) -> None
 
 
 def test_a_place_for_the_one_listed_last_is_refused_on_the_page_too(signed: Pair) -> None:  # noqa: F811
-    async def go(pilot: Pilot[None]) -> str:
+    """Refused as on the command line, in asq's words (R13b): the way out is the page's own
+    Remove, on that row, and its Add, never the commands the CLI names."""
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
         view = await _both_rows(pilot)
         await press(pilot, "#account-up-5-claude-code")
         await _acted(pilot)
-        return notice(view)
+        ways = ["#account-remove-5-claude-code", "#claude-add"]
+        return notice(view), [str(view.query_one(way, Button).label) for way in ways]
 
     before = _order()
 
-    said = drive_registry(go)
+    said, buttons = drive_registry(go)
 
-    assert said == f"✗ {REFUSED_RANK}"
+    refused, _, _how = REFUSED_RANK.partition(" To give it a number of its own: ")
+    assert said == f"✗ {refused} To give it a number of its own: Remove it, then add it again."
+    assert "accounts remove" not in said and "accounts add" not in said
+    assert buttons == ["Remove", "+ Add Claude account"], "the two it names are on the page"
     assert _order() == before
 
 

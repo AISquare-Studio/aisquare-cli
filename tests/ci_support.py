@@ -39,7 +39,7 @@ def request(**overrides: object) -> HookRequest:
         "run_id": RUN,
         "session_id": "ses_test",
         "trace_id": new_trace_id(),
-        "project_ref": "AISquare-Studio/aisquare-cli@main",
+        "project_ref": "AISquare-Studio/rlx@main",
         "snapshot_ref": None,
         "prompt": "why does the brain lock use msvcrt",
         "client_safety_ms": 5_000,

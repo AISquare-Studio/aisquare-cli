@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -1151,13 +1151,55 @@ class UiSettings(BaseModel):
     back on. The captain's ``open_stop`` ui action asks whatever this says: it opens the
     dialog and stops nothing.
 
+    ``dont_ask`` (R17): the actions whose box was ticked *Don't ask again* (``stop``,
+    ``pause``, ``restart``), which then act on one click, every agent alike. A list of kinds,
+    not a switch per kind: a kind it does not name asks, so one a later release adds asks by
+    default, and *Ask again before every action* (App settings ▸ User preferences ▸
+    Advanced) empties it, kinds this release does not know included. ``confirm_stop`` is
+    kept in step for the releases before it (:meth:`_stop_kept_in_step`): ``false`` there
+    reads as ``stop`` here, and every write of either says the same of Stop in both.
+
+    The Display tab's switches, each on by default and applied as it is toggled:
+    ``show_usage`` (an account's use after each agent: the sidebar's ``#1·42%``, the
+    header's ``· 87%``), ``show_agent_marks`` (``✻`` and ``>_`` before the names in a fleet
+    of more than one agent), ``show_live_count`` (``r\\x · 3 live`` in the sidebar's title),
+    ``fade_unfocused`` (the side without the keyboard drawn faded), ``bell`` (the terminal
+    bell when an agent needs its person) and ``board_autoscroll`` (the board follows its
+    live feed when it opens; ``a`` still toggles it).
+
     Read from the config file alone, like ``[fleet]``: there is no ``AISQUARE_UI_*``
     variable. ``asq`` reads it once at start and again when App settings saves, reloads
-    or resets, or the Stop dialog saves *Don't ask again* — not on every refresh tick.
+    or resets, or a box saves *Don't ask again* — not on every refresh tick. Whether an
+    action asks is read from the file at each press (``settings.asks_first``), so two asqs
+    on one home agree at once.
     """
 
     always_show_project_path: bool = False
     confirm_stop: bool = True
+    dont_ask: list[str] = Field(default_factory=list)
+    show_usage: bool = True
+    show_agent_marks: bool = True
+    show_live_count: bool = True
+    fade_unfocused: bool = True
+    bell: bool = True
+    board_autoscroll: bool = True
+
+    @model_validator(mode="after")
+    def _stop_kept_in_step(self) -> UiSettings:
+        """``confirm_stop = false`` (an older release's tick) is ``stop`` in ``dont_ask``, and
+        ``stop`` in ``dont_ask`` is ``confirm_stop = false``: either one saying Stop does not
+        ask is believed, so a choice made by either release holds in both. Each kind once,
+        in the order it was ticked; kinds this release does not know are kept."""
+        kinds = list(dict.fromkeys(kind for kind in self.dont_ask if kind))
+        if not self.confirm_stop and DONT_ASK_STOP not in kinds:
+            kinds.append(DONT_ASK_STOP)
+        self.dont_ask = kinds
+        self.confirm_stop = DONT_ASK_STOP not in kinds
+        return self
+
+
+DONT_ASK_STOP = "stop"
+"""The kind ``[ui] confirm_stop`` stands for in ``dont_ask``: the Stop box's."""
 
 
 class SharingSettings(BaseModel):
@@ -1205,7 +1247,7 @@ class AppConfig(BaseModel):
 #: dropped, since no build from this one on will, and doctor's config row names them
 #: until then (:func:`retired_sections`).
 RETIRED_SECTIONS: dict[str, str] = {
-    "snapshot": "aisquare no longer packs a codebase; an ignore list in it moves to [code]",
+    "snapshot": "rlx no longer packs a codebase; an ignore list in it moves to [code]",
 }
 
 

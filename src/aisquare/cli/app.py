@@ -59,7 +59,7 @@ app = typer.Typer(
 def _print_version(value: bool) -> None:
     """Eager callback for ``--version``."""
     if value:
-        typer.echo(f"aisquare {__version__}")
+        typer.echo(f"rlx {__version__}")
         raise typer.Exit()
 
 
@@ -95,8 +95,8 @@ def main_callback(
     ] = "default",
     no_color: Annotated[bool, typer.Option("--no-color", help="Disable coloured output.")] = False,
 ) -> None:
-    """One terminal over your projects and your coding agents: task a manager in
-    plain words, and it runs the coders, testers and reviewers for you.
+    """rlx is a manager for your AI coding agents. Tell it the goal: it runs Claude Code
+    and Codex on accounts with room. Then relax.
 
     Underneath, a memory keeps your preferences and each project's conventions
     across sessions.
@@ -270,7 +270,9 @@ app.add_typer(fleet.app, name="fleet")
 app.add_typer(watcher.app, name="watch")
 app.add_typer(code.app, name="code")
 app.add_typer(persona.app, name="persona")
-app.add_typer(captain.app, name="captain")
+# Experimental, and off until turned on: not in the top-level --help (owner, 2026-11-17).
+# `rlx captain …` runs, and `rlx captain --help` prints, as before.
+app.add_typer(captain.app, name="captain", hidden=True)
 app.command("ui")(fleet.ui)
 app.command("instances")(instances_cli.instances)
 app.add_typer(hook.app, name="hook", hidden=True)
@@ -299,6 +301,6 @@ def main(prog_name: str | None = None) -> None:
     why = store_broker.check_cwd()
     if why is not None:
         store_broker.record_refusal("board", why)
-        sys.stderr.write(f"aisquare: {why}\n")
+        sys.stderr.write(f"rlx: {why}\n")
         raise SystemExit(2)
     app(prog_name=prog_name)

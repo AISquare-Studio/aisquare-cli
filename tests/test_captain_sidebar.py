@@ -24,6 +24,7 @@ from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
 from tests import toast_log
@@ -144,9 +145,10 @@ def test_with_no_captain_the_section_says_how_to_start_one(tmp_path: Path, scrip
         section = app.query_one("#captain-section")
         assert not section.query(AgentRow)
         start = app.query_one("#captain-empty")
-        # A Start captain line now (#33), and the command it stands for under the pointer.
+        # A Start captain line now (#33); under the pointer, what a click does, never the
+        # command it stands for (R13).
         assert shown(start) == "▶  Start captain"  # type: ignore[arg-type]
-        assert "aisquare captain" in str(start.tooltip)
+        assert str(start.tooltip) == "No captain running — click to start one"
 
     drive(body)
 
@@ -314,6 +316,9 @@ def test_restarting_the_captain_selects_its_new_row_and_keeps_the_doctor_global(
     """Restart on the captain's row: the service is asked with the home's board, the
     shell follows the new row as it does any agent's (#138), and the Doctor's
     scope stays the global one — the restart path scopes it too."""
+    # Restart's box ticked Don't ask again (R17): this test is of the restart, and the box
+    # has its own (tests/test_ui_agent_actions.py).
+    settings_service.stop_asking_first("restart")
     seed(tmp_path, ("prj_aaa", "alpha", None))
     home = captain_state.home_project()
     exited = status(home.id, "captain", "captain", "exited", exit_status=130)

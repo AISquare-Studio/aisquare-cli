@@ -539,7 +539,7 @@ def test_ls_with_no_agents_says_how_to_start_one(
     assert result.exit_code == 0, result.output
     assert "(no agents)" in result.stdout
     # Naming the project listed: alone, it spawned in the active one (#259, round 21).
-    assert "aisquare fleet spawn --project amber-otter manager" in result.stdout
+    assert "rlx fleet spawn --project amber-otter manager" in result.stdout
 
 
 def test_ls_all_includes_ended_agents_and_plain_ls_does_not(
@@ -822,7 +822,7 @@ def test_an_interrupted_shutdown_prints_how_far_it_got_and_exits_130(
     assert "💤 manager (exit 0)" in out, "the row already down is named"
     assert "🔓 1 claimed task(s) released back to the board" in out
     assert "interrupted while stopping coder-auth" in out
-    assert "`aisquare fleet ls --project amber-otter --all` shows what is still running" in out
+    assert "`rlx fleet ls --project amber-otter --all` shows what is still running" in out
 
 
 def test_stop_confirms_and_passes_force_through(
@@ -855,7 +855,7 @@ def test_stop_says_reap_removes_the_worktree_of_an_agent_that_had_one(
     _install(monkeypatch, "stop", StopReceipt(agent, []))
     said = runner.invoke(app, ["fleet", "stop", "--project", "web", "coder-auth"]).stdout
     hint = (
-        "· run `aisquare fleet reap --project amber-otter` to remove its worktree once its "
+        "· run `rlx fleet reap --project amber-otter` to remove its worktree once its "
         "work is pushed"
     )
     assert (hint in " ".join(said.split())) is worktree, said
@@ -1112,7 +1112,7 @@ def test_all_exits_0_when_nothing_failed_and_says_what_each_stop_left(
     assert _lines(result.stdout) == [
         "api",
         f"  ✓ {'coder-auth':<24} {'coder':<10} stopped",
-        "      · run `aisquare fleet reap --project amber-otter` to remove its worktree once"
+        "      · run `rlx fleet reap --project amber-otter` to remove its worktree once"
         " its work is pushed",
         "      🔓 1 claimed task(s) released back to the board",
         "         · the task it held (tsk_01x)",
@@ -1609,8 +1609,8 @@ def test_shutdown_all_names_a_resume_for_each_project_whose_pause_was_not_settle
     out = " ".join(_plain(result.stdout).split())
     assert (
         "re-run once the store answers, or clear them with "
-        "`aisquare fleet resume --project amber-otter`; "
-        "`aisquare fleet resume --project prj_02def`"
+        "`rlx fleet resume --project amber-otter`; "
+        "`rlx fleet resume --project prj_02def`"
     ) in out, out
     assert resolved.calls == []
 
@@ -2113,7 +2113,7 @@ def test_pause_all_says_the_captains_home_has_no_manager(
     assert said.count("its manager spawns nothing") == 1, said
     assert (
         "⏸ api is fleet-paused: its manager spawns nothing until "
-        "`aisquare fleet resume --project amber-otter`"
+        "`rlx fleet resume --project amber-otter`"
     ) in said
 
 
@@ -2253,8 +2253,8 @@ def test_ui_refuses_without_a_tty_and_says_which_condition_failed(
     assert result.exit_code == 1, result.output
     assert result.stdout == ""
     err = _plain(result.stderr)
-    assert "✗ the fleet UI needs an interactive terminal (stdin is not a TTY)" in err
-    assert "aisquare fleet ls --json" in err
+    assert "✗ the rlx UI needs an interactive terminal (stdin is not a TTY)" in err
+    assert "rlx fleet ls --json" in err
     assert ui_spy == []
 
 
@@ -2333,7 +2333,7 @@ def test_ui_help_exists(runner: CliRunner) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Usage" in _plain(result.output)
-    assert "fleet UI" in _plain(result.output)
+    assert "rlx UI" in _plain(result.output)
 
 
 # ── markup in data ───────────────────────────────────────────────────────────

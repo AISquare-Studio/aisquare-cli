@@ -1279,7 +1279,7 @@ def test_use_on_a_host_it_does_not_know_says_where_its_gateway_goes(
     assert f"target:   {host} → (no gateway known)" in result.output
     said = " ".join(result.output.split())
     where = f'set gateway_url and proxy_url under [explainability.targets."{host}"]'
-    assert f"{host} is not a deployment this CLI knows — {where}" in said
+    assert f"{host} is not a deployment rlx knows — {where}" in said
     assert "explainability-api.aisquare.studio" not in result.output
     assert load_config().explainability.targets == {}
 
@@ -1305,7 +1305,7 @@ def test_describe_has_one_voice() -> None:
     )
     assert dest.describe(row, key_source="file").endswith("— using the machine key")
     minted = row.model_copy(update={"key_uid": "k"})
-    assert dest.describe(minted).endswith("— key minted by the CLI")
+    assert dest.describe(minted).endswith("— key minted by rlx")
 
 
 # --- the key never crosses a deployment or a workspace ---------------------------------------
@@ -2016,7 +2016,7 @@ def test_the_ui_attach_leaves_a_minted_key_to_the_cli(
     _json(runner, "explainability", "use", "acme/Frontend")
     assert view.minted_key_refusal(project) is not None
     refused = view.attach_project_key("AIS_pasted_again", project, "local")
-    assert refused.severity == "warning" and "minted by the CLI" in refused.message
+    assert refused.severity == "warning" and "minted by rlx" in refused.message
     assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
 
 
@@ -2069,7 +2069,7 @@ def test_the_tabs_attach_asks_about_a_minted_key_inside_the_writers_own_session(
     with monkeypatch.context() as counting:
         counting.setattr(store_module, "open_store", counted)
         refused = view.attach_project_key("AIS_pasted_again", project, "local")
-    assert refused.severity == "warning" and "minted by the CLI" in refused.message
+    assert refused.severity == "warning" and "minted by rlx" in refused.message
     assert len(opened) == 1
     assert service.project_key_path(project.id).read_text() == idp.minted[0]["api_key"]
 
@@ -2321,7 +2321,7 @@ def test_a_refused_revoke_is_said_kept_owed_and_retried_by_doctor_live(
     idp.key_mint = "token_not_valid"  # the key endpoints answer the sign-in token 401
     cleared = runner.invoke(app, ["explainability", "key", "clear"])
     assert cleared.exit_code == 0, cleared.output
-    assert "⚠ 1 key the CLI minted is still live on the server — acme for web" in cleared.output
+    assert "⚠ 1 key rlx minted is still live on the server — acme for web" in cleared.output
     assert "HTTP 401" in cleared.output and "doctor --live" in cleared.output
     assert idp.revoked_keys == []
 
@@ -2796,9 +2796,7 @@ def test_a_purge_signed_out_keeps_its_keys_owed_says_so_and_revokes_after_the_sw
     assert {key["last_error"] for key in still_live} == {"signed out"}
     assert passes[0] == {one.id, two.id}, "one pass after the sweep, not a revoke per project"
     assert forgotten.exit_code == 0, forgotten.output
-    assert "⚠ 1 key the CLI minted is still live on the server — acme for three" in (
-        forgotten.output
-    )
+    assert "⚠ 1 key rlx minted is still live on the server — acme for three" in (forgotten.output)
     assert idp.revoked_keys == []
 
     add_project(tmp_path / "web")  # `use` here names web's destination: web is added (#139)

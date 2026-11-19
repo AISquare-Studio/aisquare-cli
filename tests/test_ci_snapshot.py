@@ -297,10 +297,10 @@ def test_project_ref_names_the_repository_and_branch_without_credentials(tmp_pat
         "remote",
         "add",
         "origin",
-        "https://user:s3cr3t@github.com/AISquare-Studio/aisquare-cli.git",
+        "https://user:s3cr3t@github.com/AISquare-Studio/rlx.git",
     )
     ref = ci_snapshot.project_ref(root)
-    assert ref == "AISquare-Studio/aisquare-cli@main"
+    assert ref == "AISquare-Studio/rlx@main"
     assert "s3cr3t" not in ref
 
 
@@ -324,8 +324,8 @@ def test_project_ref_is_a_valid_request_field(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("url", "slug"),
     [
-        ("git@github.com:AISquare-Studio/aisquare-cli.git", "AISquare-Studio/aisquare-cli"),
-        ("https://github.com/AISquare-Studio/aisquare-cli", "AISquare-Studio/aisquare-cli"),
+        ("git@github.com:AISquare-Studio/rlx.git", "AISquare-Studio/rlx"),
+        ("https://github.com/AISquare-Studio/rlx", "AISquare-Studio/rlx"),
         ("https://user:token@github.com/o/r.git", "o/r"),
         ("ssh://git@host.example:2222/deep/path/o/r.git", "o/r"),
         ("file:///srv/repos/thing.git", "repos/thing"),

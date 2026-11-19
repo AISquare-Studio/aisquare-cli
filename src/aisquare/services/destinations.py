@@ -51,6 +51,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core.config import ExplainabilitySettings, ExplainabilityTarget
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import UNKNOWN_KEY_UID, PendingRevocation, ProjectInfo, TraceDestination
@@ -641,6 +642,14 @@ REVOKE_RETRY = (
 """Where a key still owed is tried again — the one remedy every surface names."""
 
 
+def revoke_retry() -> str:
+    """:data:`REVOKE_RETRY` where asq may show it: the dashboard's way alone (R13b)."""
+    return prog.shell_advice(
+        REVOKE_RETRY,
+        app="revoke it in the dashboard's key list (aisquare-cli <host> <project>)",
+    )
+
+
 @dataclass
 class Revocations:
     """One pass over the revocations owed (:func:`revoke_owed`): what went, what is still live."""
@@ -778,8 +787,8 @@ def _revoke(
 
 
 def describe_owed(owed: list[PendingRevocation]) -> str:
-    """``1 key the CLI minted is still live on the server — acme for web (signed out)``."""
-    noun = "key the CLI minted is" if len(owed) == 1 else "keys the CLI minted are"
+    """``1 key rlx minted is still live on the server — acme for web (signed out)``."""
+    noun = "key rlx minted is" if len(owed) == 1 else "keys rlx minted are"
     which = "; ".join(
         f"{record.workspace_name} for {record.project_name} "
         f"({record.last_error or 'not tried yet'})"
@@ -795,9 +804,9 @@ def describe_revocations(report: Revocations) -> str | None:
         which = ", ".join(
             f"{record.workspace_name} for {record.project_name}" for record in report.revoked
         )
-        parts.append(f"revoked {len(report.revoked)} key(s) the CLI minted ({which})")
+        parts.append(f"revoked {len(report.revoked)} key(s) rlx minted ({which})")
     if report.owed:
-        parts.append(f"{describe_owed(report.owed)} — {REVOKE_RETRY}")
+        parts.append(f"{describe_owed(report.owed)} — {revoke_retry()}")
     return "; ".join(parts) or None
 
 
@@ -860,9 +869,12 @@ def mint_key(
     if binding is not None and not destination.key_uid and binding.key_path.is_file():
         raise DestinationError(
             "hand_key_attached",
-            f"the project has a key attached by hand for target {binding.target}, and the CLI "
-            "does not overwrite it — `aisquare explainability key set --target "
-            f"{destination.environment}` replaces it, `key clear` removes it",
+            f"the project has a key attached by hand for target {binding.target}, and rlx "
+            "does not overwrite it"
+            + prog.shell_advice(
+                " — `aisquare explainability key set --target "
+                f"{destination.environment}` replaces it, `key clear` removes it"
+            ),
         )
     result = iam.request(
         "api/v2/iam/workspace-api-key/",
@@ -879,8 +891,8 @@ def mint_key(
         raise DestinationError(
             "key_exchange_unsupported",
             "the API does not accept a sign-in token on its key endpoint yet "
-            f"({BACKEND_ISSUE}); until it does, attach a key from the dashboard with "
-            "`aisquare explainability key set --from-env VAR`",
+            f"({BACKEND_ISSUE}); until it does, attach a key from the dashboard"
+            + prog.shell_advice(" with `aisquare explainability key set --from-env VAR`"),
         )
     if result.status == 403:
         raise DestinationError(
@@ -1063,13 +1075,17 @@ def _binding_detail(verdict: HttpVerdict) -> str:
 def describe(destination: TraceDestination | None, *, key_source: str | None = None) -> str:
     """``acme / Frontend · stg · chosen by a@b.c`` plus the credential's standing — one renderer."""
     if destination is None:
-        return "(none chosen — aisquare explainability use <workspace>/<studio>)"
+        return (
+            "(none chosen"
+            + prog.shell_advice(" — aisquare explainability use <workspace>/<studio>")
+            + ")"
+        )
     parts = [destination.label, destination.environment]
     if destination.set_by:
         parts.append(f"chosen by {destination.set_by}")
     text = " · ".join(parts)
     if destination.key_uid:
-        text += " — key minted by the CLI"
+        text += " — key minted by rlx"
     elif key_source == "project":
         text += " — key attached by hand"
     elif key_source in ("env", "file"):

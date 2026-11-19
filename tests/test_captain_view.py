@@ -363,7 +363,8 @@ def test_the_quick_action_types_nothing_into_a_fresh_captains_trust_dialog(
     said = drive(_whats_up)
     assert fake.typed == [] and fake.told == []
     assert any("nothing typed" in line and "trust its folder" in line for line in said), said
-    assert any("choose Yes, I trust this folder (once)" in line for line in said), said
+    assert any("choose Yes, I trust this folder in its pane (once)" in line for line in said), said
+    assert not any("rlx captain" in line for line in said), "asq names no command (R13b)"
 
 
 @pytest.mark.needs_captain
@@ -721,7 +722,7 @@ async def _press_mic(pilot: Pilot[None]) -> str:
 
 
 @pytest.mark.needs_captain
-def test_the_mic_prints_the_url_the_qr_and_the_start_command_with_no_page_running(
+def test_the_mic_prints_the_url_and_the_qr_and_names_no_command_with_no_page_running(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """13178 Q2: print only — with none running, the URL it would serve, the QR, the command."""
@@ -739,8 +740,8 @@ def test_the_mic_prints_the_url_the_qr_and_the_start_command_with_no_page_runnin
     text = drive(body)
     assert voice.voice_url(voice.DEFAULT_PORT, serve_token()) in text
     assert "█▀▀█ qr" in text and "█▄▄█ qr" in text
-    assert "aisquare captain voice" in text
-    assert voice.adb_reverse(voice.DEFAULT_PORT) in text
+    # The commands that start the page or forward a phone's port are the shell's (R13).
+    assert "captain voice" not in text and "adb reverse" not in text
     assert "not running" in text
 
 

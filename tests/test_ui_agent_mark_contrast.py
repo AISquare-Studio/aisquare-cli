@@ -8,10 +8,11 @@ theme's surfaces (catppuccin-frappe's picker needs a lighter ink than textual-li
 allows), so each mark has a colour for a dark theme and one for a light theme
 (``AgentMark.on_dark``, ``on_light``), of one hue.
 
-Here every built-in theme but the two ``ansi`` ones (they paint the terminal's own
-background, which no test can know) is put on screen, after the page has painted, so the
-repaint a theme change brings is the one measured: the Accounts page and the sidebar rows of a
-fleet that mixes agents, then the account picker with each agent's row off the highlight.
+Here every built-in theme and our own ``rlx`` (#139), but the two ``ansi`` ones (they paint the
+terminal's own background, which no test can know), is put on screen, after the page has
+painted, so the repaint a theme change brings is the one measured: the Accounts page and the
+sidebar rows of a fleet that mixes agents, then the account picker with each agent's row off the
+highlight.
 Every mark cell's ink is measured against the background drawn under it (WCAG's ratio).
 """
 
@@ -31,6 +32,7 @@ from textual.widgets import OptionList
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.attach import AttachTargetScreen
+from aisquare.cli.ui.theme import RLX_THEME, register_themes
 from aisquare.core.orchestrator import team_project
 from aisquare.models import FleetAgent, FleetAgentStatus
 from aisquare.services import claude_accounts as accounts_service
@@ -41,14 +43,15 @@ from tests.ui_workers import settle_page, settle_until, settle_until_held
 
 #: The themes whose background is the terminal's own: not measured, and the only ones not.
 TERMINALS = frozenset({"ansi-dark", "ansi-light"})
-THEMES = sorted(set(BUILTIN_THEMES) - TERMINALS)
+THEMES = sorted((set(BUILTIN_THEMES) | {RLX_THEME.name}) - TERMINALS)
+"""Every built-in theme and our own, ``rlx`` (the default since #139), but the terminals'."""
 FLOOR = 3.0
 """WCAG 2's ratio for a graphical object that must be told apart (1.4.11)."""
 
 
 def test_every_built_in_theme_is_measured_but_the_terminals_own() -> None:
-    assert set(BUILTIN_THEMES) >= TERMINALS and len(THEMES) >= 19
-    assert {"textual-dark", "textual-light", "catppuccin-frappe", "nord"} <= set(THEMES)
+    assert set(BUILTIN_THEMES) >= TERMINALS and len(THEMES) >= 20
+    assert {"rlx", "textual-dark", "textual-light", "catppuccin-frappe", "nord"} <= set(THEMES)
 
 
 def _luminance(rgb: tuple[int, int, int]) -> float:
@@ -115,6 +118,7 @@ def _fleet(project: str) -> list[FleetAgentStatus]:
 class PickerHost(App[None]):
     def __init__(self, project: Any) -> None:
         super().__init__()
+        register_themes(self)  # rlx, as both of our apps offer it
         self.project = project
 
     def on_mount(self) -> None:

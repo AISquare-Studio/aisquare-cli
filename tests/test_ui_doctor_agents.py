@@ -76,7 +76,9 @@ def test_connect_is_one_click_and_the_planned_agents_have_no_button(
         (isolated_agent_home / name).mkdir(parents=True)
     monkeypatch.chdir(tmp_path)
     run = InProcessConnect()
-    connect_label = f"aisquare agents connect claude-code --config-dir {claude}"
+    home = str(Path.home())
+    shown = "~" + str(claude)[len(home) :] if str(claude).startswith(home) else str(claude)
+    connect_label = f"Connect Claude Code ({shown})"  # what it does, never its command (R13)
 
     async def drive() -> tuple[dict[str, str], dict[str, str], str, list[Message]]:
         view = DoctorView(run=run, refresh=lambda cwd: diagnostics.doctor(cwd=cwd))
@@ -110,7 +112,7 @@ def test_connect_is_one_click_and_the_planned_agents_have_no_button(
     lines = {line.split(":")[0]: line for line in report.splitlines() if ": " in line}
     assert "connected (all lifecycle hooks installed" in lines["✓ claude-code"], report
     # Codex's row is its integration's since #113 (`_check_other_agents`), not a path's.
-    assert "Codex detected" in lines["✓ codex (beta)"], report  # its release stage's mark
+    assert "Codex detected" in lines["✓ codex"], report  # no mark since 0.10.1 (R21)
     assert f"Cursor detected at {isolated_agent_home / '.cursor'}" in lines["✓ cursor"], report
     refreshed = [m for m in received if isinstance(m, DoctorRefreshed)]
     assert len(refreshed) == 1, received

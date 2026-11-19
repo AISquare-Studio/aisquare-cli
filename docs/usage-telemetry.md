@@ -1,6 +1,6 @@
 # Usage sharing: what is sent, what never is, and the wire contract
 
-aisquare can send AISquare **anonymous daily counts of how it is used**, so that the people who
+rlx can send AISquare **anonymous daily counts of how it is used**, so that the people who
 build it know what to improve. It is **off by default**. Nothing leaves your machine until you
 turn it on, you can see what would be sent first, and you can turn it off with one click.
 
@@ -8,8 +8,8 @@ Turn it on or off, either way:
 
 - the one-time question the UI asks after you have set up a project, or the button at the top of
   *Settings ▸ Usage & stats* (*Turn sharing on* / *Turn sharing off*, and *What's shared*);
-- `aisquare metrics share on`, `aisquare metrics share off`, `aisquare metrics share status`;
-- see the body of the next shipment: `aisquare metrics share preview`. With sharing on it is
+- `rlx metrics share on`, `rlx metrics share off`, `rlx metrics share status`;
+- see the body of the next shipment: `rlx metrics share preview`. With sharing on it is
   exactly that body (built by the same code, the transcripts read first). Otherwise (sharing off,
   forced off, or switched on by hand with `config set sharing.enabled true` before this
   installation has an id) it is captioned as what it is: a **sample** of your last 31 days with
@@ -40,23 +40,23 @@ Counts, per local calendar day, and nothing else:
   A Codex agent and the tasks it marked done are not in these counts: one marked in its shell or
   through its sandbox's broker is its own whether or not it names its session (`--as`), and one
   you mark done `--as` a Codex agent's session is that agent's too.
-- **Your installation**: aisquare's version, your operating system and its version, the CPU
-  architecture, the Python version and how aisquare was installed (`brew`, `pipx`, `uv`, `pip`,
+- **Your installation**: rlx's version, your operating system and its version, the CPU
+  architecture, the Python version and how rlx was installed (`brew`, `pipx`, `uv`, `pip`,
   `script`, `unknown`), and a **random id** made the first time you turn sharing on (a UUID that
   is not derived from you or your machine).
 
 ### Every repository you run Claude Code in
 
 Usage is counted for **every repository you run Claude Code in, including ones you have not
-added to aisquare**: the local sweep reads the transcripts of every session on the machine, and
+added to rlx**: the local sweep reads the transcripts of every session on the machine, and
 `[projects] capture` (which decides whether a hook records rows for a directory nobody added)
 does not change that. When you turn sharing on, those repositories are part of the repository
 counts that are sent, each as a salted hash with four coarse traits, like any other. This is
 said wherever sharing is switched on: in the question, in the description of the switch in
-Settings ▸ Usage & stats, and when `aisquare metrics share on` turns it on. A project you forgot
+Settings ▸ Usage & stats, and when `rlx metrics share on` turns it on. A project you forgot
 with `project forget --purge` is not counted, shown or sent again, by the sweep or by the Stop
 hook. Codex's sessions, which the sweep reads too, are counted on your machine (Usage & stats,
-`aisquare metrics stats`) and never sent: sharing covers Claude Code's alone, its tokens,
+`rlx metrics stats`) and never sent: sharing covers Claude Code's alone, its tokens,
 repositories, sessions and accounts, its agents alone in the fleet counts (agents started by
 role, tasks done) and the commands of its launches and yours alone in the feature counts. A day
 with only Codex activity sends no record.
@@ -83,7 +83,8 @@ it does for any signed-in API call; the telemetry tables themselves never store 
 ## When it is sent
 
 Never while you are waiting: once a shipment has gone through, the next is due 6 hours later, and
-after a failure it is tried again after 5 minutes, doubling up to 6 hours (a command starts at
+after a failure it is tried again after 5 minutes, doubling up to 6 hours, or later when the
+server names a longer wait with `Retry-After` on a 429 or a 503, up to a day (a command starts at
 most one background shipment in half an hour either way); the UI sends from a background
 thread; a shipment has 5-second timeouts and does not
 touch the command or hook that started it. Sharing starts from the day you turn it on: the days
@@ -110,14 +111,14 @@ the attempt is retried after the backoff.
 
 ## Switching it off
 
-`aisquare metrics share off` (or the button) turns it off at once, deletes what was kept about what
+`rlx metrics share off` (or the button) turns it off at once, deletes what was kept about what
 was sent, and sends **one** notice that you opted out (only if anything was ever sent). A shipment
 already under way is stopped: it looks at the switch again before every request, so at most the
 request that is already out finishes (5 seconds at most), and nothing it would have recorded is
 written after the deletion. Nothing is sent after the notice until you turn sharing on again. Saying
 *off* is also the answer to the one-time question, which is not asked afterwards. These force it off whatever the switch says, and
 suppress the question: `DO_NOT_TRACK=1`, `AISQUARE_NO_TELEMETRY=1`, and any `CI` run.
-`aisquare metrics share reset-id` gives the installation a new id and salt.
+`rlx metrics share reset-id` gives the installation a new id and salt.
 
 ## Where it lives in the code
 
@@ -127,7 +128,7 @@ holds the rules (forced off, the state, the backoff), and the local figures it i
 
 ---
 
-# CLI usage telemetry — wire contract v1.1 (aisquare-cli ⇄ AISquare-Studio-BE)
+# rlx usage telemetry — wire contract v1.1 (aisquare-cli ⇄ AISquare-Studio-BE)
 
 The contract both ends implement (the endpoint is AISquare-Studio-BE's task #3). A change to it
 is agreed by both first. **v1.1** is v1 with the amendments of the team board (seq 3631), marked
@@ -141,26 +142,27 @@ is agreed by both first. **v1.1** is v1 with the amendments of the team board (s
   remote URLs, emails, prompts, file names, command arguments or any text.
 - Consent: one-time TUI dialog after onboarding (Share / No thanks / See what
   would be sent) + one-click toggle on Settings ▸ Usage & stats +
-  `aisquare metrics share on|off|status|preview`.
+  `rlx metrics share on|off|status|preview`.
 
 ## Endpoint
-`POST {api_url}/api/v1/cli/metrics/` — `api_url` is the same base the CLI's
-AISquare sign-in already uses. JSON body, `Content-Type: application/json`.
+`POST {api_url}/api/v1/rlx/metrics/` — `api_url` is the same base rlx's
+AISquare sign-in already uses. JSON body, `Content-Type: application/json`. Releases up to
+0.10.0 post to `/api/v1/cli/metrics/`, which the BE keeps as a deprecated alias until May 2027.
 
 Auth is OPTIONAL:
-- Signed in → CLI sends `Authorization: Bearer aisq_…` (its existing device-flow
+- Signed in → rlx sends `Authorization: Bearer aisq_…` (its existing device-flow
   token). BE links the rows to that user.
 - Not signed in → no header. Accepted, stored unlinked.
 - Invalid / expired / revoked / wrong-scope token → BE MUST still accept the
   batch as anonymous (200, `linked: false`), never 401. (DRF's default auth
-  raises before AllowAny; BE uses a lenient auth class.) Belt and braces: the
-  CLI retries once without the header if it ever gets a 401.
+  raises before AllowAny; BE uses a lenient auth class.) Belt and braces:
+  rlx retries once without the header if it ever gets a 401.
 
 Throttle: per-IP named rate (env-backed, default 120/hour). Body cap 256 KB.
 
-Redirects *(v1.1)*: the endpoint answers where it is asked. The CLI **never follows a redirect**
+Redirects *(v1.1)*: the endpoint answers where it is asked. rlx **never follows a redirect**
 on this POST (so the bearer token cannot reach another origin); a 3xx is a retryable failure, and
-the CLI posts to the path **with** its trailing slash.
+rlx posts to the path **with** its trailing slash.
 
 ## Request body (schema_version 1)
 ```json
@@ -199,29 +201,29 @@ the CLI posts to the path **with** its trailing slash.
 }
 ```
 Field rules:
-- `install_id`: random uuid4 minted at first opt-in, stored in CLI state; NOT
+- `install_id`: random uuid4 minted at first opt-in, stored in rlx's state; NOT
   derived from hardware/user. Kept across opt-out/in unless the user resets it.
 - `date` is the user's LOCAL calendar day; `tz_offset_minutes` its offset. *(v1.1)* Any integer
   in [-840, 840]: west of UTC is negative, and is not an error.
-- `active` = at least one CLI command, TUI launch or agent turn that day. DAU on
+- `active` = at least one rlx command, TUI launch or agent turn that day. DAU on
   the BE = distinct `install_id` with `active=true` for a date.
 - `tokens.total` = input + cache_write + cache_read + output and MUST equal what
-  `aisquare metrics tokens` / the local dashboard report for the same day.
-- `accounts.by_type` keys = Claude subscription type as the CLI reads it
+  `rlx metrics tokens` / the local dashboard report for the same day.
+- `accounts.by_type` keys = Claude subscription type as rlx reads it
   (`core/claude_accounts.py` subscription_type; "api" for API-key accounts; "unknown"
   otherwise). No emails, aliases or slot ids. *(v1.1)* A closed set: `pro`, `max`, `team`,
-  `enterprise`, `api`, `unknown`, `other`. The CLI maps anything else to `other` (counts summed);
+  `enterprise`, `api`, `unknown`, `other`. rlx maps anything else to `other` (counts summed);
   the BE stores a key it does not know under `other` and never answers 400 for it.
-- `models` keys *(v1.1)*: the CLI sends only ids matching `^claude-[a-z0-9.-]{1,60}$`; every other
+- `models` keys *(v1.1)*: rlx sends only ids matching `^claude-[a-z0-9.-]{1,60}$`; every other
   model name is summed under the key `other`. (A model name is text from a transcript.)
 - `repo_hash` = first 16 hex of HMAC-SHA256(key = per-install random salt kept
-  in CLI state, msg = normalised git remote URL, else the repo root path).
+  in rlx's state, msg = normalised git remote URL, else the repo root path).
   Per-install salt ⇒ the same repo is NOT correlatable across users.
 - `repos`: top 25 by tokens_total for that day; `repos_active` is the full count.
   Clones of one remote are one repo.
 - `features`: counts keyed by command path (`cli.<group>.<verb>`) or TUI view
   (`tui.view.<name>`), ≤ 200 keys, names only — never arguments or values.
-- Batch: ≤ 31 days, oldest first. The CLI resends TODAY on every ship (it grows)
+- Batch: ≤ 31 days, oldest first. rlx resends TODAY on every ship (it grows)
   and every day since opt-in not yet acknowledged, in successive batches.
 - `opt_out: true` with `days: []` is sent once, best-effort, when the user turns
   sharing off; the BE stamps `opted_out_at` on the installation. Nothing is
@@ -240,29 +242,32 @@ Field rules:
   date outside [today−400d, today+1d], negative numbers); `429` throttled.
   *(v1.1)* "Negative numbers → 400" covers token, cost and count fields only; `tz_offset_minutes`
   may be any integer in [-840, 840]. The 200 body is **exactly** those two keys (`accepted_days`
-  an integer, `linked` a boolean); the CLI treats any other 200 body as a retryable failure and
+  an integer, `linked` a boolean); rlx treats any other 200 body as a retryable failure and
   does not mark the days as sent.
 - Unknown extra keys inside a day are ignored (forward-compatible), not 400.
 
 ## What the client does that the contract leaves open
 - `features` keys are free-form names (`cli.<group>.<verb>`, `tui.view.<name>`, `tui.launch`),
-  matched `^[a-z0-9_.-]{1,64}$`; the BE must not pattern-check them beyond that. The CLI counts
+  matched `^[a-z0-9_.-]{1,64}$`; the BE must not pattern-check them beyond that. rlx counts
   a hidden alias of a group (`ctx`, `workspace`) under the group's name, and a request for a
   command's `--help` is not a use of it.
 - `client` fields are shapes: `os_version` is `\d+(\.\d+)?` (else `unknown`), `os`/`arch` are
-  `[a-z0-9_]{1,16}`, `python` is `x.y.z`, and `traits.language` is one of the languages the CLI can
+  `[a-z0-9_]{1,16}`, `python` is `x.y.z`, and `traits.language` is one of the languages rlx can
   name (`python`, `typescript`, …) or `unknown`: a kernel release such as `6.8-alice-laptop` is not
   sent.
 - A shipment is acknowledged **only** by a 200 whose body is the contract's reply: an object with
   `accepted_days` an integer of at least 1 and `linked` a boolean (extra keys are ignored). An
   empty object, an error with a 200, a gateway's page, a string or 0 for `accepted_days`, a missing
   `linked` — none of it is an answer of the endpoint; the days stay unsent and go next time.
-- The CLI checks the switch before every request of a shipment and again before it records the
+- rlx checks the switch before every request of a shipment and again before it records the
   answer, so `share off` stops a shipment under way (see *Switching it off*).
 - `signed_in` is the sign-in's state when the batch is built, for every day in it.
 - `install_method`: `brew` (Homebrew), `pipx`, `uv` (uvx), `script` (the one-line installer's
   uv tool), `pip` (a virtual environment or system pip), `unknown` (a checkout).
-- `language` is `unknown` when no tracked file is in a language the CLI knows.
+- `language` is `unknown` when no tracked file is in a language rlx knows.
 - A failure of any kind (no network, 404 because the endpoint is not deployed, 4xx, 5xx, 429, a
   reply that is not JSON) is silent on the client and retried after a backoff of 5 minutes
-  doubling to 6 hours, for ever; the days are rebuilt from the local record, so none is lost.
+  doubling to 6 hours, for ever, or after the `Retry-After` of a 429 or a 503 when that is longer,
+  capped at 24 hours (the ingest answers 503 with `Retry-After: 3600` while its kill switch is
+  off, and a 500 or 502's `Retry-After` is not read); the days are
+  rebuilt from the local record, so none is lost.

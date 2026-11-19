@@ -288,7 +288,7 @@ def test_the_home_warning_names_each_agent_with_accounts_here(fake_home: Path) -
     from aisquare.services import project as project_service
 
     assert project_service.home_warning() == (
-        "this folder is aisquare's own home: it holds aisquare's settings, the fleet database "
+        "this folder is rlx's own home: it holds rlx's settings, the fleet database "
         "and every Claude account's login data, so agents working here can read and change them"
     )
     _codex_slot("me@example.com")

@@ -879,7 +879,7 @@ def test_dry_run_still_reports_what_it_would_do(tmp_path: Path) -> None:
         env={"AISQUARE_HOME": ""},
         path=f"{cli}:{curl}:{base_path(tmp_path)}",
     )
-    assert "aisquare installer" in result.stdout
+    assert "rlx installer" in result.stdout
     assert "~/.aisquare/" in result.stdout, "the banner must list what gets written (§3.7)"
     assert "nothing above was actually run" in result.stdout
 
@@ -1049,7 +1049,7 @@ def test_the_handoff_survives_having_no_controlling_terminal(tmp_path: Path) -> 
         f"(rc={result.returncode}) — see the docstring\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    assert "Open the fleet UI with" in result.stdout, (
+    assert "Open rlx with" in result.stdout, (
         f"it exited before naming the next step:\n{result.stdout}"
     )
 
@@ -1071,7 +1071,7 @@ def test_no_terminal_means_the_ui_is_named_rather_than_launched(tmp_path: Path) 
     assert "THE UI STARTED" not in result.stdout, (
         f"the UI was launched with no terminal to read:\n{result.stdout}"
     )
-    assert "asq" in result.stdout, "it should still tell the user the command"
+    assert "rlx" in result.stdout, "it should still tell the user the command"
 
 
 def test_yes_names_the_ui_rather_than_launching_it(tmp_path: Path) -> None:
@@ -1283,7 +1283,7 @@ def test_the_prompt_reads_the_terminal_and_not_the_script(
         extra=_HANDOFF_FLAGS,
     )
 
-    assert "Open the aisquare fleet UI now?" in output, (
+    assert "Open rlx now?" in output, (
         f"the prompt never appeared — the read did not reach a terminal:\n{output}"
     )
     assert "UI-STARTED" not in output, f"answering 'n' still launched the UI:\n{output}"
@@ -1768,7 +1768,7 @@ def test_a_missing_extra_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None
     assert _NODE_FAILED in alone.stdout
     assert "aisquare doctor" not in alone.stdout, alone.stdout
     assert alone.returncode == 2
-    pointer = both.stdout.index("the full detail and a fix for each: aisquare doctor")
+    pointer = both.stdout.index("the full detail and a fix for each: rlx doctor")
     assert both.stdout.index("  python\n") < pointer < both.stdout.index(_NODE_FAILED)
     assert "  chrome-devtools\n" not in both.stdout, "an extra is not listed as a doctor check"
     assert both.returncode == 2
@@ -3419,7 +3419,7 @@ def _claude_code_state(
     ("state", "row_says"),
     [
         ("switched off", 'hooks are switched off ("disableAllHooks": true)'),
-        ("plugin and hooks", "runs aisquare two ways"),
+        ("plugin and hooks", "runs rlx two ways"),
         ("another install", "(0.7.0) — this install is"),
         ("switched off beside missing hooks", "; hooks are missing or outdated"),
         ("missing hooks", "hooks are missing or outdated"),
@@ -3603,7 +3603,7 @@ def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
 
     assert row["status"] == "warn" and row["fix"], row
     assert "expected: brain claude-code" in result.stdout, result.stdout
-    told = "  claude-code — left alone by --no-agent; aisquare doctor here says:\n"
+    told = "  claude-code — left alone by --no-agent; rlx doctor here says:\n"
     assert f"{told}               {row['detail']}\n" in result.stdout, result.stdout
     assert row["fix"] not in result.stdout, result.stdout
     assert "Not expected" not in result.stdout and "authenticate" not in result.stdout
@@ -3630,7 +3630,7 @@ def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
     )
 
     assert "{" in row["detail"], row
-    said = "  claude-code — left alone by --no-agent; aisquare doctor here shows its state.\n"
+    said = "  claude-code — left alone by --no-agent; rlx doctor here shows its state.\n"
     assert said in result.stdout, result.stdout
     assert "here says:" not in result.stdout, result.stdout
     assert result.returncode == 0
@@ -3639,11 +3639,11 @@ def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
 @pytest.mark.parametrize(
     ("machine", "want_agent", "bin_line", "tool_env", "hooks"),
     [
-        ("fresh", 1, "uv, aisquare, asq, claude", True, True),
-        ("fresh", 0, "uv, aisquare, asq", True, False),
+        ("fresh", 1, "uv, aisquare, asq, rlx, relax, claude", True, True),
+        ("fresh", 0, "uv, aisquare, asq, rlx, relax", True, False),
         ("current", 1, None, False, True),
         ("current", 0, None, False, False),
-        ("force", 1, "aisquare, asq", True, True),
+        ("force", 1, "aisquare, asq, rlx, relax", True, True),
         ("upgrade-all", 1, None, False, True),
     ],
     ids=["fresh", "fresh-no-agent", "current", "current-no-agent", "force", "upgrade-all"],
@@ -3811,6 +3811,126 @@ def test_a_run_from_that_repository_lists_hooks_it_could_not_write(
     assert "the full detail and a fix for each" not in result.stdout, result.stdout
     assert "UNEXPECTED=1" in result.stdout
     assert result.returncode == 2
+
+
+def _session_end_timeouts(config_dir: Path) -> list[object]:
+    """The ``timeout`` of each of aisquare's SessionEnd hooks in ``config_dir``: ``None`` for
+    one with none, as 0.10.0 wrote it."""
+    settings = json.loads((config_dir / "settings.json").read_text(encoding="utf-8"))
+    return [
+        item.get("timeout")
+        for group in settings["hooks"]["SessionEnd"]
+        for item in group["hooks"]
+        if agent_core._is_aisquare_hook_command(str(item.get("command", "")))
+    ]
+
+
+def test_an_upgrade_by_the_installer_gives_every_account_home_its_session_end_time(
+    tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """R26a (the final review of #503, M1). An upgrade by this script is `uv tool install
+    --force` and then `init`, which wires the config dir this shell reads, and no account
+    home. A fleet launch loads no plugin, so an account home's own settings.json hooks are
+    what its agents run, and from 0.10.0 they named no SessionEnd timeout: Claude Code cut
+    the hook off at 1.5 s, doctor read the home short, and the run exited 2. init_home now
+    has the new install rewrite every directory an upgrade re-connects (`agents
+    refresh-hooks --recorded`): both get 10 s, doctor is green, and the run exits 0."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.core.agent_adapters.claude_code import SESSION_END_TIMEOUT_SECONDS
+
+    claude = isolated_agent_home / ".claude"
+    claude.mkdir(parents=True)
+    (claude / "settings.json").write_text("{}", encoding="utf-8")
+    slot = accounts_core.accounts_root() / "2"
+    slot.mkdir(parents=True)
+    cli = _the_cli(tmp_path)
+    path = f"{cli}:{base_path(tmp_path)}"
+    env = {**os.environ, "HOME": str(isolated_agent_home), "PATH": path}
+    for directory in (claude, slot):  # connected by 0.10.0, then its session end as it wrote it
+        argv = [str(cli / "aisquare"), "agents", "connect", "claude-code"]
+        connected = subprocess.run(
+            [*argv, "--config-dir", str(directory)],
+            env=env, capture_output=True, text=True, timeout=120, check=False,
+        )  # fmt: skip
+        assert connected.returncode == 0, connected.stdout + connected.stderr
+        settings_path = directory / "settings.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        for group in settings["hooks"]["SessionEnd"]:
+            for item in group["hooks"]:
+                item.pop("timeout", None)
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        assert _session_end_timeouts(directory) == [None], directory
+    before = _claude_code_row_from(tmp_path, cli, path, isolated_agent_home)
+    assert before["status"] == "warn" and "too little time" in before["detail"], before
+
+    result = sh(
+        "DRY_RUN=0; WANT_SYSTEM_DEPS=0; WANT_PROJECT=0; init_home; run_doctor >/dev/null; "
+        'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
+        cwd=tmp_path,
+        env={"HOME": str(isolated_agent_home)},
+        path=path,
+        no_terminal=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UNEXPECTED=0" in result.stdout, result.stdout
+    for directory in (claude, slot):
+        assert _session_end_timeouts(directory) == [SESSION_END_TIMEOUT_SECONDS], directory
+    after = _claude_code_row_from(tmp_path, cli, path, isolated_agent_home)
+    assert after["status"] == "ok" and "too little time" not in after["detail"], after
+
+
+def test_a_refresh_that_fails_is_a_warning_and_the_run_goes_on(tmp_path: Path) -> None:
+    """R26a: a CLI whose `agents refresh-hooks --recorded` fails (a release before it, a full
+    disk) costs the run a warning, never the install: init_home goes on and says it is set
+    up, and doctor afterwards names any directory still short."""
+    cli = stub_dir(
+        tmp_path, "cli", "aisquare", body='[ "$1 $2" = "agents refresh-hooks" ] && exit 1\nexit 0'
+    )
+    result = sh(
+        'DRY_RUN=0; WANT_PROJECT=0; init_home; echo "AFTER=$?"', path=f"{cli}:{base_path(tmp_path)}"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "warn `aisquare agents refresh-hooks --recorded` failed" in result.stderr, result.stderr
+    assert "set up" in result.stdout and "AFTER=0" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("flags", "refreshed"),
+    [("--yes --no-project", True), ("--no-agent --yes --no-project", False)],
+    ids=["an agent", "--no-agent"],
+)
+def test_the_refresh_runs_after_init_only_with_an_agent(
+    tmp_path: Path, flags: str, refreshed: bool
+) -> None:
+    """--no-agent skips the agents and their hooks: nothing is refreshed then. With an agent,
+    the refresh runs once, after init."""
+    calls = tmp_path / "calls.log"
+    cli = stub_dir(tmp_path, "cli", "aisquare", body=f'printf "%s\\n" "$*" >> "{calls}"\nexit 0')
+    result = sh(f"parse_args {flags}; DRY_RUN=0; init_home", path=f"{cli}:{base_path(tmp_path)}")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    ran = calls.read_text(encoding="utf-8").splitlines()
+    assert ran[0].startswith("init --local --yes"), ran
+    assert (ran[1:] == ["agents refresh-hooks --recorded"]) is refreshed, ran
+    assert any("refresh-hooks" in line for line in ran) is refreshed, ran
+
+
+@pytest.mark.parametrize(
+    ("flags", "said"),
+    [("--dry-run --yes --no-project", True), ("--dry-run --no-agent --yes --no-project", False)],
+    ids=["an agent", "--no-agent"],
+)
+def test_a_dry_run_says_the_refresh_only_with_an_agent(
+    tmp_path: Path, flags: str, said: bool
+) -> None:
+    result = sh(f"parse_args {flags}; init_home", path=base_path(tmp_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "would run: aisquare init --local --yes" in result.stdout, result.stdout
+    line = "would run: aisquare agents refresh-hooks --recorded"
+    assert (line in result.stdout) is said, result.stdout
 
 
 def _claude_code_doctor(status: str, detail: str) -> str:
@@ -4201,7 +4321,7 @@ def test_the_dry_run_banner_names_codex_and_where_it_writes(tmp_path: Path) -> N
     assert "  connect  codex's hooks" in out, out
     assert "Claude Code" not in out, out
     assert f"{tmp_path / 'codex-home'}/hooks.json" in out, out
-    assert "MERGED — aisquare's hook groups only" in out, out
+    assert "MERGED — rlx's hook groups only" in out, out
     assert "would run: aisquare agents use codex" in out, out
 
 
@@ -4228,7 +4348,7 @@ def test_claude_code_is_left_alone_when_only_codex_is_asked_for(tmp_path: Path) 
     assert expected.stdout.strip() == (
         "brain claude-code repomix sandbox-path snapshot tiktoken"
     ), expected.stdout
-    assert "  claude-code — left alone by --agent codex; aisquare doctor here says:" in (
+    assert "  claude-code — left alone by --agent codex; rlx doctor here says:" in (
         result.stdout
     ), result.stdout
     assert row["fix"] not in result.stdout and result.returncode == 0, result.stdout
@@ -4261,7 +4381,7 @@ def test_codex_hooks_awaiting_trust_are_the_users_step_not_a_surprise(tmp_path: 
         env={"PAYLOAD": json.dumps([rows[0], _codex_row("not_configured")])},
     )
 
-    step = "  codex — run codex (sign in if it asks), open /hooks and trust aisquare's hooks\n"
+    step = "  codex — run codex (sign in if it asks), open /hooks and trust rlx's hooks\n"
     assert trust.stdout.count(step) == 1, trust.stdout
     assert "UNEXPECTED=0" in trust.stdout and trust.returncode == 0, trust.stdout
     assert step not in broken.stdout and "Not expected" in broken.stdout, broken.stdout
@@ -4282,11 +4402,28 @@ def test_codex_hooks_awaiting_trust_are_the_users_step_not_a_surprise(tmp_path: 
             ],
             0,
         ),
+        (
+            [
+                {
+                    "name": "codex",
+                    "status": "ok",
+                    "detail": "Codex detected; rlx integration not selected",
+                }
+            ],
+            0,
+        ),
         ([_codex_row("unverified")], 1),
         ([_codex_row("observed")], 1),
         ([], 0),
     ],
-    ids=["not-detected", "not-selected", "unverified", "observed", "no-row"],
+    ids=[
+        "not-detected",
+        "not-selected",
+        "not-selected-since-rlx",
+        "unverified",
+        "observed",
+        "no-row",
+    ],
 )
 def test_a_codex_never_connected_is_work_to_do(
     tmp_path: Path, rows: list[dict[str, str]], connected: int
@@ -4299,6 +4436,31 @@ def test_a_codex_never_connected_is_work_to_do(
         path=base_path(tmp_path),
     )
     assert result.stdout.strip() == ("yes" if connected else "no"), result.stdout
+
+
+def test_the_doctors_own_not_selected_codex_row_is_read_as_not_connected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """install.sh reads the doctor's words: a Codex the doctor calls "… integration not
+    selected" has no hooks of ours. The doctor wrote AISquare there before the rlx rename
+    (#135) and rlx since, so the row the doctor writes today is fed in as it is written."""
+    codex = str(tmp_path / "bin" / "codex")
+    monkeypatch.setattr(agent_core, "on_path", lambda name: codex if name == "codex" else None)
+    [row] = [c for c in diagnostics._check_other_agents() if c.name == "codex"]
+    said = row.model_dump(mode="json")
+
+    def connected(payload: dict[str, Any]) -> str:
+        return sh(
+            "DOCTOR_RAW=$PAYLOAD; if codex_row_connected; then echo yes; else echo no; fi",
+            env={"PAYLOAD": json.dumps([payload])},
+            path=base_path(tmp_path),
+        ).stdout.strip()
+
+    assert row.detail.endswith("integration not selected"), row
+    assert connected(said) == "no", row
+    assert connected({**said, "detail": "Codex connected (hooks installed)"}) == "yes", (
+        "control: the same row read as connected once it says so"
+    )
 
 
 def test_unknown_agent_is_refused_before_installation() -> None:
@@ -4345,3 +4507,213 @@ def test_an_install_run_from_the_home_does_not_read_aisquare_there_as_in_a_proje
     )
     amber = next(line for line in result.stdout.splitlines() if line.startswith("AMBER="))
     assert "sandbox" not in amber and "agents'" not in amber, result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------------
+# rlx and relax: another program's, in uv's executable directory (#133)
+# ---------------------------------------------------------------------------
+#
+# Measured with uv 0.11.6 in a scratch HOME: a plain `uv tool install aisquare-cli`
+# refuses the whole package over another program's `rlx` or `relax` there
+# ("Executables already exist"), and over an installed aisquare-cli it takes that
+# install away too; `uv tool install --force`, which this script's upgrade runs,
+# replaces it without a word. So the run stops before anything is installed.
+
+
+def _commands_home(tmp_path: Path) -> tuple[Path, Path]:
+    """A home whose ~/.local/bin holds, as uv leaves them, aisquare-cli's own `rlx` link, and
+    the place another tool's environment would be."""
+    home = tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    tools = home / ".local" / "share" / "uv" / "tools"
+    (bin_dir / "rlx").symlink_to(tools / "aisquare-cli" / "bin" / "rlx")
+    return home, tools
+
+
+def _hand_made(path: Path) -> None:
+    path.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("variables", "expected"),
+    [
+        ({"UV_TOOL_BIN_DIR": "/u/bin/", "XDG_BIN_HOME": "/x", "XDG_DATA_HOME": "/d"}, "/u/bin"),
+        ({"XDG_BIN_HOME": "/x/", "XDG_DATA_HOME": "/d"}, "/x"),
+        ({"XDG_DATA_HOME": "/d/"}, "/d/../bin"),
+        ({}, "{home}/.local/bin"),
+    ],
+    ids=["uv-tool-bin-dir", "xdg-bin-home", "xdg-data-home", "default"],
+)
+def test_uv_bin_dir_is_where_uv_puts_a_tools_executables(
+    tmp_path: Path, variables: dict[str, str], expected: str
+) -> None:
+    """uv's own order (its docs, `uv tool dir --bin`), worked out without running uv: under
+    --dry-run only version reads may run."""
+    unset = {"UV_TOOL_BIN_DIR": "", "XDG_BIN_HOME": "", "XDG_DATA_HOME": ""}
+    result = sh(
+        "uv_bin_dir",
+        env={**unset, **variables, "HOME": str(tmp_path)},
+        path=base_path(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected.format(home=tmp_path)
+
+
+def test_taken_commands_names_every_rlx_or_relax_but_aisquare_clis_own(tmp_path: Path) -> None:
+    """A hand-made script, another uv tool's link and a link to nothing are another
+    program's; uv's link to aisquare-cli's own script is not."""
+    home, tools = _commands_home(tmp_path)
+    bin_dir = home / ".local" / "bin"
+    (bin_dir / "relax").symlink_to(tools / "relax-other" / "bin" / "relax")  # dangling
+    clean = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+    (bin_dir / "relax").unlink()
+    _hand_made(bin_dir / "relax")
+    one = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+    (bin_dir / "rlx").unlink()
+    (bin_dir / "rlx").symlink_to(tools / "relax-other" / "bin" / "rlx")
+    both = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+    (bin_dir / "rlx").unlink()
+    (bin_dir / "rlx").symlink_to(tools / "aisquare-cli" / "bin" / "relax")  # ours, wrong name
+    renamed = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+
+    assert clean.stdout == f"{bin_dir}/relax\n", clean.stdout + clean.stderr
+    assert one.stdout == f"{bin_dir}/relax\n", one.stdout + one.stderr
+    assert both.stdout == f"{bin_dir}/rlx\n{bin_dir}/relax\n", both.stdout + both.stderr
+    assert renamed.stdout == f"{bin_dir}/rlx\n{bin_dir}/relax\n", renamed.stdout
+
+
+def test_taken_commands_is_empty_with_only_aisquare_clis_own_or_none(tmp_path: Path) -> None:
+    home, tools = _commands_home(tmp_path)
+    (home / ".local" / "bin" / "relax").symlink_to(tools / "aisquare-cli" / "bin" / "relax")
+    ours = sh("taken_commands", env={"HOME": str(home)}, path=base_path(tmp_path))
+    nothing = sh("taken_commands", env={"HOME": str(tmp_path / "empty")}, path=base_path(tmp_path))
+
+    assert (ours.returncode, ours.stdout) == (0, ""), ours.stderr
+    assert (nothing.returncode, nothing.stdout) == (0, ""), nothing.stderr
+
+
+@pytest.mark.parametrize("action", ["install", "upgrade", "repair"])
+def test_a_run_that_installs_the_cli_stops_on_another_programs_command_in_one_line(
+    tmp_path: Path, action: str
+) -> None:
+    """Never replaced unasked, and never the whole install refused halfway: one line says
+    which file and what to do, and the run exits 1."""
+    home, _ = _commands_home(tmp_path)
+    _hand_made(home / ".local" / "bin" / "relax")
+
+    result = sh(
+        f"CLI_ACTION={action}; refuse_taken_commands; echo went-on",
+        env={"HOME": str(home)},
+        path=base_path(tmp_path),
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "went-on" not in result.stdout
+    assert result.stderr == (
+        "error ~/.local/bin/relax is another program's, and aisquare-cli now installs its own "
+        "relax command there: rename or move it, then run this again. Nothing was changed.\n"
+    )
+
+
+def test_two_taken_commands_are_named_in_the_one_line(tmp_path: Path) -> None:
+    home, _ = _commands_home(tmp_path)
+    (home / ".local" / "bin" / "rlx").unlink()
+    _hand_made(home / ".local" / "bin" / "rlx")
+    _hand_made(home / ".local" / "bin" / "relax")
+
+    result = sh("CLI_ACTION=install; refuse_taken_commands", env={"HOME": str(home)})
+
+    assert result.returncode == 1
+    assert result.stderr == (
+        "error ~/.local/bin/rlx and ~/.local/bin/relax are another program's, and aisquare-cli "
+        "now installs its own rlx and relax commands there: rename or move them, then run this "
+        "again. Nothing was changed.\n"
+    )
+
+
+def test_a_run_that_leaves_the_cli_as_it_is_says_nothing_of_them(tmp_path: Path) -> None:
+    """A current aisquare-cli is not reinstalled, so another program's `relax` is no matter."""
+    home, _ = _commands_home(tmp_path)
+    _hand_made(home / ".local" / "bin" / "relax")
+
+    result = sh(
+        "CLI_ACTION=current; refuse_taken_commands; echo went-on",
+        env={"HOME": str(home)},
+        path=base_path(tmp_path),
+    )
+
+    assert (result.returncode, result.stdout, result.stderr) == (0, "went-on\n", "")
+
+
+def test_main_stops_on_a_taken_command_before_uv_or_anything_runs(tmp_path: Path) -> None:
+    """From `main`, as a person runs it: an upgrade over another program's `rlx` runs no uv,
+    no package manager and no installer, and leaves that `rlx` as it was."""
+    home, _ = _commands_home(tmp_path)
+    taken = home / ".local" / "bin" / "rlx"
+    taken.unlink()
+    _hand_made(taken)
+    log = tmp_path / "calls.log"
+    record = f'printf "%s %s\\n" "$(basename "$0")" "$*" >>"{log}"\n'
+    stubs = stub_dir(
+        tmp_path,
+        "bin",
+        "uv",
+        "apt-get",
+        "dnf",
+        "pacman",
+        "apk",
+        "brew",
+        "claude",
+        "curl",
+        "wget",
+        "tmux",
+        "gh",
+        "git",
+        body=record + 'case "$1" in --version|-V|version) echo "x 1.0"; exit 0 ;; esac\nexit 1',
+    )
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body='case "$1" in --version) printf "aisquare 0.10.0\\n"; exit 0 ;; esac\nexit 1',
+    )
+
+    result = sh(
+        "main --yes --no-project --no-agent",
+        env={"HOME": str(home), "AISQUARE_INSTALL_PACKAGE": str(tmp_path / "x.whl")},
+        path=f"{stubs}:{cli}:{base_path(tmp_path)}",
+        no_terminal=True,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "~/.local/bin/rlx is another program's" in result.stderr, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    mutations = [call for call in calls if call.split()[1:2] not in ([], ["--version"], ["-V"])]
+    assert not mutations, f"the refusal still ran something: {calls}"
+    assert taken.read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
+
+
+@pytest.mark.parametrize(
+    ("on_path", "word"),
+    [
+        ("none", "rlx"),
+        ("ours", "rlx"),
+        ("foreign-first", "aisquare"),
+    ],
+    ids=["none-yet", "ours-first", "another-programs-first"],
+)
+def test_the_word_a_line_tells_a_person_to_type_is_rlx_while_rlx_is_ours(
+    tmp_path: Path, on_path: str, word: str
+) -> None:
+    """install.sh names a command by core/program.py's rule (#135): `rlx` while the rlx a shell
+    finds first is uv's own (refuse_taken_commands keeps another program's out of uv's
+    directory), or while none is on PATH yet; `aisquare` while another program's comes first."""
+    uv_bin = stub_dir(tmp_path, "uv-bin", "aisquare", "rlx")
+    other = stub_dir(tmp_path, "other-bin", "rlx")
+    dirs = {"none": [], "ours": [uv_bin], "foreign-first": [other, uv_bin]}[on_path]
+    path = ":".join([*map(str, dirs), base_path(tmp_path)])
+    said = sh("program_word", env={"UV_TOOL_BIN_DIR": str(uv_bin)}, path=path)
+    assert said.stdout == word, (said.stdout, said.stderr)

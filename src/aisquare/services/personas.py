@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from aisquare.core import agents as agents_core
 from aisquare.core import claude_accounts
 from aisquare.core import personas as core
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import DEFAULT_AGENT, adapters, default_adapter, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, SkillDirs
 from aisquare.core.atomic import write_replacing
@@ -492,7 +493,8 @@ def _import_with_llm(
     )
     if not confirm(view):
         raise DraftKept(
-            f"not saved — the draft is kept at {kept}; `aisquare persona import {kept}` saves it",
+            f"not saved — the draft is kept at {kept}"
+            + prog.shell_advice(f"; `{prog.word()} persona import {kept}` saves it"),
             draft_path=kept,
             code="not_confirmed",
         )
@@ -654,8 +656,8 @@ def _read_source(source: str, root: Path | None, *, stdin: bytes | None = None) 
         if ref.name == source:
             return _read_source(str(ref.path), root)
     raise PersonaError(
-        f"no such file, directory or agent skill: {source} "
-        "(`aisquare persona import --list` shows the skills)",
+        f"no such file, directory or agent skill: {source}"
+        + prog.shell_advice(f" (`{prog.word()} persona import --list` shows the skills)"),
         code="source_not_found",
     )
 
@@ -1153,7 +1155,7 @@ def _layer_of(directory: Path) -> Layer:
 def _layer_dir(layer: Layer, root: Path | None) -> Path:
     if layer == "bundled":
         raise PersonaError(
-            "the bundled layer ships with aisquare and is read-only — use --user or --project",
+            "the bundled layer ships with rlx and is read-only — use --user or --project",
             code="bundled_read_only",
         )
     dirs = dict(core.layer_dirs(root))
@@ -1171,14 +1173,17 @@ def _layer_dir(layer: Layer, root: Path | None) -> Path:
 def _bundled_refusal(name: str, verb: Literal["edited", "removed"]) -> PersonaError:
     if verb == "removed":
         rule = (
-            f"'{name}' is a bundled persona — it ships with aisquare and cannot be removed; a "
+            f"'{name}' is a bundled persona — it ships with rlx and cannot be removed; a "
             "user or project persona of the same name shadows it instead"
         )
     else:
         rule = (
             f"'{name}' is a bundled persona and cannot be edited in place — copy it into a "
-            f"layer you own first: `aisquare persona export {name} --to DIR`, then "
-            f"`aisquare persona import DIR/{name} --user` (or `persona new NAME`)"
+            "layer you own first"
+            + prog.shell_advice(
+                f": `{prog.word()} persona export {name} --to DIR`, then "
+                f"`{prog.word()} persona import DIR/{name} --user` (or `persona new NAME`)"
+            )
         )
     return PersonaError(rule, code="bundled_read_only")
 

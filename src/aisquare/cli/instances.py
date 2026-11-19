@@ -21,7 +21,7 @@ from aisquare.core.state import get_state
 
 
 def instances() -> None:
-    """List the asq UIs running on this home: kind, host, pid, version, since and heartbeat."""
+    """List the rlx UIs running on this home: kind, host, pid, version, since and heartbeat."""
     now = datetime.now(UTC)
     live = instances_core.live_instances(prune=False)
     mine = instances_core.this_instance()
@@ -30,7 +30,7 @@ def instances() -> None:
         typer.echo(json.dumps({"instances": [as_json(i, now, this_id) for i in live]}))
         return
     if not live:
-        stdout_console().print("No asq is running on this home.")
+        stdout_console().print("No rlx is running on this home.")
         return
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
     for column in ("KIND", "HOST", "PID", "VERSION", "SINCE", "HEARTBEAT"):
@@ -48,8 +48,8 @@ def instances() -> None:
     stdout_console().print(table)
     if any(instance.differs_from(live[0]) for instance in live[1:]):
         stderr_console().print(
-            "⚠ these asqs run different releases or store schemas on one home: quit the older "
-            "one (q in it) and start it again with this release",
+            "⚠ these rlx instances run different releases or store schemas on one home: quit "
+            "the older one (q in it) and start it again with this release",
             markup=False,
             highlight=False,
         )

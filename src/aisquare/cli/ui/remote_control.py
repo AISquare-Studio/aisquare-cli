@@ -59,7 +59,7 @@ from aisquare.services.ngrok_tunnel import (
 )
 
 # The one sentence every read-only refusal says, re-exported for the modal.
-from aisquare.services.remote_server import READ_ONLY_REASON as READ_ONLY_REASON
+from aisquare.services.remote_server import read_only_reason as read_only_reason
 
 AUTO_OFF_CHOICES: tuple[int | None, ...] = (30, 60, 120, None)
 """Minutes until Remote switches itself off — ``None`` is "Never".
@@ -105,15 +105,22 @@ TOKEN_AT_NEXT_START = "new ngrok token saved — ngrok signs in with it at its n
 the one it started with, and a restart would change the link of one with no static domain."""
 SAVING = "saving to remote.json…"
 """The status line's line while a write the controls asked for waits (:data:`SAVING_AFTER`)."""
+NEW_LINK_NEWS = "New link and password — the old link no longer opens; every device unlocks again"
+"""What *New link* says once it is in (:meth:`RemoteController.regenerate_password`)."""
 SAVING_AFTER = 0.5
 """How long a write of ``remote.json`` runs before the status line says it is saving: one
 takes milliseconds, unless another process holds the file's lock."""
 ELSEWHERE_EVERY_SECONDS = 3.0
 """How often the panel looks whether another process serves Remote from this home: a lock
 taken for a moment each time (``remote_server.remote_served_elsewhere``)."""
-ALREADY_ON = f"Remote could not start — {remote_server.REMOTE_ALREADY_ON}"
-"""What a start says that another Remote, on this home, kept off."""
-AUTO_OFF_MISSED = "Remote stayed off — its auto-off time passed while asq was not running"
+
+
+def already_on() -> str:
+    """What a start says that another Remote, on this home, kept off."""
+    return f"Remote could not start — {remote_server.remote_already_on()}"
+
+
+AUTO_OFF_MISSED = "Remote stayed off — its auto-off time passed while rlx was not running"
 """What a TUI start says of a Remote left on whose auto-off time has passed meanwhile
 (:meth:`RemoteController._auto_off_missed`)."""
 
@@ -497,7 +504,7 @@ class RemoteController:
         Remote stop it (sweep 3 of #243). Not while another Remote is on for this home (a
         ``serve``, another fleet UI): what it saved is its own, in the same ``state.json``.
         """
-        if self.info is None and self.state.remote_enabled and self.message != ALREADY_ON:
+        if self.info is None and self.state.remote_enabled and self.message != already_on():
             self._set_state(remote_enabled=False)
 
     def _save_started(self, info: remote_server.RemoteInfo) -> None:
@@ -775,7 +782,7 @@ class RemoteController:
             return
         if self._turn_on(wait=wait, restoring=True):
             return  # what came after the server is said as it ends
-        if self.message == ALREADY_ON:
+        if self.message == already_on():
             self.message = None  # on elsewhere: the panel's state says so (served_elsewhere)
             return
         self._remote_news(self.message)
@@ -911,12 +918,16 @@ class RemoteController:
 
         self._then(self._remote_json_write(remote_json_job, deadline=True), wait)
 
-    def regenerate_password(self, *, wait: bool = True) -> str | None:
+    def regenerate_password(self, *, wait: bool = True, new_link: bool = False) -> str | None:
         """A new passphrase from the server; ``None`` while Remote is off (nothing to unlock),
         or when ``remote.json`` would not take it, which the status line then says. The
         running server has the new one all the same, and has signed every phone out: the
         panel shows it until the server reads the file again after another process rewrote
         it, which brings back the old passphrase, and the devices with it.
+
+        ``new_link``: a new link too, so a link that leaked stops opening anywhere. A new
+        passphrase alone keeps the leaked link working and clears the failed-unlock budget, so
+        the lockout's advice is this (*New link*; review of #503, m2).
 
         ``wait=False`` returns ``None`` before the write, and :attr:`on_done` is told once
         the new passphrase is in."""
@@ -926,13 +937,15 @@ class RemoteController:
 
         def remote_json_job() -> None:
             try:
-                password = str(self._server.regenerate_password())
+                password = str(self._server.regenerate_password(new_link=new_link))
             except Exception as exc:  # raised into the Regenerate button's handler: the UI ended
                 self.save_problem = f"the new password could not be saved to remote.json — {exc}"
                 return
             self.save_problem = None
             made.append(password)
-            self._done("New password — every device has to unlock again")
+            self._done(
+                NEW_LINK_NEWS if new_link else "New password — every device has to unlock again"
+            )
 
         written = self._remote_json_write(remote_json_job)
         if not wait:
@@ -1189,7 +1202,7 @@ class RemoteController:
         self.elsewhere = found and not self.running  # this one's own claim, as it started
         if not found:
             with self._lock:
-                if self.message == ALREADY_ON:
+                if self.message == already_on():
                     self.message = None
         with self._elsewhere_lock:
             self._elsewhere_looking = False

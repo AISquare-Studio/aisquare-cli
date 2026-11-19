@@ -30,6 +30,7 @@ GRANT = iam.DeviceAuthorization(
     verification_uri_complete="https://home.example/cli?code=WDJB-MJHT",
     expires_in=900,
     interval=5,
+    client_id=iam.FALLBACK_CLIENT_ID,
 )
 TOKEN = {"access_token": "aisq_new", "expires_in": 7776000}
 
@@ -65,8 +66,9 @@ def _wait(
     clock = clock or Clock()
     polls: list[int] = []
 
-    def poll(endpoints: iam.Endpoints, device_code: str) -> iam.PollOutcome:
-        assert endpoints is ENDPOINTS and device_code == "dev"
+    def poll(endpoints: iam.Endpoints, grant: iam.DeviceAuthorization) -> iam.PollOutcome:
+        # The grant itself, so the poll is made as the client that started it.
+        assert endpoints is ENDPOINTS and grant is GRANT
         polls.append(len(polls))
         clock.poll_times.append(clock.now)
         answer = outcomes[min(len(polls) - 1, len(outcomes) - 1)]
@@ -162,7 +164,7 @@ def test_a_cancel_that_lands_while_the_poll_is_in_flight_still_cancels() -> None
     """The commit boundary: the server said yes, the user said no, the user wins."""
     flag = {"set": False}
 
-    def poll(endpoints: iam.Endpoints, device_code: str) -> iam.PollOutcome:
+    def poll(endpoints: iam.Endpoints, grant: iam.DeviceAuthorization) -> iam.PollOutcome:
         flag["set"] = True  # Cancel pressed during the request
         return iam.PollOutcome("token", TOKEN)
 
@@ -192,6 +194,8 @@ class _Iam:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *, previous: iam.Session | None) -> None:
         self.stored: list[dict[str, Any]] = []
         self.revoked: list[str] = []
+        #: The client each revoke was made as, beside ``revoked``.
+        self.revoked_as: list[str] = []
         self.cancel = {"set": False}
         self.userinfo_calls = 0
 
@@ -211,8 +215,9 @@ class _Iam:
         monkeypatch.setattr(iam, "stored_session", lambda: previous)
         monkeypatch.setattr(iam, "store_session", store_session)
 
-        def revoke(endpoints: iam.Endpoints, token: str) -> bool:
-            self.revoked.append(token)
+        def revoke(endpoints: iam.Endpoints, session: iam.Session) -> bool:
+            self.revoked.append(session.token)
+            self.revoked_as.append(session.client_id)
             return True
 
         monkeypatch.setattr(iam, "revoke", revoke)
@@ -229,24 +234,35 @@ def test_commit_stores_the_session_and_retires_the_previous_token_on_the_same_ho
     fake = _Iam(monkeypatch, previous=_previous())
 
     session = device_flow.commit_sign_in(
-        "https://api.example", ENDPOINTS, TOKEN, cancelled=lambda: fake.cancel["set"]
+        "https://api.example",
+        ENDPOINTS,
+        TOKEN,
+        client_id=iam.CLIENT_ID,
+        cancelled=lambda: fake.cancel["set"],
     )
 
     assert session.email == "new@example.com" and session.token == "aisq_new"
     [written] = fake.stored
     assert written["token"] == "aisq_new" and written["expires_in"] == 7776000
     assert written["scope"] == iam.SCOPE  # the response named none: the client's default
+    assert written["client_id"] == "rlx"  # the client that started the grant
     assert fake.revoked == ["aisq_old"]
+    # The session it replaces is an aisquare-cli one, and is revoked as aisquare-cli.
+    assert fake.revoked_as == ["aisquare-cli"]
 
 
 def test_commit_never_sends_a_token_to_another_hosts_revocation_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _Iam(monkeypatch, previous=_previous(api_url="https://other.example"))
-    device_flow.commit_sign_in("https://api.example", ENDPOINTS, TOKEN, cancelled=lambda: False)
+    device_flow.commit_sign_in(
+        "https://api.example", ENDPOINTS, TOKEN, client_id=iam.CLIENT_ID, cancelled=lambda: False
+    )
     assert fake.stored and fake.revoked == []  # stored, but the other host's token is left alone
     same = _Iam(monkeypatch, previous=_previous(token="aisq_new"))
-    device_flow.commit_sign_in("https://api.example", ENDPOINTS, TOKEN, cancelled=lambda: False)
+    device_flow.commit_sign_in(
+        "https://api.example", ENDPOINTS, TOKEN, client_id=iam.CLIENT_ID, cancelled=lambda: False
+    )
     assert same.revoked == []  # the same token is not "previous"
 
 
@@ -259,7 +275,11 @@ def test_a_cancel_during_the_userinfo_request_stores_nothing_and_revokes_nothing
 
     with pytest.raises(iam.IamError) as caught:
         device_flow.commit_sign_in(
-            "https://api.example", ENDPOINTS, TOKEN, cancelled=lambda: fake.cancel["set"]
+            "https://api.example",
+            ENDPOINTS,
+            TOKEN,
+            client_id=iam.CLIENT_ID,
+            cancelled=lambda: fake.cancel["set"],
         )
 
     assert caught.value.code == "cancelled"

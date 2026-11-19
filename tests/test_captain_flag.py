@@ -54,7 +54,7 @@ spawns = spawn_suite.spawns
 
 ENV = "AISQUARE_EXPERIMENTAL_CAPTAIN"
 OFF_LINE = (
-    "the captain is experimental; turn it on with aisquare config set experimental.captain "
+    "the captain is experimental; turn it on with rlx config set experimental.captain "
     "true, or AISQUARE_EXPERIMENTAL_CAPTAIN=1"
 )
 """The card's one line, word for word."""
@@ -425,7 +425,7 @@ def test_doctor_shows_one_ok_captain_row_when_off(off: None) -> None:
     (row,) = rows
     assert row.status is CheckStatus.ok
     assert row.detail.startswith("off (experimental)"), row.detail
-    assert "aisquare config set experimental.captain true" in row.detail
+    assert "rlx config set experimental.captain true" in row.detail
 
 
 @pytest.mark.needs_captain
@@ -438,7 +438,9 @@ def test_doctor_has_no_captain_row_when_on() -> None:
 REPO = Path(__file__).resolve().parent.parent
 
 
-@pytest.mark.parametrize("page", ["CHANGELOG.md", "README.md"])
+#: The README left the list with rlx (the owner, 2026-11-16): it names only what is live, so
+#: it says nothing of the captain (tests/test_readme_presents_rlx.py holds it to that).
+@pytest.mark.parametrize("page", ["CHANGELOG.md"])
 def test_the_docs_say_it_is_experimental_and_how_to_turn_it_on(page: str) -> None:
     text = (REPO / page).read_text(encoding="utf-8")
     assert "experimental" in text

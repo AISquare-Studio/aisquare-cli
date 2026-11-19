@@ -369,7 +369,8 @@ def test_the_doctor_line_exists_only_for_auto_mode_behind_a_configured_proxy(
     assert "manager" in check.detail and "not measurable yet" in check.detail
     assert check.fix and "--permission-mode acceptEdits" in check.fix
     assert "AISquare-Explainability-SDK/issues/1144" in check.fix
-    assert "explainability disable" in check.fix
+    # The AISquare integration keeps its name (owner, seq 12065): never `rlx explainability`.
+    assert "untraced: aisquare explainability disable" in check.fix
     assert _doctor_row() is not None, "it reaches `explainability doctor`"
 
 
@@ -414,9 +415,7 @@ def test_the_doctor_line_names_the_agents_still_running_in_auto(
     assert check.detail.startswith("the running agent coder-auto (repo) runs in auto mode")
     assert "141k" in check.detail
     # Its own restart, naming its project: alone, the active project's (#259, round 21).
-    restart = (
-        f"aisquare fleet restart --project {project.id} coder-auto --permission-mode acceptEdits"
-    )
+    restart = f"rlx fleet restart --project {project.id} coder-auto --permission-mode acceptEdits"
     assert check.fix and restart in check.fix, check.fix
     assert "config set" not in check.fix and "[fleet.roles" not in check.fix
 
@@ -445,7 +444,7 @@ def test_the_printed_mode_fix_is_one_this_config_accepts(
     _configure(tracing=True, modes={"coder": "acceptEdits"})
     check = auto_mode.doctor_check()
     assert check is not None and check.fix
-    command = "aisquare config set fleet.roles.manager.permission_mode acceptEdits"
+    command = "rlx config set fleet.roles.manager.permission_mode acceptEdits"
     assert command in check.fix and "add a `[fleet.roles" not in check.fix
     result = runner.invoke(app, command.split()[1:])
     assert result.exit_code == 0, result.output
@@ -608,10 +607,10 @@ def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
     note = _note("auto", role="coder", label="coder-auth")
 
     assert note is not None and "fleet spawn" not in note
-    command = "aisquare config set fleet.roles.coder.permission_mode acceptEdits"
+    command = "rlx config set fleet.roles.coder.permission_mode acceptEdits"
     assert (
         f"set a non-classifier mode for coder ({command}) and "
-        "`aisquare fleet restart --project calm-otter coder-auth --permission-mode acceptEdits` "
+        "`rlx fleet restart --project calm-otter coder-auth --permission-mode acceptEdits` "
         "(its session resumes)" in note
     )
     result = runner.invoke(app, command.split()[1:])
@@ -697,7 +696,7 @@ def test_a_refused_session_is_put_in_attention_once_with_one_board_line(
     assert (
         "5 refusals" in blocked[0] and "fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
     )
-    assert f"aisquare fleet restart --project {project.id} coder-auth" in blocked[0]
+    assert f"rlx fleet restart --project {project.id} coder-auth" in blocked[0]
 
     # The next Stop finds the same refusals: the feed does not repeat, the row is waiting again.
     again = runner.invoke(app, ["hook", "stop"], input=payload)
@@ -727,7 +726,7 @@ def test_under_a_hub_the_refused_agent_is_restarted_in_its_own_rows_project(
 
     blocked = [text for kind, text in _events(hub) if kind == auto_mode.EVENT_KIND]
     assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode"), blocked
-    assert f"aisquare fleet restart --project {project.id} coder-auth" in blocked[0]
+    assert f"rlx fleet restart --project {project.id} coder-auth" in blocked[0]
 
 
 def test_fewer_refusals_than_the_threshold_or_no_transcript_change_nothing(
@@ -802,7 +801,7 @@ def test_only_a_session_launched_through_the_proxy_is_blamed_on_it(
     blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
     assert len(blocked) == 1 and "behind the explainability proxy" in blocked[0]
     # coder, a fleet role, has its table whatever the file holds: the step is `config set`.
-    assert "aisquare config set fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
+    assert "rlx config set fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
     assert "add a `[fleet.roles" not in blocked[0]
 
 
@@ -887,7 +886,7 @@ def test_a_refused_turn_that_ends_inside_a_hand_over_leaves_the_notice_to_the_re
     assert _state("sess-coder") == "attention"
     [line] = _blocked(project)
     assert line.startswith("coder-auth: auto mode is refusing") and "(3 refusals" in line
-    assert f"aisquare fleet restart --project {project.id} coder-auth" in line
+    assert f"rlx fleet restart --project {project.id} coder-auth" in line
     # Said once, as for any session.
     assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
     assert len(_blocked(project)) == 1

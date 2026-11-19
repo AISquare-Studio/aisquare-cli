@@ -811,7 +811,7 @@ def test_accounts_add_codex_runs_codex_login_in_the_slot_and_connects_its_hooks(
     assert result.exit_code == 0, result.output
     assert "Added Codex account 3: stub@example.com" in result.stderr
     # Naming the account names its agent: no --agent where the coder's binding pins none.
-    assert "as a role: aisquare launch coder --account 3" in result.stderr
+    assert "as a role: rlx launch coder --account 3" in result.stderr
     [slot] = core.managed_accounts("codex")
     assert core.identity(slot) is not None and service.describe(slot).hooks_installed
     assert (slot.config_dir / "hooks.json").is_file()  # `agents connect codex --config-dir`
@@ -835,7 +835,7 @@ def test_accounts_add_codex_names_no_agent_in_its_hint_even_with_claude_code_fir
     result = runner.invoke(app, ["accounts", "add", "--agent", "codex"])
 
     assert result.exit_code == 0, result.output
-    assert "as a role: aisquare launch coder --account 3" in result.stderr, result.stderr
+    assert "as a role: rlx launch coder --account 3" in result.stderr, result.stderr
 
 
 def test_accounts_add_codex_discards_a_slot_nothing_signed_into(
@@ -869,7 +869,7 @@ def test_accounts_list_and_usage_show_both_agents_with_codex_read_offline(
 
     listed = runner.invoke(app, ["accounts", "list"])
     assert listed.exit_code == 0, listed.output
-    assert "Codex (beta) · /opt/bin/codex" in listed.stdout  # its release stage's mark
+    assert "Codex · /opt/bin/codex" in listed.stdout  # no mark since 0.10.1 (R21)
     row = next(line for line in listed.stdout.splitlines() if "me@example.com" in line)
     assert "Codex" in row and "plus" in row
 

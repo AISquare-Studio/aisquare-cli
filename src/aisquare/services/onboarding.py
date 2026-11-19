@@ -34,8 +34,8 @@ from typing import Literal, Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
-from aisquare.core import selfcli
-from aisquare.core.agent_adapters import adapters
+from aisquare.core import program, selfcli
+from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.selfcli import CliResult
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
@@ -242,7 +242,10 @@ def _invoke(
     try:
         return run(args, cwd=cwd), None
     except Exception as exc:
-        return None, f"could not run aisquare {' '.join(args)}: {exc or type(exc).__name__}"
+        why = exc or type(exc).__name__
+        return None, program.shell_advice(
+            f"could not run {_shown_command(args)}: {why}", app=f"could not run it: {why}"
+        )
 
 
 def _json_object(stdout: str) -> dict[str, object] | None:
@@ -351,7 +354,7 @@ def run_doctor(
     """
     args = ["--json", "doctor"]
     if on_line is not None:
-        on_line(f"$ aisquare {' '.join(args)}")
+        on_line(DOCTOR_STEP)
     result, asked = _invoke(run, args, cwd)
     if result is None:
         return [], asked
@@ -362,6 +365,14 @@ def run_doctor(
     if error is not None and result.returncode != 0 and not result.stdout.strip():
         error = failure_reason(result, "doctor")
     return checks, error
+
+
+INIT_STEP = "· setting up {path} as a project…"
+"""The onboard log's first step, as asq shows it: what it does, never the command it runs
+(R13, #146). The log is asq's alone (the Onboard view, Welcome's step 1)."""
+
+DOCTOR_STEP = "· running the checks…"
+"""The onboard log's checks step, as asq shows it."""
 
 
 def summary_line(checks: Iterable[DoctorCheck]) -> str:
@@ -396,7 +407,7 @@ def onboard(
         return OnboardOutcome(path=path, reason=reason, log=tuple(lines))
 
     init_args = ["--json", "init", *INIT_FLAGS, str(path)]
-    say(f"$ aisquare {' '.join(init_args)}")
+    say(INIT_STEP.format(path=path))
     result, asked = _invoke(run, init_args, path)
     if result is None:
         return failed(asked or "init could not be run")
@@ -426,8 +437,8 @@ def onboard(
             if check.status is CheckStatus.ok:
                 continue
             say(f"  {_SYMBOL[check.status]} {check.name}: {check.detail}")
-            if check.fix:
-                say(f"      → {check.fix}")
+            if check.ui_fix:  # the shell's `fix` is the Doctor's below, as asq says it (R13)
+                say(f"      → {check.ui_fix}")
     return OnboardOutcome(
         path=path,
         project_id=project.id,
@@ -444,7 +455,8 @@ def onboard(
 @dataclass(frozen=True)
 class _KnownFix:
     mention: str
-    """How the doctor writes it, after the word ``aisquare``."""
+    """How the doctor writes it, after the program's word (``rlx`` or ``aisquare``,
+    ``core.program.PRINTED``)."""
     argv: tuple[str, ...]
     """What we actually run — the non-interactive form of the same command."""
     scope: FixScope
@@ -496,11 +508,26 @@ KNOWN_FIXES: tuple[_KnownFix, ...] = (
 )
 
 _MENTION = re.compile(
-    r"aisquare (?P<mention>"
+    # A hint starts its command with whichever word ``core.program.word`` gave it, ``rlx``
+    # or ``aisquare``: a button is read from either (#135), so a reworded hint keeps its button.
+    r"(?:"
+    + "|".join(re.escape(word) for word in program.PRINTED)
+    + r") (?P<mention>"
     + "|".join(re.escape(known.mention) for known in KNOWN_FIXES)
     + r")(?P<rest>[^;)`\n]*)"
 )
 _BY_MENTION = {known.mention: known for known in KNOWN_FIXES}
+
+
+def _from_home(where: str) -> str:
+    """``where``, the folder a button names, with the home folder as ``~``, in this platform's
+    separators: on Windows a fix's ``C:\\Users\\me/.aisquare/…``, its separators mixed, was
+    shown whole (#517, windows-latest); paths compare as the platform does (case on Windows)."""
+    try:
+        inside = Path(where).relative_to(Path.home())
+    except ValueError:
+        return where
+    return str(Path("~") / inside)
 
 
 @dataclass(frozen=True)
@@ -510,7 +537,7 @@ class FixCommand:
     check: str
     """The check whose ``fix`` this came from."""
     argv: tuple[str, ...]
-    """Arguments after ``aisquare``; ``apply_fix`` prepends ``--json``."""
+    """Arguments after the program's word; ``apply_fix`` prepends ``--json``."""
     scope: FixScope
     """``project`` fixes need the project's cwd; ``machine`` fixes do not care."""
     source: str
@@ -520,8 +547,32 @@ class FixCommand:
 
     @property
     def label(self) -> str:
-        """The command as the fix it came from prints it, quoted for this shell."""
-        return install_route.command_line(["aisquare", *self.argv])
+        """The command as the fix it came from prints it, quoted for this shell, with the word
+        hints start with (``core.program.words``)."""
+        return program.words(*self.argv)
+
+    @property
+    def title(self) -> str:
+        """What asq's button says: what the fix does, never its command line (R13, #146)."""
+        head = self.argv[:2]
+        if head == ("agents", "connect") and len(self.argv) > 2:
+            try:
+                agent = get_adapter(self.argv[2]).label
+            except ValueError:  # an agent no longer registered: its id
+                agent = self.argv[2]
+            # Which home, where it names one: two slots' Connects are two buttons. A path, not
+            # a command; the home folder as ``~``.
+            where = dict(zip(self.argv[3::2], self.argv[4::2], strict=False)).get("--config-dir")
+            if where is None:
+                return f"Connect {agent}"
+            return f"Connect {agent} ({_from_home(where)})"
+        if head == ("project", "onboard"):
+            return "Refresh this project"
+        if head == ("doctor", "--fix"):
+            return "Fix what the checks can"
+        if self.sign_in_slot is not None:
+            return f"Sign in account {self.sign_in_slot}"
+        return self.label
 
     @property
     def sign_in_slot(self) -> int | None:
@@ -529,6 +580,12 @@ class FixCommand:
         if not self.interactive or len(self.argv) < 3 or not self.argv[2].isdigit():
             return None
         return int(self.argv[2])
+
+
+def _shown_command(args: Sequence[str]) -> str:
+    """``rlx <args>`` as the onboarding transcript and its errors show what ran: the words
+    joined, as they always were, with the word hints print (``core.program.word``)."""
+    return " ".join((program.word(), *args))
 
 
 def _sign_in_tokens() -> frozenset[str]:
@@ -626,6 +683,13 @@ class FixResult:
             return f"✓ {self.fix.label}"
         return f"✗ {self.fix.label}: {self.reason}"
 
+    def said(self) -> str:
+        """:meth:`summary` as asq says it: the fix by its title, never its command (R13)."""
+        if self.ok:
+            return f"✓ {self.fix.title}"
+        reason = (self.reason or "").replace(self.fix.label, self.fix.title)
+        return f"✗ {self.fix.title}: {reason}"
+
 
 def apply_fix(fix: FixCommand, cwd: Path | None, *, run: Runner = selfcli.run) -> FixResult:
     """Run one fix as ``aisquare --json <argv>`` in ``cwd``; never raises.
@@ -640,7 +704,7 @@ def apply_fix(fix: FixCommand, cwd: Path | None, *, run: Runner = selfcli.run) -
         return FixResult(
             fix=fix,
             returncode=None,
-            reason="it opens the agent's own sign-in: run it in a terminal, or from asq → Accounts",
+            reason="it opens the agent's own sign-in: run it in a terminal, or from rlx → Accounts",
         )
     result, asked = _invoke(run, ["--json", *fix.argv], cwd)
     if result is None:

@@ -53,6 +53,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from aisquare.core import outbox, paths
+from aisquare.core import program as prog
 from aisquare.core.config import (
     ExplainabilitySettings,
     ExplainabilityTarget,
@@ -332,9 +333,8 @@ def unregistered_roles_note(roles: Sequence[str], target: ResolvedTarget) -> str
     register = ["aisquare", "explainability", "register", "--target", target.name]
     register += [word for role in roles for word in ("--role", role)]
     return (
-        f"launchable but not in explainability.roles: {listed} — add them to "
-        f"config.toml or run: {install_route.command_line(register)}"
-    )
+        f"launchable but not in explainability.roles: {listed} — add them to config.toml"
+    ) + prog.shell_advice(f" or run: {install_route.command_line(register)}")
 
 
 def resolve_target(
@@ -1608,7 +1608,8 @@ def _check_switch(
             )
         return _ok(
             "explainability",
-            "tracing is off (turn it on with: aisquare explainability enable)",
+            "tracing is off"
+            + prog.detail_advice(" (turn it on with: aisquare explainability enable)"),
         )
     suffix = "" if live else " (add --live for the gateway round-trip)"
     return _ok(
@@ -1652,14 +1653,14 @@ def _check_sdk(*, on: bool, live: bool, deployable: bool) -> DoctorCheck:
             name,
             "the 'aisquare' package root in this environment is not aisquare-cli's — "
             "the SDK ships a package of the same name and overwrote it",
-            "Harmless for the CLI (it reads its version from dist metadata), but "
+            "Harmless for rlx (it reads its version from dist metadata), but "
             "repair the root if you use the SDK's own facade: "
             "pip install --force-reinstall aisquare",
         )
     if not presence.present:
         detail = (
-            "SDK not installed — the proxy lane still traces model traffic, but the "
-            "CLI cannot ship its own insights as spans"
+            "SDK not installed — the proxy lane still traces model traffic, but "
+            "rlx cannot ship its own insights as spans"
         )
         if not on:
             return _ok(name, f"{detail} ({_install_remedy('install')})")
@@ -1683,8 +1684,8 @@ def _check_sdk(*, on: bool, live: bool, deployable: bool) -> DoctorCheck:
             f"{f'SDK {presence.version}' if presence.version else 'the SDK'} is "
             f"reachable only as a console script ({presence.script}) and cannot "
             "be imported here — the proxy "
-            "lane still traces model traffic, but the client lane is OFF: the "
-            "CLI cannot ship its own insights as spans, and 'init "
+            "lane still traces model traffic, but the client lane is OFF: "
+            "rlx cannot ship its own insights as spans, and 'init "
             "--explainability' will decline to turn shipping on",
             _install_remedy("Install the SDK into the same environment as aisquare"),
         )
@@ -1754,7 +1755,7 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
             name,
             f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
             f"but ${target.api_key_env} is not set in this shell",
-            f"Export the workspace key as ${target.api_key_env} (the CLI reads it from "
+            f"Export the workspace key as ${target.api_key_env} (rlx reads it from "
             f"the environment and never stores it), or {other}",
         )
     identities = ", ".join(target.agent_names) or "none"
@@ -1885,7 +1886,7 @@ class ProxyState:
 #: either pointed the CLI at the wrong proxy, or started the right proxy against
 #: the wrong gateway -- and only they know which they meant.
 _PROXY_DESTINATION_FIX = (
-    "Point this CLI at the proxy for the target "
+    "Point rlx at the proxy for the target "
     "(aisquare explainability enable --proxy-url <deployment proxy>), or restart "
     "the local proxy with EXPLAINABILITY_GATEWAY_URL set to the target's gateway."
 )
@@ -1963,7 +1964,8 @@ def proxy_state(
             return ProxyState(
                 summary=(
                     f"answered at {target.proxy_url}, but tracing is off — nothing is "
-                    "being traced yet (turn it on: aisquare explainability enable)"
+                    "being traced yet"
+                    + prog.detail_advice(" (turn it on: aisquare explainability enable)")
                 ),
                 severity=CheckStatus.ok,
             )
@@ -2170,7 +2172,7 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             severity=CheckStatus.warn,
             remediation=(
                 f"Restart the local proxy with EXPLAINABILITY_GATEWAY_URL={target.gateway_url}, "
-                "or point this CLI at the deployment's own proxy: "
+                "or point rlx at the deployment's own proxy: "
                 f"{deployment_fix(target, what='proxy', value=hosted)}"
             ),
         )
@@ -2186,7 +2188,7 @@ def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
             f"If {target.proxy_url} is {target.name}'s proxy behind another hostname, nothing "
             "is wrong: confirm on that host that it was started with "
             f"EXPLAINABILITY_GATEWAY_URL={target.gateway_url} (a proxy that reports its "
-            "gateway from /health clears this on its own). Otherwise point this CLI at the "
+            "gateway from /health clears this on its own). Otherwise point rlx at the "
             f"deployment's proxy: {deployment_fix(target, what='proxy', value=hosted)}"
         ),
     )
@@ -2599,7 +2601,7 @@ def apply_fixes(
             confirm is not None
             and confirm(
                 f"Install the explainability SDK into {sys.executable}? "
-                "It shares the 'aisquare' import package with this CLI"
+                "It shares the 'aisquare' import package with rlx"
             )
         )
         if not allowed:

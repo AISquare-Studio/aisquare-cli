@@ -26,13 +26,13 @@ from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import SETTINGS_KEY, SettingsRow
 from aisquare.cli.ui.views.usage_stats import (
     DEFAULT_RANGE,
-    EMPTY,
     EMPTY_RANGE,
     KEYS,
     LOAD_WORKER,
     SWEEP_WORKER,
     UsageStatsView,
     chart_text,
+    empty_text,
     longer_ranges_hint,
 )
 from aisquare.core.agent_adapters import adapters
@@ -469,19 +469,20 @@ def test_with_nothing_recorded_the_page_says_so_and_how_to_record_it() -> None:
     empty, empty_shown, body_shown = _drive_page(real_loader(), go)
 
     assert empty_shown and not body_shown
-    assert "No usage recorded yet." in empty and "aisquare metrics backfill" in empty
-    assert EMPTY.splitlines()[0] == "No usage recorded yet."
+    assert "No usage recorded yet." in empty and "press r to read them again" in empty
+    assert "metrics backfill" not in empty, "asq names no command (R13)"
+    assert empty_text().splitlines()[0] == "No usage recorded yet."
 
 
 def test_the_pages_words_name_no_agent() -> None:
     """The sweep reads every agent's transcripts (Codex's rollouts too: SCOPE #113 091, item
     4), so what the page says when a range or the machine has nothing, as its sweep goes,
     names none of them (seq 4194)."""
-    words = [EMPTY, EMPTY_RANGE]
+    words = [empty_text(), EMPTY_RANGE]
     assert not [
         (adapter.label, text) for adapter in adapters() for text in words if adapter.label in text
     ]
-    assert "If you use an agent and still see this" in EMPTY
+    assert "If you use an agent and still see this" in empty_text()
     assert EMPTY_RANGE.startswith("Nothing in {range} — no agent was used in it.")
 
 
@@ -654,7 +655,7 @@ def test_the_page_fits_a_small_terminal(machine: Machine) -> None:
 def test_top_repositories_names_a_nicknamed_repository_by_its_remote(machine: Machine) -> None:
     """tsk_01m67vf4mpsgdcvt6kq6znsrwc: the owner could not tell which repository a nickname
     meant. The remote's name is shown — not the nickname, the codename or the folder (``ws7``)."""
-    repo = machine.repo("ws7", remote="git@github.com:AISquare-Studio/aisquare-cli.git")
+    repo = machine.repo("ws7", remote="git@github.com:AISquare-Studio/rlx.git")
     project = project_service.set_nickname(add_project(repo), "the big one")
     with store_session() as store:
         store.set_codename(project.id, "earnest-hawk")
@@ -669,7 +670,7 @@ def test_top_repositories_names_a_nicknamed_repository_by_its_remote(machine: Ma
 
     repos = _drive_page(real_loader(), go)
 
-    assert "aisquare-cli" in repos
+    assert "rlx" in repos
     for other in ("the big one", "earnest-hawk", "ws7"):
         assert other not in repos
 

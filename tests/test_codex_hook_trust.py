@@ -669,7 +669,7 @@ def test_disconnect_names_the_file_and_the_trust_a_read_only_config_toml_kept(
     assert payload["trust_left"]["file"] == str(home / "config.toml")
     assert sorted(payload["trust_left"]["records"]) == tables and len(tables) == CODEX_HOOKS
     note = " ".join(said.stderr.split())
-    assert f"{home / 'config.toml'} still holds the trust aisquare recorded" in note, said.stderr
+    assert f"{home / 'config.toml'} still holds the trust rlx recorded" in note, said.stderr
     assert "read-only" in note and f"{CODEX_HOOKS} [hooks.state] table(s)" in note
     assert not agents.hook_commands("codex", home), "the hooks went all the same"
 
@@ -697,7 +697,7 @@ def test_uninstall_names_the_trust_a_read_only_config_toml_kept(
 
     assert result.exit_code == 0, result.output
     report = _one_object(result.stdout)
-    [note] = [n for n in report["notes"] if "still holds the trust aisquare recorded" in n]
+    [note] = [n for n in report["notes"] if "still holds the trust rlx recorded" in n]
     assert str(home / "config.toml") in note and f"{CODEX_HOOKS} [hooks.state] table(s)" in note
     assert "tables" not in _keys(report), report
     assert report["package"]["runs"] is True
@@ -739,8 +739,9 @@ def test_upgrade_help_and_the_plugin_readme_say_the_trust_is_recorded_not_asked_
 
     readme = Path(__file__).parents[1] / "plugins" / "codex" / "README.md"
     text = " ".join(readme.read_text("utf-8").split())
+    # The page writes the commands a user types as `rlx …` since the product became rlx.
     assert (
-        "`aisquare agents connect codex` and `aisquare upgrade` record Codex's trust of the "
+        "`rlx agents connect codex` and `rlx upgrade` record Codex's trust of the "
         "`hooks.json` hooks they write" in text
     )
     assert "Trust both in `/hooks`" not in text

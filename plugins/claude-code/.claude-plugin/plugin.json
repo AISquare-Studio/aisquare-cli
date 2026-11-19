@@ -1,13 +1,13 @@
 {
   "name": "aisquare",
-  "version": "0.10.0",
-  "description": "Portable memory for Claude Code: aisquare's lifecycle hooks, run by the aisquare CLI, or by uvx when the CLI is not installed.",
+  "version": "0.10.1",
+  "description": "Portable memory for Claude Code: rlx's lifecycle hooks, run by rlx, or by uvx when rlx is not installed.",
   "author": {
     "name": "AISquare",
     "email": "anmol@aisquare.studio"
   },
-  "homepage": "https://github.com/AISquare-Studio/aisquare-cli",
-  "repository": "https://github.com/AISquare-Studio/aisquare-cli",
+  "homepage": "https://github.com/AISquare-Studio/rlx",
+  "repository": "https://github.com/AISquare-Studio/rlx",
   "license": "MIT",
   "keywords": ["memory", "context", "hooks"]
 }

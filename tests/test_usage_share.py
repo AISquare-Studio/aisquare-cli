@@ -11,7 +11,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Iterator
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -413,7 +413,7 @@ def test_what_is_previewed_is_what_is_posted(machine: Machine) -> None:
     assert report.sent and len(server.calls) == 1
     assert server.calls[0].body == shown
     check_contract(shown)
-    assert server.calls[0].url.endswith("/api/v1/cli/metrics/")
+    assert server.calls[0].url.endswith("/api/v1/rlx/metrics/")
     assert server.calls[0].timeout == 5.0
 
 
@@ -594,6 +594,107 @@ def test_a_server_error_is_a_failure_and_a_200_without_a_body_is_not_trusted(
 
     assert first.error == "HTTP 503" and (second.error or "").startswith("HTTP 200")
     assert sharing.read().acked == {}
+
+
+def test_the_kill_switch_s_503_keeps_every_day_for_the_next_shipment(machine: Machine) -> None:
+    """The server's ingest ships dark behind a kill switch, and while it is off it answers 503 with
+    `Retry-After: 3600` (AISquare-Studio-BE #3791, its manager's note of 2026-11-16). That is a
+    retry-later, never a refusal: no day is acknowledged or skipped ahead of, the next try waits
+    the hour the server asked for (not the backoff's first 5 minutes), and then it sends the very
+    same days to the endpoint."""
+    _history(machine)
+    _on()
+    dark = Server(status(503, {"detail": "ingest is off"}, **{"Retry-After": "3600"}))
+
+    first = usage_share.ship(now=NOW, tz=IST, transport=dark)
+    state = sharing.read()
+    due = sharing.parse_time(state.next_due_at)
+
+    assert not first.sent and first.error == "HTTP 503" and first.rejected_days == 0
+    assert state.acked == {} and state.failures == 1
+    assert due == NOW + timedelta(hours=1), "the hour Retry-After asked for, not 5 minutes"
+    asked = [day["date"] for day in dark.calls[0].body["days"]]
+    assert asked, "the dark server was asked for the days"
+
+    lit = Server()
+    again = usage_share.ship(now=due + timedelta(minutes=1), tz=IST, transport=lit)
+
+    assert again.sent and again.error is None
+    assert lit.calls[0].url.endswith(usage_share.ENDPOINT_PATH)
+    assert [day["date"] for day in lit.calls[0].body["days"]] == asked
+    assert set(sharing.read().acked) == set(asked)
+
+
+@pytest.mark.parametrize("code", [500, 502, 503])
+def test_a_server_error_that_names_no_wait_keeps_the_backoff(machine: Machine, code: int) -> None:
+    """Only an answer that says when (429, 503 with `Retry-After`) moves the next try past the
+    backoff; a server error that names no wait is tried again on the backoff's own schedule, and
+    its days are kept as the kill switch's are."""
+    _history(machine)
+    _on()
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=Server(status(code, "later")))
+    state = sharing.read()
+
+    assert not report.sent and report.error == f"HTTP {code}" and report.rejected_days == 0
+    assert state.acked == {} and state.failures == 1
+    assert sharing.parse_time(state.next_due_at) == NOW + sharing.backoff(1)
+    assert sharing.backoff(1) == timedelta(minutes=5), "the backoff's first step, for the record"
+
+
+@pytest.mark.parametrize("code", [429, 503])
+def test_a_retry_after_of_a_year_waits_a_day_not_a_year(machine: Machine, code: int) -> None:
+    """Tester 12360, F1: a Retry-After is honoured up to a day (RETRY_AFTER_CAP_S). A year's
+    would park sharing for a year; the kill switch's hour is still waited in full (above)."""
+    _history(machine)
+    _on()
+    year = Server(status(code, "later", **{"Retry-After": "31536000"}))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=year)
+    state = sharing.read()
+
+    assert not report.sent and report.error == f"HTTP {code}" and report.rejected_days == 0
+    assert state.acked == {} and state.failures == 1
+    assert sharing.parse_time(state.next_due_at) == NOW + timedelta(hours=24)
+    assert usage_share.RETRY_AFTER_CAP_S == 24 * 60 * 60
+
+
+@pytest.mark.parametrize("seconds", [10**12, 10**20])
+def test_an_absurd_retry_after_is_capped_before_the_date_math_and_recorded(
+    machine: Machine, seconds: int
+) -> None:
+    """Tester 12360, F2: 10^12 s overflowed the next-due date, the state's writer swallowed
+    the error, and the failure went unrecorded (failures stayed 0). Capped in whole seconds
+    first, it is a day like any long wait, and recorded. 10^20 s does not even make a
+    timedelta: the cap must come before one is built."""
+    _history(machine)
+    _on()
+    broken = Server(status(503, "later", **{"Retry-After": str(seconds)}))
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=broken)
+    state = sharing.read()
+
+    assert not report.sent and report.error == "HTTP 503"
+    assert state.failures == 1 and state.last_error == "HTTP 503", "the failure is recorded"
+    assert state.acked == {}
+    assert sharing.parse_time(state.next_due_at) == NOW + timedelta(hours=24)
+
+
+@pytest.mark.parametrize("code", [500, 502])
+def test_a_server_error_s_retry_after_is_not_honoured_only_a_429_s_and_a_503_s(
+    machine: Machine, code: int
+) -> None:
+    """Tester 12360, G1: Retry-After is the server's word on a 429 and a 503 alone
+    (_SAYS_WHEN). On a 500 or a 502 it is not read, and the backoff decides."""
+    _history(machine)
+    _on()
+    server = Server(status(code, "later", **{"Retry-After": "3600"}))
+
+    usage_share.ship(now=NOW, tz=IST, transport=server)
+    state = sharing.read()
+
+    assert state.acked == {} and state.failures == 1
+    assert sharing.parse_time(state.next_due_at) == NOW + sharing.backoff(1)
 
 
 def test_two_shippers_at_once_send_one(machine: Machine) -> None:
@@ -993,7 +1094,7 @@ def test_a_later_200_delivers_the_whole_backlog_oldest_first_in_batches_of_31(
     assert flat[-1] == "2026-10-26"  # the last batch ends with today
     for call in server.calls[3:]:
         check_contract(call.body)
-        assert call.url.endswith("/api/v1/cli/metrics/")
+        assert call.url.endswith("/api/v1/rlx/metrics/")
     after = sharing.read()
     assert after.failures == 0 and after.last_error is None and after.last_sent_at is not None
     # none of it is sent again, and the file that tracks it stays small
@@ -1408,7 +1509,7 @@ def test_a_redirect_is_never_followed_and_the_bearer_goes_to_one_origin_only(
         report = usage_share.ship(now=NOW, tz=IST)  # the real transport, over real sockets
 
         assert report.sent is False and report.error == f"HTTP {code}"
-        assert [(m, p) for m, p, _ in home.requests] == [("POST", "/api/v1/cli/metrics/")]
+        assert [(m, p) for m, p, _ in home.requests] == [("POST", "/api/v1/rlx/metrics/")]
         assert home.requests[0][2] == "Bearer aisq_secret_bearer"
         assert other.requests == []  # the redirect target was never contacted
         state = sharing.read()
@@ -1436,7 +1537,7 @@ def test_a_post_that_is_answered_directly_goes_through_the_real_transport(
         report = usage_share.ship(now=NOW, tz=IST)
 
         assert report.sent and report.days == 3
-        assert site.requests == [("POST", "/api/v1/cli/metrics/", None)]  # anonymous: no header
+        assert site.requests == [("POST", "/api/v1/rlx/metrics/", None)]  # anonymous: no header
     finally:
         site.close()
 
@@ -1805,6 +1906,111 @@ def test_a_feature_name_outside_the_contracts_shape_is_not_sent(machine: Machine
     day = usage_share.day_body(rollup, "ab" * 32, signed_in=False)
 
     assert day["features"] == {"cli.fleet.spawn": 3, "tui.launch": 2}
+
+
+def test_a_day_with_keys_outside_the_contracts_shape_still_ships_whole(machine: Machine) -> None:
+    """The server folds a feature key or an agent role outside `^[a-z0-9_.-]{1,64}$` into
+    "other", with no 400 for it (AISquare-Studio-BE #3791, its manager's note of 2026-11-16).
+    So the client holds nothing back for a key's shape: the day still goes, in the same one
+    POST as every other day, and is acknowledged. A name of that shape is left out of the
+    day's features (above) and an invented role is sent as "other", as before."""
+    _history(machine)
+    with store_session() as store:
+        store.add_feature_uses({("2026-10-26", "Has Space"): 2, ("2026-10-26", "x" * 65): 1})
+    _on()
+    server = Server()
+
+    report = usage_share.ship(now=NOW, tz=IST, transport=server)
+
+    assert report.sent and report.error is None and report.rejected_days == 0
+    (call,) = server.calls
+    today = next(day for day in call.body["days"] if day["date"] == "2026-10-26")
+    assert today["features"]["cli.fleet.spawn"] == 3, "the rest of the day went"
+    assert today["fleet"]["agents_spawned"].get("other") == 1, "the invented role went too"
+    assert set(sharing.read().acked) == {day["date"] for day in call.body["days"]}
+
+
+# --- a backlog the last release could not deliver goes to the new endpoint (RLX R9) ---------------
+
+_OLD_PATH = "/api/v1/cli/metrics/"
+_NEW_PATH = usage_share.ENDPOINT_PATH
+
+
+def _left_by_0_10_0(m: Machine, monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, str], datetime]:
+    """The state 0.10.0 leaves on a machine whose backlog it could not deliver, as production
+    answers it: a 404 for every batch on its path (the endpoint is not deployed), then, once the
+    server is, a 503 with Retry-After while the ingest's kill switch is off. 0.10.0 is this code
+    posting to its path: the state, the days and the shipper are the same, and the path is read
+    at send time (``endpoint``). Returns each day 0.10.0 asked to send, with its digest, and when
+    the next shipment is due."""
+    _backlog(m)  # 70 days: batches of 31, 31 and 8
+    monkeypatch.setattr(usage_share, "ENDPOINT_PATH", _OLD_PATH)
+    prod = Server(*[status(404, {"detail": "Not Found"})] * 3)
+    first = usage_share.ship(now=NOW, tz=IST, transport=prod)
+    assert not first.sent and len(prod.calls) == 3, "every batch asked, every one refused"
+    assert all(call.url.endswith(_OLD_PATH) for call in prod.calls)
+    tried = {
+        day["date"]: usage_share._digest(day) for call in prod.calls for day in call.body["days"]
+    }
+    dark = Server(status(503, {"detail": "ingest is off"}, **{"Retry-After": "3600"}))
+    due = sharing.parse_time(sharing.read().next_due_at)
+    assert due is not None
+    second = usage_share.ship(now=due + timedelta(minutes=1), tz=IST, transport=dark)
+    assert not second.sent and dark.calls[0].url.endswith(_OLD_PATH)
+    state = sharing.read()
+    assert state.acked == {} and state.settled_through is None, "0.10.0 delivered nothing"
+    monkeypatch.setattr(usage_share, "ENDPOINT_PATH", _NEW_PATH)  # the update
+    after = sharing.parse_time(state.next_due_at)
+    assert after is not None
+    return tried, after + timedelta(minutes=1)
+
+
+def test_a_backlog_0_10_0_could_not_deliver_goes_whole_to_the_new_endpoint(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's requirement: what was waiting before the update goes to the NEW endpoint after
+    it, never dropped. On the new path's 200 every day 0.10.0 held is sent, with the same
+    digests, none skipped or refused, and each is acknowledged (or settled, past the keep
+    window, as any delivered day is)."""
+    tried, later = _left_by_0_10_0(machine, monkeypatch)
+    server = Server()
+
+    report = usage_share.ship(now=later, tz=IST, transport=server)
+
+    assert report.sent and report.error is None and report.rejected_days == 0
+    assert server.calls and all(call.url.endswith(_NEW_PATH) for call in server.calls)
+    sent = {
+        day["date"]: usage_share._digest(day) for call in server.calls for day in call.body["days"]
+    }
+    assert sent == tried, "every held day, with the same digest, and nothing else"
+    state = sharing.read()
+    settled = state.settled_through or ""
+    unacked = [day for day in tried if day > settled and state.acked.get(day) != tried[day][:12]]
+    assert not unacked, f"sent but not acknowledged: {unacked}"
+
+
+def test_a_404_on_the_new_endpoint_too_keeps_the_whole_backlog_for_next_time(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Until the server's new route is deployed it answers 404 there too: a refusal, which
+    keeps every day (none acknowledged, none settled past) for the next shipment, and that
+    one, once the route answers, sends them all."""
+    tried, later = _left_by_0_10_0(machine, monkeypatch)
+    undeployed = Server(*[status(404, {"detail": "Not Found"})] * 3)
+
+    report = usage_share.ship(now=later, tz=IST, transport=undeployed)
+
+    assert not report.sent and report.rejected_days == len(tried)
+    assert all(call.url.endswith(_NEW_PATH) for call in undeployed.calls)
+    state = sharing.read()
+    assert state.acked == {} and state.settled_through is None, "nothing taken, nothing settled"
+
+    due = sharing.parse_time(state.next_due_at)
+    assert due is not None
+    deployed = Server()
+    usage_share.ship(now=due + timedelta(minutes=1), tz=IST, transport=deployed)
+
+    assert {day["date"] for call in deployed.calls for day in call.body["days"]} == set(tried)
 
 
 # --- a batch the server refuses for good does not block the newer ones (review of #444, 3) ----

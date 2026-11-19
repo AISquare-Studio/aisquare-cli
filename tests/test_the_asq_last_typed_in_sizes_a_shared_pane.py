@@ -113,9 +113,9 @@ def test_a_claim_says_how_its_terminal_reached_the_machine() -> None:
 
 
 def test_the_hint_names_the_other_asqs_terminal_when_it_is_known() -> None:
-    assert sized_elsewhere(SizeOwner(1, "h", "ssh", 1)) == "[sized by the other asq (ssh)]"
-    assert sized_elsewhere(SizeOwner(1, "h", "mac", 1)) == "[sized by the other asq (Mac)]"
-    assert sized_elsewhere(SizeOwner(1, "h", "local", 1)) == "[sized by the other asq]"
+    assert sized_elsewhere(SizeOwner(1, "h", "ssh", 1)) == "[sized by the other rlx (ssh)]"
+    assert sized_elsewhere(SizeOwner(1, "h", "mac", 1)) == "[sized by the other rlx (Mac)]"
+    assert sized_elsewhere(SizeOwner(1, "h", "local", 1)) == "[sized by the other rlx]"
 
 
 # --- one asq: as before --------------------------------------------------------------------
@@ -199,8 +199,8 @@ def test_a_window_another_running_asq_sized_is_never_resized_from_here(
     first, last = run(drive())
     assert _resizes(fake) == [], _resizes(fake)
     assert (fake.panes["%1"].width, fake.panes["%1"].height) == (80, 24)
-    assert first.endswith("[sized by the other asq (ssh)]"), first
-    assert last.endswith("[sized by the other asq (ssh)]"), last
+    assert first.endswith("[sized by the other rlx (ssh)]"), first
+    assert last.endswith("[sized by the other rlx (ssh)]"), last
     assert fake.claims == []
 
 
@@ -226,7 +226,7 @@ def test_the_hint_shows_only_while_the_sizes_differ(
 
     same, differs = run(drive())
     assert "sized by" not in same, same
-    assert differs.endswith("[sized by the other asq (Mac)]"), differs
+    assert differs.endswith("[sized by the other rlx (Mac)]"), differs
     assert _resizes(fake) == []
 
 
@@ -450,7 +450,7 @@ def test_the_size_comes_back_when_the_other_asq_lets_go(
             return before, _corner(pane)
 
     before, after = run(drive())
-    assert before.endswith("[sized by the other asq (ssh)]"), before
+    assert before.endswith("[sized by the other rlx (ssh)]"), before
     assert "sized by" not in after, after
     assert _resizes(fake) == [("resize-window", "%1", "60", "20")]
     assert fake.claims == []
@@ -595,7 +595,7 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
                 return lambda: _window_size(live, pane_id) == _size(pane)
 
             def hint(pane: TerminalPane) -> Callable[[], bool]:
-                return lambda: "[sized by the other asq" in _corner(pane)
+                return lambda: "[sized by the other rlx" in _corner(pane)
 
             async def resize_both(
                 owner: TerminalPane, other: TerminalPane, terminals: list[tuple[int, int]]
@@ -714,7 +714,7 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
         found = seen[phase]
         assert found["resized"], f"{phase}: the owner resized as it always did"
         assert found["owner's"], f"{phase}: only the owner's sizes reached tmux: {found}"
-        assert not found["other's"], f"{phase}: the other asq resized it: {found}"
+        assert not found["other's"], f"{phase}: the other rlx resized it: {found}"
         assert not found["owner hint"], f"{phase}: the owner says nothing: {found}"
         assert found["questions"] == [], f"{phase}: a show-options process: {found}"
     assert seen["their drag"] == {
@@ -730,7 +730,7 @@ def test_real_tmux_two_asq_on_one_window_never_resize_it_back_and_forth(
     assert not at_their_key["debounce"], f"their key left a debounce running: {at_their_key}"
     assert seen["idle"] == [], f"resized while nobody did anything: {seen['idle']}"
     assert seen["owner pids"] == {"mine": other_asq.pid, "theirs": other_asq.pid}, (
-        "the claim stays the dead asq's until input: nobody's, read as unset"
+        "the claim stays the dead rlx's until input: nobody's, read as unset"
     )
 
 
@@ -771,7 +771,7 @@ def test_real_tmux_a_claim_landing_between_a_look_and_a_resize_is_never_undone(
     window, owner, corner = run(drive())
     assert owner == theirs
     assert window == (50, 15), f"the claimer's size, not this pane's 90x28: {window}"
-    assert corner.endswith("[sized by the other asq (ssh)]"), corner
+    assert corner.endswith("[sized by the other rlx (ssh)]"), corner
 
 
 def test_a_claim_landing_between_a_look_and_a_resize_is_never_undone(
@@ -803,5 +803,5 @@ def test_a_claim_landing_between_a_look_and_a_resize_is_never_undone(
     size = (fake_pane.width, fake_pane.height)
     assert size == (50, 15), f"the claimer's size, not this pane's 70x22: {size}"
     assert fake_pane.size_owner == theirs
-    assert corner.endswith("[sized by the other asq (ssh)]"), corner
+    assert corner.endswith("[sized by the other rlx (ssh)]"), corner
     assert _resizes(fake) == [("resize-window", "%1", "60", "20")], "the attach's alone"

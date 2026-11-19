@@ -8,7 +8,7 @@
 # cannot survive that. PSScriptAnalyzer's PSUseBOMForUnicodeEncodedFile is what
 # pointed it out.
 #
-#   irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex
+#   irm https://aisquare.studio/rlx/install.ps1 | iex
 #
 # WHY THIS IS A SHIM AND NOT AN INSTALLER (docs/plans/one-line-install.md section 2).
 # The fleet UI runs every agent in a real tmux pane, and there is no tmux on
@@ -22,7 +22,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'AISquare-Studio/aisquare-cli'
+$Repo = 'AISquare-Studio/rlx'
 # THE RELEASE STAMP. In the repository these two lines name main's install.sh
 # and no version, so this file installs the latest release. The copy attached to
 # a GitHub Release is rewritten by scripts/stamp_installers.py to fetch THAT
@@ -61,8 +61,8 @@ $Pin = if ($StampedVersion) { "--version $StampedVersion " } else { '' }
 function Write-Step($Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 function Write-Note($Message) { Write-Host "    $Message" -ForegroundColor DarkGray }
 
-Write-Step 'aisquare on Windows runs inside WSL2'
-Write-Note 'The fleet UI gives every agent a real tmux pane, and Windows has no tmux.'
+Write-Step 'rlx on Windows runs inside WSL2'
+Write-Note 'The rlx UI gives every agent a real tmux pane, and Windows has no tmux.'
 
 # `wsl.exe` exists on modern Windows even with no distribution installed, so its
 # presence is not the question -- whether a distribution is actually there is.
@@ -174,6 +174,6 @@ if ($code -ne 0) {
 }
 
 Write-Host ''
-Write-Step 'Done. aisquare is installed inside WSL.'
-Write-Note "Open it with:  wsl -d $target -- asq"
+Write-Step 'Done. rlx is installed inside WSL.'
+Write-Note "Open it with:  wsl -d $target -- rlx"
 Write-Note 'Run everything else from that shell too -- the agents live there.'

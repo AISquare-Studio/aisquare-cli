@@ -1,6 +1,6 @@
 """The Claude Code plugin route: the marketplace, the plugin, its hooks and its launcher.
 
-``/plugin marketplace add AISquare-Studio/aisquare-cli``, then ``/plugin install
+``/plugin marketplace add AISquare-Studio/rlx``, then ``/plugin install
 aisquare@aisquare-cli``, gives Claude Code the six lifecycle hooks ``aisquare agents
 connect claude-code`` writes into settings.json, with no installer. Each one runs
 ``plugins/claude-code/scripts/aisquare-hook``, a POSIX launcher around ``aisquare hook
@@ -38,6 +38,7 @@ from typing import Any
 import pytest
 
 from aisquare.core import agents as agent_core
+from aisquare.core.agent_adapters import get_adapter
 from tests.fsperms import can_deny_reads
 
 REPO = Path(__file__).resolve().parents[1]
@@ -159,8 +160,9 @@ def hook_problems(hooks_json: Mapping[str, Any]) -> list[str]:
     """How a hooks.json differs from the hooks ``agents connect`` installs; empty if it does not.
 
     The same six events as ``core.agents._HOOKS``, each one hook that runs the launcher
-    with that event's ``aisquare hook`` subcommand, and the two context hooks allowed
-    ``CONTEXT_HOOK_TIMEOUT_SECONDS``, as settings.json gives them.
+    with that event's ``aisquare hook`` subcommand, and every hook the time
+    ``agents connect`` gives it (``required_hook_timeout``): the two context hooks
+    ``CONTEXT_HOOK_TIMEOUT_SECONDS``, the session end its own (R20), as settings.json does.
     """
     events = hooks_json.get("hooks")
     if not isinstance(events, dict):
@@ -184,13 +186,13 @@ def hook_problems(hooks_json: Mapping[str, Any]) -> list[str]:
         ):
             problems.append(f"{event}: does not run the launcher with {subcommand}")
         timeout = item.get("timeout")
-        if event in agent_core._CONTEXT_HOOKS and not (
-            isinstance(timeout, int) and timeout >= agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
-        ):
-            problems.append(
-                f"{event}: timeout {timeout!r} is under {agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS}"
-            )
+        needs = agent_core.required_hook_timeout(_SPECS[event])
+        if needs is not None and not (isinstance(timeout, int) and timeout >= needs):
+            problems.append(f"{event}: timeout {timeout!r} is under {needs}")
     return problems
+
+
+_SPECS = {hook.event: hook for hook in get_adapter("claude-code").capabilities.hooks}
 
 
 def test_hooks_json_runs_every_lifecycle_event_through_the_launcher() -> None:
@@ -232,8 +234,20 @@ def _unwrapped(hooks: dict[str, Any]) -> None:
             "PreToolUse: not an event agents connect installs",
         ),
         (_unwrapped, "no top-level `hooks` object"),
+        (
+            lambda hooks: hooks["hooks"]["SessionEnd"][0]["hooks"][0].pop("timeout"),
+            "SessionEnd: timeout None is under 10",
+        ),
     ],
-    ids=["missing-event", "wrong-subcommand", "short-timeout", "no-timeout", "extra", "unwrapped"],
+    ids=[
+        "missing-event",
+        "wrong-subcommand",
+        "short-timeout",
+        "no-timeout",
+        "extra",
+        "unwrapped",
+        "session-end-no-timeout",
+    ],
 )
 def test_the_hooks_guard_names_each_way_hooks_json_can_drift(
     mutate: Callable[[dict[str, Any]], None], expected: str
@@ -457,6 +471,8 @@ def _programs(machine: Machine) -> Path:
     for relative in (
         "aisquare",
         "asq",
+        "rlx",
+        "relax",
         "python3",
         "My Tools/aisquare",
         "Jane's Tools/aisquare",
@@ -491,6 +507,9 @@ _OURS = [
     ("{bin}/python3 -m aisquare hook stop", True),
     ("aisquare hook stop", True),
     ("{bin}/asq hook stop", True),
+    # rlx and relax, which connect never writes, as a person may (#133).
+    ("{bin}/rlx hook stop", True),
+    ("'{bin}/relax' hook stop", True),
     ("{bin}/aisquare hook stop ", True),
     ("{bin}/aisquare\thook\tstop", True),
     ("{bin}/aisquare  hook  stop", True),
@@ -1219,7 +1238,8 @@ def test_with_neither_cli_nor_uv_session_start_says_so_once(machine: Machine) ->
 
     message = json.loads(results.pop("session-start").stdout)
     assert list(message) == ["systemMessage"]
-    assert "uv" in message["systemMessage"]
+    # It names the two programs it looked for: the `aisquare` command, then uv (seq 12524).
+    assert "neither the aisquare command nor uv was found" in message["systemMessage"]
     assert {sub: (r.returncode, r.stdout) for sub, r in results.items()} == {
         sub: (0, b"") for sub in results
     }

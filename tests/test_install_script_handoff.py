@@ -55,7 +55,7 @@ REPO = Path(__file__).resolve().parents[1]
 #: what an UNSTAMPED script does, and a stamped one is made here when needed.
 SCRIPT = REPO / "install.sh"
 SH = shutil.which("sh") or "/bin/sh"
-RELEASES = "https://github.com/AISquare-Studio/aisquare-cli/releases"
+RELEASES = "https://github.com/AISquare-Studio/rlx/releases"
 LATEST_URL = f"{RELEASES}/latest/download/install.sh"
 PYPI_URL = "https://pypi.org/pypi/aisquare-cli/json"
 #: The release the served installer is stamped to. Not the tree's own version,
@@ -1102,7 +1102,7 @@ def test_the_releases_prompt_reads_the_terminal_and_not_the_script(
     output, left = _piped_with_a_terminal(current_machine, _PROMPT_FLAGS, "n\n")
 
     assert "using the v7.7.7 installer" in output, output
-    assert "Open the aisquare fleet UI now?" in output, f"the prompt never appeared:\n{output}"
+    assert "Open rlx now?" in output, f"the prompt never appeared:\n{output}"
     assert "UI-STARTED" not in output, f"answering 'n' still launched the UI:\n{output}"
     assert "Open it any time with" in output, output
     assert left.endswith(_SENTINEL), "the prompt read the parent's stdin"

@@ -28,6 +28,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from aisquare.core import atomic, paths, selfcli
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.agent_adapters.claude_code import ClaudeCodeAdapter
 from aisquare.core.agent_adapters.types import (
@@ -62,6 +63,13 @@ so this changes nothing for anyone who has not opted in.
 #: Hooks whose stdout becomes the agent's context. The others do bookkeeping
 #: and keep Claude Code's default.
 _CONTEXT_HOOKS = frozenset({"SessionStart", "UserPromptSubmit"})
+
+#: Bookkeeping hooks whose agent cancels them on a short default budget, losing what they
+#: record: Claude Code gives a ``SessionEnd`` hook 1.5 s unless it names a ``timeout``, and
+#: Codex 1 s (RLX R20, #154). Installed without the ``timeout`` the adapter writes, or with
+#: less, they read as a shortfall (:func:`hook_timeout_shortfall`), as a short context hook
+#: does.
+_BUDGETED_HOOKS = frozenset({"SessionEnd"})
 
 #: Claude Code's lifecycle events → the ``aisquare hook`` subcommand, as its adapter installs
 #: them (``ClaudeCodeAdapter.capabilities.hooks``). ``StopFailure`` fires INSTEAD of Stop
@@ -200,11 +208,18 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
     return specs
 
 
-_PROGRAM_NAMES = frozenset({"aisquare", "asq"})
+_PROGRAM_NAMES = frozenset({"aisquare", "asq", "rlx", "relax"})
+"""Every name the package's console scripts give the CLI: a hook naming any is ours (#133)."""
+
+_WRITTEN_NAMES = frozenset({"aisquare", "asq"})
+"""The names :func:`_aisquare_command` writes a hook with when it runs as one. Not ``rlx`` or
+``relax`` (#133): another program can take either name over where uv puts executables, and a
+hook naming it would then run that program; run as either, a hook names this install's
+``aisquare`` script."""
 
 
-def _is_aisquare_program(token: str) -> bool:
-    """Whether ``token`` names the aisquare executable itself.
+def _is_aisquare_program(token: str, names: frozenset[str] = _PROGRAM_NAMES) -> bool:
+    """Whether ``token`` names the aisquare executable itself (one of ``names``).
 
     On Windows the console scripts are ``aisquare.exe`` / ``asq.EXE``, so the
     extension is stripped and the comparison is case-insensitive — the bare
@@ -212,11 +227,11 @@ def _is_aisquare_program(token: str) -> bool:
     ``PureWindowsPath`` because ``Path`` follows the *running* platform, and
     backslashes are ordinary filename characters to a ``PosixPath``.
     """
-    if Path(token).name in _PROGRAM_NAMES:
+    if Path(token).name in names:
         return True
     if sys.platform != "win32":
         return False
-    return PureWindowsPath(token).stem.lower() in _PROGRAM_NAMES
+    return PureWindowsPath(token).stem.lower() in names
 
 
 def _quote(path: str) -> str:
@@ -273,7 +288,7 @@ def _aisquare_command(isolated: bool = False) -> str:
     if isolated:
         return " ".join(_quote(part) for part in selfcli.isolated_argv_for([]))
     argv0 = Path(sys.argv[0])
-    if _is_aisquare_program(argv0.name) and argv0.exists():
+    if _is_aisquare_program(argv0.name, _WRITTEN_NAMES) and argv0.exists():
         return _quote(str(argv0.resolve()))
     installed = current_install()
     if _starts(installed):
@@ -511,7 +526,7 @@ def _is_aisquare_hook_command(command: str) -> bool:
     """Whether ``command`` is one of aisquare's own hook invocations.
 
     Deliberately strict: the command must *end* with ``hook <subcommand>``
-    AND the invoked program must be aisquare itself (an ``aisquare``/``asq``
+    AND the invoked program must be aisquare itself (an ``aisquare``/``asq``/``rlx``/``relax``
     executable, or ``python [-P] -m aisquare`` — the ``-m aisquare`` pair is
     matched by position, so hooks written before ``-P`` still count as ours
     and ``connect`` replaces rather than duplicates them). A bare-substring match would
@@ -520,9 +535,10 @@ def _is_aisquare_hook_command(command: str) -> bool:
     uses shlex so aisquare paths containing spaces (quoted at install time)
     keep matching.
 
-    This must stay the exact inverse of :func:`_aisquare_command`: if the two
-    ever disagree, ``connect`` stops recognising its own hooks and appends a
-    duplicate, and ``disconnect`` cannot remove them.
+    It must recognise everything :func:`_aisquare_command` writes: if it ever missed one,
+    ``connect`` would stop recognising its own hooks and append a duplicate, and
+    ``disconnect`` could not remove them. It recognises ``rlx`` and ``relax`` too, which
+    are never written (:data:`_WRITTEN_NAMES`), so one a person wrote is ours as well.
     """
     try:
         tokens, _ = _hook_command_parts(command)
@@ -683,7 +699,11 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         if isinstance(entry.get("timeout"), int):
             # Never below the ceiling the CI hook may wait for; never *reducing*
             # a longer one the operator chose deliberately.
-            entry["timeout"] = max(entry["timeout"], _installed_timeout(groups, hook.event) or 0)
+            entry["timeout"] = max(
+                entry["timeout"],
+                _installed_timeout(groups, hook.event, adapter.capabilities.clamped_hook_events)
+                or 0,
+            )
         group: dict[str, Any] = {"hooks": [entry]}
         if hook.matcher is not None:
             group["matcher"] = hook.matcher
@@ -770,8 +790,8 @@ def hook_trust_left_note(left: HookTrustLeft) -> str:
     )
     shown = ", ".join(left.records)
     return (
-        f"{left.file} still holds the trust aisquare recorded for its hooks, as {why}: "
-        f"{len(left.records)} {left.record}(s), {shown} — they trust hooks of aisquare's "
+        f"{left.file} still holds the trust rlx recorded for its hooks, as {why}: "
+        f"{len(left.records)} {left.record}(s), {shown} — they trust hooks of rlx's "
         "that are gone; remove them there by hand"
     )
 
@@ -1084,7 +1104,9 @@ def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
 
 
 def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[str]:
-    """Context events whose installed ``timeout`` is below what the CI hook needs.
+    """Events whose installed ``timeout`` is below what they need
+    (:func:`required_hook_timeout`): a context hook short of the CI hook's ceiling, or a
+    session end without its own (a 0.10.0 install's).
 
     Empty when there is nothing to reconcile — including when the hooks are not
     installed at all, which :func:`hooks_installed` is the question for.
@@ -1241,7 +1263,7 @@ def _local_settings_root(directory: Path) -> Path:
 
 def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> list[str]:
     """Lifecycle events with no aisquare group — or, with ``reconciled``, none
-    whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`.
+    whose timeout reaches :func:`required_hook_timeout`.
 
     Read as :func:`read_json` reads, this module's rule for a file it only reads (through
     the inspection snapshot, :func:`_read_settings`): a ``settings.json`` that is missing,
@@ -1258,12 +1280,31 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
     hooks = _read_settings(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return events
-    accepts = _is_current_aisquare_group if reconciled else (lambda g, _e: _is_aisquare_group(g))
+    if not reconciled:
+        return [
+            event
+            for event in events
+            if not any(_is_aisquare_group(group) for group in _event_groups(hooks, event))
+        ]
     return [
-        event
-        for event in events
-        if not any(accepts(group, event) for group in _event_groups(hooks, event))
+        hook.event
+        for hook in spec.hooks
+        if not any(
+            _is_current_aisquare_group(group, required_hook_timeout(hook))
+            for group in _event_groups(hooks, hook.event)
+        )
     ]
+
+
+def required_hook_timeout(hook: HookSpec) -> int | None:
+    """The ``timeout`` an installed ``hook`` needs at least, in seconds, or ``None`` when any
+    will do: :data:`CONTEXT_HOOK_TIMEOUT_SECONDS` for a context hook, the adapter's own for a
+    hook its agent cancels on a short default (:data:`_BUDGETED_HOOKS`)."""
+    if hook.event in _CONTEXT_HOOKS:
+        return CONTEXT_HOOK_TIMEOUT_SECONDS
+    if hook.event in _BUDGETED_HOOKS:
+        return hook.timeout
+    return None
 
 
 def _event_groups(hooks: dict[str, Any], event: str) -> list[Any]:
@@ -1278,13 +1319,19 @@ def _event_groups(hooks: dict[str, Any], event: str) -> list[Any]:
     return groups if isinstance(groups, list) else []
 
 
-def _installed_timeout(groups: Any, event: str) -> int | None:
-    """Preserve extra headroom only for the two context-producing hooks.
+def _installed_timeout(groups: Any, event: str, clamped: frozenset[str]) -> int | None:
+    """The longest timeout one of our handlers under ``event`` already has, which the writer
+    keeps over the spec's: an operator's longer one, for the two context-producing hooks and
+    for a session end its agent honours past the spec (R20, the manager's ruling (a): drift
+    calls it sufficient, so a refresh must not cut it). ``None`` keeps nothing.
 
-    UI and decision hooks must reconcile to their adapter's bounded timeout;
-    Claude hooks without a spec timeout retain the native default.
+    UI and decision hooks, and the budgeted hooks the agent clamps at the spec's own value
+    (``clamped``: its ``AgentCapabilities.clamped_hook_events``, Codex's ``SessionEnd`` and
+    ``Interrupt``), reconcile to their adapter's bounded timeout; Claude hooks without a spec
+    timeout retain the native default.
     """
-    if event not in _CONTEXT_HOOKS or not isinstance(groups, list):
+    budgeted = event in _BUDGETED_HOOKS and event not in clamped
+    if not (event in _CONTEXT_HOOKS or budgeted) or not isinstance(groups, list):
         return None
     timeouts: list[int] = []
     for group in groups:
@@ -1295,12 +1342,15 @@ def _installed_timeout(groups: Any, event: str) -> int | None:
     return max(timeouts, default=None)
 
 
-def _is_current_aisquare_group(group: Any, event: str) -> bool:
-    """An aisquare hook group whose context events carry a sufficient timeout.
+def _is_current_aisquare_group(group: Any, needs: int | None) -> bool:
+    """An aisquare hook group whose timeout is at least ``needs`` seconds
+    (:func:`required_hook_timeout`; ``None``: any, or none).
 
     Presence alone reported a settings file written before the context hooks
     carried ``timeout`` as healthy, so ``doctor`` said the hooks were installed
-    while Claude Code cut the CI hook off at its 60 s default.
+    while Claude Code cut the CI hook off at its 60 s default; and a 0.10.0
+    session end, which carried none, as healthy while Claude Code cancelled it at
+    1.5 s (R20).
 
     "Sufficient", not "equal to ours": an operator who set 180 chose a longer
     ceiling than we need and reconciling that back down to 120 would discard
@@ -1308,12 +1358,12 @@ def _is_current_aisquare_group(group: Any, event: str) -> bool:
     """
     if not _is_aisquare_group(group):
         return False
-    if event not in _CONTEXT_HOOKS:
+    if needs is None:
         return True
     return any(
         isinstance(item.get("timeout"), int)
         and not isinstance(item.get("timeout"), bool)
-        and item["timeout"] >= CONTEXT_HOOK_TIMEOUT_SECONDS
+        and item["timeout"] >= needs
         for item in _owned_handlers(group)
     )
 
@@ -1878,9 +1928,10 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any], *, ambient: bool = False
     plugin = plugin_of(spec.name) if route == ROUTE_BOTH else None
     install = plugin.installed(_hook_dir(spec)) if plugin is not None else None
     both = (
-        f"aisquare runs two ways here: the {spec.settings_path.name} hooks and "
-        f"{plugin_label(install)}, whose hooks stand down beside them; keep one "
-        "(aisquare doctor says how)."
+        f"rlx runs two ways here: the {spec.settings_path.name} hooks and "
+        f"{plugin_label(install)}, whose hooks stand down beside them; keep one"
+        + prog.shell_advice(f" ({prog.word()} doctor says how)")
+        + "."
         if install is not None and spec.settings_path is not None
         else ""
     )
@@ -2118,12 +2169,12 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
         return (
             "trusted",
             f"Hooks configured and trusted where {adapter.label} records a review's yes; "
-            "AISquare has not yet observed this definition run.",
+            "rlx has not yet observed this definition run.",
         )
     return (
         "unverified",
         f"Hooks configured; open /hooks in {adapter.label} to review and trust them. "
-        "AISquare has not yet observed this definition run.",
+        "rlx has not yet observed this definition run.",
     )
 
 

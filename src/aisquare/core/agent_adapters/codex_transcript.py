@@ -62,6 +62,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from aisquare.core import program as prog
 from aisquare.core import prompt_origin
 from aisquare.core.agent_adapters.transcripts import (
     DIM,
@@ -260,11 +261,11 @@ class CodexTranscript:
         :data:`_DAEMON_KEEPS` after its TUI quit, and stops at ``codex app-server daemon
         stop`` on that account's home (which leaves its ``pid-update-loop`` running), run
         through ``run``."""
-        stop = command_line([*run, "app-server", "daemon", "stop"])
         return (
             "it is Codex's background app-server, which keeps a thread open after its TUI quit "
-            f"and lets go of it by itself {_DAEMON_KEEPS}: retry then, or stop it first with "
-            f"`{stop}`"
+            f"and lets go of it by itself {_DAEMON_KEEPS}: retry then"
+        ) + prog.shell_advice(
+            f", or stop it first with `{command_line([*run, 'app-server', 'daemon', 'stop'])}`"
         )
 
     def conversations(self, home: Path) -> Iterator[tuple[str, Path]]:

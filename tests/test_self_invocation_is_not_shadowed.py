@@ -93,7 +93,7 @@ def test_a_project_with_its_own_aisquare_cannot_shadow_the_self_invocation(
         check=False,
     )
     assert MARKER in bare.stdout, f"{shape} did not shadow `python -m aisquare`: {bare}"
-    assert f"aisquare {__version__}" not in bare.stdout, bare
+    assert f"rlx {__version__}" not in bare.stdout, bare
     if shape.endswith("__init__.py"):
         assert bare.returncode != 0 and "No module named aisquare.__main__" in bare.stderr
     else:
@@ -102,7 +102,7 @@ def test_a_project_with_its_own_aisquare_cannot_shadow_the_self_invocation(
     result = selfcli.run(["--version"], cwd=project, env=env, timeout=120.0)
 
     assert result.ok, result.stderr
-    assert result.stdout.strip() == f"aisquare {__version__}"
+    assert result.stdout.strip() == f"rlx {__version__}"
 
 
 def test_the_hook_fallback_carries_the_flag_and_still_round_trips(

@@ -728,7 +728,7 @@ def test_a_settings_json_nobody_else_shares_is_still_replaced(fake_home: Path) -
 def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home: Path) -> None:
     result = runner.invoke(app, ["agents", "disconnect", "claude-code"])
     assert result.exit_code == 0
-    assert "no aisquare hooks found" in result.output
+    assert "no rlx hooks found" in result.output
 
 
 # --- parallel installs: one agent, several config dirs -----------------------
@@ -997,7 +997,9 @@ def test_connect_gives_the_context_hooks_room_for_the_ci_ceiling(
     """Claude Code cancels a command hook at 60 s by default and discards its
     output; the CI test bed's prompt call may wait up to the descriptor's
     ceiling (60 s today) before degrading. The two context hooks therefore
-    carry a longer timeout, and the bookkeeping hooks keep the default."""
+    carry a longer timeout; the session end its own, as Claude Code cancels it at
+    1.5 s without one (R20); and the other bookkeeping hooks keep the default."""
+    from aisquare.core.agent_adapters.claude_code import SESSION_END_TIMEOUT_SECONDS
     from aisquare.core.agents import CONTEXT_HOOK_TIMEOUT_SECONDS
 
     runner.invoke(app, ["agents", "connect", "claude-code"])
@@ -1005,6 +1007,7 @@ def test_connect_gives_the_context_hooks_room_for_the_ci_ceiling(
     for event in ("SessionStart", "UserPromptSubmit"):
         entry = settings["hooks"][event][0]["hooks"][0]
         assert entry["timeout"] == CONTEXT_HOOK_TIMEOUT_SECONDS, event
-    for event in ("Stop", "SessionEnd", "Notification", "StopFailure"):
+    assert settings["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] == SESSION_END_TIMEOUT_SECONDS
+    for event in ("Stop", "Notification", "StopFailure"):
         assert "timeout" not in settings["hooks"][event][0]["hooks"][0], event
     assert CONTEXT_HOOK_TIMEOUT_SECONDS > 60

@@ -29,10 +29,19 @@ from typing import Any
 from urllib.parse import urlencode, urlparse
 
 from aisquare.core import credentials, paths
+from aisquare.core import program as prog
 from aisquare.core.config import load_config
 from aisquare.core.version import __version__
 
-CLIENT_ID = "aisquare-cli"
+CLIENT_ID = "rlx"
+"""The client a sign-in starts as: the server sends the person to its own ``/rlx`` page."""
+FALLBACK_CLIENT_ID = "aisquare-cli"
+"""The client a server that does not know ``rlx`` yet still serves, at its ``/cli`` page.
+Also the client of every session stored before 0.10.1: 0.7.0 to 0.10.0 recorded it."""
+UNKNOWN_CLIENT_STATUSES = frozenset({400, 401})
+"""The statuses with which an ``invalid_client`` start means "this server does not know rlx":
+401, as production and staging answer, and 400, which RFC 6749 allows where no client
+authentication is used. Either falls back to :data:`FALLBACK_CLIENT_ID`."""
 SCOPE = "openid profile email aisquare"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
@@ -92,11 +101,17 @@ class HttpResult:
     headers: dict[str, str]
 
     def retry_after(self, default: int = 30) -> int:
+        said = self.said_retry_after()
+        return default if said is None else said
+
+    def said_retry_after(self) -> int | None:
+        """The ``Retry-After`` the server sent, in whole seconds (at least one), or ``None``
+        where it sent none, or none in seconds."""
         raw = self.headers.get("retry-after") or self.headers.get("Retry-After") or ""
         try:
             return max(1, int(raw))
         except ValueError:
-            return default
+            return None
 
     @property
     def error(self) -> str | None:
@@ -125,6 +140,9 @@ class DeviceAuthorization:
     verification_uri_complete: str
     expires_in: int
     interval: int
+    client_id: str
+    """The client that started the grant. The server binds the device code to it, so every
+    poll is made as this client, and the session it ends in is stored as this client's."""
 
 
 @dataclass(frozen=True)
@@ -153,6 +171,10 @@ class Session:
     """True on the session ``store_session`` returns when the credentials file could NOT be
     restricted to this account. A surface that cannot see stderr (the fleet UI, where Textual
     captures it) says so from this flag. A session read back from disk leaves it False."""
+    client_id: str = FALLBACK_CLIENT_ID
+    """The client the token was issued to, and the one that revokes it. A stored session
+    that does not say is ``aisquare-cli``'s, as every session before 0.10.1 was.
+    ``AISQUARE_TOKEN``'s does not say either, and nothing here revokes it."""
 
     def expires_in_days(self, now: datetime | None = None) -> int | None:
         if self.expires_at is None:
@@ -402,27 +424,60 @@ def _safe_link(value: Any, issuer: str) -> str:
 # --------------------------------------------------------------------------- device flow
 
 
+def _in_minutes(seconds: int) -> str:
+    """A wait as a person reads it: whole minutes, rounded up, at least one."""
+    minutes = max(1, -(-seconds // 60))
+    return f"{minutes} minute{'' if minutes == 1 else 's'}"
+
+
 def _reject_common(result: HttpResult, what: str) -> None:
+    """The answers a server may give before it looks at the request: its per-IP rate limit
+    (429 ``too_many_requests`` with ``Retry-After``) and its kill switch (503
+    ``temporarily_unavailable``), and a server error. Each is said with when to try again, the
+    server's ``Retry-After`` where it sent one: a sign-in is the person's to start again, and a
+    wait of minutes is not one to sit through in silence (R26a)."""
     if result.status == 429:
+        wait = result.retry_after()
         raise IamError(
             "rate_limited",
-            "Too many sign-in attempts from this network. "
-            f"Try again in {max(1, result.retry_after() // 60)} minutes.",
-            retry_after=result.retry_after(),
+            f"Too many sign-in attempts from this network. Try again in {_in_minutes(wait)}.",
+            retry_after=wait,
         )
     if result.status == 503:
-        raise IamError("paused", "CLI sign-in is temporarily paused. Try again later.")
+        if result.said_retry_after() is None:
+            raise IamError("paused", "Sign-in from rlx is temporarily paused. Try again later.")
+        wait = result.retry_after()
+        raise IamError(
+            "paused",
+            f"Sign-in from rlx is temporarily paused. Try again in {_in_minutes(wait)}.",
+            retry_after=wait,
+        )
     if result.status >= 500:
         raise IamError("unreachable", f"The server could not {what} (HTTP {result.status}).")
 
 
 def start_device_authorization(endpoints: Endpoints) -> DeviceAuthorization:
-    result = _http(
-        "POST",
-        endpoints.device_authorization,
-        form={"client_id": CLIENT_ID, "scope": SCOPE},
-        headers={"X-Device-Name": device_name()},
-    )
+    """Start the device grant as ``rlx``, or as ``aisquare-cli`` on a server that does not know rlx.
+
+    Such a server answers ``invalid_client``, and the grant starts again as ``aisquare-cli``,
+    whose ``/cli`` page signs the person in just the same: a normal fallback, so nothing is
+    said about it. Production and staging answer HTTP 401, ``{"error": "invalid_client",
+    "error_description": "Unknown client_id."}`` (cedar-swan, live, 2026-11-18); a 400 with
+    it falls back too, which RFC 6749 allows where no client authentication is used (R26a,
+    the final review of #503, M2). The error is read from the parsed JSON body. Any other
+    answer is the server's answer, said as it always was, and never a reason to try the other
+    client: ``unauthorized_client``, and the two a server gives before it checks the client,
+    its rate limit (429) and its kill switch (503), said with when to try again
+    (:func:`_reject_common`).
+
+    The links come from the response, never from here: the page lives on the web app's
+    host, which differs per environment and is not the API's.
+    """
+    client_id = CLIENT_ID
+    result = _start_as(endpoints, client_id)
+    if result.status in UNKNOWN_CLIENT_STATUSES and result.error == "invalid_client":
+        client_id = FALLBACK_CLIENT_ID
+        result = _start_as(endpoints, client_id)
     _reject_common(result, "start a sign-in")
     if result.status != 200 or not isinstance(result.body, dict):
         raise IamError(
@@ -441,6 +496,7 @@ def start_device_authorization(endpoints: Endpoints) -> DeviceAuthorization:
             ),
             expires_in=int(body.get("expires_in", 900)),
             interval=int(body.get("interval", 5)),
+            client_id=client_id,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise IamError(
@@ -448,11 +504,29 @@ def start_device_authorization(endpoints: Endpoints) -> DeviceAuthorization:
         ) from exc
 
 
-def poll_token(endpoints: Endpoints, device_code: str) -> PollOutcome:
+def _start_as(endpoints: Endpoints, client_id: str) -> HttpResult:
+    return _http(
+        "POST",
+        endpoints.device_authorization,
+        form={"client_id": client_id, "scope": SCOPE},
+        headers={"X-Device-Name": device_name()},
+    )
+
+
+def poll_token(endpoints: Endpoints, grant: DeviceAuthorization) -> PollOutcome:
+    """One poll for ``grant``'s token, as the client that started it.
+
+    The server binds a device code to its client, and answers another client's poll for it
+    with ``invalid_grant``, which reads here as an expired code.
+    """
     result = _http(
         "POST",
         endpoints.token,
-        form={"grant_type": DEVICE_GRANT, "device_code": device_code, "client_id": CLIENT_ID},
+        form={
+            "grant_type": DEVICE_GRANT,
+            "device_code": grant.device_code,
+            "client_id": grant.client_id,
+        },
     )
     if result.status == 200 and isinstance(result.body, dict) and result.body.get("access_token"):
         return PollOutcome("token", token=result.body)
@@ -482,7 +556,8 @@ def fetch_userinfo(endpoints: Endpoints, token: str) -> dict[str, Any]:
     if result.status == 401:
         raise IamError(
             "session_expired",
-            "Your AISquare session has expired or was revoked. Run aisquare login.",
+            "Your AISquare session has expired or was revoked."
+            + prog.shell_advice(" Run aisquare login."),
         )
     _reject_common(result, "identify you")
     if result.status != 200 or not isinstance(result.body, dict):
@@ -490,10 +565,14 @@ def fetch_userinfo(endpoints: Endpoints, token: str) -> dict[str, Any]:
     return result.body
 
 
-def revoke(endpoints: Endpoints, token: str) -> bool:
-    """RFC 7009. ``True`` when the server answered; a network failure is ``False``."""
+def revoke(endpoints: Endpoints, session: Session) -> bool:
+    """RFC 7009, as the client ``session``'s token was issued to.
+
+    ``True`` when the server answered; a network failure is ``False``.
+    """
+    form = {"token": session.token, "client_id": session.client_id}
     try:
-        result = _http("POST", endpoints.revocation, form={"token": token, "client_id": CLIENT_ID})
+        result = _http("POST", endpoints.revocation, form=form)
     except IamError:
         return False
     return 200 <= result.status < 300
@@ -517,6 +596,9 @@ def stored_session() -> Session | None:
         sub=data.get(KEY_SUB, ""),
         email=data.get(KEY_EMAIL, ""),
         name=data.get(KEY_NAME, ""),
+        # 0.7.0 to 0.10.0 recorded aisquare-cli and never read it back. A file without
+        # the key is read as theirs, which is what it was before this line read it.
+        client_id=data.get(KEY_CLIENT_ID) or FALLBACK_CLIENT_ID,
     )
 
 
@@ -553,6 +635,7 @@ def store_session(
     expires_in: int | None,
     scope: str,
     claims: dict[str, Any],
+    client_id: str,
 ) -> Session:
     expires_at = datetime.now(UTC) + timedelta(seconds=int(expires_in)) if expires_in else None
     values = {
@@ -563,9 +646,9 @@ def store_session(
         KEY_SUB: str(claims.get("sub", "")),
         KEY_EMAIL: str(claims.get("email", "")),
         KEY_NAME: str(claims.get("name", "")),
-        # Recorded, not read back yet: a second client_id in this file would mean
-        # a second stored session, and the reader that handles that is not here.
-        KEY_CLIENT_ID: CLIENT_ID,
+        # The client the token was issued to, read back to revoke it as that client.
+        # Still one session per file: a sign-in as either client replaces the other's.
+        KEY_CLIENT_ID: client_id,
     }
     # store() merges only non-empty values. Replace this session's keys first
     # so an unknown expiry or omitted claim cannot survive from the old token —
@@ -591,6 +674,7 @@ def store_session(
         email=values[KEY_EMAIL],
         name=values[KEY_NAME],
         unrestricted=not restricted,
+        client_id=client_id,
     )
 
 
@@ -679,12 +763,16 @@ def request(
     resolved = resolve_api_url(api_url)
     session = current_session(resolved)
     if session is None:
-        raise IamError("not_authenticated", "Not signed in. Run aisquare login.")
+        raise IamError(
+            "not_authenticated", "Not signed in." + prog.shell_advice(" Run aisquare login.")
+        )
     if session.source == "file" and session.api_url != resolved:
         raise IamError(
             "api_url_mismatch",
-            f"You are signed in to {session.api_url} but this command targets {resolved}. "
-            f"Run aisquare login --api-url {resolved}, or unset {API_URL_ENV_VAR}.",
+            f"You are signed in to {session.api_url} but this command targets {resolved}."
+            + prog.shell_advice(
+                f" Run aisquare login --api-url {resolved}, or unset {API_URL_ENV_VAR}."
+            ),
         )
     headers = {"Authorization": f"Bearer {session.token}"}
     if workspace:
@@ -702,7 +790,8 @@ def request(
     if result.status == 401:
         raise IamError(
             "session_expired",
-            "Your AISquare session has expired or was revoked. Run aisquare login.",
+            "Your AISquare session has expired or was revoked."
+            + prog.shell_advice(" Run aisquare login."),
         )
     if result.status == 429:
         raise IamError(

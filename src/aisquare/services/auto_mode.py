@@ -44,6 +44,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import orchestrator, paths, transcripts
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.agent_adapters.types import PermissionIntent
 from aisquare.core.config import FleetRoleSettings, FleetSettings
@@ -303,11 +304,11 @@ def _mode_step(role: str, config: FleetSettings) -> str:
     if role in config.roles and config.roles[role].permission:
         # The role's one permission for every agent wins over its Claude Code mode.
         return (
-            f"aisquare config set fleet.roles.{role}.permission workspace:ask (or "
+            f"{prog.word()} config set fleet.roles.{role}.permission workspace:ask (or "
             "workspace:never; any approvals but auto)"
         )
     if role in config.roles:
-        return f"aisquare config set fleet.roles.{role}.permission_mode acceptEdits"
+        return f"{prog.word()} config set fleet.roles.{role}.permission_mode acceptEdits"
     return (
         f'add a `[fleet.roles.{role}]` table with `permission_mode = "acceptEdits"` '
         f"to {paths.config_path()}"
@@ -487,7 +488,9 @@ def spawn_note(
         )
     return (
         f"auto mode behind the explainability proxy: {why} — expect its tool calls to be refused "
-        f"({SDK_ISSUE}); set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
+        f"({SDK_ISSUE})"
+    ) + prog.shell_advice(
+        f"; set a non-classifier mode for {role} ({_mode_step(role, config)}) and "
         f"`{_restart_off_auto(project, label)}` (its session resumes), or see "
         f"`aisquare explainability doctor` ({CHECK_NAME})"
     )

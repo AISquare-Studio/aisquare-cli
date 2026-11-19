@@ -1297,7 +1297,7 @@ def test_warn_names_each_crossing_once_and_only_on_the_human_board(
     [line] = warned()
     assert line.startswith(f"{LABEL}: account 2 92% used (8% left) — over the 85%-used line;")
     assert "account 3 has room" in line
-    assert f"aisquare fleet switch --project {work.id} {LABEL}" in line
+    assert f"rlx fleet switch --project {work.id} {LABEL}" in line
     assert switched == [] and nudged == []
     assert team_service.BEFORE_LIMIT_KIND not in team_service.MANAGER_WAKE_KINDS
     assert line not in team_service.hook_prompt_heartbeat("sess-peer", work.root)

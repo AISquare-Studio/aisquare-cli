@@ -81,6 +81,16 @@ BREW_COMMAND = "brew install --cask claude-code"
 _PROJECT_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
 #: A native install's target, named by its version (``…/share/claude/versions/2.1.250``).
 _VERSION_DIR = re.compile(r"^\d+\.\d+\.\d+\S*$")
+#: How long Claude Code may wait for the ``SessionEnd`` hook, in seconds (RLX R20, #154).
+#: With no ``timeout`` it gives SessionEnd hooks 1.5 s (2.1.318 and 2.1.326 alike: the
+#: largest hook ``timeout``, capped at 60 s, else 1,500 ms, or
+#: ``CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS``). The interpreter and its imports are inside
+#: that budget, and it cancels the hook past it, so the session's end never reaches the
+#: board: its row reads running, and its claims stay held until their lease runs out. The
+#: hook takes about 0.4 s on a fast Mac. Behind another writer it waits up to the store's
+#: 5 s busy timeout. 10 s covers that on a Mac several times slower, and a hung hook holds
+#: Claude Code's exit 10 s at most. Claude Code waits only as long as the hook runs.
+SESSION_END_TIMEOUT_SECONDS = 10
 
 
 def _effort_level(payload: Mapping[str, Any]) -> str | None:
@@ -187,6 +197,7 @@ class ClaudeCodeAdapter:
     home_name = ".claude"
     settings_name = "settings.json"
     install_hint = "https://claude.ai/install.sh"
+    install_page = "https://code.claude.com/docs/en/setup"
     args_example = "--model opus"
     """The example an *Extra args* field shows for it (``cli.ui.attach.args_hint``), as
     0.9.2's Spawn dialog and New bind form showed it. An agent without one is shown its
@@ -227,7 +238,7 @@ class ClaudeCodeAdapter:
         hooks=(
             HookSpec("SessionStart", "session-start", 120),
             HookSpec("UserPromptSubmit", "user-prompt-submit", 120),
-            HookSpec("SessionEnd", "session-end"),
+            HookSpec("SessionEnd", "session-end", SESSION_END_TIMEOUT_SECONDS),
             HookSpec("Stop", "stop"),
             HookSpec("Notification", "notification"),
             # Fires INSTEAD of Stop when a turn ends on an API error (#146).

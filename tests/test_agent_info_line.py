@@ -28,6 +28,7 @@ from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import (
     BADGE_KEEP,
     GREEN,
+    MENU_GLYPH,
     RED,
     YELLOW,
     agent_row_text,
@@ -448,7 +449,56 @@ def test_the_detail_comes_after_the_account_and_the_model_before_the_pane() -> N
     alone = _status(state="unknown", detail="tmux unavailable", session=False, slot=None)
     assert info_line(alone, LABELS).plain == "🔨 coder-auth  · unknown  tmux unavailable  %4"
     bare = _status(state="lost", detail="pane gone", slot=None)
-    assert info_line(bare, LABELS).plain.endswith("claude-opus-5-5 high  pane gone  %4")
+    assert info_line(bare, LABELS).plain.endswith("claude-opus-5-5 high  pane gone")
+
+
+@pytest.mark.parametrize(
+    ("state", "held", "shown"),
+    [
+        ("working", False, True),
+        ("exited", False, True),
+        ("unknown", False, True),
+        ("paused", False, False),
+        ("lost", False, False),
+        ("unknown", True, False),
+    ],
+    ids=["working", "exited", "unknown", "paused", "lost", "held"],
+)
+def test_the_pane_id_shows_only_while_the_row_has_a_pane_of_its_own(
+    state: str, held: bool, shown: bool
+) -> None:
+    """Brief 233's ruling: a paused or lost row's pane id was its killed window's, and a held
+    row's is the next server's. tmux hands it to the next agent, so the header named someone
+    else's pane. An exited row keeps its window (remain-on-exit), and its id with it."""
+    line = info_line(_status(state=state).model_copy(update={"held": held}), LABELS).plain
+    assert ("%4" in line) is shown, line
+    assert line.endswith("high  %4" if shown else "high"), line
+
+
+def test_a_paused_rows_header_names_no_command_to_resume_it() -> None:
+    """Review of #503, m5: a paused row's detail (``PAUSED_DETAIL``) ends "wait for fleet
+    resume", a command, and the header drew it beside the Resume button. In rlx the view says
+    what a pause keeps and that Resume brings it back (``PAUSED_WORDS``), so the header draws no
+    detail for it; a working row's detail is still drawn."""
+    from aisquare.services.fleet import PAUSED_DETAIL
+
+    paused = _status(state="paused", detail=PAUSED_DETAIL)
+    line = info_line(paused, LABELS).plain
+    assert "fleet resume" not in line and "no process" not in line, line
+    assert line.endswith("claude-opus-5-5 high"), line  # no detail, and no pane id (#528)
+    working = _status(state="attention", detail="Claude needs your permission")
+    assert info_line(working, LABELS).plain.endswith("Claude needs your permission  %4")
+
+
+def test_a_line_with_nothing_after_what_it_keeps_whole_cuts_its_label_to_the_row() -> None:
+    """No cell is kept for a ``…`` that cuts nothing: a paused row with no session and no
+    account ends at its state, its pane id gone with its window."""
+    paused = _status(label="coder-01m5d34v", state="paused", session=False, slot=None)
+    whole = info_line(paused, LABELS)
+    assert whole.plain.endswith("paused"), whole.plain
+    width = whole.cell_len - 3
+    cut = info_line(paused, LABELS, width=width)
+    assert cut.cell_len == width and cut.plain.endswith("paused"), cut.plain
 
 
 def test_no_two_neighbouring_fields_share_a_style() -> None:
@@ -620,7 +670,7 @@ def test_a_codex_account_with_a_week_alone_counts_by_it_and_reads_limited_when_s
     both = accounts_service.fleet_headroom([room, spent], readings)
     assert (both.usable, both.limit_by_slot) == (2, {room.slot: 30.0, spent.slot: 100.0})
     assert both.percent_left == 35.0 and both.level == "fair"
-    line = status_line_text(True, None, more=[AgentHeadroom("codex", both)]).plain
+    line = status_line_text(None, more=[AgentHeadroom("codex", both)]).plain
     assert f"● 2{TIMES} codex" in line, line
     assert agent_row_text(_codex_status(_codex_turn(tmp_path)), 30.0).plain.endswith("#5·30%")
 
@@ -683,5 +733,7 @@ def test_the_sidebar_and_the_info_line_show_a_codex_rows_figure_beside_claudes(
 
     manager, coder, header = asyncio.run(run())
     assert manager.rstrip().endswith("⏸ #2·87%"), manager
-    assert coder.rstrip().endswith("▶ #5·42%"), coder
+    # The highlighted row ends in its ⋯ (R17's agent menu), after the figure it shows.
+    assert coder.rstrip().removesuffix(MENU_GLYPH.strip()).rstrip().endswith("▶ #5·42%"), coder
+    assert coder.rstrip().endswith(MENU_GLYPH), coder
     assert "account 5 · 42%" in header, header

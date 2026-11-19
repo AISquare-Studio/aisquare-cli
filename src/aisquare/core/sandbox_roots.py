@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import paths
+from aisquare.core import program as prog
 from aisquare.core.store import ContextStore
 
 PREFIX = "sandbox-root:"
@@ -116,10 +117,10 @@ def owner(root: Root) -> str | None:
 
 
 def forget_argv(root: Root) -> list[str]:
-    """The command that forgets ``root``: ``aisquare agents disconnect <owner> --forget-root
-    <path>``, its agent :func:`owner`'s."""
+    """The command that forgets ``root``: ``rlx agents disconnect <owner> --forget-root
+    <path>`` (the word hints print, ``core.program.word``), its agent :func:`owner`'s."""
     return [
-        "aisquare",
+        prog.word(),
         "agents",
         "disconnect",
         owner(root) or root.agent,

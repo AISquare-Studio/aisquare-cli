@@ -941,7 +941,7 @@ def test_doctor_says_nothing_with_no_added_accounts_and_names_each_one_otherwise
 
     assert check.name == "claude-accounts" and check.status.value == "warn"
     assert "2 two@example.com" in check.detail and "3 not signed in" in check.detail
-    assert check.fix is not None and "aisquare accounts run 3" in check.fix
+    assert check.fix is not None and "rlx accounts run 3" in check.fix
     assert "run 2" not in check.fix  # only the slot that needs it
     _sign_in(third, "three@example.com")
     [check] = diagnostics._claude_accounts_checks()
@@ -965,7 +965,7 @@ def test_accounts_lists_offline_and_as_json(
     assert plain.exit_code == 0, plain.output
     assert "two@example.com" in plain.stdout and "max 5x" in plain.stdout
     assert "not signed in" in plain.stdout  # the default slot, in this home
-    assert "aisquare accounts add" in plain.stdout
+    assert "rlx accounts add" in plain.stdout
     assert fetch.calls == []  # bare listing never reaches the network
 
     as_json = runner.invoke(app, ["--json", "accounts", "list"])
@@ -1011,7 +1011,7 @@ def test_accounts_usage_renders_the_windows_and_the_reasons(
     # No hover here: the reason, and the fix the Accounts page's '!' shows on hover (#13).
     assert (
         "the stored token has expired; fix: press Log in, or open a session on this account "
-        "(aisquare accounts run 3): Claude Code refreshes the token"
+        "(rlx accounts run 3): Claude Code refreshes the token"
     ) in result.stdout
 
     one = runner.invoke(app, ["--json", "accounts", "usage", "two@example.com"])
@@ -1102,10 +1102,10 @@ def test_accounts_usage_says_why_a_signed_out_slot_reads_nothing_and_the_fix(
     _sign_in(third, "three@example.com", credentials=False)  # signed in once, token gone
     fetch = _Fetch()
     monkeypatch.setattr(service, "_http_get", fetch)
-    never = "not signed in; fix: press Log in (in a terminal: aisquare accounts run 2, then /login)"
+    never = "not signed in; fix: press Log in (in a terminal: rlx accounts run 2, then /login)"
     gone = (
         "no credentials file — not signed in; fix: press Log in (in a terminal: "
-        "aisquare accounts run 3, then /login)"
+        "rlx accounts run 3, then /login)"
     )
 
     for args in (["accounts", "usage"], ["accounts", "list", "--usage"]):
@@ -1116,7 +1116,7 @@ def test_accounts_usage_says_why_a_signed_out_slot_reads_nothing_and_the_fix(
     usage_json = runner.invoke(app, ["--json", "accounts", "usage"])
     rows = {row["account"]["slot"]: row["usage"] for row in json.loads(usage_json.stdout)}
     assert (rows[2]["cause"], rows[3]["cause"]) == ("not_signed_in", "token_missing")
-    assert rows[3]["fix"] == "press Log in (in a terminal: aisquare accounts run 3, then /login)"
+    assert rows[3]["fix"] == "press Log in (in a terminal: rlx accounts run 3, then /login)"
     listed = runner.invoke(app, ["--json", "accounts", "list", "--usage"])
     by_slot = {
         row["account"]["slot"]: row["usage"] for row in json.loads(listed.stdout)["accounts"]
@@ -1158,7 +1158,7 @@ def test_accounts_add_refuses_where_it_cannot_hand_over_a_terminal(
 
     no_tty = runner.invoke(app, ["accounts", "add"])
     assert no_tty.exit_code == 1
-    assert "interactive terminal" in no_tty.stderr and "asq" in no_tty.stderr
+    assert "interactive terminal" in no_tty.stderr and "rlx" in no_tty.stderr
 
     as_json = runner.invoke(app, ["--json", "accounts", "add"])
     assert as_json.exit_code == 1
@@ -1181,7 +1181,7 @@ def test_accounts_add_records_a_landed_sign_in_and_discards_one_that_did_not(
     result = runner.invoke(app, ["accounts", "add"])
     assert result.exit_code == 0, result.output
     assert "Added Claude account 2: two@example.com" in result.stderr
-    assert "aisquare accounts run 2" in result.stderr
+    assert "rlx accounts run 2" in result.stderr
     assert service.describe(core.find_account(2) or core.default_account()).hooks_installed
 
     monkeypatch.setattr(service, "run_session", lambda account, *a, **k: 130)
@@ -1213,7 +1213,7 @@ def test_accounts_add_names_the_connect_to_run_quoted_for_a_slot_under_a_path_wi
 
     _installed(monkeypatch)
     monkeypatch.setattr(accounts_cli, "not_interactive_reason", lambda: None)
-    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "rlx home"))
 
     def signs_in(account: ClaudeAccount, *args: Any, **kwargs: Any) -> int:
         _sign_in(account, "two@example.com")
@@ -1234,7 +1234,7 @@ def test_accounts_add_names_the_connect_to_run_quoted_for_a_slot_under_a_path_wi
 
     assert result.exit_code == 0 and account is not None, result.output
     assert " " in str(account.config_dir), "the slot is under a path with a space"
-    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+    connect = ["rlx", "agents", "connect", "claude-code", "--config-dir"]
     assert argv == [*connect, str(account.config_dir)], printed
     assert printed == install_route.command_line(argv), "quoted for this shell"
     assert again.exit_code == 0, again.output

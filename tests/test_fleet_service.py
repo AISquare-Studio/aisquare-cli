@@ -104,6 +104,7 @@ from aisquare.services.fleet import (
     FleetUnavailable,
     NoSuchAgent,
 )
+from tests import added_folder_screens as folder_screens
 from tests import bundled_personas, captain_screens, fakebin
 from tests.captain_screens import INPUT_BOX, MARK
 from tests.cycles import unscoped
@@ -3588,7 +3589,7 @@ def test_an_answer_this_version_cannot_read_trips_the_canary(
     _turn(agent, transcript, "claude-haiku-5-5", "max")
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
     said = capsys.readouterr().err
-    assert said.count("aisquare:") == 1 and "Effort is now max" in said
+    assert said.count("rlx:") == 1 and "Effort is now max" in said
     [check] = [c for c in diagnostics.doctor() if c.name == "fleet model pick"]
     assert check.status == "warn" and "Effort is now max" in check.detail
     tmux.die(agent.pane_id, 0)
@@ -4165,7 +4166,7 @@ def test_a_setting_record_outside_the_frame_trips_the_canary(
     _turn(agent, transcript, "claude-sonnet-5-5", "xhigh")
     assert model_memory.remembered() == model_memory.Pick("opus", "xhigh")
     err = capsys.readouterr().err
-    assert err.count("aisquare:") == 1 and "2.9.0" in err and "/model" in err
+    assert err.count("rlx:") == 1 and "2.9.0" in err and "/model" in err
     [check] = [c for c in diagnostics.doctor() if c.name == "fleet model pick"]
     assert check.status == "warn" and "/model" in check.detail
 
@@ -5931,6 +5932,9 @@ def test_a_fresh_claude_manager_is_nudged_before_its_first_prompt(
     tmux.set_command(manager.pane_id, "claude")
     assert manager.session_id is not None
     team_service.hook_session_start(manager.session_id, project.root, "startup")
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert tmux.typed == [
         (manager.pane_id, "paste", NUDGE_TEXT),
@@ -6249,6 +6253,12 @@ def test_a_claude_code_managers_nudge_and_a_typed_line_are_one_paste_then_one_en
     tmux.set_command(coder.pane_id, "claude")
     typed = _timed_input(tmux, clock, monkeypatch)
     before = len(tmux.typed)
+
+    # The board write this nudge follows: a nudge is due only for news, unread
+
+    # (``team.wake_pending``, R12).
+
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
 
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     line = fleet_service.type_line(coder, "/compact", acked=lambda: True)
@@ -6608,14 +6618,14 @@ def test_a_spawn_over_a_server_that_exited_leaves_its_rows_lost_not_held(
     assert " read lost from now on, as their panes went with it " in said, said
     # Rows of every project: `reap --all`, and a restart naming each row's project and label
     # (review of #259, round 21) — bare, each acted on the active project, or was refused.
-    assert "(`aisquare fleet reap --all` records them; " in said, said
+    assert "(`rlx fleet reap --all` records them; " in said, said
     with store_session() as store:
         ours, theirs_project = store.get_project(project.id), store.get_project(plain_project.id)
     assert ours is not None and theirs_project is not None
     for where, label in ((ours, "manager"), (ours, "coder-1"), (theirs_project, "manager")):
         restart = project_service.fleet_command("restart", where, label)
         assert f"`{restart}`" in said, said
-    assert "`aisquare fleet reap`" not in said and "`aisquare fleet restart`" not in said
+    assert "`rlx fleet reap`" not in said and "`rlx fleet restart`" not in said
     # Lost, as in 0.8.0: a coder comes back under its own label, the manager's row ends at
     # a stop, and `reap` records the rest; nothing is held, and nothing of coder-3's touched.
     assert fleet_service.restart(project, "coder-1").replaced.id == coder.id
@@ -6646,14 +6656,14 @@ def test_the_exited_note_tells_a_forgotten_projects_rows_to_add_it_back_first(
 
     restart = project_service.fleet_command("restart", named, "manager")
     assert f"`{restart}` starts it again" in said, said
-    assert said.count("aisquare fleet restart") == 1, said
+    assert said.count("rlx fleet restart") == 1, said
     onboard = project_service.onboard_command(plain_project.root)
     assert f"{plain_project.root.name} is forgotten: {onboard} adds it back first" in said
     # Round 23, 5/10: `reap --all` walks the projects it reaches, so it records the one row
     # of a live project, "it", and never the forgotten project's alone.
-    assert "(`aisquare fleet reap --all` records it; " in said, said
+    assert "(`rlx fleet reap --all` records it; " in said, said
     alone = fleet_service._exited_note(tmux, [theirs])
-    assert "reap --all" not in alone and "aisquare fleet restart" not in alone, alone
+    assert "reap --all" not in alone and "rlx fleet restart" not in alone, alone
     assert f"({plain_project.root.name} is forgotten: {onboard} adds it back first)" in alone
 
 
@@ -7449,6 +7459,9 @@ def test_every_path_that_types_into_or_shows_a_pane_refuses_a_held_rows_id(
         assert shown_pane(status) is None, "asq's Agent and Manager tabs"
     status = statuses[coder.id]
     assert not fleet_service.tell(project, "coder-1", "please rebase").delivered
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(project.id, reason="coder-1 exited") is False
     assert remote_server._remote_pane_refusal(newcomer, coder) == remote_server.PANE_OUTLIVED
     snap = remote_needs._needs_snapshot(project, status, None, (), now)
@@ -8062,9 +8075,9 @@ def test_the_boards_limited_chip_names_the_agents_own_project_under_a_hub(
 
     frame = board_frame(height=40, width=200).plain
 
-    switch = f"aisquare fleet switch --project {stored.codename} {agent.label}"
+    switch = f"rlx fleet switch --project {stored.codename} {agent.label}"
     assert f"⏳ limited — `{switch}`" in frame
-    assert frame.count("aisquare fleet switch") == 1, "the session with no row: the chip alone"
+    assert frame.count("rlx fleet switch") == 1, "the session with no row: the chip alone"
     assert team_project(hub).id not in frame
 
 
@@ -8097,7 +8110,7 @@ def test_the_limited_chips_switch_is_read_in_the_boards_own_store_session(
 
     frame = board_frame(height=40, width=200).plain
 
-    assert f"`aisquare fleet switch --project {stored.codename} {agent.label}`" in frame
+    assert f"`rlx fleet switch --project {stored.codename} {agent.label}`" in frame
     assert opened == ["store"]
 
 
@@ -15308,7 +15321,7 @@ def test_a_reap_says_why_it_keeps_a_tree_while_a_spawn_holds_the_branch_lock(
 
     [(path, why)] = during.worktrees_kept
     assert path == agent.cwd
-    assert why.startswith("not removed now: another aisquare (a spawn or a reap) holds "), why
+    assert why.startswith("not removed now: another rlx (a spawn or a reap) holds "), why
     assert why.endswith("; when asked just before, it held: uncommitted changes"), why
     assert dict(after.worktrees_kept) == {agent.cwd: "uncommitted changes"}
     assert free == [True], "asked without the lock"
@@ -15634,6 +15647,8 @@ def _waiting_manager(tmux: FakeTmux, project: ProjectInfo) -> FleetAgent:
     manager = fleet_service.spawn(project, "manager").agent
     _board_session(manager, "waiting")
     tmux.set_command(manager.pane_id, "claude")
+    # The board write these nudges follow, unread: a nudge is due only for news (R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     return manager
 
 
@@ -15693,6 +15708,9 @@ def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
     tmux.printed(manager.pane_id)  # the pane printed just now: mid-turn
 
     assert fleet_service.status_of(manager).state == "working", "what ls and tell see"
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(project.id, reason="task_review") is False
     assert tmux.typed == []
     # Negative control: the same stale row over a QUIET pane is waiting everywhere,
@@ -15727,6 +15745,9 @@ def test_nudge_reads_the_panes_last_output_in_its_facts(
     monkeypatch.setattr(tmux, "run", run)
 
     tmux.printed(manager.pane_id)  # mid-turn
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(project.id, reason="task_review") is False
     tmux.printed(manager.pane_id, ago=ACTIVITY_WINDOW + timedelta(seconds=2))
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
@@ -15774,6 +15795,12 @@ def test_a_nudge_tmux_refuses_is_left_owed_and_one_not_due_is_not(
     _board_session(manager, "working")
     tmux.set_command(manager.pane_id, "claude")
     key = fleet_service.NUDGE_OWED + project.id
+
+    # The board write this nudge follows: a nudge is due only for news, unread
+
+    # (``team.wake_pending``, R12).
+
+    team_service.watch_event(project.id, "watch: 1 new (1 permission)")
 
     assert fleet_service.nudge_manager(project.id, reason="result") is False
     tmux.socket_denied = True
@@ -16059,7 +16086,7 @@ def test_a_row_whose_record_is_lost_after_the_census_is_told_nothing_and_never_k
         fleet_service.stop(project, agent.label)
 
     assert not told.delivered and "no launch record" in told.how
-    assert "end its agent in its own window, then `aisquare fleet stop" in str(refused.value)
+    assert "end its agent in its own window, then `rlx fleet stop" in str(refused.value)
     assert tmux.typed == [] and tmux.killed == [], "nothing typed or killed on its word"
     tmux.die(agent.pane_id, 0)  # its agent ended in its own window
     receipt = fleet_service.stop(project, agent.label)
@@ -16495,7 +16522,7 @@ def test_a_restart_of_a_row_from_before_launch_records_says_why_it_starts_fresh(
     assert why == "no session is recorded for it (its agent never reached a hook)"
     census = record.model_copy(update={"session": None, "legacy": True})
     _, why = fleet_service._resumable(census, None)
-    assert why is not None and "spawned before this aisquare kept launch records" in why
+    assert why is not None and "spawned before this rlx kept launch records" in why
 
 
 def test_a_listing_shows_the_account_its_launch_record_runs_it_on(
@@ -21250,8 +21277,8 @@ def test_the_auto_mode_board_line_s_own_way_out_brings_the_agent_back_off_auto(
     monkeypatch.delenv(PIPELINE_ID_ENV_VAR)
     [line] = _events(project, auto_mode.EVENT_KIND)
     way_out = re.search(
-        r"set a non-classifier mode \((aisquare config set [^)]+)\) and "
-        r"`(aisquare fleet restart [^`]+)`",
+        r"set a non-classifier mode \((rlx config set [^)]+)\) and "
+        r"`(rlx fleet restart [^`]+)`",
         line,
     )
     assert way_out is not None, line
@@ -22459,7 +22486,7 @@ def test_a_row_spawned_before_launch_records_is_refused_its_replay_before_the_st
     launch_seal._path(agent.id).unlink()  # as an aisquare that kept no records left it
     started = len(tmux.spawned)
     refusal = (
-        "no launch record was written for it (it was spawned by an aisquare that keeps "
+        "no launch record was written for it (it was spawned by an rlx that keeps "
         "none, or its record could not be written)"
     )
 
@@ -23484,7 +23511,7 @@ def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
 
     assert status.state == "attention"
     assert status.detail is not None and status.detail.startswith(TRUST_PROMPT)
-    trust = install_route.command_line(["aisquare", "accounts", "trust", str(agent.cwd)])
+    trust = install_route.command_line(["rlx", "accounts", "trust", str(agent.cwd)])
     assert trust in status.detail
     assert fleet_service.status_of(agent).detail == status.detail
     # `fleet tell` files a board note instead of typing: Enter there picks "No, exit".
@@ -23494,6 +23521,186 @@ def test_an_agent_at_the_trust_question_needs_the_human_until_it_is_answered(
     # Answered, the screen moves on and so does the state.
     tmux.screens[agent.pane_id] = ["╭─ Claude Code ─╮", "\u276f "]
     assert fleet_service.list_agents(project)[0].state == "waiting"
+
+
+def _added(name: str) -> list[str]:
+    path = Path(__file__).parent / "fixtures" / "claude_code" / f"added_folder_trust_2.1.326{name}"
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+EXTRA = "/private/var/tmp/asq-native/extra-dir"
+"""The ``--add-dir`` folder of the 120-column capture, its temp path masked: the text the
+capture shows, never a ``Path``, which Windows spells with backslashes (review of #520)."""
+SPACES = "/private/var/tmp/asq-native/extra dir with spaces"
+"""The one the compact, cut-off and held captures name, masked."""
+ADDED_SCREENS = [
+    pytest.param(".txt", EXTRA, 120, id="a fleet window, 120 columns"),
+    pytest.param("_compact_50x22.txt", SPACES, 50, id="asq's agent pane, 50x22"),
+    pytest.param("_compact_120x12.txt", SPACES, 120, id="compact, 120x12"),
+    pytest.param("_cut_off_50x14.txt", SPACES, 50, id="cut off, 50x14"),
+    pytest.param("_cut_off_50x8.txt", SPACES, 50, id="cut off, 50x8"),
+    pytest.param(
+        "_repository_compact_50x22.txt",
+        "/private/var/tmp/asq-native/other repo/sub dir",
+        50,
+        id="in a repository, 50x22",
+    ),
+    pytest.param("_held_cut_off_50x8.txt", SPACES, 50, id="held at a refused key, cut off"),
+    pytest.param(
+        "_cut_off_alone_50x8.txt",
+        "/private/var/tmp/asq-native00/fffffffffffffff",
+        50,
+        id="cut off, the folder on a row of its own",
+    ),
+]
+"""Claude Code 2.1.326 at its start, asking about an ``--add-dir`` folder no trust covers, as
+``capture-pane -e`` showed it (R19): in a fleet window; on a pane under 30 rows tall, which
+draws it with no blank row (asq's agent pane on an 80x24 terminal is about 50x22); and on
+one too short for that, which cuts it off and names the folder under its key hint. About a
+folder in a git repository, a note under it; once it refused a key typed into it, its key
+hint says so. Each with the masked folder it names and its width, for :func:`_at_the_question`."""
+
+
+def _at_the_question(
+    tmp_path: Path, capture: str, masked: str, columns: int
+) -> tuple[list[str], Path]:
+    """A capture asking about a real folder of the test's own, its name with spaces, in its
+    place, as Claude Code draws it on this platform (``tests.added_folder_screens``), and that
+    folder. The captures' masked macOS folder is a directory on no machine, and as a ``Path``
+    not even the same text on Windows, where all four wrapped cases named ``<dir>`` (brief
+    217): the folder is read off this disk."""
+    folder = tmp_path / "extra dir with spaces"
+    folder.mkdir()
+    return folder_screens.drawn(_added(capture), masked, str(folder), columns), folder
+
+
+def _trust(folder: Path) -> str:
+    """``rlx accounts trust <folder>``, as a test's hints spell it (``core.program.word``)."""
+    return install_route.command_line(["rlx", "accounts", "trust", str(folder)])
+
+
+@pytest.mark.parametrize(("capture", "masked", "columns"), ADDED_SCREENS)
+def test_an_agent_at_the_question_about_an_added_folder_needs_the_human_for_that_folder(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    capture: str,
+    masked: str,
+    columns: int,
+) -> None:
+    """R19: Claude Code 2.1.326 asks at its start about each ``--add-dir`` folder no trust
+    covers, and fires no hook there, so the row read a healthy ``working`` with no reason, as
+    long as nobody looked. It reads as at the folder-trust question now, and names the added
+    folder, the one ``accounts trust`` must be told: the folder it starts in is trusted. In
+    each layout of the question: it named no folder on a pane under 30 rows tall, and on one
+    too short for the question it read no question at its foot (review of #520)."""
+    screen, folder = _at_the_question(tmp_path, capture, masked, columns)
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = screen
+
+    (status,) = fleet_service.list_agents(project)
+
+    assert status.state == "attention"
+    assert status.detail == fleet_service.trust_prompt_detail(folder)
+    assert _trust(folder) in status.detail and str(agent.cwd) not in status.detail
+    assert fleet_service.status_of(agent).detail == status.detail
+    told = fleet_service.tell(project, agent.label, "start on the task")
+    assert not told.delivered and "has not started" in told.how and tmux.typed == []
+
+
+def test_the_trust_command_says_the_programs_word_whether_or_not_its_folder_is_known(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``accounts trust`` with a folder said ``aisquare``, and without one (``<dir>``) the
+    program's word, ``rlx``: one row read either by whether the folder was found (review of
+    #520). Both say the program's word now (``core.program.word``)."""
+    assert accounts_service.trust_command(Path(EXTRA)) == _trust(Path(EXTRA))
+    assert accounts_service.trust_command(None) == "rlx accounts trust <dir>"
+    agent = _coder(project)
+    tmux.set_command(agent.pane_id, "claude")
+    tmux.screens[agent.pane_id] = _added("_compact_50x22.txt")  # wrapped, not a folder here
+    (status,) = fleet_service.list_agents(project)
+    assert status.detail == fleet_service.trust_prompt_detail(None)
+    assert status.detail.endswith("`rlx accounts trust <dir>`"), status.detail
+
+
+@pytest.mark.parametrize(("capture", "masked", "columns"), ADDED_SCREENS)
+def test_spawn_never_types_its_prompt_into_the_question_about_an_added_folder(
+    tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capture: str,
+    masked: str,
+    columns: int,
+) -> None:
+    """A typed first message waits for a human to answer 2.1.326's question about an
+    ``--add-dir`` folder, as for the one about the folder it starts in, and the note's
+    ``accounts trust`` names the added folder (R19), in each layout of the question."""
+    screen, folder = _at_the_question(tmp_path, capture, masked, columns)
+    original = tmux.pane_facts
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = screen
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == [] and receipt.prompt_typed == "no"
+    note = next(n for n in receipt.notes if "folder-trust question" in n)
+    assert "NOT typed" in note and _trust(folder) in note
+    assert _trust(receipt.agent.cwd) not in note, "not the folder it starts in"
+    assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
+
+
+@pytest.mark.parametrize(("capture", "masked", "columns"), ADDED_SCREENS)
+def test_a_start_the_board_waits_for_names_the_added_folder_its_question_is_about(
+    tmux: FakeTmux,
+    session_start_for_real: None,
+    typed_first_lines: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capture: str,
+    masked: str,
+    columns: int,
+) -> None:
+    """The typed first message waits for the agent's SessionStart, which never comes at
+    2.1.326's question about an ``--add-dir`` folder: past the wait, the note's ``accounts
+    trust`` names that folder, not the one the agent starts in (R19). Cut off on a pane too
+    short for it, the question ends on the folder's name, not its key hint: the start
+    waited out ``START_TIMEOUT`` there, and its note said nothing of the question (review of
+    #520)."""
+    screen, folder = _at_the_question(tmp_path, capture, masked, columns)
+    original, text = tmux.pane_facts, tmux.screen_text
+
+    def up_at_the_question(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        tmux.screens[pane_id] = screen
+        return original(pane_id)
+
+    def plain(pane_id: str) -> list[str]:  # `capture-pane -p`, as the real one runs it
+        return [screen_reader.PANE_ESCAPES.sub("", row) for row in text(pane_id)]
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
+    monkeypatch.setattr(tmux, "screen_text", plain)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    assert tmux.typed == [] and receipt.prompt_typed == "no"
+    said = next(n for n in [*receipt.failures, *receipt.notes] if "folder-trust question" in n)
+    assert "session did not start" in said and "NOT typed" in said, said
+    assert _trust(folder) in said, said
+    assert _trust(receipt.agent.cwd) not in said, "not the folder it starts in"
+    assert clock.now < fleet_service.START_TIMEOUT, (
+        "said at the question, not at the start's ceiling"
+    )
 
 
 def test_an_agent_whose_hooks_have_run_is_never_asked_for_its_screen(
@@ -23632,7 +23839,7 @@ def test_spawn_never_types_its_prompt_into_the_trust_question(
     assert receipt.prompt_typed == "no"  # `Typed`: NOT typed, never "maybe" or "unsent"
     note = next(n for n in receipt.notes if "folder-trust question" in n)
     assert "NOT typed" in note
-    trust = ["aisquare", "accounts", "trust", str(receipt.agent.cwd)]
+    trust = ["rlx", "accounts", "trust", str(receipt.agent.cwd)]
     assert install_route.command_line(trust) in note
     assert clock.now >= PROMPT_TIMEOUT, "waited for a human to answer it first"
 
@@ -23762,7 +23969,7 @@ def test_spawn_refuses_below_the_memory_floor_before_any_window_opens(
         _coder(project)
     assert refused.value.code == "capacity_memory"
     assert "1500 MB available" in str(refused.value) and "2048 MB" in str(refused.value)
-    assert "aisquare fleet capacity" in str(refused.value)
+    assert "rlx fleet capacity" in str(refused.value)
     assert tmux.spawned == [], "refused before any window"
     # Negative control: the floor off admits the same spawn.
     _settings(monkeypatch, min_free_mb=0)
@@ -23906,7 +24113,7 @@ def test_the_doctor_capacity_row_warns_when_a_spawn_would_be_refused(
     _memory(monkeypatch, 1500)
     row = diagnostics._check_fleet_capacity()
     assert row.status.value == "warn"
-    assert "1500 MB available" in row.detail and "aisquare fleet capacity" in (row.fix or "")
+    assert "1500 MB available" in row.detail and "rlx fleet capacity" in (row.fix or "")
     _memory(monkeypatch, 8000)
     row = diagnostics._check_fleet_capacity()
     assert row.status.value == "ok" and "8000 MB available, pressure normal" in row.detail

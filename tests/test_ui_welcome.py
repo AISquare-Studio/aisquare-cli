@@ -44,7 +44,7 @@ from aisquare.cli.ui.sidebar import (
 from aisquare.cli.ui.views import welcome
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.onboard import ProjectOnboarded
-from aisquare.cli.ui.views.welcome import FLEET_UP, Seams, WelcomeView
+from aisquare.cli.ui.views.welcome import FLEET_UP, TMUX_INSTALL_PAGE, Seams, WelcomeView
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import claude_code
@@ -386,7 +386,10 @@ def first_candidate(page: WelcomeView) -> Button:
 # --------------------------------------------------------------------------- step 2
 
 
-def test_a_missing_claude_names_the_install_and_npm_comes_last() -> None:
+def test_a_missing_claude_links_its_install_page_and_offers_check_again() -> None:
+    """R13 (ruled Q1): the official install page, never a command to type; the shell's
+    ``first_run.install_routes`` keep the commands."""
+
     async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, bool, bool]:
         return (
             card(page, "claude-status"),
@@ -395,8 +398,9 @@ def test_a_missing_claude_names_the_install_and_npm_comes_last() -> None:
         )
 
     text, check, start = hosted(Machine(), go)
-    assert accounts_core.INSTALL_COMMAND in text
-    assert text.index(accounts_core.INSTALL_COMMAND) < text.index(accounts_core.INSTALL_ALTERNATIVE)
+    assert claude_code.ClaudeCodeAdapter.install_page in text
+    assert accounts_core.INSTALL_COMMAND not in text
+    assert accounts_core.INSTALL_ALTERNATIVE not in text
     assert "Claude Code is not installed" in text
     assert check and not start  # Check again offered; step 3 cannot start yet
 
@@ -407,8 +411,9 @@ def test_each_platform_names_its_own_install() -> None:
 
     mac = hosted(Machine(), go, platform="darwin")
     windows = hosted(Machine(), go, platform="win32")
-    assert claude_code.BREW_COMMAND in mac and "WSL2" not in mac
-    assert "WSL2" in windows and claude_code.BREW_COMMAND not in windows
+    page = claude_code.ClaudeCodeAdapter.install_page
+    assert page in mac and "WSL2" not in mac and claude_code.BREW_COMMAND not in mac
+    assert "WSL2" in windows and page in windows
 
 
 def test_an_override_that_is_missing_is_named_not_claude() -> None:
@@ -518,7 +523,7 @@ def test_a_plugin_for_the_project_folder_alone_offers_connect_for_the_coders(
         return (card(page, "claude-status"), *offered)
 
     text, connect, manager = hosted(machine, go)
-    assert "✗ the coders may run without aisquare" in text and "✓ connected" not in text
+    assert "✗ the coders may run without rlx" in text and "✓ connected" not in text
     assert connect and not manager, text
 
 
@@ -1108,7 +1113,8 @@ def test_step_three_waits_for_tmux_and_names_its_install(tmp_path: Path) -> None
         return card(page, "fleet-status"), visible(page, "fleet-manager")
 
     text, start = hosted(machine, go)
-    assert "tmux is not installed — install it: apt install tmux" in text and not start
+    assert f"tmux is not installed — install it as {TMUX_INSTALL_PAGE} says" in text
+    assert "apt install" not in text and not start, "a page, never a command (R13, Q1)"
 
 
 def test_open_the_manager_selects_its_row(tmp_path: Path) -> None:
@@ -1986,8 +1992,10 @@ def test_a_refused_restart_is_said_under_its_coder_with_the_way_out(
         lines = text.splitlines()
         lost = lines.index("✗ coder-1 — lost (pane gone)")
         assert lines[lost + 1] == f"✗ coder-1: {reason}", text
-        way_out = f"aisquare fleet reap --project {codename or project.id} ends the rows"
+        # The way out is the manager's: asq has no reap, and names no command (R13).
+        way_out = "its window is gone. Ask the manager to reap its row"
         assert f"coder-1 could not be restarted: {way_out}" in text, text
+        assert "fleet reap" not in text and "--project" not in text, text
         assert "trusting this folder" not in text, text
     assert offered, "a refusal that may pass (a hand-over in flight) can still be retried"
 
@@ -2047,10 +2055,10 @@ def test_a_refusal_is_about_its_own_row_and_goes_with_it(
         return seen
 
     before, restarted, lost_again, pressed = in_shell(machine, go)
-    assert reason in before and "fleet reap" in before, f"control: said for its row: {before}"
+    assert reason in before and "Ask the manager to reap" in before, f"control: said: {before}"
     assert FLEET_UP in restarted and reason not in restarted, restarted
     assert "✗ coder-1 — lost (pane gone)" in lost_again, lost_again
-    assert reason not in lost_again and "fleet reap" not in lost_again, lost_again
+    assert reason not in lost_again and "Ask the manager" not in lost_again, lost_again
     assert "trusting this folder" in lost_again, lost_again
     assert machine.restarted == ["coder-1", "coder-1", "coder-1"], machine.restarted
     assert "✓ coder-1 — started" in pressed and FLEET_UP in pressed, "one press resumes it"

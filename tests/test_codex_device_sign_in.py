@@ -171,7 +171,7 @@ def test_what_accounts_add_prints_for_claude_code_is_byte_identical_to_before(
         "Slot 2 is ready. Claude Code opens now with its own login — sign in there, then "
         "leave it (/exit) and this command records the account.\n"
         "✓ Added Claude account 2: two@example.com\n"
-        "  open it: aisquare accounts run 2 · as a role: aisquare launch coder --account 2\n"
+        "  open it: rlx accounts run 2 · as a role: rlx launch coder --account 2\n"
     )
     assert not_landed.exit_code == 1
     assert not_landed.stderr == (
@@ -191,7 +191,7 @@ def test_the_accounts_pages_words_for_a_claude_sign_in_are_byte_identical_to_bef
         " — type /login if Claude Code does not prompt you."
     )
     assert service._log_in(CLAUDE) == (
-        "press Log in (in a terminal: aisquare accounts run {slot}, then /login)"
+        "press Log in (in a terminal: {program} accounts run {slot}, then /login)"
     )
 
 
@@ -315,7 +315,7 @@ def test_claude_codes_doctor_row_and_sign_in_button_for_a_slot_with_no_login_are
 
     checks = diagnostics._claude_accounts_checks()
 
-    hint = "Sign in from asq → Accounts, or: aisquare accounts run 3"
+    hint = "Sign in from rlx → Accounts, or: rlx accounts run 3"
     assert [(c.name, c.status.value, c.detail, c.fix) for c in checks] == [
         (
             "claude-accounts",
@@ -334,12 +334,7 @@ def test_claude_codes_doctor_row_and_sign_in_button_for_a_slot_with_no_login_are
         )
     ]
     assert _doctor_buttons(checks) == (
-        [
-            (
-                "Sign in account 3",
-                f"{hint}\nOpens the Accounts page with aisquare accounts run 3 in its pane.",
-            )
-        ],
+        [("Sign in account 3", "Opens the Accounts page to sign in to account 3.")],
         [3],
     )
 
@@ -526,7 +521,7 @@ def test_a_device_code_sign_in_with_no_login_names_where_it_is_turned_on_and_bro
     assert device.exit_code == 1
     assert device.stderr.splitlines()[-1] == (
         "✗ no sign-in landed in slot 2 (Codex exited with status 1) — nothing was added. "
-        f"{HINT}: aisquare accounts add --agent codex --browser"
+        f"{HINT}: rlx accounts add --agent codex --browser"
     )
     assert browser.exit_code == 1
     assert browser.stderr.splitlines()[-1] == (
@@ -592,7 +587,7 @@ def test_asq_add_codex_runs_login_device_auth_and_says_what_to_do_with_the_code(
     [window] = windows
     assert window["command"][-5:] == ["accounts", "run", str(account.slot), *DEVICE]
     assert header == (
-        f"Logging in to account {account.slot} — `codex login --device-auth` runs in this "
+        f"Logging in to account {account.slot} — Codex's sign-in runs in this "
         f"pane: {STEPS}. This pane closes by itself once the login is recorded; F12 hands "
         "focus back to the sidebar."
     )
@@ -622,7 +617,7 @@ def test_asq_log_in_on_a_codex_slot_runs_login_device_auth_there(
     assert drive(go, overview=_real_overview())
     [window] = windows
     assert window["command"][-5:] == ["accounts", "run", str(account.slot), *DEVICE]
-    assert accounts_view._sign_in_opens(CODEX) == "`codex login --device-auth` opens below"
+    assert accounts_view._sign_in_opens(CODEX) == "Codex's sign-in opens below"  # no command (R13)
     assert _replay(window, runner, monkeypatch) == 0
     assert codex.argvs() == [DEVICE]
     assert core.identity(account) is not None
@@ -637,8 +632,8 @@ def test_the_doctors_sign_in_for_a_codex_slot_stays_one_click_that_opens_its_log
 
     [check] = diagnostics._agent_accounts_checks(CODEX)
 
-    run = " ".join(("aisquare accounts run", str(account.slot), *DEVICE))
-    hint = f"Sign in from asq → Accounts, or: {run}"
+    run = " ".join(("rlx accounts run", str(account.slot), *DEVICE))
+    hint = f"Sign in from rlx → Accounts, or: {run}"
     assert (check.name, check.fix) == ("codex-accounts", hint)
     assert onboarding.fix_commands([check]) == [
         onboarding.FixCommand(
@@ -653,8 +648,7 @@ def test_the_doctors_sign_in_for_a_codex_slot_stays_one_click_that_opens_its_log
         [
             (
                 f"Sign in account {account.slot}",
-                f"{hint}\nOpens the Accounts page with aisquare accounts run "
-                f"{account.slot} in its pane.",
+                f"Opens the Accounts page to sign in to account {account.slot}.",
             )
         ],
         [account.slot],
@@ -685,11 +679,12 @@ def test_a_codex_pane_that_closes_with_no_login_names_the_browser_sign_in(
             said[key] = notice(view)
 
     drive(go, overview=_real_overview())
+    # asq says where the browser's sign-in is turned on, and names no command (R13); the
+    # shell's `accounts add` still prints it.
     assert said["fresh"] == (
         "sign-in cancelled — Codex closed before a sign-in landed; the new slot was "
-        f"discarded. {HINT}: aisquare accounts add --agent codex --browser"
+        f"discarded. {HINT}"
     )
     assert said["existing"] == (
-        "sign-in cancelled — Codex closed before a sign-in landed; nothing changed. "
-        f"{HINT}: aisquare accounts run {existing.slot} login"
+        f"sign-in cancelled — Codex closed before a sign-in landed; nothing changed. {HINT}"
     )

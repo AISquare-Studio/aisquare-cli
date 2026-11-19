@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Literal
 
 from aisquare.core import orchestrator, paths
+from aisquare.core import program as prog
 from aisquare.core.store import ContextStore, is_the_home, store_session
 from aisquare.models import (
     FreshCounts,
@@ -209,9 +210,11 @@ def start_fresh(
         raise
     except ValueError as exc:  # reset_project: an agent live again
         raise FreshIncomplete(
-            f"{exc}, started since its fleet was stopped — the board was not cleared. Stop "
-            f"it ({project_service.fleet_command('shutdown', project)}), then start fresh "
-            "again",
+            f"{exc}, started since its fleet was stopped — the board was not cleared. Stop it"
+            + prog.shell_advice(
+                f" ({project_service.fleet_command('shutdown', project)})", app=" (Stop all…)"
+            )
+            + ", then start fresh again",
             report,
         ) from exc
     except Exception as exc:  # a store that will not take the write lock, a git that hung
@@ -272,11 +275,15 @@ def _stop(project: ProjectInfo, report: FreshReport, *, actor: str) -> None:
     standing = [f"{row.agent.label} ({row.reason})" for row in down.failed]
     standing += [f"tmux session {session}" for session in down.sessions_failed]
     what = "; ".join(standing) or "the stop could not confirm it down"
-    shutdown = project_service.fleet_command("shutdown", project)
     raise FreshIncomplete(
         f"{name}'s fleet is not down — {what}. Nothing was removed and the board was not "
-        f"cleared: take it down with {shutdown} (whose --forget ends the rows of agents you "
-        "know are not running), then start fresh again",
+        "cleared: take it down with "
+        + prog.shell_advice(
+            f"{project_service.fleet_command('shutdown', project)} (whose --forget ends the "
+            "rows of agents you know are not running)",
+            app="Stop all…",
+        )
+        + ", then start fresh again",
         report,
     )
 
@@ -307,11 +314,11 @@ def _confirm_down(
         )
     else:
         what = f"tmux session {', '.join(standing)} still stands"
-    shutdown = project_service.fleet_command("shutdown", project)
     said = (
         f"{project_service.display_name(project)}'s fleet is not down — {what}. Nothing was "
-        f"removed and the board was not cleared: take it down with {shutdown}, then start "
-        "fresh again"
+        "removed and the board was not cleared: take it down with "
+        + prog.shell_advice(project_service.fleet_command("shutdown", project), app="Stop all…")
+        + ", then start fresh again"
     )
     if stopped:
         report.sessions_failed = list(dict.fromkeys([*report.sessions_failed, *(standing or [])]))
@@ -338,9 +345,11 @@ def _held_now(
     if live:
         raise FreshIncomplete(
             f"{len(live)} fleet agent(s) started since its fleet was stopped: "
-            f"{', '.join(live)} — nothing was removed and the board was not cleared. Stop "
-            f"them ({project_service.fleet_command('shutdown', project)}), then start fresh "
-            "again",
+            f"{', '.join(live)} — nothing was removed and the board was not cleared. Stop them"
+            + prog.shell_advice(
+                f" ({project_service.fleet_command('shutdown', project)})", app=" (Stop all…)"
+            )
+            + ", then start fresh again",
             report,
         )
     trees = fleet_service.fleet_trees(project, rows)
@@ -404,11 +413,15 @@ def manager_hint(report: FreshReport) -> str:
     at the Mac when an SSH login was refused it. The stop can end the fleet server's last
     session, and from SSH no spawn starts a server (#20), so the same spawn typed here is
     refused again (REVIEW-RC092-MI, nit 3)."""
-    spawn = project_service.fleet_command("spawn", report.project, "manager")
     said = report.manager_error or ""
     if fleet_service.SSH_START_REFUSAL in said:
-        return f"start one at the Mac: {spawn}"
-    return f"start one: {spawn}"
+        return "start one at the Mac" + prog.shell_advice(
+            f": {project_service.fleet_command('spawn', report.project, 'manager')}"
+        )
+    return prog.shell_advice(
+        f"start one: {project_service.fleet_command('spawn', report.project, 'manager')}",
+        app="start one with Start manager",
+    )
 
 
 def cleared_words(report: FreshReport) -> list[str]:
@@ -466,14 +479,17 @@ def found_after_stop(
     itself, the rest being refused before it. With ``way``, ``limit`` and ``brief`` as
     :func:`unpushed_refusal` takes them, then that the fleet is stopped and how to start it
     again: refused there, the project is left with nothing running."""
-    restart = project_service.fleet_command("restart", planned.project) + " <label>"
-    spawn = project_service.fleet_command("spawn", planned.project, "manager")
     refusal = unpushed_refusal(planned, way=way, limit=limit, brief=brief)
     return (
         f"{refusal} — found once its fleet was "
         "stopped: nothing was removed and the board was not cleared, but its agents are "
-        f"stopped. Start them again with {restart} (the manager first), or a new manager "
-        f"with {spawn}"
+        "stopped. Start them again with "
+        + prog.shell_advice(
+            f"{project_service.fleet_command('restart', planned.project)} <label> (the manager "
+            "first), or a new manager with "
+            f"{project_service.fleet_command('spawn', planned.project, 'manager')}",
+            app="Restart on their rows (the manager first), or a new manager with Start manager",
+        )
     )
 
 
@@ -508,7 +524,7 @@ def _refuse(store: ContextStore, project: ProjectInfo, *, dry_run: bool = False)
         raise FreshRefused(str(project_service.NotAdded(project)), code="not_onboarded")
     if is_the_home(stored.root):
         raise FreshRefused(
-            "can't start fresh in the aisquare home: it is the captain's board, not a project",
+            "can't start fresh in the rlx home: it is the captain's board, not a project",
             code="the_home",
         )
     own = orchestrator.env_fleet_agent()
@@ -517,7 +533,7 @@ def _refuse(store: ContextStore, project: ProjectInfo, *, dry_run: bool = False)
         raise FreshRefused(
             f"can't start fresh from inside {row.label}, one of "
             f"{project_service.display_name(stored)}'s own fleet agents: the stop would take "
-            "this pane down part-way through. Run it from the UI (asq) or from a terminal of "
+            "this pane down part-way through. Run it from the UI (rlx) or from a terminal of "
             "your own",
             code="inside_fleet_agent",
         )
@@ -568,7 +584,7 @@ def _sessions(project: ProjectInfo, *, live: bool, dry_run: bool = False) -> lis
         raise FreshRefused(
             f"can't start fresh from inside the fleet's own tmux server: stopping "
             f"{project_service.display_name(project)}'s fleet kills sessions on the server "
-            "this pane runs in, before anything could be reported. Run it from the UI (asq) "
+            "this pane runs in, before anything could be reported. Run it from the UI (rlx) "
             "or from a terminal outside the fleet",
             code="inside_fleet",
         ) from exc

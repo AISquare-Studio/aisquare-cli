@@ -442,13 +442,32 @@ class Native:
     def rows(self, pane: str) -> list[str]:
         return self.screen(pane).splitlines()
 
+    def screens(self) -> str:
+        """Every pane on the server, each under its id and command line: what a wait that
+        names no pane shows when it times out."""
+        try:
+            panes = self.srv.run(
+                "list-panes", "-a", "-F", "#{pane_id} #{session_name} #{pane_current_command}"
+            ).splitlines()
+        except TmuxError as exc:
+            return f"(no tmux server: {exc})"
+        shown = []
+        for line in panes:
+            pane = line.split(" ", 1)[0]
+            try:
+                screen = self.screen(pane)
+            except TmuxError as exc:
+                screen = f"(gone: {exc})"
+            shown.append(f"--- pane {line}\n{screen}")
+        return "\n".join(shown) or "(no panes)"
+
     def until(
         self, check: Callable[[], T | None], seconds: float, what: str, pane: str | None = None
     ) -> T:
         deadline = time.monotonic() + seconds
         while not (found := check()):
             if time.monotonic() >= deadline:
-                raise AssertionError(f"{what}:\n{self.screen(pane) if pane else ''}")
+                raise AssertionError(f"{what}:\n{self.screen(pane) if pane else self.screens()}")
             time.sleep(0.2)
         return found
 
@@ -856,6 +875,99 @@ def test_real_claude_code_whose_start_the_board_cannot_see_gets_the_prompt_past_
         thread.join(timeout=5)
 
 
+#: The first Claude Code measured to ask at its start about an ``--add-dir`` folder no trust
+#: covers (R19, 2026-11-16): 2.1.318 took one without asking.
+ASKS_ABOUT_ADDED_FOLDERS = (2, 1, 326)
+
+
+def claude_version(binary: str) -> tuple[int, ...]:
+    """The version ``binary --version`` prints (``2.1.326 (Claude Code)``), as numbers: run
+    under the test's own config dir, quietly, as ``tests.run_claude_native`` reads it."""
+    shown = subprocess.run(
+        [binary, "--version"],
+        check=True,
+        text=True,
+        capture_output=True,
+        env={**os.environ, **QUIET_ENV},
+    ).stdout.split()
+    return tuple(int(part) for part in shown[0].split(".")) if shown else ()
+
+
+def _trusted_on_the_account(native: Native, folder: Path) -> None:
+    """``folder`` trusted in the account's ``.claude.json``, as a yes at the question about
+    it, or ``accounts trust``, leaves it."""
+    entry = {"hasTrustDialogAccepted": True, "allowedTools": []}
+    _merge_json(native.config_dir / ".claude.json", projects={str(folder): entry})
+
+
+def test_real_claude_code_asks_about_an_added_folder_no_trust_covers_and_the_fleet_says_so(
+    native: Native,
+) -> None:
+    """An ``--add-dir`` folder in the role's arguments that no trust covers (R19). From
+    2.1.326 Claude Code asks at its start whether to trust it, over a highlighted "No, exit",
+    and fires no hook there: the fleet reads the row ``attention``, its detail naming that
+    folder for ``accounts trust``; its screen reader reads a ``trust`` prompt no key answers;
+    a ``tell`` is not typed into it. So in each of the question's layouts: a fleet window's,
+    asq's agent pane on an 80x24 terminal (about 50x22, which draws it with no blank row
+    and wraps the folder, its name with spaces), and a pane too short for it (50x8, which
+    cuts it off and names the folder under its key hint). Each named no folder, or the
+    question not at all, on the first fix (review of #520). The human says yes, and the first
+    message, on its command line, runs once, with the folder. 2.1.318 took the folder without
+    asking."""
+    extra = native.outside / "extra dir with spaces"
+    extra.mkdir()
+    config = load_config()
+    config.fleet.roles["coder"].agent_args = {AGENT: ["--add-dir", str(extra)]}
+    save_config(config)
+    receipt = native.spawn(prompt="added and asked")
+    row, pane = receipt.agent, receipt.agent.pane_id
+
+    def asked_or_heard() -> str | None:
+        with native.stub.lock:
+            if any("added and asked" in turn.said for turn in native.stub.turns):
+                return "heard"
+        screen = native.screen(pane)
+        return "asked" if "Adding a new directory" in screen and "Esc to" in screen else None
+
+    seen = native.until(asked_or_heard, 40, "its question, or the turn", pane)
+    if claude_version(native.binary) >= ASKS_ABOUT_ADDED_FOLDERS:
+        assert seen == "asked", native.screen(pane)
+    if seen == "asked":
+        time.sleep(3)  # well past the agent's start
+        assert native.sessions() == [], "no hook fires at the question"
+        assert native.stub.turns == [], "nothing reached the model"
+        reader = screen_of(get_adapter(AGENT))
+        assert reader.screen_prompt is not None and reader.modal_on_screen is not None
+        size = native.srv.run(
+            "display-message", "-p", "-t", pane, "#{window_width} #{window_height}"
+        )
+        for columns, lines in (size.split(), ("50", "22"), ("50", "8")):
+            native.srv.run("resize-window", "-t", pane, "-x", columns, "-y", lines)
+            time.sleep(2)  # its redraw at the new size
+            rows = native.rows(pane)
+            at = f"{columns}x{lines}:\n{native.screen(pane)}"
+            shown = reader.screen_prompt(rows)
+            assert shown is not None and shown.shape == "trust", at
+            assert (shown.yes_key, shown.no_key) == (None, None), "the owner's to answer"
+            assert reader.modal_on_screen(rows) == "the trust dialog", at
+            native.until(lambda: fleet.status_of(row).state == "attention", 20, at, pane)
+            detail = fleet.status_of(row).detail
+            assert detail == fleet.trust_prompt_detail(extra), f"{detail}\n{at}"
+            told = fleet.tell(native.project, row.label, "not into the question")
+            assert told.typed == "no", told
+            facts = native.srv.pane_facts(pane)
+            assert facts is not None and not facts.dead, "the agent is still there"
+        native.srv.run("resize-window", "-t", pane, "-x", size.split()[0], "-y", size.split()[1])
+        time.sleep(2)  # its options both drawn again
+        native.srv.send_keys(pane, "Down")
+        time.sleep(0.3)
+        native.srv.send_keys(pane, "Enter")  # Yes, add it
+    turn = native.heard("added and asked")
+    assert str(extra) in turn.everything, "Claude Code took the added folder"
+    native.until(lambda: "added and asked" in native.prompts(), 20, "the prompt on the board", pane)
+    assert native.prompts().count("added and asked") == 1, "once"
+
+
 # --- launch -----------------------------------------------------------------------------
 
 
@@ -915,9 +1027,13 @@ def test_real_claude_code_launch_with_a_model_pin_extra_args_and_a_persona(nativ
     """The role's model pin (``[agents.models]``), its own arguments for Claude Code
     (``[fleet.roles.coder] agent_args``) and a persona reach Claude Code: the model it asks
     for, the folder it adds to its workspace, and the persona's briefing in what the model
-    reads."""
+    reads. The folder is one the account trusts, as a folder a role adds for good is: from
+    2.1.326 Claude Code asks at its start about one no trust covers (R19), which
+    ``test_real_claude_code_asks_about_an_added_folder_no_trust_covers_and_the_fleet_says_so``
+    is about."""
     extra = native.outside / "extra-dir"
     extra.mkdir()
+    _trusted_on_the_account(native, extra)
     config = load_config()
     config.agents.models[AGENT] = AgentModelSettings(
         roles={"coder": AgentModelDefault(model="claude-sonnet-4-5")}
@@ -1038,3 +1154,43 @@ def test_real_claude_code_fires_every_hook_aisquare_installs_and_each_reaches_th
     assert "after the compaction" in resumed.everything, "the conversation, resumed"
     seen["SessionStart"] += ", resume"
     assert set(seen) == {spec.event for spec in get_adapter(AGENT).capabilities.hooks}, seen
+
+
+#: How long the slowed session end below waits before running aisquare's hook: past Claude
+#: Code's 1.5 s default for a SessionEnd hook that names no timeout (RLX R20, #154).
+SLOW_SESSION_END_SECONDS = 2
+
+
+def test_real_claude_code_waits_for_a_slow_session_end_within_its_timeout(native: Native) -> None:
+    """RLX R20 (#154): a session end slowed past 1.5 s (a busy store, a slow Mac) still reaches
+    the board. Claude Code gives a SessionEnd hook 1.5 s unless the hook names a ``timeout``,
+    and then cancels it: the pane reads "SessionEnd hook [...] failed: Hook cancelled", and the
+    session stays running on the board. aisquare's names one. The hook installed in the config
+    dir is slowed in place, as an operator's machine would slow it."""
+    path = native.config_dir / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    [group] = settings["hooks"]["SessionEnd"]
+    [entry] = group["hooks"]
+    entry["command"] = f"sleep {SLOW_SESSION_END_SECONDS}; {entry['command']}"
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    receipt = native.spawn(prompt="a slow end")
+    row = receipt.agent
+    pane = row.pane_id
+    native.heard("a slow end")
+    native.until(lambda: native.state(row.session_id) == "waiting", 30, "Stop", pane)
+    native.ready(pane)
+    native.type(pane, "/exit")
+    typed = time.monotonic()
+    native.until(lambda: native.ended(row.session_id), 30, "SessionEnd", pane)
+    ended = time.monotonic() - typed
+    native.until(lambda: "Pane is dead" in native.screen(pane), 30, "the exit", pane)
+    # Said, not asserted (a wall clock in CI is flaky by construction): Claude Code waits as
+    # long as the hook runs, not its whole timeout.
+    print(
+        f"session end on the board {ended:.1f} s after /exit, pane dead by "
+        f"{time.monotonic() - typed:.1f} s"
+    )
+    # Flattened, wrap-proof: at the pane's width the line wraps inside its words ("…failed:
+    # Hook cance" / "lled", seen on 2.1.318), so every space and row break goes first.
+    screen = native.screen(pane)
+    assert "Hookcancelled" not in "".join(screen.split()), screen

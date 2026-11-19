@@ -232,6 +232,9 @@ def test_a_quiet_manager_is_compacted_once(
 
     # And it is still a manager a review wakes: the real nudge types into its pane.
     monkeypatch.setattr(fleet_service, "nudge_manager", _REAL_NUDGE)
+    # The board write this nudge follows: a nudge is due only for news, unread
+    # (``team.wake_pending``, R12).
+    team_service.watch_event(manager.project.id, "watch: 1 new (1 permission)")
     assert fleet_service.nudge_manager(manager.project.id, reason="task_review")
     assert manager.tmux.typed[-1][2] == "Enter" and fleet_service.NUDGE_TEXT in str(
         manager.tmux.typed[-2]

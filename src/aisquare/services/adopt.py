@@ -48,6 +48,7 @@ from pathlib import Path
 
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import process_table, procs
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters import adapters, default_adapter, recorded_adapter
 from aisquare.core.agent_adapters.types import (
     AgentAdapter,
@@ -434,8 +435,9 @@ def _find(ref: str, accounts: Sequence[ClaudeAccount]) -> _Found:
         if not homes:
             raise AdoptRefused(
                 "not_on_a_known_account",
-                f"{ref} is no conversation under an account the CLI knows (its slots, and each "
-                "agent's plain home): `aisquare accounts list` shows them",
+                f"{ref} is no conversation under an account rlx knows (its slots, and each "
+                "agent's plain home)"
+                + prog.shell_advice(f": `{prog.word()} accounts list` shows them"),
             )
         return homes[0]
     # An id or the start of one (the list shows eight characters): only the characters a
@@ -444,8 +446,8 @@ def _find(ref: str, accounts: Sequence[ClaudeAccount]) -> _Found:
     if not ref or not _SESSION_CHARS.fullmatch(ref):
         raise AdoptRefused(
             "no_such_conversation",
-            f"{ref!r} is no session id (or the start of one) — "
-            "`aisquare fleet adopt --list` shows the recent ones",
+            f"{ref!r} is no session id (or the start of one)"
+            + prog.shell_advice(f" — `{prog.word()} fleet adopt --list` shows the recent ones"),
         )
     matches = [
         each for account in accounts for each in _found_in(account) if each.native.startswith(ref)
@@ -453,8 +455,8 @@ def _find(ref: str, accounts: Sequence[ClaudeAccount]) -> _Found:
     if not matches:
         raise AdoptRefused(
             "no_such_conversation",
-            f"no conversation {ref!r} under the accounts the CLI knows — "
-            "`aisquare fleet adopt --list` shows the recent ones",
+            f"no conversation {ref!r} under the accounts rlx knows"
+            + prog.shell_advice(f" — `{prog.word()} fleet adopt --list` shows the recent ones"),
         )
     sessions = sorted({each.native for each in matches})
     if len(sessions) > 1:
@@ -498,7 +500,7 @@ def adopt(ref: str, *, role: str = "coder", label: str | None = None) -> fleet_s
     holders = _Holders(accounts, None)
     if (pid := holders.of(found.native, found.path, found.adapter)) is not None:
         why = (
-            found.reader.server_note(["aisquare", "accounts", "run", str(found.account.slot)])
+            found.reader.server_note([prog.word(), "accounts", "run", str(found.account.slot)])
             if holders.serving(pid)
             else "quit it first, then adopt — two processes would write one conversation"
         )
@@ -511,8 +513,11 @@ def adopt(ref: str, *, role: str = "coder", label: str | None = None) -> fleet_s
         where = conversation.cwd or "a directory its transcript does not record"
         raise AdoptRefused(
             "not_onboarded",
-            f"{found.native} ran in {where}, which no onboarded project holds: "
-            f"`aisquare project onboard {conversation.cwd or '<dir>'}` first",
+            f"{found.native} ran in {where}, which no onboarded project holds"
+            + prog.shell_advice(
+                f": `{prog.word()} project onboard {conversation.cwd or '<dir>'}` first",
+                app=": add it as a project first",
+            ),
         )
     return fleet_service.spawn(
         project,

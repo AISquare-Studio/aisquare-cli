@@ -27,9 +27,9 @@ from aisquare.models import ClaudeAccount, ClaudeUsage, UsageCause
 from aisquare.services import claude_accounts as service
 from tests.test_claude_accounts import NOW, _sign_in
 
-_LOG_IN = "press Log in (in a terminal: aisquare accounts run 2, then /login)"
+_LOG_IN = "press Log in (in a terminal: rlx accounts run 2, then /login)"
 _REFRESH_TOKEN = (
-    "press Log in, or open a session on this account (aisquare accounts run 2): "
+    "press Log in, or open a session on this account (rlx accounts run 2): "
     "Claude Code refreshes the token"
 )
 _THEN_REFRESH = "then ↻ Refresh usage (or --refresh)"
@@ -56,12 +56,12 @@ CAUSES: dict[UsageCause, tuple[str, str | None]] = {
     # Over SSH into the Mac: the Mac's own asq records for this session; no unlock is asked.
     UsageCause.keychain_locked_ssh: (
         "the login Keychain is locked in this SSH session",
-        "open asq on the Mac itself, which records usage for this session too; "
+        "open rlx on the Mac itself, which records usage for this session too; "
         f"or run security unlock-keychain here, {_THEN_REFRESH}",
     ),
     UsageCause.keychain_refused: (
-        "macOS refused aisquare access to the Claude Code item",
-        f"allow aisquare in Keychain Access, {_THEN_REFRESH}",
+        "macOS refused rlx access to the Claude Code item",
+        f"allow rlx in Keychain Access, {_THEN_REFRESH}",
     ),
     UsageCause.keychain_timeout: (
         "could not read the Keychain (no answer in 5 s)",
@@ -81,7 +81,10 @@ CAUSES: dict[UsageCause, tuple[str, str | None]] = {
     ),
     # #403's wording: its reason, then its fix, the words doctor's tls row says too.
     UsageCause.tls_bundle: ("TLS: the CA bundle could not be loaded", tls.BUNDLE_FIX),
-    UsageCause.tls_cert: ("TLS certificate could not be verified", tls.CERT_HINT),
+    UsageCause.tls_cert: (
+        "TLS certificate could not be verified",
+        tls.CERT_HINT.format(program="rlx"),
+    ),
     UsageCause.http_error: ("HTTP 500 from the usage endpoint", None),
     UsageCause.bad_answer: ("the usage endpoint did not answer with JSON", None),
     UsageCause.read_failed: ("usage read failed (RuntimeError)", None),
@@ -204,6 +207,6 @@ def test_a_rate_limits_fix_says_when_reads_resume_and_without_a_time_that_they_d
 
 def test_a_fix_names_the_slot_it_is_for_and_a_placeholder_without_one() -> None:
     assert service.usage_fix(UsageCause.token_missing, slot=3) == (
-        "press Log in (in a terminal: aisquare accounts run 3, then /login)"
+        "press Log in (in a terminal: rlx accounts run 3, then /login)"
     )
-    assert "aisquare accounts run <slot>" in (service.usage_fix(UsageCause.token_missing) or "")
+    assert "rlx accounts run <slot>" in (service.usage_fix(UsageCause.token_missing) or "")

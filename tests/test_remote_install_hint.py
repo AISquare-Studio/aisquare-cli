@@ -133,18 +133,18 @@ def test_a_uv_tool_keeps_every_extra_and_package_it_was_installed_with(
         ),
         (
             [
-                '{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/aisquare-cli'
+                '{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/rlx'
                 '?rev=feat%2Fremote&subdirectory=cli" }'
             ],
             "",
             "uv tool install --python 3.13 'aisquare-cli @ git+https://github.com/"
-            "AISquare-Studio/aisquare-cli@feat/remote#subdirectory=cli'",
+            "AISquare-Studio/rlx@feat/remote#subdirectory=cli'",
         ),
         (
-            ['{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/aisquare-cli" }'],
+            ['{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/rlx" }'],
             "",
             "uv tool install --python 3.13 "
-            "'aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli'",
+            "'aisquare-cli @ git+https://github.com/AISquare-Studio/rlx'",
         ),
         (
             [
@@ -480,7 +480,7 @@ def test_a_real_uv_keeps_a_tool_installed_with_serve_whole_when_the_hint_is_foll
         ("venv made by uv", "uv pip install --python '{python}' aisquare-cli"),
     ],
 )
-def test_a_qr_without_segno_names_the_command_that_puts_it_back_in_the_install_that_runs(
+def test_a_qr_without_segno_says_so_and_names_no_command_whatever_the_install(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str, command: str
 ) -> None:
     """Review of #259, round 39, 8/9: the R panel's QR said "QR unavailable — pip install
@@ -506,5 +506,8 @@ def test_a_qr_without_segno_names_the_command_that_puts_it_back_in_the_install_t
     art = remote_view.qr_art("https://abcd-12.ngrok-free.app/r/AbCdEfGhIjKlMnOpQrStUv")
 
     said = command.format(python=prefix / "bin" / "python")
-    assert art.plain == f"QR unavailable: this install lacks segno — {said}"
+    # asq names no command (R13): the notice says what is missing; the shell's `remote`
+    # extra notice (remote_install_hint) still names the install's own command.
+    assert art.plain == "QR unavailable: this install lacks segno"
+    assert said not in art.plain
     assert not art.style, "the notice is plain, not the QR's colours"

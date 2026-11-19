@@ -290,7 +290,7 @@ def test_a_codex_rows_fix_is_codexs_own_sign_in_never_claudes(slot: int) -> None
         assert tip is not None
         fix = tip.splitlines()[-1]
         assert fix == (
-            f"fix: press Log in (in a terminal: aisquare accounts run {slot} login --device-auth)"
+            f"fix: press Log in (in a terminal: rlx accounts run {slot} login --device-auth)"
         )
         assert "/login" not in tip and "Claude" not in tip
     claude = ClaudeAccountStatus(
@@ -299,13 +299,11 @@ def test_a_codex_rows_fix_is_codexs_own_sign_in_never_claudes(slot: int) -> None
     )
     claude_tip = problem_tooltip(claude, None, now=NOW)
     assert claude_tip is not None
-    assert claude_tip.endswith(
-        "fix: press Log in (in a terminal: aisquare accounts run 3, then /login)"
-    )
+    assert claude_tip.endswith("fix: press Log in (in a terminal: rlx accounts run 3, then /login)")
     # The same words where there is no hover (``accounts usage``, ``accounts list --usage``).
     problem = accounts_service.usage_problem(_codex_status(slot, None), None)
     assert problem is not None and accounts_service.explain_usage(problem).endswith(
-        f"aisquare accounts run {slot} login --device-auth)"
+        f"rlx accounts run {slot} login --device-auth)"
     )
 
 
@@ -355,7 +353,7 @@ def test_a_codex_slot_renders_in_the_one_table_with_offline_usage_bars(
         }
 
     seen = drive(go, overview=overview)
-    assert seen["section"] and seen["title"].startswith("Codex (beta) 0.162.1") and seen["header"]
+    assert seen["section"] and seen["title"].startswith("Codex 0.162.1") and seen["header"]
     assert seen["in_table"], "every agent's rows are in the one table"
     assert f"{slot}  account {slot}" in seen["line"]
     assert seen["cells"]["agent"] == ">_"  # the first word of the name's column, Codex's mark
@@ -438,7 +436,7 @@ def test_add_codex_account_opens_codex_login_in_a_new_slot_and_records_it(
     assert window["socket"] == PRIVATE_SOCKET and window["session"] == "asq-accounts"
     assert window["command"][-5:] == ["accounts", "run", str(account.slot), *DEVICE_AUTH]
     assert "CLAUDE_CONFIG_DIR" not in window["env"]  # a Codex window carries Codex's own
-    assert "`codex login --device-auth`" in seen["header"]
+    assert "Codex's sign-in runs in this pane" in seen["header"]  # never its command (R13)
     assert "Claude Code's login" not in seen["header"]
     assert seen["still_open"] and not seen["box"]
     assert completed == [(account.slot, CODEX)]

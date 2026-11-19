@@ -25,6 +25,7 @@ from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.cli.ui.views.welcome import WelcomeView, agent_button, claude_text
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import codex as codex_adapter
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.models import FleetAgentStatus
 from aisquare.services.first_run import ClaudeState
 from tests.test_ui_welcome import (  # noqa: F401  (fixtures: pytest finds them by name here)
@@ -46,6 +47,8 @@ from tests.ui_workers import settle_page
 
 HOME = Path("/home/dev/.codex")
 CODEX_MISSING = ClaudeState(wanted="codex", source="default", agent="codex", home=HOME)
+CODEX_PAGE = get_adapter("codex").install_page
+CLAUDE_PAGE = get_adapter("claude-code").install_page
 CODEX_UNHOOKED = dataclasses.replace(
     CODEX_MISSING,
     binary="/opt/bin/codex",
@@ -96,7 +99,7 @@ def test_the_hooks_home_is_named_in_full_as_this_platform_spells_it() -> None:
         assert f" in {home}" in text and "~" not in text, text
 
 
-def test_codex_missing_names_its_installer_and_check_again() -> None:
+def test_codex_missing_links_its_install_page_and_check_again() -> None:
     async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, bool, bool]:
         return (
             card(page, "claude-status"),
@@ -106,21 +109,21 @@ def test_codex_missing_names_its_installer_and_check_again() -> None:
 
     text, check, start = hosted(Machine(claude=[CODEX_MISSING]), go)
     assert "Codex is not installed" in text
-    assert text.index(codex_adapter.INSTALL_COMMAND) < text.index("npm install -g @openai/codex")
-    assert accounts_core.INSTALL_COMMAND not in text  # Claude Code's install is not offered
+    assert CODEX_PAGE in text and codex_adapter.INSTALL_COMMAND not in text  # a page (R13, Q1)
+    assert CLAUDE_PAGE not in text  # Claude Code's install is not offered
     assert check and not start
 
 
-def test_with_neither_installed_both_install_commands_are_named() -> None:
+def test_with_neither_installed_both_install_pages_are_linked() -> None:
     title, text = hosted(Machine(claude=[NEITHER]), _look)
     assert title.startswith("2  Coding agent")
     assert "No coding agent is installed" in text
-    assert accounts_core.INSTALL_COMMAND in text and codex_adapter.INSTALL_COMMAND in text
-    assert text.index("Claude Code:") < text.index(accounts_core.INSTALL_COMMAND)
-    assert text.index("Codex (beta):") < text.index(codex_adapter.INSTALL_COMMAND)
-    # Control: Claude Code chosen by name (not choosable) names its own install only.
+    assert text.index("Claude Code:") < text.index(CLAUDE_PAGE)
+    assert text.index("Codex:") < text.index(CODEX_PAGE)
+    assert accounts_core.INSTALL_COMMAND not in text and codex_adapter.INSTALL_COMMAND not in text
+    # Control: Claude Code chosen by name (not choosable) links its own page only.
     _title, claude_only = hosted(Machine(claude=[MISSING]), _look)
-    assert codex_adapter.INSTALL_COMMAND not in claude_only
+    assert CODEX_PAGE not in claude_only
 
 
 def test_connect_runs_for_codex_and_opens_step_three(tmp_path: Path) -> None:
@@ -161,7 +164,7 @@ def test_sign_in_asks_for_the_managers_account_and_opens_accounts_on_it() -> Non
 
     text, received = hosted(machine, go)
     assert "not signed in (0 · plain codex)" in text
-    assert "Sign in opens `codex login --device-auth` on the Accounts page" in text
+    assert "Sign in opens Codex's sign-in on the Accounts page" in text  # no command (R13)
     assert [state.agent for state in machine.sign_ins] == ["codex"]
     opened = [m for m in received if isinstance(m, AccountsSelected)]
     assert len(opened) == 1 and opened[0].sign_in == 0

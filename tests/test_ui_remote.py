@@ -22,6 +22,7 @@ import socket
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -36,7 +37,7 @@ from textual.widgets import Button, DataTable, Select, Static, Switch
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import remote_control
 from aisquare.cli.ui.app import FleetApp, HelpScreen
-from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController, load_remote_state
+from aisquare.cli.ui.remote_control import RemoteController, load_remote_state, read_only_reason
 from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
 from aisquare.core import clipboard, paths, state_file
@@ -144,6 +145,7 @@ def drive(
             server=remote_server, tunnel_factory=tunnel, url_timeout=2, port=free_port()
         )
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
+        RAISED[app] = toast_log.record(app)
         async with app.run_test(size=size, notifications=True) as pilot:
             await started(app)
             result = await fn(pilot)
@@ -206,6 +208,29 @@ def shown(widget: Static) -> str:
 def toasts(app: FleetApp) -> list[str]:
     """The notifications the app still shows."""
     return [note.message for note in app._notifications]
+
+
+RAISED: weakref.WeakKeyDictionary[FleetApp, list[str]] = weakref.WeakKeyDictionary()
+"""Every toast each app ``drive`` ran raised, from before it started (``toast_log``)."""
+
+
+def raised(app: FleetApp) -> list[str]:
+    """What ``app`` said, as it was said: a toast raised at start, or from a thread, can be
+    gone by its time, or wait under "+N more", before a test reads the screen (windows-latest,
+    #517)."""
+    return RAISED[app]
+
+
+async def said(pilot: Pilot[None], line: str) -> bool:
+    """Whether ``line`` was toasted, waited for a bounded time: news a thread posted reaches
+    the app as a message, handled when the loop gets to it."""
+    app = pilot.app
+    assert isinstance(app, FleetApp)
+    for _ in range(250):
+        if any(told.startswith(line) for told in raised(app)):
+            return True
+        await pilot.pause(0.02)
+    return False
 
 
 def panel(pilot: Pilot[None]) -> RemotePanel:
@@ -291,7 +316,7 @@ def test_shift_r_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off()
         assert password == remote_server.runtime().password and len(password.split("-")) == 4
         qr = shown(modal.query_one("#remote-qr", Static))
         assert qr == qr_text(expected) and 15 <= len(qr.splitlines()) <= 22
-        assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
+        assert shown(modal.query_one("#remote-write-hint", Static)) == read_only_reason()
         assert modal.query_one("#remote-allow-write", Switch).value is False
 
         switch.toggle()
@@ -784,15 +809,12 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         await written(pilot)
         # Back read-only, and said so: writes come back on only when switched on again
         # (review of #259, remote focus, 11/12).
-        assert any(
-            line.startswith("Remote is back on from the last session — writes turned off")
-            for line in toasts(app)
-        )
+        assert await said(pilot, "Remote is back on from the last session — writes turned off")
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-on", Switch).value is True
         assert modal.query_one("#remote-allow-write", Switch).value is False
         assert modal.query_one("#remote-auto-off", Select).value == 120
-        assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
+        assert shown(modal.query_one("#remote-write-hint", Static)) == read_only_reason()
         assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         # The persisted token is the same one, so the link the phone kept still works.
         assert remote_server.runtime().token in shown(modal.query_one("#remote-link", Static))
@@ -811,7 +833,7 @@ def test_a_fresh_home_opens_with_write_actions_off() -> None:
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-allow-write", Switch).value is False
         assert modal.query_one("#remote-on", Switch).value is False
-        assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
+        assert shown(modal.query_one("#remote-write-hint", Static)) == read_only_reason()
 
     drive(go, tunnel=missing_ngrok)
     assert not paths.state_path().exists() or "allow_write" not in json.loads(
@@ -1412,7 +1434,10 @@ def test_the_modal_shows_failed_unlocks_and_a_deadline_a_phone_extended(
         await pilot.pause()
         line = shown(modal.query_one("#remote-unlocks", Static))
         assert line.startswith(f"{UNLOCK_GLOBAL_FAILURES} failed unlocks in 30 min")
-        assert "new unlocks paused" in line and "regenerate-password --new-link" in line
+        # Review of #503, m2: a new password alone keeps a leaked link working; New link
+        # replaces both, and the line points at it, in rlx's words (R13: no command).
+        assert "new unlocks paused; if the link leaked, New link replaces it and the" in line
+        assert "regenerate-password" not in line, "asq names no command (R13)"
         state_line = shown(modal.query_one("#remote-state", Static))
         # with its date: an extension can cross midnight
         assert f"auto-off at {there:%b} {there.day} 00:{there.minute:02d}" in state_line
@@ -1518,6 +1543,42 @@ def test_the_panels_controls_never_wait_for_remote_jsons_lock_on_textuals_thread
     drive(go, tunnel=missing_ngrok)
 
 
+def test_new_link_replaces_the_link_and_the_password_and_signs_every_device_out() -> None:
+    """Review of #503, m2: 0.10.0's lockout advice was to rotate the LINK. A new password alone
+    (Regenerate) keeps a leaked link working and clears the failed-unlock budget, and rlx had
+    no way to rotate the link. *New link* does: the old link no longer opens, the password is
+    new, every device unlocks again, and the panel shows the new link."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        new_link = modal.query_one("#remote-new-link", Button)
+        assert new_link.disabled, "off: a press would change nothing (review of #542, F1)"
+        modal.query_one("#remote-on", Switch).toggle()
+        await written(pilot)
+        modal.repaint()
+        await pilot.pause()
+        assert not new_link.disabled, "on in this process: New link acts"
+        runtime = remote_server.runtime()
+        assert runtime.unlock_device(runtime.password, "iPhone Safari") is not None
+        old_token, old_password = remote_server.remote_link_token(), runtime.password
+        new_link.press()
+        await written(pilot)
+        saved = json.loads(paths.remote_state_path().read_text())
+        assert saved["token"] != old_token and saved["password"] != old_password
+        assert saved["devices"] == [], "every device unlocks again"
+        assert not runtime.token_matches(old_token), "the leaked link no longer opens"
+        assert runtime.token_matches(saved["token"])
+        modal.repaint()
+        await pilot.pause()
+        assert saved["token"] in shown(modal.query_one("#remote-link", Static))
+        assert old_token not in shown(modal.query_one("#remote-link", Static))
+        assert remote_control.NEW_LINK_NEWS in toasts(app)
+
+    drive(go, tunnel=missing_ngrok)
+
+
 def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1544,14 +1605,27 @@ def test_the_panel_says_remote_is_on_while_another_process_serves_this_home(
                 if shown(state) != "off":
                     break
                 await asyncio.sleep(0.02)
-            assert shown(state) == f"{remote_view.ELSEWHERE}  · no auto-off"
-            assert shown(modal.query_one("#remote-link", Static)) == remote_view.ELSEWHERE_LINK
+            assert shown(state) == f"{remote_view.served_elsewhere_state()}  · no auto-off"
+            link = modal.query_one("#remote-link", Static)
+            assert shown(link) == remote_view.served_elsewhere_link()
             assert shown(modal.query_one("#remote-password", Static)) == passphrase
+            # Review of #542, F1: New link acts on this process's Remote, as Regenerate does,
+            # so it is off here; at a lockout the line points where Remote runs.
+            assert modal.query_one("#remote-new-link", Button).disabled
+            assert modal.query_one("#remote-regen", Button).disabled
+            budget = UnlockBudget(remote_server.runtime())
+            for _ in range(UNLOCK_GLOBAL_FAILURES):
+                budget.record_failed_unlock()
+            modal.repaint()
+            await pilot.pause()
+            line = shown(modal.query_one("#remote-unlocks", Static))
+            assert "if the link leaked, give it a new link where Remote runs" in line
+            assert "New link replaces" not in line, line
             modal.query_one("#remote-on", Switch).toggle()
             await written(pilot)
             assert not app.remote.running
             status = modal.query_one("#remote-status", Static)
-            assert shown(status) == remote_control.ALREADY_ON
+            assert shown(status) == remote_control.already_on()
         finally:
             unlock(fd)
             os.close(fd)
@@ -1605,7 +1679,7 @@ def test_while_another_process_serves_the_panel_shows_its_auto_off_and_picks_non
                 if shown(state) != "off":
                     break
                 await asyncio.sleep(0.02)
-            assert shown(state) == f"{remote_view.ELSEWHERE}  · {said}"
+            assert shown(state) == f"{remote_view.served_elsewhere_state()}  · {said}"
             assert modal.query_one("#remote-auto-off", Select).disabled
         finally:
             unlock(fd)
@@ -1651,9 +1725,9 @@ def test_the_sentences_beside_the_switches_are_painted_whole_at_any_width(
                 await asyncio.sleep(0.02)
             await pilot.pause()
             dated = f"auto-off at {deadline:%b} {deadline.day} 21:58"
-            assert painted_in(app, state) == f"{remote_view.ELSEWHERE} · {dated}"
+            assert painted_in(app, state) == f"{remote_view.served_elsewhere_state()} · {dated}"
             hint = modal.query_one("#remote-write-hint", Static)
-            assert painted_in(app, hint) == READ_ONLY_REASON
+            assert painted_in(app, hint) == read_only_reason()
         finally:
             unlock(fd)
             os.close(fd)
@@ -1698,6 +1772,7 @@ def drive_controller(
 
     async def run() -> tuple[T, float]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
+        RAISED[app] = toast_log.record(app)
         async with app.run_test(size=SIZE, notifications=True) as pilot:
             await started(app)
             result = await fn(pilot)
@@ -1890,10 +1965,9 @@ def test_a_tunnel_that_does_not_come_up_after_a_restore_is_toasted_from_its_thre
         await written(pilot)
         assert app.remote.running and app.remote._waiter is not None
         app.remote._waiter.join(5)
-        await pilot.pause()
-        assert (
-            "Remote is on, but phones cannot reach it — ngrok did not announce a tunnel in time"
-            in toasts(app)
+        assert await said(
+            pilot,
+            "Remote is on, but phones cannot reach it — ngrok did not announce a tunnel in time",
         )
 
     drive_controller(go, controller)
@@ -1962,3 +2036,25 @@ def test_auto_off_is_toasted_unless_the_panel_says_it() -> None:
         assert shown(modal.query_one("#remote-status", Static)) == ran_out
 
     drive_controller(go, controller)
+
+
+def test_news_that_arrives_once_asq_s_screens_are_gone_is_dropped_not_raised() -> None:
+    """Remote's threads post news as asq quits (its auto-off, a write landing): handled once
+    the screens were gone, reading the screen raised ``ScreenStackError`` out of asq's exit
+    (windows-latest, #517: two of the eight failures)."""
+
+    async def run() -> FleetApp:
+        controller = RemoteController(
+            server=remote_server, tunnel_factory=missing_ngrok, url_timeout=2, port=free_port()
+        )
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
+        async with app.run_test(size=SIZE, notifications=True) as pilot:
+            await started(app)
+            await pilot.pause()
+        assert controller.wait_until_off(10)
+        return app
+
+    app = asyncio.run(run())
+    assert not app._screen_stack, "asq's screens are gone"
+    app.on_remote_news(app_mod.RemoteNews("Remote is off", False))
+    app.on_remote_news(app_mod.RemoteNews("revoked", False, done=True))

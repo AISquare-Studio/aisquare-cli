@@ -169,7 +169,7 @@ def test_off_a_declared_captain_in_the_home_restarts_like_any_other_role(
     declared_captain: None,
 ) -> None:
     """Review of #240, R2-m2: by role and board alone, a declared captain spawned into the
-    home was read as the captain's leftover row and refused with CAPTAIN_OFF. Only a row
+    home was read as the captain's leftover row and refused with captain_off(). Only a row
     launched as the captain is that."""
     from aisquare.core import paths
     from aisquare.core.workspace import project_id_for
@@ -295,7 +295,7 @@ def test_on_the_captains_refusals_stand(
 
     result = runner.invoke(app, ["launch", "captain"])
 
-    assert result.exit_code == 1 and "`aisquare captain` starts it" in result.output
+    assert result.exit_code == 1 and "`rlx captain` starts it" in result.output
     assert not spy
     with pytest.raises(fleet_service.FleetError, match="lives on the home board"):
         fleet_service.spawn(project, "captain", worktree=False)
@@ -303,7 +303,7 @@ def test_on_the_captains_refusals_stand(
 
     monkeypatch.setenv("AISQUARE_ROLE", "captain")
     text = team_service.hook_session_start("captain-on-1", project.root, "startup")
-    assert "attention()" in text and "aisquare task claim" not in text
+    assert "attention()" in text and "rlx task claim" not in text
     with store_session() as store:
         session = store.get_session("captain-on-1")
     assert session is not None and session.state == "waiting"

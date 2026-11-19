@@ -39,7 +39,7 @@ def remote_on_elsewhere(*, by: str = "serve", port: int = 8750, pid: int = 4242)
     try:
         lock_exclusive(fd)
         try:
-            yield f"{remote_server.SERVED_BY[by]} on port {port}, process {pid}"
+            yield f"{remote_server.served_by()[by]} on port {port}, process {pid}"
         finally:
             unlock(fd)
     finally:

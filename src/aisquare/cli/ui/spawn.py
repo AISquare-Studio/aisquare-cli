@@ -83,7 +83,7 @@ through their own change handlers — an open form keeps what was typed — and 
 *+ New account* hands over to the Accounts page with :meth:`SpawnDialog.form_state`.
 Once that sign-in lands the shell opens the dialog again from it, on the new account
 (#286): what was typed is not lost to a sign-in. *Import…* beside the Persona
-select opens the Personas tab's import dialog and selects what it imports.
+select opens the Personas page's import dialog and selects what it imports.
 
 **Changing Project** re-reads everything that hangs on the project, as the dialog does
 when it opens: the header, git (the worktree switch), whether a manager already runs (the
@@ -710,9 +710,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return [task for task in tasks if task.status in OPEN_TASK_STATUSES], None
 
     def _read_personas(self) -> tuple[list[Persona], str | None]:
-        """The personas ``spawn`` accepts here: the project's catalogue, winners only."""
+        """The personas asq offers: yours and the bundled ones, winners only, the same for
+        every project — no project's own layer (R27, as on Settings ▸ Personas)."""
         try:
-            found, _invalid = personas.catalogue(personas.project_root(self.project))
+            found, _invalid = personas.catalogue(None)
         except Exception as exc:  # a layer we cannot read costs the list, never the dialog
             return [], f"personas unavailable — {type(exc).__name__}: {exc}"
         return found, None
@@ -817,14 +818,31 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def _persona_options(self) -> list[tuple[str, str]]:
         """``(none)``, the catalogue — and any name a preset or a role default asks for
-        that the catalogue lacks, so the field can show it (the spawn then refuses it
-        with the reason, as the CLI would)."""
+        that the catalogue lacks, so the field can show it: one of the project's own, which
+        the spawn uses (:meth:`_project_own`), or else one the spawn refuses with the
+        reason, as the CLI would."""
         options = [("(none)", NO_PERSONA), *((persona_choice(p), p.name) for p in self._personas)]
         known = {p.name for p in self._personas}
         wanted = {self._persona_shown, *(self._persona_default(role) for role in self._roles)}
         for name in sorted(wanted - known - {NO_PERSONA}):
-            options.append((f"{name} — not one of this project's personas", name))
+            own = self._project_own(name)
+            why = "this project's own persona" if own else "not one of your personas"
+            options.append((f"{name} — {why}", name))
         return options
+
+    def _project_own(self, name: str) -> bool:
+        """Whether ``name`` is one of the project's own personas, which ``spawn`` runs.
+
+        The list is yours and the bundled ones (R27), but ``spawn`` still resolves a name in
+        the project's layer first: a role default the list lacks that the project holds is
+        used, not refused, and a listed name the project holds too (``skeptic · bundled``)
+        runs as the project's own. A name no layer holds (or a layer that cannot be read)
+        is not."""
+        try:
+            found = personas.resolve(name, personas.project_root(self.project))
+        except Exception:
+            return False
+        return found.layer == "project"
 
     def _account_options(
         self, statuses: Iterable[ClaudeAccountStatus], agent: str | None
@@ -1700,10 +1718,18 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             text, style = f"(plain {self._plain_agent()}: no role, no persona)", "dim"
         elif not value:
             text, style = "(no persona — the agent runs as its role alone)", "dim"
+        elif found is None and self._project_own(value):
+            text, style = f"{value} is this project's own persona — spawn uses it", "dim"
         elif found is None:
             text, style = (
-                f"{value} is not one of this project's personas — spawn refuses it",
+                f"{value} is not one of your personas — spawn refuses it",
                 "yellow",
+            )
+        elif self._project_own(value):
+            text, style = (
+                f"{value} is this project's own persona too — spawn uses the project's own, "
+                f"not the {found.layer} one",
+                "dim",
             )
         else:
             text, style = found.description, ""
@@ -2276,9 +2302,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     @on(Button.Pressed, "#spawn-import")
     def _import_persona(self) -> None:
-        self.app.push_screen(
-            ImportPersonaScreen(personas.project_root(self.project)), callback=self._imported
-        )
+        # No project's root: the import lands in the user layer, as on Settings ▸ Personas.
+        self.app.push_screen(ImportPersonaScreen(None), callback=self._imported)
 
     def _imported(self, result: personas_service.ImportResult | None) -> None:
         """Select what was just imported — re-reading the catalogue it landed in."""

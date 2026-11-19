@@ -2,12 +2,14 @@
 opens (REVIEW-RC092-MI round 3, MAJOR 1).
 
 ConfirmBulk's box is centred on the screen, so with a small fleet its Confirm is drawn over
-the hub button that opened it: at 120x40 with one agent, *Stop all…* and Confirm share 12
-cells, *Pause all…* and Confirm 2 (*Restart all…* and *Resume all…* none, from 80x24 to
-200x60). The first click of a double-click there opened the dialog, and the second, which
-reached asq once Confirm was drawn and the plan read, stopped every agent, the manager
-included. A click on Confirm as soon as it is drawn still acts when it is a click of its own
-(#478, user 2026-10-30): there is no time to wait out.
+the hub button that opened it: at 120x47 with one agent, *Stop all…* and Confirm share cells,
+and so do *Pause all…* and Confirm (120x40 until R17's *Select all* row moved Confirm down a
+row, then 120x41 until R27's *Personas* link moved the hub's Fleet row down three; *Restart
+all…* and *Resume all…* none, from 80x24 to 200x60). The first click of a
+double-click there opened the dialog, and the second, which reached asq once Confirm was
+drawn and the plan read, stopped every agent, the manager included. A click on Confirm as
+soon as it is drawn still acts when it is a click of its own (#478, user 2026-10-30): there is
+no time to wait out.
 
 The presses are queued at the app as the terminal's driver queues them, so Textual counts the
 run of clicks itself (``Click.chain``), and stamped (``guard_paint.queue_press``), so a loaded
@@ -43,8 +45,8 @@ no_tmux = _no_tmux
 script = _script
 
 T = TypeVar("T")
-SIZE = (120, 40)
-"""Where Confirm covers 12 cells of *Stop all…* and 2 of *Pause all…* with one agent."""
+SIZE = (120, 47)
+"""Where Confirm covers cells of *Stop all…* and of *Pause all…* with one agent."""
 DOUBLE = FleetApp.CLICK_CHAIN_TIME_THRESHOLD / 2
 """The second press of a double-click, this long after the first."""
 APART = FleetApp.CLICK_CHAIN_TIME_THRESHOLD * 2

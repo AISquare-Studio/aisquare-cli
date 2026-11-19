@@ -786,11 +786,11 @@ def test_over_ssh_the_page_shows_the_macs_reading_and_whose_it_is(
         return seen
 
     seen = drive(go, overview=frame)
-    assert seen["age"] == "via the Mac's asq · 2m ago", "as every surface says it (#461 item 6)"
+    assert seen["age"] == "via the Mac's rlx · 2m ago", "as every surface says it (#461 item 6)"
     assert "40% · Mac" in str(seen["row"])
-    assert "via the Mac's asq · 2m ago — the login Keychain is locked in this SSH session" in str(
+    assert "via the Mac's rlx · 2m ago — the login Keychain is locked in this SSH session" in str(
         seen["row"]
     )
-    assert seen["refreshed"] == "via the Mac's asq · 2m ago"
+    assert seen["refreshed"] == "via the Mac's rlx · 2m ago"
     assert seen["why"] == "", "a figure to show, not the '!'"
     assert no_network["usage_calls"] == []

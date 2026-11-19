@@ -33,7 +33,7 @@ import sys
 import threading
 import tomllib
 from collections.abc import Callable, Coroutine, Iterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -62,7 +62,6 @@ from aisquare.cli.ui.divider import Divider
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import personas_tab
 from aisquare.cli.ui.views import project as project_view_module
-from aisquare.cli.ui.views import settings as settings_view_module
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
@@ -83,13 +82,13 @@ from aisquare.models import (
     TeamEvent,
     TeamSession,
 )
-from aisquare.services import diagnostics, install_route
+from aisquare.services import diagnostics
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests.ci_support import git
-from tests.ui_workers import settle_page, settle_until_held
+from tests.ui_workers import settle_page
 
 T = TypeVar("T")
 
@@ -401,9 +400,10 @@ def _config_toml() -> dict[str, Any]:
 # --- the tabs -----------------------------------------------------------------------------
 
 
-def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo) -> None:
-    """Manager, Board, Settings, Personas: no Doctor tab — the doctor is the app's page — and
-    no AISquare tab: the explainability view is dormant, mounted by nothing."""
+def test_project_view_has_the_three_tabs_with_their_widgets(project: ProjectInfo) -> None:
+    """Manager, Board, Settings: no Doctor tab — the doctor is the app's page — no AISquare
+    tab: the explainability view is dormant, mounted by nothing — and no Personas tab: they
+    are yours, on Settings ▸ Personas (R27)."""
 
     async def scenario(
         pilot: Pilot[None], host: Host
@@ -415,10 +415,6 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
             ("#tab-settings", SettingsView),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
-        view.active = "tab-personas"  # built when first opened
-        await settle_page(pilot.app)
-        assert view.query_one("#tab-personas").query_one(PersonasTab)
-        view.active = "tab-manager"
         await pilot.pause()
         ids = [pane.id or "" for pane in view.query("TabPane")]
         labels = [view.get_tab(pane_id).label_text for pane_id in ids]
@@ -432,10 +428,10 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
         )
 
     count, ids, active, labels, doctors, explainability = drive(project, scenario)
-    assert count == 4
+    assert count == 3
     assert ids == list(ProjectView.TAB_IDS)
     assert active == "tab-manager"  # the manager first: that is where the goal goes
-    assert labels == ["Manager", "Board", "Settings", "Personas"]
+    assert labels == ["Manager", "Board", "Settings"]
     assert doctors == 0
     assert explainability == 0
 
@@ -461,20 +457,12 @@ def test_the_dormant_explainability_view_opens_on_an_explainability_heading(
     assert first_id == "explainability-heading:bold" and heading == "Explainability"
 
 
-def test_the_personas_tab_reads_nothing_until_it_is_opened(
+def test_no_tab_of_the_project_view_shows_or_reads_the_personas(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Built with the view, the Personas tab read the whole catalogue as every project view
-    mounted, on the UI thread, for a tab that may never be opened (review of #201, R1-F10).
-    It is built when first opened, reads then, and re-reads at each later opening.
-
-    Each count is taken once the page has gone quiet, so a read that comes late is still
-    counted. The first opening's read is in ``PersonasTab.on_mount``, after a mount
-    ``open_personas`` does not await, and one pause after ``active`` did not wait for it: P3's
-    layers row made that mount longer, and every windows-latest job counted the tab before
-    its read (run 40238412702). An opening waits for its read, bounded. The board's opening
-    has nothing to wait for, since no read is the claim, so the page is settled before the
-    count, and a read it started would land in time to fail it."""
+    """R27: personas are the user's, on Settings ▸ Personas, and no longer a tab of each
+    project. Every tab opened in turn, none is a Personas tab, none holds the Personas page,
+    and none reads the catalogue: the project's own persona layer is nowhere in the view."""
     reads: list[Path | None] = []
     read_entries = personas_tab.read_entries
 
@@ -484,28 +472,21 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
 
     monkeypatch.setattr(personas_tab, "read_entries", counted)
 
-    async def read_since(pilot: Pilot[None], before: int) -> None:
-        await settle_until_held(
-            pilot.app, lambda: len(reads) > before, what="a read on opening tab-personas"
-        )
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[int, int]]:
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, int, str]]:
         view = host.query_one(ProjectView)
         await settle_page(pilot.app)
-        seen = [(len(view.query(PersonasTab)), len(reads))]
-        for tab in ("tab-personas", "tab-board", "tab-personas"):
-            before = len(reads)
-            view.active = tab
-            if tab == "tab-personas":
-                await read_since(pilot, before)
+        seen: list[tuple[str, int, str]] = []
+        for pane in list(view.query("TabPane")):
+            view.active = pane.id or ""
             await settle_page(pilot.app)
-            seen.append((len(view.query(PersonasTab)), len(reads)))
+            label = str(view.get_tab(pane.id or "").label_text)
+            seen.append((pane.id or "", len(host.query(PersonasTab)), label))
         return seen
 
     seen = drive(project, scenario)
-
-    assert seen == [(0, 0), (1, 1), (1, 1), (1, 2)]
-    assert reads == [project.root, project.root]  # the project's own layer, as spawn checks
+    assert [tab for tab, _, _ in seen] == ["tab-manager", "tab-board", "tab-settings"]
+    assert all(count == 0 and "Persona" not in label for _, count, label in seen), seen
+    assert reads == []
 
 
 # --- the Manager tab ----------------------------------------------------------------------
@@ -615,7 +596,7 @@ def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
     named the row's server by its socket's name (``tmux -L``). From a shell under another
     ``TMUX_TMPDIR`` that is another server, and its ``%7`` — another agent — was shown and
     typed into. A row recorded elsewhere is asked at its path (``tmux -S``); one from before
-    v25, by its name. The attach line has since moved to the Settings tab, with its rule.
+    v25, by its name. (The attach line it also named is gone from asq: R13, #146.)
 
     Where, the listed status says (``socket_at``, worked out with the listing's config): each
     frame asked ``fleet_service.socket_at``, which reloaded config.toml on the UI thread for
@@ -641,165 +622,36 @@ def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
 
     monkeypatch.setattr(fleet_service, "settings", no_config)
 
-    def attach_line(agent: FleetAgent, socket_at: Path | None) -> str:
-        status = FleetAgentStatus(
-            agent=agent, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
-        )
-        return settings_view_module.attach_line([status]).plain
-
     assert isinstance(server, ScriptedServer) and server.path == elsewhere, server
     assert server.captures, "the frame came from the server at the recorded path"
-    assert f"tmux -S {elsewhere} attach -t =asq-amber-otter" in attach_line(recorded, elsewhere)
-    assert f"tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter" in attach_line(named, None)
     shown = FleetAgentStatus(agent=recorded, socket_at=elsewhere)
     assert AgentView(shown, escape_key="ctrl+]").server.path == elsewhere
     by_name = AgentView(FleetAgentStatus(agent=named), escape_key="ctrl+]")
     assert by_name.server.path is None, "asked by its name"
 
 
-def test_the_attach_line_quotes_the_path_and_the_socket_name_it_prints(
-    project: ProjectInfo, tmp_path: Path
-) -> None:
-    """Round 29 of #257: the Manager tab pasted the recorded socket path into its attach line
-    as it was, so a ``TMUX_TMPDIR`` with a space or a ``$`` gave a line that failed or named
-    another path, and so did a free-form ``[fleet] tmux_socket``. Quoted for this shell, it
-    reads back as the command it names — on the Settings tab, where the line now is."""
-    odd = tmp_path / "my $HOME" / "tmux-1000" / "asq one"
-    recorded = fake_agent(project, pane_id="%7").model_copy(
-        update={"socket_path": odd, "tmux_socket": "asq one"}
-    )
-
-    def attach_argv(socket_at: Path | None) -> list[str]:
-        status = FleetAgentStatus(
-            agent=recorded, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
-        )
-        line = settings_view_module.attach_line([status]).plain
-        assert line.startswith("Attach in a terminal: "), line
-        return install_route.split_line(line.removeprefix("Attach in a terminal: "))
-
-    session = ["attach", "-t", "=asq-amber-otter"]
-    assert attach_argv(odd) == ["tmux", "-S", str(odd), *session]
-    assert attach_argv(None) == ["tmux", "-L", "asq one", *session]
-
-
-def test_the_settings_tab_shows_how_to_attach_and_says_so_when_there_is_nothing_to(
-    project: ProjectInfo, tmp_path: Path
-) -> None:
-    """The tmux attach command moved off the Manager tab's line to the project's Settings
-    tab: a labelled read-only row, from the shell's frames. The manager's session first; a
-    ``lost`` row or one held as another server's is no session to attach to, and with none
-    the row is a dim note. Before any frame it says nothing: "no live tmux session" there
-    may be false (review of #267, 7)."""
+def test_the_settings_tab_names_no_command_to_attach_a_terminal(project: ProjectInfo) -> None:
+    """R13 (#146): the tab showed ``Attach in a terminal: tmux -L asq attach -t =asq-…``, a
+    command to type. asq names none, whatever the frame; the shell's ``fleet attach`` keeps
+    it. The fleet id says the codename and its branches, never the tmux session or a flag."""
     manager = fake_agent(project, pane_id="%11")
-    coder = fake_agent(project, pane_id="%12", label="coder-auth")
-    elsewhere = tmp_path / "tmux 1000" / "$asq"
 
-    def row(agent: FleetAgent, state: str = "working", **update: Any) -> FleetAgentStatus:
-        return FleetAgentStatus.model_validate(
-            {"agent": agent, "state": state, "tmux_session": "asq-amber-otter", **update}
-        )
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, int]:
         view = host.query_one(ProjectView)
         view.active = "tab-settings"
         await pilot.pause()
-        line = host.query_one("#attach-line", Static)
-        seen = [shown(line)]
-        for frame in (
-            [row(coder), row(manager, "waiting", socket_at=elsewhere)],
-            [row(coder, socket_at=elsewhere)],
-            [row(coder, "lost"), row(manager, held=True)],
-            [],
-        ):
-            view.refresh_status(frame)
-            await pilot.pause()
-            seen.append(shown(line))
-        return seen
-
-    before, manager_first, coder_only, none_live, no_rows = drive(project, scenario)
-    attach = ["attach", "-t", "=asq-amber-otter"]
-    command = "Attach in a terminal: "
-    for plain in (manager_first, coder_only):
-        assert plain.startswith(command)
-        assert install_route.split_line(plain.removeprefix(command)) == [
-            "tmux",
-            "-S",
-            str(elsewhere),
-            *attach,
-        ]
-    assert before == "", "no frame yet: nothing said"
-    for note in (none_live, no_rows):
-        assert "no live tmux session" in note and "tmux -" not in note
-    assert settings_view_module.attach_line([row(manager)]).plain == (
-        f"{command}tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter"
-    )
-    nothing = settings_view_module.attach_line([])
-    assert str(nothing.style) == "dim"
-
-
-def test_the_attach_line_repaints_only_when_it_changes(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review of #267, 6: every two-second frame repainted the attach line of every open
-    project, with a layout pass, though the command had not changed. A frame that names the
-    same command repaints nothing, a new state on the row included; the frame that ends the
-    session repaints once, and the next one, which says the same, does not."""
-    manager = fake_agent(project, pane_id="%11")
-    live = FleetAgentStatus(agent=manager, state="waiting", tmux_session="asq-amber-otter")
-    painted: list[str] = []
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
-        view = host.query_one(ProjectView)
-        line = host.query_one("#attach-line", Static)
-        real = line.update
-
-        def update(content: Any = "", *, layout: bool = True) -> None:
-            painted.append(str(content))
-            real(content, layout=layout)
-
-        monkeypatch.setattr(line, "update", update)
-        for frame in ([live], [live], [live.model_copy(update={"state": "working"})], [], []):
-            view.refresh_status(frame)
-            await pilot.pause()
-        return painted
-
-    seen = drive(project, scenario)
-    assert len(seen) == 2, seen  # the first frame, then the one that ended the session
-    assert "attach -t =asq-amber-otter" in seen[0] and "no live tmux session" in seen[1]
-
-
-def test_the_settings_tab_attaches_where_fleet_attach_does_live_rows_before_ended_ones(
-    project: ProjectInfo, tmp_path: Path
-) -> None:
-    """Review of #267, 1: an ENDED manager is listed while its window stands (#138), and
-    ranked by its label alone the Settings tab named its server ahead of a live coder's — not
-    the server ``aisquare fleet attach`` reaches (``services.fleet.attach_argv``: the rows
-    that have not ended, the manager first, then the ended ones, the latest to end first)."""
-    now = datetime.now(tz=UTC)
-    old, new, older = tmp_path / "old" / "asq", tmp_path / "new" / "asq", tmp_path / "older"
-    manager = fake_agent(project, pane_id="%11")
-    coder = fake_agent(project, pane_id="%12", label="coder-auth")
-    tester = fake_agent(project, pane_id="%13", label="tester-1")
-
-    def row(agent: FleetAgent, at: Path, ended: datetime | None = None) -> FleetAgentStatus:
-        ended_row = agent.model_copy(update={"ended_at": ended, "exit_status": 0})
-        return FleetAgentStatus(
-            agent=ended_row if ended is not None else agent,
-            state="exited" if ended is not None else "working",
-            tmux_session="asq-amber-otter",
-            socket_at=at,
+        row = FleetAgentStatus.model_validate(
+            {"agent": manager, "state": "working", "tmux_session": "asq-amber-otter"}
         )
+        view.refresh_status([row])
+        await pilot.pause()
+        settings = host.query_one(SettingsView)
+        said = " ".join(shown(widget) for widget in settings.query(Static))
+        return said, len(host.query("#attach-line"))
 
-    def server(rows: list[FleetAgentStatus]) -> str:
-        line = settings_view_module.attach_line(rows).plain
-        return install_route.split_line(line.removeprefix("Attach in a terminal: "))[2]
-
-    exited_manager = row(manager, old, ended=now)
-    assert server([exited_manager, row(coder, new)]) == str(new)  # the live coder's
-    assert server([row(coder, new), row(manager, old)]) == str(old)  # a live manager's first
-    # No live row: the latest to end, as the 💤 row's attach stands for.
-    early = row(tester, older, ended=now - timedelta(minutes=5))
-    assert server([early, exited_manager]) == str(old)
+    said, lines = drive(project, scenario)
+    assert lines == 0
+    assert "tmux" not in said and "attach -t" not in said and "--project" not in said
 
 
 def test_no_button_and_no_spawn_when_a_manager_already_runs(
@@ -864,9 +716,7 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     manager = fake_agent(project, pane_id="%11")
     coder = fake_agent(project, pane_id="%12", label="coder-auth")
 
-    async def scenario(
-        pilot: Pilot[None], host: Host
-    ) -> tuple[str, str, str | None, bool, bool, str]:
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str | None, bool, bool]:
         view = host.query_one(ProjectView)
         view.refresh_status(
             [
@@ -877,25 +727,15 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
         await pilot.pause()
         pane = host.query_one("#manager-pane", TerminalPane)
         header = str(host.query_one("#manager-header").render())
-        attach = shown(host.query_one("#attach-line", Static))
         attached = pane.pane_id
         view.refresh_status([FleetAgentStatus(agent=coder, state="working")])  # coder only
         await pilot.pause()
-        return (
-            header,
-            attach,
-            attached,
-            host.query_one("#start-manager", Button).display,
-            pane.display,
-            shown(host.query_one("#attach-line", Static)),
-        )
+        return header, attached, host.query_one("#start-manager", Button).display, pane.display
 
-    header, attach, attached, button_back, pane_after, attach_after = drive(project, scenario)
-    assert "🔔 attention" in header and "asq-ruby-fox" not in header  # no tmux command here…
-    assert "attach -t =asq-ruby-fox" in attach  # …the Settings tab has it, from the same push
+    header, attached, button_back, pane_after = drive(project, scenario)
+    assert "🔔 attention" in header and "asq-ruby-fox" not in header  # no tmux command (R13)
     assert attached == "%11"  # the manager's pane, not the coder's
     assert button_back is True and pane_after is False  # no manager in the snapshot → button
-    assert "no live tmux session" in attach_after  # the coder has no session to attach to
 
 
 def _member(project: ProjectInfo, label: str, role: str, *, ended: bool = False) -> FleetAgent:
@@ -1098,8 +938,7 @@ def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
     header, button, pane, without = drive(project, scenario)
     assert "manager exited (130)" in header and "Restart on its sidebar row" in header
     # Naming the project: alone, it restarted the active project's manager (#259, round 21).
-    restart = f"aisquare fleet restart --project {project.codename or project.id} manager"
-    assert restart in " ".join(header.split()) and "no manager yet" not in header
+    assert "fleet restart" not in header and "no manager yet" not in header  # no command (R13)
     assert button is True and pane is False  # the way to a NEW session is right there
     assert "has no manager yet" in without and "exited" not in without  # the control
 
@@ -1499,12 +1338,11 @@ def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
     value, placeholder, line, machine_fields, note = drive(project, scenario)
     assert value == "Auth work" and placeholder == project.root.name
     assert line == (
-        "fleet id: amber-otter — tmux session asq-amber-otter, branches fleet/amber-otter/…, "
-        "--project amber-otter; renaming the project renames it"
-    )
+        "fleet id: amber-otter — branches fleet/amber-otter/…; renaming the project renames it"
+    ), "no tmux session and no --project: asq names no command (R13)"
     assert machine_fields == [], "no codename field of its own, and nothing machine-wide"
     assert "The fleet id follows it." in note
-    assert "aisquare project rename sets the same" in note
+    assert "project rename" not in note, "asq names no command (R13)"
     assert "`" not in note, "the note is a Text: backticks would show as they are"
 
 
@@ -1557,7 +1395,7 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(
     saved, field_value, title, line, cleared, title_after, notices = drive(project, scenario)
     assert saved == "Auth [wip] 🚀" and field_value == "Auth [wip] 🚀"  # trimmed, kept as typed
     assert title == "project settings — Auth [wip] 🚀"
-    assert str(line).startswith("fleet id: auth-wip — tmux session asq-auth-wip"), line
+    assert str(line).startswith("fleet id: auth-wip — branches fleet/auth-wip/"), line
     assert cleared is None
     assert title_after == f"project settings — {project.root.name}"
     assert renamed == [project.id, project.id], "the app hears of both, to repaint the name"
@@ -1566,8 +1404,7 @@ def test_settings_saves_a_nickname_and_a_blank_one_clears_it(
         m.endswith("is now called Auth [wip] 🚀 · fleet codename auth-wip") for m, _ in notices
     ), notices
     assert any(
-        "shows its folder name again · fleet codename repo (was auth-wip; --project auth-wip "
-        "still works)" in m
+        m.endswith("shows its folder name again · fleet codename repo (was auth-wip)")
         for m, _ in notices
     ), notices
     # The session made by hand above is one no launch record names: #113 renames the
@@ -2274,7 +2111,7 @@ def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
     [attached] = [m for m, _ in notices if m.startswith("✓ key attached to")]
     assert attached.startswith("✓ key attached to hub (the AISQUARE_TEAM_HUB project"), attached
     assert "its own key for target stg is not used — its launches join hub" in status, status
-    assert f"key clear --project {project.id}" in status
+    assert "key clear" not in status, "asq names no command (R13)"
 
 
 def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_one(
@@ -2317,7 +2154,7 @@ def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_
         return refused, kept, on_disk
 
     refused, kept, on_disk = drive_explainability(project, scenario)
-    assert any("minted by the CLI" in m and s == "warning" for m, s in refused), refused
+    assert any("minted by rlx" in m and s == "warning" for m, s in refused), refused
     assert kept == "pk-over-minted-0123456789", "refused before a write began: the field keeps it"
     assert on_disk == "AIS_minted_key"
     with store_session() as store:

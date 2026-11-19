@@ -229,8 +229,13 @@ _SEQUENCERS = re.compile(r"\s*(?:&&|\|\||;)\s*")
 #: useful PATH, so the absolute path is the correct thing to document and
 #: `exec` is how a wrapper hands the process over. `aisquare-runner` and
 #: `.../aisquare/file.env` do not match: the name must be followed by a space
-#: or the end of the segment.
-_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?(?:aisquare|asq)(?=\s|$)")
+#: or the end of the segment. `rlx` and `relax` are the product's own names since rlx
+#: (the README writes every command as `rlx …`); `asq` and `aisquare` start the same app.
+_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?(?:aisquare|asq|rlx|relax)(?=\s|$)")
+
+#: A fenced line that names the app by any of its commands: each one is either resolved
+#: as a command or classified by `_NOT_AN_INVOCATION`, never skipped in silence.
+_MENTIONS = re.compile(r"aisquare|\b(?:asq|rlx|relax)\b")
 
 
 def _as_invocation(segment: str) -> str | None:
@@ -741,6 +746,9 @@ _NOT_AN_INVOCATION = (
     # path. Without the lookahead this reason silently swallowed a cron
     # wrapper's `exec /usr/local/bin/aisquare explainability ship --strict`.
     ("a path segment, not a command word", re.compile(r"[/\w-]/aisquare(?!\s+\S)|aisquare[/-]")),
+    # The repository is AISquare-Studio/rlx since 2026-11-16: `codex plugin marketplace add
+    # AISquare-Studio/rlx` names it, and `rlx` there is the slug's last part, not the command.
+    ("the repository's slug, not the command", re.compile(r"\bAISquare-Studio/rlx\b")),
     ("a dotted Python module path", re.compile(r"aisquare\.\w")),
     ("a comment", re.compile(r"^\s*#")),
     ("nested in a command substitution the extractor cannot see into", re.compile(r"\$\(")),
@@ -787,8 +795,10 @@ CENSUS = {
     # the two quickstarts and the plain-command block, with the `uv tool install`
     # line and the installer URL as the two classified mentions. 2026-10-28: the
     # plain-command block gained `fleet relabel`. Re-measured 2026-11-03 at 14, when it
-    # gained `fleet top` and `outcomes` (#485) beside `instances` (#474).
-    "README.md": (14, 2),
+    # gained `fleet top` and `outcomes` (#485) beside `instances` (#474). Re-measured
+    # 2026-11-16 at 15 when it presented rlx: every command written `rlx …`, and an
+    # accounts block of four beside the memory and plain-command blocks.
+    "README.md": (15, 2),
     # 2026-10-30 (#20): `aisquare instances` and its `--json`, in one block.
     "docs/multi-instance.md": (2, 0),
     # Measured 2026-10-14 on the day the page was written: three fenced commands
@@ -825,7 +835,7 @@ def test_every_aisquare_mention_is_classified(document: str) -> None:
     unexplained: list[str] = []
     classified = 0
     for number, line in _shell_lines(text):
-        if not re.search(r"aisquare|\basq\b", line) or number in extracted:
+        if not _MENTIONS.search(line) or number in extracted:
             continue
         if any(pattern.search(line) for _reason, pattern in _NOT_AN_INVOCATION):
             classified += 1
@@ -1257,7 +1267,9 @@ def _leaf_chains() -> list[list[str]]:
     return found
 
 
-@pytest.mark.parametrize("binary", ["aisquare", "asq", "/usr/local/bin/asq"])
+@pytest.mark.parametrize(
+    "binary", ["aisquare", "asq", "rlx", "relax", "/usr/local/bin/asq", "/usr/local/bin/rlx"]
+)
 def test_agent_document_aliases_reach_command_validation(binary: str) -> None:
     lines = _from_text("fixture.md", f"```sh\n{binary} definitelynotacommand\n```\n")
     assert len(lines) == 1

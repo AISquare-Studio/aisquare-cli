@@ -617,7 +617,7 @@ def test_a_manager_the_fleet_refuses_is_said_and_the_board_is_clear_all_the_same
 
     assert result.exit_code == 1, result.output
     said = " ".join(result.output.split())
-    assert "✗ no manager started: tmux is not installed — start one: aisquare fleet spawn" in said
+    assert "✗ no manager started: tmux is not installed — start one: rlx fleet spawn" in said
     assert _rows(alpha.id)["team_task"] == []
 
 
@@ -640,11 +640,11 @@ def test_a_manager_ssh_could_not_start_is_said_to_start_at_the_mac(
 
     assert result.exit_code == 1, result.output
     said = " ".join(result.output.split())
-    assert "— start one at the Mac: aisquare fleet spawn --project alpha-x manager" in said
+    assert "— start one at the Mac: rlx fleet spawn --project alpha-x manager" in said
     assert _rows(alpha.id)["team_task"] == []
     plain = FreshReport(project=alpha, manager_error="tmux is not installed")
     assert fresh_service.manager_hint(plain) == (
-        "start one: aisquare fleet spawn --project alpha-x manager"
+        "start one: rlx fleet spawn --project alpha-x manager"
     )
 
 
@@ -690,7 +690,7 @@ def test_it_is_refused_from_inside_one_of_the_projects_own_fleet_agents(
     assert refused.exit_code == 2, refused.output
     said = " ".join(refused.output.split())
     assert "can't start fresh from inside coder-1, one of alpha's own fleet agents" in said
-    assert "Run it from the UI (asq) or from a terminal of your own" in said
+    assert "Run it from the UI (rlx) or from a terminal of your own" in said
     as_json = runner.invoke(app, ["--json", "project", "fresh", "-P", "alpha-x", "--yes"])
     refused_json = json.loads(as_json.stdout)
     assert {k: refused_json[k] for k in ("error", "ref")} == {
@@ -1067,10 +1067,8 @@ def test_m1_a_commit_made_before_the_stop_ended_its_agent_is_judged_after_it(
     said = str(stopped.value)
     assert "found once its fleet was stopped" in said
     # Refused there, the project is left with nothing running: the refusal says how back.
-    assert "its agents are stopped. Start them again with aisquare fleet restart --project " in said
-    assert (
-        "alpha-x <label> (the manager first), or a new manager with aisquare fleet spawn " in said
-    )
+    assert "its agents are stopped. Start them again with rlx fleet restart --project " in said
+    assert "alpha-x <label> (the manager first), or a new manager with rlx fleet spawn " in said
     assert (tree / "late.txt").exists() and _rows(alpha.id) == before and spawned == []
 
 
@@ -1118,7 +1116,7 @@ def test_m3_a_session_tmux_would_not_kill_clears_nothing_and_starts_no_manager(
     said = str(stopped.value)
     assert "tmux session asq:asq-alpha-x" in said and "the board was not cleared" in said
     # The next step is fleet shutdown's, which takes --forget; project fresh does not.
-    assert "aisquare fleet shutdown --project alpha-x (whose --forget" in said
+    assert "rlx fleet shutdown --project alpha-x (whose --forget" in said
     assert stopped.value.report.sessions_failed == ["asq:asq-alpha-x"]
     assert _rows(alpha.id) == before and spawned == []
 
@@ -1572,7 +1570,7 @@ def test_n2_a_session_the_stop_did_not_take_down_is_never_said_to_have_ended(
         fresh_service.start_fresh(alpha)
 
     assert f"tmux session asq:{session} still stands" in str(stopped.value)
-    assert "aisquare fleet shutdown --project alpha-x" in str(stopped.value)
+    assert "rlx fleet shutdown --project alpha-x" in str(stopped.value)
     assert stopped.value.report.sessions_gone == []
     assert srv.has_session(session) and _alive(stray)
     assert len(_rows(alpha.id)["team_task"]) == tasks and spawned == []
@@ -1879,7 +1877,7 @@ def test_a_withheld_manager_names_its_spawn_once(
 
     said = " ".join(result.output.split())
     assert result.exit_code == 1, result.output
-    assert "remove it first — start one: aisquare fleet spawn --project alpha-x manager" in said
+    assert "remove it first — start one: rlx fleet spawn --project alpha-x manager" in said
     assert said.count("fleet spawn") == 1
 
 

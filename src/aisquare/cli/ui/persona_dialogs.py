@@ -1,5 +1,6 @@
-"""The persona dialogs the Personas tab opens — Import, Confirm draft, New, Edit (in
-``$EDITOR`` or the text box), Export, Remove.
+"""The persona dialogs the Personas page opens — Import, Confirm draft, New, Edit (in
+``$EDITOR`` or the text box), Export, Remove. asq opens each with no project's root
+(Settings ▸ Personas, R27): the user layer is the only one it writes.
 
 docs/plans/spawn-personas.md §4.3 to §4.5. Each is a ``ModalScreen`` over ONE
 ``services.personas`` call — the seam ``aisquare persona`` uses — so no rule is
@@ -124,16 +125,12 @@ def name_problem(name: str) -> str | None:
 
 
 def layer_radios(root: Path | None, prefix: str) -> RadioSet:
-    """User (default) or project — the project layer only inside a git repository."""
-    return RadioSet(
-        RadioButton("user", value=True, id=f"{prefix}-user"),
-        RadioButton(
-            "project" if root is not None else "project — needs a git repository",
-            id=f"{prefix}-project",
-            disabled=root is None,
-        ),
-        id=f"{prefix}-layer",
-    )
+    """User (default) or project — the project layer only with a project's root. asq opens
+    every dialog with none (Settings ▸ Personas, R27): user is the one choice."""
+    buttons = [RadioButton("user", value=True, id=f"{prefix}-user")]
+    if root is not None:
+        buttons.append(RadioButton("project", id=f"{prefix}-project"))
+    return RadioSet(*buttons, id=f"{prefix}-layer")
 
 
 def chosen_layer(radios: RadioSet) -> Layer:
@@ -1003,10 +1000,13 @@ class ExportPersonaScreen(_Dialog):
     def _destinations(self) -> list[RadioButton]:
         """One button per agent and scope it reads skills in (``skill_target``): every
         agent's personal skills, then every agent's project skills, disabled outside a git
-        repository. Each names its agent as ``types.staged_label`` does: ``Codex (beta)``,
-        ``Claude Code``."""
+        repository — and none with no project's root, as asq opens it (R27). Each names its
+        agent as ``types.staged_label`` does: ``Codex``, ``Claude Code``."""
         buttons: list[RadioButton] = []
-        for scope in ("user", "project"):
+        scopes: tuple[Literal["user", "project"], ...] = (
+            ("user", "project") if self.root is not None else ("user",)
+        )
+        for scope in scopes:
             for adapter in adapters():
                 try:
                     where = str(

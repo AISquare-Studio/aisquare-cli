@@ -869,7 +869,7 @@ def test_a_remotes_repository_name_keeps_the_case_its_url_spells(
 @pytest.mark.parametrize(
     ("remote", "root", "name"),
     [
-        ("github.com/aisquare-studio/aisquare-cli", "/w/ws7", "aisquare-cli"),  # the remote's
+        ("github.com/aisquare-studio/rlx", "/w/ws7", "rlx"),  # the remote's
         ("git@github.com:Org/MyRepo.git", "/w/ws7", "MyRepo"),  # as the URL spells it
         ("https://user:token@GitHub.com/Org/MyRepo/", "/w/ws7", "MyRepo"),
         ("github.com/org/myrepo", "/w/MyRepo", "myrepo"),  # normalised: the case is gone
@@ -1335,7 +1335,7 @@ def test_metrics_stats_on_an_empty_machine_says_how_to_fill_it() -> None:
     result = CliRunner().invoke(app, ["metrics", "stats", "--no-sweep"])
     assert result.exit_code == 0
     assert "No usage recorded for 7 days yet" in result.output
-    assert "aisquare metrics backfill" in result.output
+    assert "rlx metrics backfill" in result.output
     assert "Claude Code" not in result.output, "the sweep reads every agent's transcripts"
 
 
@@ -1769,7 +1769,7 @@ def test_a_nicknamed_project_is_named_by_its_remote_in_the_stats_the_table_and_t
 ) -> None:
     """The owner could not tell which repository a nickname meant: the remote's name is shown,
     not the nickname, not the codename and not the checkout's folder (``ws7``)."""
-    repo = machine.repo("ws7", remote="git@github.com:AISquare-Studio/aisquare-cli.git")
+    repo = machine.repo("ws7", remote="git@github.com:AISquare-Studio/rlx.git")
     _nicknamed(repo)
     _one_turn(machine, repo, SESSION, _day(0, 9))
     usage_stats.sweep(tz=IST)
@@ -1777,10 +1777,10 @@ def test_a_nicknamed_project_is_named_by_its_remote_in_the_stats_the_table_and_t
     repos = _read("today").repos
     names, table = _cli_names()
 
-    assert [row.name for row in repos.rows] == ["aisquare-cli"]
-    assert repos.top is not None and repos.top.name == "aisquare-cli"
-    assert names == ["aisquare-cli", "aisquare-cli"]
-    assert "aisquare-cli" in table
+    assert [row.name for row in repos.rows] == ["rlx"]
+    assert repos.top is not None and repos.top.name == "rlx"
+    assert names == ["rlx", "rlx"]
+    assert "rlx" in table
     for other in ("the big one", "earnest-hawk", "ws7"):
         assert other not in table
 

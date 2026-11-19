@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from aisquare.core import experimental, spawn
+from aisquare.core import program as prog
 from aisquare.core.paths import aisquare_home, cache_dir, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
@@ -1687,6 +1688,8 @@ def _role_cycle_core(
             *_state_rule(state_file),
             "Never watch panes, CI or pull requests with Monitor or sleep loops: `aisquare",
             "watch --detach` runs one watcher for the fleet, and its `watch:` lines wake you.",
+            f"Waiting on your person with nothing in flight? `aisquare team standby --as {sid}`:",
+            "its routine lines stop waking you until their next prompt; urgent news still does.",
             # The owner's ruling of 2026-11-11 (PR #499, redone here): the manager may merge,
             # on a person's GitHub approval and a green head, and still never pushes. Said once,
             # before both escalations; the lane rule then adds no "Never merge" after it.
@@ -2022,16 +2025,19 @@ def resolve_profile(
             # it was refused (review of #259, round 3). `team bind` stores a full path now.
             refusal = (
                 f"{role} reads {key} from {path}, a relative path, which each launch would "
-                f"look for in its own working directory — not launching {role} without it. "
-                f"Bind it by its full path: aisquare team bind {role} --env-file {key}=<path>"
+                f"look for in its own working directory — not launching {role} without it."
+            ) + prog.shell_advice(
+                f" Bind it by its full path: {prog.word()} team bind {role} --env-file {key}=<path>"
             )
             continue
         try:
             file_env[key] = read_env_file(path)
         except ValueError as exc:
             refusal = (
-                f"{role} reads {key} from {path}, which {exc} — not launching {role} without it. "
-                f"Fix the file, or unbind it: aisquare team bind {role} --unset {key}"
+                f"{role} reads {key} from {path}, which {exc} — not launching {role} without it."
+            ) + prog.shell_advice(
+                f" Fix the file, or unbind it: {prog.word()} team bind {role} --unset {key}",
+                app=" Fix the file.",
             )
     return LaunchProfile(
         env=env,

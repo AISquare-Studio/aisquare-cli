@@ -8,7 +8,7 @@ tsk_01m3qvghrpgg). ``[experimental] captain = true`` in config.toml turns it on
 ``AISQUARE_CI`` does over ``[experiment]``: an on-value turns it on, anything else
 set turns it off (``0``, and a typo), and unset or empty defers to the config.
 
-Off: ``aisquare captain`` and every subcommand exit 2 with :data:`CAPTAIN_OFF`, and so
+Off: ``aisquare captain`` and every subcommand exit 2 with :func:`captain_off`, and so
 does the server's lean entry (``python -m aisquare.services.captain``); only the group's
 own ``--help`` prints. The fleet UI shows no Start captain, captain row or captain view and
 starts no ui receiver, ``captain`` is an unknown role to ``launch`` and ``fleet spawn``
@@ -28,16 +28,21 @@ from __future__ import annotations
 
 import os
 
+from aisquare.core import program as prog
 from aisquare.core.config import load_config
 
 CAPTAIN_ENV = "AISQUARE_EXPERIMENTAL_CAPTAIN"
 
-CAPTAIN_OFF = (
-    "the captain is experimental; turn it on with aisquare config set experimental.captain "
-    f"true, or {CAPTAIN_ENV}=1"
-)
-"""The one line every refusal says: the CLI's, the lean server entry's, the ui receiver's
-and doctor's."""
+
+def captain_off() -> str:
+    """The one line every refusal says: the CLI's, the lean server entry's, the ui receiver's
+    and doctor's."""
+    return (
+        f"the captain is experimental; turn it on with {prog.word()} config set "
+        "experimental.captain "
+        f"true, or {CAPTAIN_ENV}=1"
+    )
+
 
 _ON_VALUES = frozenset({"1", "true", "yes", "on"})
 
@@ -88,7 +93,7 @@ def captain_environment() -> dict[str, str]:
     For the captain's own window (``services.fleet.spawn``; review of #240, finding 13).
     Its launcher looks the bundled ``captain`` persona up again, and a window's
     environment is the tmux SERVER's plus the pairs its spawn passes: a switch set for one
-    shell, the way :data:`CAPTAIN_OFF` itself suggests, passed the spawner's check and
+    shell, the way :func:`captain_off` itself suggests, passed the spawner's check and
     was off in the window — "no persona named 'captain'", a dead pane, and "started the
     captain" said over it. The value travels as it is, so the window decides exactly as
     its starter did. Unset here, the window reads the server's environment and the

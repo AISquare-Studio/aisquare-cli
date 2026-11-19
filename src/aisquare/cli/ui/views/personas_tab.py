@@ -1,9 +1,12 @@
-"""The Personas tab of the Project view — search, catalogue, preview, and every action.
+"""The Personas page — search, catalogue, preview, and every action.
 
-docs/plans/spawn-personas.md §4.2 (this tab) and §4.3 to §4.5 (the dialogs it opens,
-in ``cli/ui/persona_dialogs.py``). Personas live where the fleet they serve
-lives: the tab's project supplies the project layer (``core.project_root``), the one
-``fleet spawn`` checks and ``aisquare persona`` reads from the project's directory.
+docs/plans/spawn-personas.md §4.2 (this page) and §4.3 to §4.5 (the dialogs it opens,
+in ``cli/ui/persona_dialogs.py``). asq shows it on Settings ▸ Personas with no project
+(R27, 0.10.1): the user and bundled layers only, the same for every project, and every
+dialog it opens writes the user layer. Built with a project (``PersonasTab(project)``, the
+Project view's tab until R27, which nothing in asq builds now), its project supplies the
+project layer (``core.project_root``), the one ``fleet spawn`` checks and ``aisquare
+persona`` reads from the project's directory; the CLI and the services keep that layer.
 
 **The tab holds no state the disk does not.** Every action ends by re-reading
 ``core.personas.catalogue``, and the selection is kept by row key (``layer:name``),
@@ -12,10 +15,11 @@ next. Reads are ``core.personas`` (pure: directories in, models out); every writ
 goes through ``services.personas`` — the seam the CLI uses — looked up on the
 module at call time, so a test replaces each with a recorder.
 
-**Attach to existing / Attach to new** post :class:`AttachRequested`, which the
-tab answers itself with the target picker (``cli/ui/attach.py``): an agent is
-attached to once its row was chosen twice, the first asking in place
-(``fleet_service.attach_persona`` in a thread
+**Attach to existing / Attach to new** — with a project only, as the target picker lists
+one project's agents and a spawn goes to one project: the app-level page has neither — post
+:class:`AttachRequested`, which the tab answers itself with the target picker
+(``cli/ui/attach.py``): an agent is attached to once its row was chosen twice, the first
+asking in place (``fleet_service.attach_persona`` in a thread
 worker; the toast says whether the briefing was typed, and when it was not, why and how
 the persona reaches the agent), a bind or an account opens the Spawn dialog preset with the
 persona, and *+ New account* hands over to the Accounts page. The message is not
@@ -25,7 +29,8 @@ Bundled rows disable Edit and Remove ("bundled — export to a layer first"); th
 row itself still opens — ``Enter`` on any row opens the SKILL.md, and a bundled
 one opens read-only with *Save as…* (§4.4). Keys, live while focus is inside the
 tab (the search box keeps its letters): ``a`` attach to existing · ``n`` attach to
-new · ``e`` edit · ``x`` export · ``Del`` remove · ``v`` validate · ``i`` import.
+new (with a project) · ``e`` edit · ``x`` export · ``Del`` remove · ``v`` validate ·
+``i`` import.
 """
 
 from __future__ import annotations
@@ -62,6 +67,12 @@ from aisquare.services import personas as personas_service
 AttachIntent = Literal["existing", "new"]
 
 LAYERS: tuple[Layer, ...] = ("project", "user", "bundled")
+
+APP_LAYERS: tuple[Layer, ...] = ("user", "bundled")
+"""The layers the app-level page (no project, Settings ▸ Personas) shows a chip for."""
+
+ATTACH_ACTIONS = frozenset({"attach_existing", "attach_new"})
+"""The actions that need a project: the picker's agents are one project's, a spawn goes to one."""
 
 ATTACH_WORKER = "persona-attach"
 """The worker that attaches a persona to a running agent."""
@@ -173,7 +184,8 @@ def details_text(entry: Entry) -> Text:
 
 
 class PersonasTab(Vertical):
-    """The project's personas: pick one, preview exactly what is injected, act on it."""
+    """The personas: pick one, preview exactly what is injected, act on it. With no
+    ``project`` (Settings ▸ Personas), yours and the bundled ones, and no attach."""
 
     DEFAULT_CSS = """
     PersonasTab { height: 1fr; padding: 0 1; }
@@ -201,13 +213,16 @@ class PersonasTab(Vertical):
         Binding("i", "import_persona", "import"),
     ]
 
-    def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
+    def __init__(self, project: ProjectInfo | None = None, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.project = project
-        self.root: Path | None = core.project_root(project)
+        self.root: Path | None = core.project_root(project) if project is not None else None
         """The project layer's root: the project's own, as spawn checks it (review of #201,
         R1-F6). Asked of git, it hid a project that is not a repository's personas, and it
-        cost every project view a subprocess on the UI thread (R1-F10)."""
+        cost every project view a subprocess on the UI thread (R1-F10). ``None`` with no
+        project: no project layer, and every dialog writes the user's."""
+        self.shown_layers: tuple[Layer, ...] = LAYERS if project is not None else APP_LAYERS
+        """The layers with a chip: the project's too only with a project."""
         self.entries: list[Entry] = []
         self.selected_key: str | None = None
         self.unavailable: str | None = None
@@ -220,7 +235,7 @@ class PersonasTab(Vertical):
             yield Button("+ Import…", id="persona-import")
             yield Button("+ New", id="persona-new")
         with Horizontal(id="personas-layers"):
-            for layer in LAYERS:
+            for layer in self.shown_layers:
                 yield Checkbox(layer, True, id=f"layer-{layer}")
         with Horizontal(id="personas-body"):
             yield DataTable(id="persona-table", cursor_type="row", zebra_stripes=True)
@@ -228,8 +243,9 @@ class PersonasTab(Vertical):
                 yield Static(id="persona-briefing")
                 yield Static(id="persona-details")
         with Horizontal(id="persona-actions"):
-            yield Button("Attach to existing", id="persona-attach-existing", variant="primary")
-            yield Button("Attach to new", id="persona-attach-new", variant="primary")
+            if self.project is not None:
+                yield Button("Attach to existing", id="persona-attach-existing", variant="primary")
+                yield Button("Attach to new", id="persona-attach-new", variant="primary")
             yield Button("Edit", id="persona-edit")
             yield Button("Export…", id="persona-export")
             yield Button("Remove", id="persona-remove", variant="error")
@@ -256,7 +272,11 @@ class PersonasTab(Vertical):
 
     def visible_entries(self) -> list[Entry]:
         query = self.query_one("#persona-search", Input).value
-        layers = {layer for layer in LAYERS if self.query_one(f"#layer-{layer}", Checkbox).value}
+        layers = {
+            layer
+            for layer in self.shown_layers
+            if self.query_one(f"#layer-{layer}", Checkbox).value
+        }
         return [entry for entry in self.entries if matches(entry, query, layers)]
 
     def _paint(self) -> None:
@@ -331,7 +351,8 @@ class PersonasTab(Vertical):
             ("remove", "#persona-remove"),
             ("validate", "#persona-validate"),
         ):
-            self.query_one(button, Button).disabled = not self._allowed(action, entry)
+            for shown in self.query(button).results(Button):  # no Attach with no project
+                shown.disabled = not self._allowed(action, entry)
         if self.unavailable:
             note: str | None = self.unavailable
         elif entry is not None and entry.layer == "bundled":
@@ -354,9 +375,13 @@ class PersonasTab(Vertical):
 
     # --- attach (the picker's seam) ---------------------------------------------------
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """``a`` and ``n`` neither run nor show in the footer with no project to attach in."""
+        return self.project is not None or action not in ATTACH_ACTIONS
+
     def _request_attach(self, intent: AttachIntent) -> None:
         entry = self.selected()
-        if entry is not None and self._allowed("attach", entry):
+        if self.project is not None and entry is not None and self._allowed("attach", entry):
             self.post_message(AttachRequested(entry.name, intent))
 
     @on(Button.Pressed, "#persona-attach-existing")
@@ -381,10 +406,14 @@ class PersonasTab(Vertical):
     ) -> None:
         """The target picker for ``persona``. The shell opens it again, through here, once a
         sign-in its *+ New account* started has landed, with that account highlighted
-        (``select``) and the filter as it was (#215): what it is chosen for stays this tab's."""
+        (``select``) and the filter as it was (#215): what it is chosen for stays this tab's.
+        Nothing with no project: the picker lists one project's agents."""
+        project = self.project
+        if project is None:
+            return
         self.app.push_screen(
             AttachTargetScreen(
-                self.project,
+                project,
                 persona=persona,
                 intent=intent,
                 accounts=accounts_service.overview,
@@ -396,17 +425,18 @@ class PersonasTab(Vertical):
         )
 
     def _target_chosen(self, persona: str, intent: AttachIntent, target: Target | None) -> None:
-        if target is None:
+        project = self.project
+        if target is None or project is None:
             return
         if target.kind == "agent":  # chosen twice in the picker, which asked in place
             self._attach_persona(persona, target.key)
         elif target.kind == "new-account":
             form = {"persona": persona, "intent": intent, "filter": target.key}
-            self.post_message(NewAccountRequested(ReturnTo("picker", self.project.id, form)))
+            self.post_message(NewAccountRequested(ReturnTo("picker", project.id, form)))
         else:
             self.app.push_screen(
                 SpawnDialog(
-                    self.project,
+                    project,
                     persona=persona,
                     role=target.role,
                     binary=target.binary,
@@ -422,6 +452,8 @@ class PersonasTab(Vertical):
 
     def _attach_persona(self, persona: str, label: str) -> None:
         project = self.project
+        if project is None:
+            return
         self.run_worker(
             lambda: fleet_service.attach_persona(project, label, persona),
             name=ATTACH_WORKER,

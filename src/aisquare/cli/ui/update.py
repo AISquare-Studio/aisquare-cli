@@ -140,20 +140,21 @@ class UpdateScreen(ModalScreen[bool]):
         """What the dialog says, above its buttons."""
         text = Text()
         if not self.plan.runnable:
-            text.append(f"asq does not update this install itself ({self.plan.reason}).")
-            if self.plan.command:
-                text.append(" Update it with:\n\n")
-                text.append(self.plan.command, style="bold")
-                text.append("\n\nthen start asq again. The agents keep running.")
+            # The way it was installed updates it; asq names no command to type (R13).
+            text.append(f"rlx does not update this install itself ({self.plan.reason}).")
+            text.append(
+                " Update it the way you installed it, then start rlx again. "
+                "The agents keep running."
+            )
             if self.status is not None:
                 text.append("\n")
                 text.append(self.status, style="dim")
             return text
         if self.confirmed:
-            text.append(f"asq closes, installs {self.version} and reopens here.\n")
+            text.append(f"rlx closes, installs {self.version} and reopens here.\n")
         else:
             text.append(
-                f"asq closes, installs the newest release ({self.version} when last checked) "
+                f"rlx closes, installs the newest release ({self.version} when last checked) "
                 "and reopens here.\n"
             )
         text.append(agents_line(self.live))
@@ -169,7 +170,7 @@ class UpdateScreen(ModalScreen[bool]):
     def heading(self) -> Text:
         """``Update aisquare 0.8.2 → 0.8.3`` once PyPI has answered, ``Update aisquare 0.8.2``
         until then: the versions are data, never markup."""
-        text = Text("Update aisquare ")
+        text = Text("Update rlx ")
         text.append(self.plan.current)
         if self.confirmed:
             text.append(" → ")

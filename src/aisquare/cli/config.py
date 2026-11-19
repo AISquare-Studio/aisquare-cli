@@ -20,7 +20,7 @@ from aisquare.core.state import get_state
 from aisquare.models import RedactionLevel
 from aisquare.services import settings as settings_service
 
-app = typer.Typer(help="Read and write aisquare configuration.", no_args_is_help=True)
+app = typer.Typer(help="Read and write rlx configuration.", no_args_is_help=True)
 
 
 @app.command("list")

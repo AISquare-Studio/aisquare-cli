@@ -89,6 +89,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from aisquare.core import program as prog
 from aisquare.core.agent_adapters.types import screen_of
 from aisquare.core.atomic import Replacement, replacement, write_replacing
 from aisquare.core.locking import acquire, open_lock_file, unlock
@@ -251,12 +252,17 @@ that needs another entry asks for it: :meth:`RemoteKit.kit_route` refuses to bui
 an ungated write that is not listed, and ``tests/test_remote_gates.py`` walks the
 built app for any that slipped past it."""
 
-READ_ONLY_REASON = (
-    "writes are off — on the machine run `aisquare remote allow-write on`, "
-    "or switch Allow write actions in the R panel"
-)
-"""Every 403 ``read_only`` says this, and so do the page and the modal: the two ways to
-turn writes on, both of which write the one switch in ``remote.json``."""
+
+def read_only_reason() -> str:
+    """Every 403 ``read_only`` says this, and so do the page and the modal: the two ways to
+    turn writes on, both of which write the one switch in ``remote.json``."""
+    return (
+        "writes are off — "
+        + prog.shell_advice(f"on the machine run `{prog.word()} remote allow-write on`, or ")
+        + "switch Allow write actions in the R panel"
+    )
+
+
 WRITE_ENDPOINTS = (
     "task/claim",
     "task/done",
@@ -1294,8 +1300,8 @@ def _unknown_state_version(path: Path, version: object) -> str:
     """Why ``path`` is neither read nor written: its ``version`` is one this aisquare does
     not know (:func:`_known_state_version`)."""
     return (
-        f"{path} is version {version!r}, which this aisquare does not know (it reads "
-        f"{STATE_VERSION}) — nothing was changed; upgrade aisquare, or move the file aside "
+        f"{path} is version {version!r}, which this rlx does not know (it reads "
+        f"{STATE_VERSION}) — nothing was changed; upgrade rlx, or move the file aside "
         "to start over with a new link and password"
     )
 
@@ -1972,7 +1978,7 @@ class Runtime:
             return None
         idle = [device for device in self._state.devices if not device.device_signed_in(now)]
         if not idle:
-            raise RequestError(409, "too_many_devices", TOO_MANY_DEVICES)
+            raise RequestError(409, "too_many_devices", too_many_devices())
         never = datetime.min.replace(tzinfo=UTC)  # a stamp that does not read: unused longest
         oldest = min(idle, key=lambda device: _remote_instant(device.last_seen) or never)
         self._drop(oldest.id, WS_CLOSE_UNAUTHORIZED)
@@ -4810,11 +4816,16 @@ its routes the whole path, which only the page's catch-all matched: a GET read w
 route at all, a plain-text 404 (sweep 4 of #243)."""
 NO_SOCKET_HERE = "there is no socket here: the page's stream is at ws"
 """404 ``not_found`` (4404 without the denial extension) for a socket at any path but ``ws``."""
-TOO_MANY_DEVICES = (
-    f"{DEVICES_MAX} devices are signed in already — sign one out on its Devices screen, or "
-    "revoke one on the machine (aisquare remote revoke), then unlock again"
-)
-"""409 ``too_many_devices``: an unlock past :data:`DEVICES_MAX` with every device signed in."""
+
+
+def too_many_devices() -> str:
+    """409 ``too_many_devices``: an unlock past :data:`DEVICES_MAX` with every device signed in."""
+    return (
+        f"{DEVICES_MAX} devices are signed in already — sign one out on its Devices screen, or "
+        f"revoke one on the machine ({prog.word()} remote revoke), then unlock again"
+    )
+
+
 NOT_UNLOCKED = "no unlocked device for this request — unlock with the passphrase"
 """401 ``unauthorized``: no cookie, or one whose device is signed out, revoked or expired."""
 WRONG_PASSWORD = "that is not the passphrase"
@@ -4827,32 +4838,42 @@ STATE_UNWRITABLE = (
 )
 """503 ``remote_state_unwritable``, as ``asq remote``'s own commands say it, but without the
 path or the error, which a phone that has not unlocked yet may read: the log has both."""
-REVOKE_UNSAVED = (
-    "revoked on the running Remote, but the machine's ~/.aisquare/remote.json would not write "
-    "(a full disk, or a home it may not write): once it can, run  aisquare remote revoke {device}  "
-    "on the machine, as until it is saved a change to that file from a shell, or a Remote "
-    "turned on again, would take the device back"
-)
-"""503 ``remote_state_unwritable`` for a revoke, ``{device}`` its id: it holds in memory, where
-the gate reads it, and the next flush that can write saves it (:meth:`Runtime.flush_last_seen`
-writes memory whenever it differs from the file). Not always: a write from another process
-before then is read by this one (``reload_if_changed``) with the device still in it, so the
-sentence names the command that makes the revoke hold (review of #243, round 4)."""
+
+
+def revoke_unsaved() -> str:
+    """503 ``remote_state_unwritable`` for a revoke, ``{device}`` its id: it holds in memory, where
+    the gate reads it, and the next flush that can write saves it (:meth:`Runtime.flush_last_seen`
+    writes memory whenever it differs from the file). Not always: a write from another process
+    before then is read by this one (``reload_if_changed``) with the device still in it, so the
+    sentence names the command that makes the revoke hold (review of #243, round 4)."""
+    return (
+        "revoked on the running Remote, but the machine's ~/.aisquare/remote.json would not write "
+        f"(a full disk, or a home it may not write): once it can, run  {prog.word()} remote "
+        "revoke {device}  "
+        "on the machine, as until it is saved a change to that file from a shell, or a Remote "
+        "turned on again, would take the device back"
+    )
+
+
 STATE_LATER = (
     "the machine could not save that: its ~/.aisquare/remote.json was upgraded by a later "
-    "aisquare while this Remote ran, and is never written over — nothing was changed; turn "
-    "Remote off and on again on the machine, with that aisquare"
+    "rlx while this Remote ran, and is never written over — nothing was changed; turn "
+    "Remote off and on again on the machine, with that rlx"
 )
 """503 ``remote_state_unwritable`` for a write refused as :class:`LaterRemoteState`. Said as
 :data:`STATE_UNWRITABLE`, it blamed a full disk or a home it may not write, and the human
 freed space to no end (review of #259, round 8, 7/9): no write of this Remote's ever lands."""
-REVOKE_LATER = (
-    "revoked on the running Remote, but the machine's ~/.aisquare/remote.json was upgraded by "
-    "a later aisquare while this Remote ran, and is never written over: run  aisquare remote "
-    "revoke {device}  on the machine with that aisquare, or the next Remote it starts takes "
-    "the device back"
-)
-"""503 ``remote_state_unwritable`` for a revoke refused as :class:`LaterRemoteState`."""
+
+
+def revoke_later() -> str:
+    """503 ``remote_state_unwritable`` for a revoke refused as :class:`LaterRemoteState`."""
+    return (
+        "revoked on the running Remote, but the machine's ~/.aisquare/remote.json was upgraded by "
+        f"a later rlx while this Remote ran, and is never written over: run  {prog.word()} "
+        "remote "
+        "revoke {device}  on the machine with that rlx, or the next Remote it starts takes "
+        "the device back"
+    )
 
 
 def _state_unsaved(exc: OSError) -> str:
@@ -4999,15 +5020,19 @@ async def remote_gate_body(scope: Any, receive: Any) -> Any | None:
     return receive_replayed
 
 
-LOCKED_OUT = (
-    "too many wrong passwords in the last 30 min — new unlocks are paused; a phone that was "
-    "unlocked here before can still unlock. On the machine: "
-    "aisquare remote regenerate-password --new-link"
-)
-LOCKOUT_ALERT = (
-    "New unlocks are paused for 30 min. If that is not you, run "
-    "`aisquare remote regenerate-password --new-link` at the machine."
-)
+def locked_out() -> str:
+    return (
+        "too many wrong passwords in the last 30 min — new unlocks are paused; a phone that was "
+        "unlocked here before can still unlock. On the machine: "
+        f"{prog.word()} remote regenerate-password --new-link"
+    )
+
+
+def lockout_alert() -> str:
+    return (
+        "New unlocks are paused for 30 min. If that is not you, run "
+        f"`{prog.word()} remote regenerate-password --new-link` at the machine."
+    )
 
 
 def _unlock_lockout_alert(runtime: Runtime) -> None:
@@ -5022,12 +5047,12 @@ def _unlock_lockout_alert(runtime: Runtime) -> None:
     until = UnlockBudget(runtime).budget_exhausted_until()
     log.warning(
         "remote: %d wrong passwords in 30 min — new unlocks are paused until %s; if that is "
-        "not you, rotate the link: aisquare remote regenerate-password --new-link",
+        f"not you, rotate the link: {prog.word()} remote regenerate-password --new-link",
         UNLOCK_GLOBAL_FAILURES,
         "?" if until is None else _iso_seconds(until),
     )
     try:
-        remote_push.push_security_alert(runtime.device_ids(), LOCKOUT_ALERT)
+        remote_push.push_security_alert(runtime.device_ids(), lockout_alert())
     except Exception:  # the alert is a courtesy: the lockout itself already holds
         log.warning("remote: the lockout alert could not be queued", exc_info=True)
 
@@ -5363,7 +5388,7 @@ class RemoteKit:
                 if not runtime.device_is_live(device.id):
                     raise RequestError(401, "unauthorized", NOT_UNLOCKED)
                 if not runtime.allow_write:
-                    raise RequestError(403, "read_only", READ_ONLY_REASON)
+                    raise RequestError(403, "read_only", read_only_reason())
         finally:
             _STATE_CHECKED.reset(checked)
 
@@ -5518,7 +5543,7 @@ class RemoteKit:
             asked = "" if request_id is None else _ledger_request(endpoint, body)
         except RequestError as exc:
             if not allowed:
-                return self.kit_refuse(403, "read_only", READ_ONLY_REASON)
+                return self.kit_refuse(403, "read_only", read_only_reason())
             return JSONResponse(exc.request_error_body(), status_code=exc.status)
         seen = None if request_id is None else self.ledger.ledger_seen(device.id, request_id, asked)
         if seen is not None and seen.same:
@@ -5530,7 +5555,7 @@ class RemoteKit:
             status, payload = seen.answer
             return JSONResponse(payload, status_code=status)
         if not allowed:
-            return self.kit_refuse(403, "read_only", READ_ONLY_REASON)
+            return self.kit_refuse(403, "read_only", read_only_reason())
         if seen is not None:
             reused = REQUEST_ID_REUSED.format(request_id=request_id)
             return self.kit_refuse(409, "request_id_reused", reused)
@@ -5687,7 +5712,9 @@ def build_remote_app(
         from starlette.status import WS_1011_INTERNAL_ERROR
         from starlette.websockets import WebSocketDisconnect
     except ImportError as exc:  # pragma: no cover - only a damaged install: they are core
-        raise RemoteUnavailable(f"{DAMAGED_INSTALL} — repair it: {remote_install_hint()}") from exc
+        raise RemoteUnavailable(
+            DAMAGED_INSTALL + prog.shell_advice(f" — repair it: {remote_install_hint()}")
+        ) from exc
 
     from aisquare.services import remote_actions, remote_needs, remote_push
 
@@ -5698,7 +5725,7 @@ def build_remote_app(
         for name, handler in (writes or live_writes()).handlers.items()
     }
     given = None if dist_dir is None else _remote_page_root(dist_dir)
-    page_remedy = PAGE_INSTALLED_REMEDY if dist_dir is None else PAGE_DIST_REMEDY
+    page_remedy = page_installed_remedy() if dist_dir is None else page_dist_remedy()
     limiter = _RateLimiter(clock)
     budget = UnlockBudget(runtime)
     cache = _Cache(ttl=tick * 0.9)
@@ -5844,7 +5871,9 @@ def build_remote_app(
             return kit.kit_refuse(503, "remote_state_unwritable", _state_unsaved(exc))
         if isinstance(decided, datetime):
             wait = max(1, math.ceil((decided - _remote_now()).total_seconds()))
-            return kit.kit_refuse(429, "locked_out", LOCKED_OUT, headers={"Retry-After": str(wait)})
+            return kit.kit_refuse(
+                429, "locked_out", locked_out(), headers={"Retry-After": str(wait)}
+            )
         if decided is None:
             return _json_error(401, "wrong_password", WRONG_PASSWORD)
         secret, device, reactivated = decided
@@ -5957,7 +5986,7 @@ def build_remote_app(
             target = "self" if own else device_id
             await asyncio.to_thread(kit.kit_audit, device, "devices/revoke", f"{target} unsaved")
             later = isinstance(exc, LaterRemoteState)
-            unsaved = (REVOKE_LATER if later else REVOKE_UNSAVED).format(device=device_id)
+            unsaved = (revoke_later() if later else revoke_unsaved()).format(device=device_id)
             return kit.kit_refuse(503, "remote_state_unwritable", unsaved)
         if not revoked:
             return kit.kit_refuse(404, "not_found", "no such device")
@@ -6763,7 +6792,9 @@ def _remote_dependency_error() -> str | None:
     if not missing:
         return None
     named = ", ".join(missing)
-    return f"{DAMAGED_INSTALL} ({named}) — repair it: {remote_install_hint()}"
+    return f"{DAMAGED_INSTALL} ({named})" + prog.shell_advice(
+        f" — repair it: {remote_install_hint()}"
+    )
 
 
 def runtime() -> Runtime:
@@ -7058,8 +7089,9 @@ def _remote_quit_now(undone: str | None = None) -> NoReturn:
         left = remote_writes_running()
         if left:
             _remote_say(
-                f"Remote quit with {', '.join(left)} unfinished: "
-                "the fleet UI (`aisquare`) shows where the agent is"
+                f"Remote quit with {', '.join(left)} unfinished: the rlx UI"
+                + prog.shell_advice(f" (`{prog.word()}`)")
+                + " shows where the agent is"
             )
         if undone is not None:
             _remote_say(undone)
@@ -7184,19 +7216,39 @@ Remote that is on (:func:`remote_served_by`), and again by every claim of a home
 holds already. Removed as the lock is let go, and when it cannot be written. Believed only
 while the lock is held: a note a process killed left names nobody, and the next claim writes
 its own over it."""
-SERVED_BY = {"serve": "`aisquare remote serve`", "panel": "asq's R panel"}
-"""What :data:`SERVE_NOTE_NAME`'s ``by`` names: the process that claimed the home."""
-SERVED_BY_SOMEONE = "asq's R panel, or `aisquare remote serve` in another shell"
-"""Who serves, said when the note cannot be read (:func:`remote_served_by`)."""
+
+
+def served_by() -> dict[str, str]:
+    """What :data:`SERVE_NOTE_NAME`'s ``by`` names: the process that claimed the home."""
+    return {
+        "serve": prog.shell_advice(f"`{prog.word()} remote serve`", app="Remote run from a shell"),
+        "panel": "rlx's R panel",
+    }
+
+
+def served_by_someone() -> str:
+    """Who serves, said when the note cannot be read (:func:`remote_served_by`)."""
+    return "rlx's R panel" + prog.shell_advice(
+        f", or `{prog.word()} remote serve` in another shell", app=", or Remote run from a shell"
+    )
+
+
 CLAIM_PATIENCE_SECONDS = 0.05
 """How long a claim of the home keeps trying a lock it finds held: one that asks whether
 another process serves (:func:`remote_served_elsewhere`) holds it for a moment, and must never
 make a real claim fail. A Remote that is on holds it for as long as it serves."""
-REMOTE_ALREADY_ON = (
-    "another Remote is on for this ~/.aisquare (the fleet UI's R panel, or `aisquare remote "
-    "serve` in another shell) — turn it off first: two would share one link, one passphrase, "
-    "one auto-off and one list of phones"
-)
+
+
+def remote_already_on() -> str:
+    """Why Remote will not start while another process serves this home."""
+    return (
+        "another Remote is on for this ~/.aisquare (the rlx UI's R panel"
+        + prog.shell_advice(f", or `{prog.word()} remote serve` in another shell")
+        + ") — turn it off first: two would share "
+        "one link, one passphrase, one auto-off and one list of phones"
+    )
+
+
 REMOTE_WINDING_DOWN = (
     "the Remote turned off last is still answering what phones asked before it went off (a "
     "read waits as long as tmux takes to answer); turn it on again in a moment"
@@ -7224,7 +7276,7 @@ def _remote_winding_down() -> str:
 def _claim_remote_home(state: Runtime, *, by: str, port: int) -> bool:
     """Hold :data:`SERVE_LOCK_NAME` for as long as this process serves Remote; ``True`` when
     this call took it, :class:`RemoteAlreadyOn` when another process holds it. Once it holds
-    it, :data:`SERVE_NOTE_NAME` says who does: ``by`` (a key of :data:`SERVED_BY`), on
+    it, :data:`SERVE_NOTE_NAME` says who does: ``by`` (a key of :func:`served_by`), on
     ``port``, with this process's id.
 
     Two Remotes on one home, the TUI's and a ``serve`` on another port as the docs
@@ -7261,7 +7313,7 @@ def _claim_remote_home(state: Runtime, *, by: str, port: int) -> bool:
             acquire(fd, wait_s=CLAIM_PATIENCE_SECONDS)  # core.locking's one loop
         except TimeoutError:
             os.close(fd)
-            raise RemoteAlreadyOn(REMOTE_ALREADY_ON) from None
+            raise RemoteAlreadyOn(remote_already_on()) from None
         except OSError as exc:
             os.close(fd)
             log.warning("remote: %s could not be locked (%s); serving without it", path, exc)
@@ -7278,7 +7330,7 @@ def _note_remote_claim(note: Path, *, by: str, port: int) -> None:
 
     Replaced whole, so a reader never sees half of one. A note that cannot be written costs
     the name ``upgrade`` and ``uninstall`` give it, never the claim: they still see the lock,
-    and say who may hold it (:data:`SERVED_BY_SOMEONE`). So the note there is removed, as
+    and say who may hold it (:func:`served_by_someone`). So the note there is removed, as
     the process it names no longer holds the lock: left, it named a process that had
     ended, or the wrong port, as this one's (review of #259, round 3)."""
     body = json.dumps({"pid": os.getpid(), "by": by, "port": port}) + "\n"
@@ -7306,7 +7358,7 @@ def remote_served_by() -> str | None:
     For ``upgrade``, which warns, and ``uninstall``, which refuses, while one does
     (``services.lifecycle``): the process holding :data:`SERVE_LOCK_NAME`
     (:func:`remote_served_elsewhere`), named by the note it wrote as it took it
-    (:data:`SERVE_NOTE_NAME`), with its port and process id; :data:`SERVED_BY_SOMEONE` when
+    (:data:`SERVE_NOTE_NAME`), with its port and process id; :func:`served_by_someone` when
     that note cannot be read. Creates nothing, as neither may make the home.
     """
     if not remote_served_elsewhere():
@@ -7315,17 +7367,17 @@ def remote_served_by() -> str | None:
     try:
         held = json.loads(note.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return SERVED_BY_SOMEONE
+        return served_by_someone()
     if not isinstance(held, dict):
-        return SERVED_BY_SOMEONE
+        return served_by_someone()
     by, port, pid = held.get("by"), held.get("port"), held.get("pid")
     if (
         not isinstance(by, str)
-        or by not in SERVED_BY
+        or by not in served_by()
         or not all(isinstance(n, int) and not isinstance(n, bool) for n in (port, pid))
     ):
-        return SERVED_BY_SOMEONE
-    return f"{SERVED_BY[by]} on port {port}, process {pid}"
+        return served_by_someone()
+    return f"{served_by()[by]} on port {port}, process {pid}"
 
 
 def remote_served_elsewhere() -> bool:
@@ -7459,10 +7511,10 @@ def _page_missing(dist_dir: Path | None) -> str | None:
             return PAGE_DOES_NOT_RESOLVE.format(path=dist_dir)
         if _built_page_file(dist, "index.html") is None:
             return _page_no_index(dist)
-        return _page_project_not_build(dist) or _page_open_to_others(dist, PAGE_DIST_REMEDY)
+        return _page_project_not_build(dist) or _page_open_to_others(dist, page_dist_remedy())
     installed = _remote_resolved(remote_dist_dir())
     if installed is not None and _built_page_file(installed, "index.html") is not None:
-        return _page_open_to_others(installed, PAGE_INSTALLED_REMEDY)
+        return _page_open_to_others(installed, page_installed_remedy())
     from aisquare.services import remote_page
 
     return None if remote_page.bundled_page_present() else NO_PAGE_HINT
@@ -7501,11 +7553,22 @@ PAGE_DOES_NOT_RESOLVE = (
 """Why a ``--dist`` or an ``install-page`` source that does not resolve is no page
 (:func:`_remote_resolved`)."""
 
-PAGE_DIST_REMEDY = "or install it with asq remote install-page and serve without --dist"
-"""The way out a refusal of a ``--dist`` build offers last (:func:`_page_open_to_others`)."""
 
-PAGE_INSTALLED_REMEDY = "or install the build again with asq remote install-page"
-"""The way out a refusal of the installed build offers last (:func:`_page_open_to_others`)."""
+def page_dist_remedy() -> str:
+    """The way out a refusal of a ``--dist`` build offers last (:func:`_page_open_to_others`)."""
+    return prog.shell_advice(
+        f"or install it with {prog.word()} remote install-page and serve without --dist",
+        app="or install the page again",
+    )
+
+
+def page_installed_remedy() -> str:
+    """The way out a refusal of the installed build offers last (:func:`_page_open_to_others`)."""
+    return prog.shell_advice(
+        f"or install the build again with {prog.word()} remote install-page",
+        app="or install the page again",
+    )
+
 
 PAGE_OPEN_TO_OTHERS = (
     "{path} can be written by another account, which could change the page that takes the "
@@ -8454,7 +8517,8 @@ def _remote_serve_off(state: Runtime, server: Any) -> str | None:
             log.warning("remote: auto-off could not revoke the devices: %s", exc)
             failure = (
                 f"its devices could not be revoked ({exc}), so their cookies would open the "
-                "next Remote: run `aisquare remote revoke --all` once ~/.aisquare/remote.json "
+                f"next Remote: run `{prog.word()} remote revoke --all` once "
+                "~/.aisquare/remote.json "
                 "can be written"
             )
         try:
@@ -8614,7 +8678,6 @@ __all__ = [
     "INDEX_CACHE_CONTROL",
     "NO_DIST_INDEX",
     "NO_PAGE_HINT",
-    "READ_ONLY_REASON",
     "WRITE_ENDPOINTS",
     "WS_CLOSE_UNAUTHORIZED",
     "Device",
@@ -8643,6 +8706,7 @@ __all__ = [
     "live_sources",
     "live_writes",
     "note_public_url",
+    "read_only_reason",
     "regenerate_password",
     "remote_board_payload",
     "remote_gate_token",

@@ -230,6 +230,7 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
+from aisquare.cli.ui import toasts
 from aisquare.cli.ui.clipboard import ClipboardApp, characters, copy_and_tell
 from aisquare.core import instances, procs
 from aisquare.core.clipboard import in_wsl
@@ -276,7 +277,7 @@ NOTHING_TO_COPY = "nothing to copy — no text under the highlight"
 """What a left drag is told when it left a highlight with no text under it: once for
 the gesture, by :func:`route_selection_gesture`, or by the pane that ran a shift+drag
 itself (:meth:`TerminalPane._end_shift_drag`)."""
-SIZED_ELSEWHERE = "[sized by the other asq{where}]"
+SIZED_ELSEWHERE = "[sized by the other rlx{where}]"
 """Row 0's corner while another asq sizes the window and its size is not this widget's
 (the module's "Size between two asq"); ``where`` names that asq's terminal when known."""
 _WHERE = {"ssh": " (ssh)", "mac": " (Mac)"}
@@ -805,6 +806,10 @@ def route_selection_gesture(app: App[Any], button: int | None, *, moved: bool = 
     drifted was told "nothing to copy" (review of the #167 fold, F3). Such a
     gesture asked for no copy: its blank highlight still goes, without a word.
     """
+    if isinstance(app.mouse_captured, toasts.CalmToast):
+        # A drag that began on a toast is the toast's (it holds the pointer): its release
+        # copies the toast's text, never a pane's that the drag ran over (#517).
+        return
     ended: list[GestureEnd | None] = []
     _tell_panes(
         app, "selection gesture", lambda pane: ended.append(pane.selection_gesture_ended(button))
@@ -813,7 +818,7 @@ def route_selection_gesture(app: App[Any], button: int | None, *, moved: bool = 
         app.notify(NOTHING_TO_COPY, markup=False)
 
 
-def route_lost_release(app: App[Any]) -> None:
+def route_lost_release(app: App[Any]) -> bool:
     """The gesture's release was lost: every pane on the active screen ends the
     part of it the pane runs itself (see :meth:`TerminalPane.gesture_release_lost`).
 
@@ -822,8 +827,17 @@ def route_lost_release(app: App[Any]) -> None:
     gestures — a press forwarded to the program, a shift+drag (#148) — are the
     three things a release would have ended, and the app is the only place
     that learns it never came.
+
+    A drag begun on a toast holds the pointer: it ends as the toast's
+    (``CalmToast.release_lost``), and True says so — the gesture was not the
+    panes' to copy (#517).
     """
     _tell_panes(app, "lost release", TerminalPane.gesture_release_lost)
+    held = app.mouse_captured
+    if isinstance(held, toasts.CalmToast):
+        held.release_lost()  # its drag ends as the toast's, and lets go of the pointer
+        return True
+    return False
 
 
 def copy_pane_selection(app: App[Any]) -> bool:
@@ -1033,8 +1047,8 @@ class SelectionHost(ClipboardApp[None]):
             # the gestures a pane runs itself (#148), which hold the pointer.
             lost, self._pressed = self._pressed, None
             self._end_screen_drag()
-            route_lost_release(self)
-            route_selection_gesture(self, lost)
+            if not route_lost_release(self):  # a toast's drag is the toast's (#517)
+                route_selection_gesture(self, lost)
         # ONE gesture at a time. A second button pressed while one is down is
         # not a new gesture — and it is not the screen's to see either. Recording
         # it overwrote ``_pressed`` and re-baselined every pane to the selection
@@ -1362,9 +1376,13 @@ class TerminalPane(Widget, can_focus=True):
         """The shown agent's own key names (``AgentAdapter.key_spellings``), which a view
         sets as it learns whose pane this is: Codex's newline is ``C-j``."""
         self.placeholder = placeholder
-        """What the pane says while nothing is attached. A view that shows ONE agent
-        passes :data:`PANE_GONE`: it detaches only from a row with no pane of its own
-        to show (``views.agent.shown_pane``), and "no agent selected" is false there."""
+        """What the pane says while nothing is attached, word-wrapped to its width. A view
+        that shows ONE agent passes why that agent has no pane (``views.agent.pane_words``:
+        :data:`PANE_GONE` for a lost row, a paused agent's own sentence): it detaches only
+        from a row with no pane of its own to show (``views.agent.shown_pane``), and "no
+        agent selected" is false there."""
+        self._placeholder_rows: tuple[str, int, list[str]] | None = None
+        """:attr:`placeholder` as wrapped last, and the width it was wrapped to."""
         self._version: tuple[int, int] | None = None
         """The server's version, read once per attach (``_server_version``)."""
         self._version_read = False
@@ -2236,6 +2254,17 @@ class TerminalPane(Widget, can_focus=True):
             runs.append((text[plain_start:], len(text) - plain_start))
         return runs
 
+    def _placeholder_wrapped(self, width: int) -> list[str]:
+        """:attr:`placeholder`, one row per entry, wrapped at ``width`` cells: a paused agent's
+        sentence reads whole beside a 45-column terminal's sidebar, where its first row alone
+        was cut."""
+        wrapped = self._placeholder_rows
+        if wrapped is None or wrapped[:2] != (self.placeholder, width):
+            lines = Text(self.placeholder).wrap(self.app.console, width)
+            wrapped = (self.placeholder, width, [line.plain.rstrip() for line in lines])
+            self._placeholder_rows = wrapped
+        return wrapped[2]
+
     def _render_row(self, y: int) -> Strip:
         width, height = self.content_size
         if width <= 0:
@@ -2243,10 +2272,9 @@ class TerminalPane(Widget, can_focus=True):
         base = self.rich_style
         self.lines_rendered += 1
         if self.pane_id is None:
-            if y == 0:
-                return Strip([Segment(self.placeholder, base + PLACEHOLDER)]).adjust_cell_length(
-                    width, base
-                )
+            rows = self._placeholder_wrapped(width)
+            if y < len(rows):
+                return Strip([Segment(rows[y], base + PLACEHOLDER)]).adjust_cell_length(width, base)
             return Strip.blank(width, base)
         strip = self._composed_strip(y)
         cursor = self._cursor

@@ -167,7 +167,7 @@ def test_codex_slots_get_a_row_of_their_own_with_identity_and_the_codex_sign_in(
     assert "2 added beside the plain codex" in row.detail
     assert f"{signed.slot} dev@example.com" in row.detail
     assert f"{unsigned.slot} not signed in" in row.detail
-    assert row.fix is not None and f"aisquare accounts run {unsigned.slot} login" in row.fix
+    assert row.fix is not None and f"rlx accounts run {unsigned.slot} login" in row.fix
     # A Codex slot is not one of Claude Code's: its row is unchanged (absent: none added).
     assert "claude-accounts" not in {c.name for c in diagnostics._claude_accounts_checks()}
 
@@ -229,7 +229,7 @@ def test_codex_headroom_warns_when_every_codex_account_is_over_the_line(
     assert check is not None and check.status.value == "warn"
     assert "every Codex account has used 85% or more of a window" in check.detail
     assert "at or over" not in check.detail, "USED, as the Claude row says it"
-    assert check.fix is not None and "aisquare accounts add --agent codex" in check.fix
+    assert check.fix is not None and "rlx accounts add --agent codex" in check.fix
     assert no_network == []
 
 
@@ -286,7 +286,7 @@ def test_codex_defaults_are_checked_apart_from_claude_codes(
     assert (
         default.status.value == "warn" and "no enabled Codex account is signed in" in default.detail
     )
-    assert default.fix is not None and "aisquare accounts run <slot> login" in default.fix
+    assert default.fix is not None and "rlx accounts run <slot> login" in default.fix
     assert unsigned.slot  # skipped, as the disabled one is, by the preferred rung
 
 
@@ -356,7 +356,7 @@ def test_a_limited_codex_agent_is_named_on_a_codex_row_not_the_claude_one(
     assert limits.status.value == "warn"
     assert "parked on a Codex usage limit" in limits.detail and "coder-codex" in limits.detail
     # The command for the row, as the Claude row names its own (0.8.1: `fleet_command`).
-    assert limits.fix is not None and "aisquare fleet switch --project" in limits.fix
+    assert limits.fix is not None and "rlx fleet switch --project" in limits.fix
     assert "coder-codex" in limits.fix
     assert "claude-account-limits" not in {c.name for c in diagnostics._claude_accounts_checks()}
 

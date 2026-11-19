@@ -156,11 +156,7 @@ def machine_sessions_text(sessions: Sequence[StatuslineSession], now: datetime) 
     and ones outside any project too; with none, how to make them report."""
     text = Text("Sessions on this machine", style="bold")
     if not sessions:
-        text.append(
-            " — none reported in the last 15 min; `aisquare accounts statusline --install` "
-            "adds the status line that reports them",
-            style="dim",
-        )
+        text.append(" — none reported in the last 15 min", style="dim")
         return text
     for session in sessions:
         age = max(int((now - session.updated_at).total_seconds()), 0)
@@ -274,10 +270,10 @@ def next_step(projects: Sequence[ProjectInfo], managed: Collection[str]) -> Next
     ``projects`` are the listed ones, in the sidebar's order; ``managed`` the ids of those
     with a live manager. No project: add one. None of them managed: start the first one's
     manager, which Welcome walks through. Otherwise the fleet is up: spawn an agent, with the
-    sidebar's one *Spawn agent* (at the top, under Fleet: the dialog asks the project).
+    sidebar's one *Spawn agent* (at the top, under the logo: the dialog asks the project).
     """
     if not projects:
-        return NextStep("Next: add a project (+ beside Fleet)")
+        return NextStep("Next: add a project (+ at the top-left)")
     if not any(project.id in managed for project in projects):
         name = project_service.display_name(projects[0])
         return NextStep(f"Next: open {name} and press Start manager", welcome=True)
@@ -857,18 +853,13 @@ def problem_tooltip(
     return f"{said}\n{accounts_service.fix_line(problem)}"
 
 
-def _sign_in_command(agent: str) -> str:
-    """The agent's own sign-in command line, as a hint shows it (``codex login``)."""
-    return " ".join((get_adapter(agent).binary, *core.kind(agent).sign_in_args()))
-
-
 def _sign_in_opens(agent: str) -> str:
-    """What a *Log in* window opens, for its tooltip: the agent's sign-in command, or the
-    agent itself where it signs in from its TUI, with what to type there if it does not
-    ask (``AgentAccounts.relogin``)."""
+    """What a *Log in* window opens, for its tooltip: the agent's sign-in, or the agent itself
+    where it signs in from its TUI, with what to type there if it does not ask
+    (``AgentAccounts.relogin``). Never the command line: asq names none (R13)."""
     accounts = core.kind(agent)
     if accounts.sign_in_args():
-        return f"`{_sign_in_command(agent)}` opens below"
+        return f"{core.agent_label(agent)}'s sign-in opens below"
     asks = f"; type {accounts.relogin} if it does not ask" if accounts.relogin else ""
     return f"{core.agent_label(agent)} opens below{asks}"
 
@@ -878,14 +869,16 @@ def _sign_in_prompt(agent: str) -> str:
     what the human does in it (``AgentAccounts.sign_in_steps``: Codex's device code)."""
     accounts = core.kind(agent)
     if accounts.sign_in_args():
-        return f" — `{_sign_in_command(agent)}` runs in this pane: {accounts.sign_in_steps}."
+        return (
+            f" — {core.agent_label(agent)}'s sign-in runs in this pane: {accounts.sign_in_steps}."
+        )
     if accounts.relogin:
         return f" — type {accounts.relogin} if {core.agent_label(agent)} does not prompt you."
     return f" — sign in to {core.agent_label(agent)} in this pane."
 
 
 def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
-    """Another agent's section title: ``Codex (beta) 0.162.1 · /path`` (a beta agent's name
+    """Another agent's section title: ``Codex 0.162.1 · /path`` (a beta agent's name
     with its mark, ``types.stage_mark``), or how to install it."""
     if core.kind(agent).legacy_slots:
         return claude_title_text(overview)
@@ -894,7 +887,7 @@ def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
     text = Text()
     if found is None or not found.installed:
         text.append(f"{name} is not installed", style="bold red")
-        text.append(f"\n  install it: {core.kind(agent).install_command}", style="dim")
+        text.append(f"\n  install it from {get_adapter(agent).install_page}", style="dim")
         return text
     text.append(name, style="bold")
     if found.version:
@@ -926,8 +919,7 @@ def claude_title_text(overview: AccountsOverview) -> Text:
     text = Text()
     if not claude.installed:
         text.append("Claude Code is not installed", style="bold red")
-        text.append(f"\n  install it: {core.INSTALL_COMMAND}", style="dim")
-        text.append(f"\n  or: {core.INSTALL_ALTERNATIVE}", style="dim")
+        text.append(f"\n  install it from {get_adapter(core.AGENT).install_page}", style="dim")
         return text
     text.append("Claude Code", style="bold")
     if claude.version:
@@ -976,8 +968,8 @@ def _hooks_did_not_install(error: object, agent: str = core.AGENT) -> str:
     (``complete_sign_in``), or after a cancel that found its login landed (``settle_sign_in``).
     ``agent`` is the slot's, whose ``agents connect`` the line names."""
     return (
-        f"⚠ signed in, but aisquare's hooks did not install: {error} — "
-        f"run: aisquare agents connect {agent} --config-dir <the slot's directory>"
+        f"⚠ signed in, but rlx's hooks did not install: {error} — "
+        f"Settings ▸ Doctor offers to connect {core.agent_label(agent)}"
     )
 
 
@@ -1682,7 +1674,11 @@ class AccountsView(Vertical):
         sign_out = self.query_one("#aisquare-sign-out", Button)
         sign_out.display = signed_in and not busy
         sign_out.disabled = env_token
-        hint = f"the token comes from {iam.TOKEN_ENV_VAR}; unset it first" if env_token else None
+        hint = (
+            f"the token comes from {iam.TOKEN_ENV_VAR}, set where rlx started; off while it is"
+            if env_token
+            else None
+        )
         sign_in.tooltip = hint
         sign_out.tooltip = hint
 
@@ -2041,8 +2037,8 @@ class AccountsView(Vertical):
             return
         if self._env_token():
             self._notice(
-                f"{iam.TOKEN_ENV_VAR} is set, so aisquare is using that token. "
-                "Unset it to sign in with the browser.",
+                f"{iam.TOKEN_ENV_VAR} is set where rlx started, so rlx is using that token: "
+                "the browser sign-in is off while it is.",
                 "warn",
             )
             return
@@ -2077,7 +2073,9 @@ class AccountsView(Vertical):
         token = device_flow.wait_for_token(endpoints, grant, cancelled=cancel.is_set)
         # The commit checks the flag once more after the userinfo request, the
         # last thing before the session is written: nothing is stored past a Cancel.
-        return device_flow.commit_sign_in(api_url, endpoints, token, cancelled=cancel.is_set)
+        return device_flow.commit_sign_in(
+            api_url, endpoints, token, client_id=grant.client_id, cancelled=cancel.is_set
+        )
 
     def _show_grant(self, grant: iam.DeviceAuthorization, opened: bool | None) -> None:
         self.query_one("#aisquare-code", Static).update(grant_text(grant, opened=opened))
@@ -2141,7 +2139,7 @@ class AccountsView(Vertical):
                 said, tone = f"{said}, but {iam.unrestricted_warning(signed_out=True)}", "warn"
             owed = worker.result.keys.revocations.owed
             if owed:
-                said = f"{said}; {destinations.describe_owed(owed)} — {destinations.REVOKE_RETRY}"
+                said = f"{said}; {destinations.describe_owed(owed)} — {destinations.revoke_retry()}"
                 tone = "warn"
             self._notice(said, tone)
             self.post_message(AccountsChanged())
@@ -2535,15 +2533,10 @@ class AccountsView(Vertical):
         the browser's sign-in run on the slot for a *Log in*. ``""`` for an agent with one
         sign-in (Claude Code's)."""
         accounts = core.kind(login.account.agent)
-        args = accounts.browser_sign_in_args()
-        if not args:
+        if not accounts.browser_sign_in_args():
             return ""
-        command = (
-            f"aisquare accounts add --agent {login.account.agent} --browser"
-            if login.fresh
-            else " ".join(("aisquare accounts run", self._ref_of(login.account), *args))
-        )
-        return f"{accounts.browser_sign_in_hint}: {command}"
+        # The hint alone: the browser's sign-in is a command to type, which asq names none of.
+        return accounts.browser_sign_in_hint
 
     def _close_login_window(self) -> _ClaudeLogin | None:
         login = self.login

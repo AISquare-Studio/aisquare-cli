@@ -32,7 +32,7 @@ from tests.test_lifecycle_upgrade import (  # noqa: F401 - fixtures, by name
     tool,
 )
 
-ME = f"aisquare launch of claude (pid {os.getpid()})"
+ME = f"rlx launch of claude (pid {os.getpid()})"
 
 
 def test_a_launcher_is_running_while_it_waits_and_leaves_nothing_after() -> None:
@@ -64,11 +64,10 @@ def test_the_uninstall_refuses_while_a_launcher_waits_and_names_it() -> None:
     assert refusal is not None and refusal.error == "launcher_running"
     said = " ".join(str(refusal).split())
     assert (
-        f"a session started with `aisquare launch` is waiting on its agent on this home ({ME})"
-        in said
+        f"a session started with `rlx launch` is waiting on its agent on this home ({ME})" in said
     )
     assert "removing them fails on files in use" in said
-    assert "End it first (leave the agent), then run `aisquare uninstall` again." in said
+    assert "End it first (leave the agent), then run `rlx uninstall` again." in said
     assert lifecycle.uninstall_plan().refusal is None, "control: once it has ended"
 
 
@@ -91,7 +90,7 @@ def test_windows_hand_run_upgrade_names_the_launcher_to_end_first(
     assert (
         "replacing them fails on files in use. End it first (leave the agent), then run it." in said
     )
-    assert "aisquare launch" not in alone.stderr, "control: none waiting, none named"
+    assert "rlx launch" not in alone.stderr, "control: none waiting, none named"
     assert machine.installs == []
 
 
@@ -123,6 +122,8 @@ def test_the_windows_launcher_is_recorded_for_as_long_as_its_agent_runs(
     agent = [
         sys.executable,
         "-c",
+        # The word hints print, pinned as the suite pins it (conftest's hints_print_rlx).
+        "from aisquare.core import program; program.ours_on_path = lambda name: True\n"
         "from aisquare.core import launchers as w; print([x.label for x in w.waiting_launchers()])",
     ]
     previous = signal.getsignal(signal.SIGINT)
@@ -133,6 +134,6 @@ def test_the_windows_launcher_is_recorded_for_as_long_as_its_agent_runs(
         signal.signal(signal.SIGINT, previous)
 
     assert ended.value.code == 0
-    named = f"aisquare launch of {Path(sys.executable).stem} (pid {os.getpid()})"
+    named = f"rlx launch of {Path(sys.executable).stem} (pid {os.getpid()})"
     assert repr([named]) in capfd.readouterr().out
     assert launchers.waiting_launchers() == (), "gone once its agent has ended"

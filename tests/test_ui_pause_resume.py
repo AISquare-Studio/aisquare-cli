@@ -2,8 +2,9 @@
 card's *Pause agents…* / *Resume agents…*, and the same two on the project's Settings tab.
 
 Each opens the one dialog Restart all and Stop all open (``views.fleet_bulk.ConfirmBulk``):
-who, by project, a *Managers only* switch, Cancel focused. Confirmed, ``fleet_service.bulk``
-runs off the UI thread with a toast per agent and one that sums it up. Driven as
+who, by project, each agent a ticked checkbox under *Select all*, Cancel focused. Confirmed,
+``fleet_service.bulk`` runs on the agents picked, off the UI thread, with a toast per agent and
+one that sums it up. Driven as
 ``test_ui_fleet_bulk.py`` drives Settings ▸ Fleet: the listing scripted, the rows in the store,
 the per-agent pause and restart stand-ins, and the ``fleet-paused`` signal recorded rather
 than written.
@@ -37,6 +38,7 @@ from tests.test_ui_fleet_bulk import (
     _confirm,
     _listed,
     _open,
+    _untick,
     drive,
 )
 from tests.test_ui_fleet_bulk import no_tmux as _no_tmux
@@ -205,6 +207,63 @@ def test_confirming_pause_all_pauses_each_agent_with_a_toast_and_sets_the_signal
         "paused 4 · skipped 1 · failed 0\nfleet-paused: alpha, beta\n"
         "skipped: tester-1 (beta) — exited"
     ]
+
+
+def test_a_partial_pause_pauses_the_agents_picked_and_fleet_pauses_only_a_whole_project(
+    acting_on_running: Paused,
+) -> None:
+    """R17, Q-E1: a pick that leaves one of alpha's agents pauses just the one picked, and
+    alpha's ``fleet-paused`` signal stays off, so its manager, left running, can still spawn;
+    beta, every agent of it picked, is fleet-paused as a pause of all sets it."""
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = _app(pilot)
+        told = toast_log.record(app)
+        dialog = await _open(pilot, "pause")
+        _untick(dialog, "agt_a_manager")
+        await settle(app)
+        label = str(_confirm(dialog).label)
+        _confirm(dialog).press()
+        await settle(app)
+        return [label, *told]
+
+    label, *toasts = drive(go)
+    assert label == "Pause 3 agents"
+    assert [(verb, agent_id) for verb, _, agent_id in acting_on_running.calls] == [
+        ("pause", "agt_a_coder-1"),
+        ("pause", "agt_b_manager"),
+        ("pause", "agt_b_coder-1"),
+    ]
+    assert acting_on_running.signals == [("on", "prj_b")], "alpha's manager runs: no signal"
+    assert [t for t in toasts if t.startswith("paused ")] == [
+        "paused 3 · skipped 2 · failed 0\nfleet-paused: beta\n"
+        f"skipped: manager (alpha) — {fleet_service.NOT_CHOSEN}; tester-1 (beta) — exited"
+    ]
+
+
+def test_a_partial_resume_resumes_the_agents_picked_and_keeps_the_project_paused(
+    acting_on_paused: Paused,
+) -> None:
+    """A resume that leaves one of alpha's paused agents brings back the one picked; alpha stays
+    fleet-paused beside the agent still paused, and the summary says so."""
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = _app(pilot)
+        told = toast_log.record(app)
+        dialog = await _open(pilot, "resume")
+        _untick(dialog, "agt_a_manager")
+        await settle(app)
+        _confirm(dialog).press()
+        await settle(app)
+        return told
+
+    toasts = drive(go)
+    assert [(verb, agent_id) for verb, _, agent_id in acting_on_paused.calls] == [
+        ("restart", "agt_a_coder-1")
+    ]
+    assert ("off", "prj_a") not in acting_on_paused.signals, "alpha's manager is still paused"
+    [summary] = [t for t in toasts if t.startswith("resumed ")]
+    assert "still fleet-paused: alpha (1 still paused)" in summary.splitlines(), summary
 
 
 def test_resume_all_lists_the_paused_agents_and_leaves_the_rest(acting_on_paused: Paused) -> None:
@@ -414,16 +473,17 @@ def test_tab_reaches_each_button_of_the_dialog_and_shows_it_focused_as_cancel_is
     """SMOKE12 O2 of #113: in Resume all… a focused Confirm drew its label orange on a dark
     band, which read as no focus at all, and the list's scroll was a tab stop between the
     switch and the buttons that drew nothing and took no Enter: a keyboard resume took
-    three tries. Tab now goes switch → Confirm → Cancel, and a focused Confirm shows the
+    three tries. Tab goes through *Select all* and the agents' checkboxes to Confirm and
+    Cancel (R17's pick-list), the list itself never a stop, and a focused Confirm shows the
     band a focused Cancel shows."""
 
-    async def go(pilot: Pilot[None]) -> tuple[list[str | None], list[Any]]:
+    async def go(pilot: Pilot[None]) -> tuple[list[Any], list[Any]]:
         dialog = await _open(pilot, action)
         app = _app(pilot)
-        chain = [widget.id for widget in dialog.focus_chain]
+        chain = [type(widget).__name__ + ":" + str(widget.id) for widget in dialog.focus_chain]
         confirm, cancel = _confirm(dialog), dialog.query_one("#bulk-cancel", Button)
         idle = confirm.rich_style
-        await pilot.press("tab", "tab")  # Cancel → the switch → Confirm
+        await pilot.press("shift+tab")  # Cancel → Confirm
         assert app.focused is confirm, app.focused
         focused = confirm.rich_style
         await pilot.press("tab")
@@ -431,6 +491,9 @@ def test_tab_reaches_each_button_of_the_dialog_and_shows_it_focused_as_cancel_is
         return chain, [idle, focused, cancel.rich_style]
 
     chain, (idle, focused, cancel) = drive(go)
-    assert chain == ["bulk-managers", "bulk-confirm", "bulk-cancel"]
+    assert chain[-2:] == ["GuardedButton:bulk-confirm", "Button:bulk-cancel"], chain
+    picks = chain[:-2]
+    assert not picks or picks[0] == "PickRow:bulk-all", chain
+    assert all(link == "PickRow:None" for link in picks[1:]), "the list is never a stop"
     assert focused.reverse and cancel.reverse and not idle.reverse
     assert focused.color == cancel.color, "the band Cancel shows when it is focused"

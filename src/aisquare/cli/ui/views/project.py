@@ -1,4 +1,4 @@
-"""The Project view: Manager · Board · Settings · Personas tabs.
+"""The Project view: Manager · Board · Settings tabs.
 
 One ``TabbedContent`` per selected project (docs/plans/fleet-tui.md §4.2). The
 Manager tab is where goal intake happens — the user types to the manager's real
@@ -6,9 +6,10 @@ Claude Code session exactly as they would to any other, so the tab is the
 manager's ``TerminalPane`` and nothing more, plus a **Start manager** button
 while the project has none — **Resume agents…** in its place while its manager is paused
 (``fleet pause``), which ``spawn`` would refuse a second one beside. The Board tab is
-``cli.ui.board.BoardPanel``, the widgets of ``aisquare board -w``; Settings and Personas are
-the two forms in this package. (An AISquare tab, ``ExplainabilityView``, sat between Board and
-Settings until tracing went dormant: ``views/explainability.py`` says how to mount it again.)
+``cli.ui.board.BoardPanel``, the widgets of ``aisquare board -w``; Settings is the form in
+this package. (An AISquare tab, ``ExplainabilityView``, sat between Board and Settings until
+tracing went dormant: ``views/explainability.py`` says how to mount it again.) Personas are no
+tab here: they are yours, not one project's, on Settings ▸ Personas (R27, 0.10.1).
 
 There is no Doctor tab: the doctor is the app's, on its own page, run at start
 and when that page opens — not once per project view, nor per tab activation.
@@ -41,13 +42,11 @@ from aisquare.cli.ui.sidebar import CUSTOM_ROLE_ICON, ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, key_spellings, shown_pane
 from aisquare.cli.ui.views.fleet_bulk import BulkAsked
-from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from aisquare.services import project as project_service
 
 SPAWN_WORKER = "spawn-manager"
 """Name of the worker that starts the manager; how its result is told apart."""
@@ -84,21 +83,17 @@ def no_manager_text(
     text = Text()
     if exited is not None and exited.state == "paused":
         text.append(f"{name}'s manager is paused.\n", style="bold")
-        resume = project_service.fleet_command("resume", project)
         text.append(
             "Its session, claims and team wait for Resume agents, which brings back every "
-            f"paused agent of {name} and clears its fleet-paused signal; {resume} does the "
-            "same from a shell.",
+            f"paused agent of {name} and clears its fleet-paused signal.",
         )
     elif exited is not None:
         status = exited.agent.exit_status
         suffix = f" ({status})" if status is not None else ""
         text.append(f"{name}'s manager exited{suffix}.\n", style="bold")
-        restart = project_service.fleet_command("restart", project, "manager")
         text.append(
             "Start manager begins a new session. Restart on its sidebar row brings the same "
-            f"session back (its last screen is still there); {restart} does the same from a "
-            "shell.",
+            "session back (its last screen is still there).",
         )
     else:
         text.append(f"{name} has no manager yet.\n", style="bold")
@@ -428,7 +423,7 @@ class ManagerTab(Vertical):
 
 
 class ProjectView(TabbedContent):
-    """One project: its manager's pane first, then the board, settings and personas.
+    """One project: its manager's pane first, then the board and settings.
 
     ``usage`` is the shell's last per-slot session use (``HeadroomSummary.limit_by_slot``),
     so a view opened between two headroom reads shows the figure at once; ``named`` is the
@@ -439,7 +434,6 @@ class ProjectView(TabbedContent):
         "tab-manager",
         "tab-board",
         "tab-settings",
-        "tab-personas",
     )
 
     def __init__(
@@ -472,10 +466,6 @@ class ProjectView(TabbedContent):
                 id="tab-board",
             ),
             TabPane("Settings", SettingsView(project, id="project-settings"), id="tab-settings"),
-            # Personas live with the fleet they serve (spawn-personas.md §4.2): the
-            # project supplies the project layer and every attach target. Empty until
-            # it is first opened (:meth:`open_personas`).
-            TabPane("Personas", id="tab-personas"),
         )
         for pane in panes:
             self.compose_add_child(pane)
@@ -533,22 +523,6 @@ class ProjectView(TabbedContent):
     def _open_board(self) -> None:
         """The team strip was clicked: the board has each agent's detail."""
         self.active = "tab-board"
-
-    @on(TabbedContent.TabActivated, pane="#tab-personas")
-    def open_personas(self) -> None:
-        """Build the Personas tab the first time it is opened, which reads the catalogue as
-        it mounts; re-read it each later time, as the disk may have changed.
-
-        Built with the view, every project view read the whole catalogue on the UI thread,
-        and asked git, for a tab that may never be opened (review of #201, R1-F10).
-        """
-        tabs = self.query(PersonasTab)
-        if not tabs:
-            pane = self.query_one("#tab-personas", TabPane)
-            pane.mount(PersonasTab(self.project, id="project-personas"))
-            return
-        for tab in tabs:
-            tab.reload()
 
     def refresh(
         self,

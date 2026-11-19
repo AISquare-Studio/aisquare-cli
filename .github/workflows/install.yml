@@ -224,7 +224,7 @@ jobs:
             $global:Inner = $args[-1]
             $global:LASTEXITCODE = 0
           }
-          $main = 'https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh'
+          $main = 'https://raw.githubusercontent.com/AISquare-Studio/rlx/main/install.sh'
           $cases = @(
             @{ Args = @('--yes'); Tail = '--yes' },
             @{ Args = @('--yes', '--version', '0.9.0'); Tail = '--yes --version 0.9.0' },
@@ -390,6 +390,8 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           aisquare --version
           asq --version
+          rlx --version
+          relax --version
 
       - name: The machine-wide checks that do not depend on a bare machine
         env:

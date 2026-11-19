@@ -205,7 +205,7 @@ def test_a_name_that_gives_no_codename_saves_the_nickname_and_says_so(
     assert renamed.codename == before == _codename(project), "the codename is left as it was"
     [note] = notes
     assert "'!!!' gives no codename (it needs a letter a-z" in note and f"stays {before}" in note
-    assert f"aisquare fleet rename --project {before} <codename>" in note
+    assert f"rlx fleet rename --project {before} <codename>" in note
     # `PRJ` slugs to `prj`, how every project id begins: the note says that, not "a letter".
     prj: list[str] = []
     fleet_service.rename_project(project, "PRJ", notes=prj)
@@ -621,7 +621,8 @@ def test_the_card_says_the_codename_when_its_name_does_not_give_it(
     tooltip = project_title_tooltip(shown)
     assert "double-click or F2 to rename" in tooltip
     if codename:
-        assert f"fleet codename {codename} (tmux asq-{codename}, --project {codename})" in tooltip
+        assert f"fleet codename {codename} · " in tooltip
+        assert "tmux" not in tooltip and "--project" not in tooltip, "asq names no command (R13)"
     else:
         assert tooltip.startswith("no fleet codename yet")
 

@@ -149,7 +149,7 @@ function setStatus(text, cls = '') { status.textContent = text; status.className
 function send(obj) { if (!ws || ws.readyState !== 1) return false; ws.send(JSON.stringify(obj)); return true; }
 
 function connect() {
-  if (!token) { setStatus('no token — open the URL aisquare captain voice printed', 'bad'); return; }
+  if (!token) { setStatus('no token — open the URL rlx captain voice printed', 'bad'); return; }
   const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';

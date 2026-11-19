@@ -114,10 +114,15 @@ def accounts_title(statuses: Iterable[ClaudeAccountStatus] | None) -> str:
 
 TARGETS_WORKER = "attach-targets"
 
-SEAT_RULE = (
-    "a seat is a role (coder, tester, …), a numbered seat of one (coder2), or a name "
-    "already bound — the names `aisquare launch` accepts"
-)
+
+def seat_rule() -> str:
+    """What a seat may be: the names ``launch`` accepts, said without the command (R13)."""
+    return (
+        "a seat is a role (coder, tester, …), a numbered seat of one (coder2), or a name "
+        "already bound"
+    )
+
+
 ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 BINARYS_AGENT = ""
 """The New bind form's Agent ``(the binary's)``: no ``--agent``, the binary says which."""
@@ -722,9 +727,7 @@ class NewBindScreen(ModalScreen[str | None]):
         with Vertical():
             seat, bound = self._editing or ("", RoleLaunchProfile())
             header = Text("Edit bind" if self._editing else "New bind", style="bold")
-            header.append(
-                " — a seat `aisquare team bind` pins: binary, environment, args", style="dim"
-            )
+            header.append(" — pin a seat's binary, environment and args", style="dim")
             yield Static(header, classes="picker-header")
             with Horizontal(classes="picker-row"):
                 yield Label("Seat")
@@ -884,7 +887,7 @@ class NewBindScreen(ModalScreen[str | None]):
         seat = self.query_one("#bind-seat", Input).value.strip()
         # `role_ok` IS the rule spawn applies, by its public name (P13): ask it, never copy it.
         if not seat or not fleet_service.role_ok(seat):
-            found.append(SEAT_RULE)
+            found.append(seat_rule())
         binary = self.query_one("#bind-binary", Input).value.strip() or self._binary_shown
         if shutil.which(binary) is None:
             found.append(

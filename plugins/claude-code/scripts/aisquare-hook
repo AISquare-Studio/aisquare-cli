@@ -37,7 +37,7 @@
 # pyproject.toml and both plugins' plugin.json; tests/test_claude_plugin.py and
 # tests/test_codex_plugin.py fail when they disagree. AISQUARE_PLUGIN_FROM replaces
 # the whole requirement (a wheel, a path) for testing a build that is not on PyPI yet.
-AISQUARE_PLUGIN_VERSION=0.10.0
+AISQUARE_PLUGIN_VERSION=0.10.1
 
 # The event, and the one a session starts with: Claude Code's are the `aisquare hook`
 # subcommands, Codex's the names its payload carries (core.agent_adapters.codex).
@@ -62,8 +62,9 @@ esac
 
 # The hook `agents connect` writes for this event, as it reads in settings.json's or
 # hooks.json's JSON text, matched the way core.agents._is_aisquare_hook_command
-# matches it: the command's first word is a program named aisquare or asq (a path or
-# the bare name, plain or in single or double quotes, `.exe` on Windows), or it is
+# matches it: the command's first word is a program named aisquare, asq, rlx or
+# relax (a path or the bare name, plain or in single or double quotes, `.exe` on
+# Windows), or it is
 # `python [-P] -m aisquare`; then `hook <event>` ends it, with any options before
 # `hook`. A user's own `webhook stop`, `~/bin/my-hook stop` or `echo aisquare hook
 # stop` does not match. Codex's is `hook codex` for every event, which may be followed
@@ -84,7 +85,7 @@ _p5='([^"]|\\")* -m '      # python -P -m, its path quoted or not
 _p6='\\"([^"]*/)?'         # \"/a path/with spaces/ (or a bare name, quoted)
 # \"$HOME\"/a/path/ and \"${HOME}\"/a/path/, which the hook's shell reads as $HOME/
 _p7="\\\\\"[\$]([{]HOME[}]|HOME)\\\\\"$_p2"
-_program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6|$_p7)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
+_program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6|$_p7)?(aisquare|asq|rlx|relax)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
 _hook=$event
 _tail=
 if [ "$_agent" = codex ]; then
@@ -430,12 +431,12 @@ elif _runner=$(_find uvx); then
     _status=$?
 else
     if [ "$event" = "$_start" ]; then
-        printf '%s\n' '{"systemMessage": "aisquare: neither the aisquare CLI nor uv was found, so this session has no aisquare memory. Install uv: https://docs.astral.sh/uv/"}'
+        printf '%s\n' '{"systemMessage": "rlx: neither the aisquare command nor uv was found, so this session has no rlx memory. Install uv: https://docs.astral.sh/uv/"}'
     fi
     exit 0
 fi
 
 if [ "$_status" -ne 0 ] && [ "$event" = "$_start" ]; then
-    printf '{"systemMessage": "aisquare: its session-start hook failed (exit %s), so this session has no aisquare memory."}\n' "$_status"
+    printf '{"systemMessage": "rlx: its session-start hook failed (exit %s), so this session has no rlx memory."}\n' "$_status"
 fi
 exit 0

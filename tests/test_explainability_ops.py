@@ -1400,7 +1400,7 @@ def test_an_off_host_proxy_is_not_ordered_to_repoint(monkeypatch: pytest.MonkeyP
     assert "nothing is wrong" in fix
     assert "EXPLAINABILITY_GATEWAY_URL=https://api.example" in fix
     assert "https://api.example:9443" in fix
-    assert not fix.startswith("Point this CLI"), "no bare imperative for a state that may be right"
+    assert not fix.startswith("Point rlx"), "no bare imperative for a state that may be right"
 
 
 def test_the_verdict_is_one_field() -> None:

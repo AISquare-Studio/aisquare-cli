@@ -77,8 +77,6 @@ VOICE_WORKER = "captain-voice-switch"
 MIC_WORKER = "captain-mic"
 BAR_WORKER = "captain-bar"
 
-START_COMMAND = "aisquare captain voice"
-"""What serves the page (T3's ``captain voice``; ``--mode``/``--speaker`` write the same keys)."""
 
 PROBE_TIMEOUT_S = 0.3
 
@@ -173,31 +171,19 @@ class MicScreen(ModalScreen[None]):
             if info.qr:
                 yield Static(Text("\n".join(info.qr)), id="mic-qr")
             else:
-                yield Static(
-                    Text("(no QR: segno is not installed — pip install 'aisquare-cli[voice]')",
-                         style="dim"),
-                    id="mic-qr",
-                )  # fmt: skip
+                yield Static(Text("(no QR: segno is not installed)", style="dim"), id="mic-qr")
             if info.serving:
                 yield Static(
                     Text("● serving now — open the URL", style="green"), classes="mic-line"
                 )
             else:
-                yield Static(
-                    Text(f"○ not running — start it: {START_COMMAND}", style="yellow"),
-                    classes="mic-line",
-                )
+                yield Static(Text("○ not running", style="yellow"), classes="mic-line")
             yield Static(
                 Text(
                     f"mode: {info.mode} · speaker: {'on' if info.speaker else 'off'}", style="dim"
                 ),
                 classes="mic-line",
             )
-            yield Static(
-                Text(f"Android over USB: {info.adb_reverse}, then open the same URL there",
-                     style="dim"),
-                classes="mic-line",
-            )  # fmt: skip
             with Horizontal(id="mic-buttons"):
                 yield Button("Close", id="mic-close", variant="primary")
 
@@ -294,7 +280,7 @@ class CaptainView(AgentView):
                 "Mic",
                 id="captain-mic",
                 compact=True,
-                tooltip="The voice page: its URL and QR, and how to start it",
+                tooltip="The voice page: its URL and QR",
             )
             yield Button(
                 "Mode: focus",

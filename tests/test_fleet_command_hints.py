@@ -21,9 +21,11 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent.parent / "src" / "aisquare"
 
 _HAND_BUILT = re.compile(
-    r"\baisquare fleet (?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b|adopt\b)[a-z]"
+    r"(?:\baisquare|\brlx|<program>) fleet "
+    r"(?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b|adopt\b)[a-z]"
 )
-"""``aisquare fleet`` and a word: any verb, except those that walk every project: ``reap
+"""``aisquare fleet``, ``rlx fleet`` or ``<program> fleet`` (the word ``core.program.word``
+gives a hint, #135) and a word: any verb, except those that walk every project: ``reap
 --all``, ``shutdown --all``, ``gate`` and ``capacity``, which take no ``--project`` (#283),
 and ``adopt``, which finds the project from the conversation's directory (#290)."""
 
@@ -38,17 +40,32 @@ EXEMPT: dict[tuple[str, str], str] = {
     ): "the comment written above the worktree root's line in .git/info/exclude",
     (
         "cli/fleet.py",
-        "the fleet UI has no --json form — for machine-readable fleet state use "
-        "`aisquare fleet ls --json`",
+        "the rlx UI has no --json form — for machine-readable fleet state use "
+        "`<program> fleet ls --json`",
     ): _NO_PROJECT_IN_QUESTION,
     (
         "cli/fleet.py",
-        "the fleet UI needs an interactive terminal ({…}) — run `aisquare` in a terminal, or "
-        "use `aisquare fleet ls --json`",
+        "the rlx UI needs an interactive terminal ({…}) — run `<program>` in a terminal, or "
+        "use `<program> fleet ls --json`",
     ): _NO_PROJECT_IN_QUESTION,
 }
 """Literals that hold ``aisquare fleet <word>`` and are no hint to name a project in, with
 why. Keyed by the literal's text, so a change to one is looked at again."""
+
+
+def _field(value: ast.expr) -> str:
+    """An f-string field as the scan reads it: ``<program>`` for the program's word
+    (``prog.word()``, ``program.word()``), ``{…}`` for any other."""
+    inner = value.value if isinstance(value, ast.FormattedValue) else value
+    if (
+        isinstance(inner, ast.Call)
+        and isinstance(inner.func, ast.Attribute)
+        and inner.func.attr == "word"
+        and isinstance(inner.func.value, ast.Name)
+        and inner.func.value.id in ("prog", "program")
+    ):
+        return "<program>"
+    return "{…}"
 
 
 def _literals(tree: ast.AST) -> Iterator[tuple[int, str]]:
@@ -70,7 +87,7 @@ def _literals(tree: ast.AST) -> Iterator[tuple[int, str]]:
             yield node.lineno, node.value
         elif isinstance(node, ast.JoinedStr):
             text = "".join(
-                str(value.value) if isinstance(value, ast.Constant) else "{…}"
+                str(value.value) if isinstance(value, ast.Constant) else _field(value)
                 for value in node.values
             )
             yield node.lineno, text
@@ -112,6 +129,8 @@ D = "`aisquare fleet reap --all` and `aisquare fleet shutdown --all --yes`"
 E = 1
 """aisquare fleet stop, an attribute's docstring."""
 F = "`aisquare fleet ls --all` is this project's, ended rows included"
+G = f"`{prog.word()} fleet stop <label>` ends it"
+H = f"`{prog.word()} fleet reap --all` and `rlx fleet capacity`"
 '''
     hits = [text for _line, text in _literals(ast.parse(module)) if _HAND_BUILT.search(text)]
     assert hits == [
@@ -119,6 +138,7 @@ F = "`aisquare fleet ls --all` is this project's, ended rows included"
         "`aisquare fleet restart {…}`",
         "aisquare fleet tell <label> …",
         "`aisquare fleet ls --all` is this project's, ended rows included",
+        "`<program> fleet stop <label>` ends it",
     ]
 
 
@@ -168,8 +188,6 @@ PROJECT_OF: dict[tuple[str, str], str] = {
         "the project whose plan found the work, the one being started fresh, whose fleet the "
         "stop left stopped"
     ),
-    ("cli/ui/views/project.py", "no_manager_text"): _SHOWN,
-    ("cli/ui/views/welcome.py", "WelcomeView._paint_fleet"): _SHOWN,
     ("services/auto_mode.py", "_restart_off_auto"): (
         "its callers': the running rows' own projects, or " + _ROW_OF_SESSION
     ),
@@ -184,7 +202,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "spawn"): _FLEET_OP,
     ("services/fleet.py", "_refuse_by_group"): _FLEET_OP,
     ("services/fleet.py", "_in_place_of_recorded"): _FLEET_OP,
-    ("services/fleet.py", "_exited_note"): "each exited row's own ``project_id``",
+    ("services/fleet.py", "_exited_ways"): "each exited row's own ``project_id``",
     ("services/fleet.py", "_tell"): _FLEET_OP,
     ("services/fleet.py", "_send_it_later"): _FLEET_OP,
     ("services/fleet.py", "_trust_note"): _FLEET_OP,

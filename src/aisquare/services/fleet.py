@@ -69,6 +69,7 @@ from aisquare.core import (
 from aisquare.core import load as load_core
 from aisquare.core import memory as memory_core
 from aisquare.core import names as names_core
+from aisquare.core import program as prog
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import (
     DEFAULT_AGENT,
@@ -218,8 +219,9 @@ that project's manager and could not send: tmux refused the writer (a command in
 sandbox, :func:`nudge_manager`). Its value is when; :func:`deliver_owed_nudge` takes it."""
 
 NUDGE_DEFERRED = "nudge_deferred:"
-"""The ``team_meta`` prefix of a nudge a draft held back (P0-W2): ``nudge_deferred:<session>``
-→ when it was held back. :func:`retry_deferred_nudges` sends it once the box is clear."""
+"""The ``team_meta`` prefix of a nudge a draft held back (P0-W2), or a dialog on the manager's
+screen (R25): ``nudge_deferred:<session>`` → when it was held back. :func:`retry_deferred_nudges`
+sends it once the box is clear and no dialog is open."""
 
 _NUDGE_RE_PRESS: tuple[float, ...] = (2.0,)
 _NUDGE_LAST_WAIT = 2.0
@@ -1299,7 +1301,7 @@ def _refused_by_the_records(rows: Sequence[FleetAgent], *, first: bool) -> dict[
         elif not first and (adapter is None or adapter.capabilities.sandboxes_tools):
             refused[row.id] = (
                 f"{launch_seal.UNRECORDED}: after the first census the census takes no row of "
-                "an agent that sandboxes its tools, or of one this aisquare does not know"
+                "an agent that sandboxes its tools, or of one this rlx does not know"
             )
     return refused
 
@@ -1484,7 +1486,7 @@ def resolve_place(
     if place is None:
         return Unplaced(
             row,
-            "its launch record does not say which pane is its (it was spawned by an aisquare "
+            "its launch record does not say which pane is its (it was spawned by an rlx "
             "that recorded none)",
         )
     if record.project_id != row.project_id:
@@ -2592,11 +2594,13 @@ def _ran_in_a_recorded_root(root: sandbox_roots.Root) -> str:
     known = recorded_adapter(root.agent) if root.agent else None
     who = f"a {known.label} agent" if known is not None else "an agent that sandboxes its tools"
     when = f" ({root.at.astimezone().date().isoformat()})" if root.at is not None else ""
-    forget = shell_line.command_line(sandbox_roots.forget_argv(root))
     return (
         f"made its worktree without the repository's hooks: {who} ran in "
         f"{_home_spelled(root.path)}{when}, and a hook it could have changed would run outside "
-        f"its sandbox; `{forget}` forgets it"
+        "its sandbox"
+        + prog.shell_advice(
+            f"; `{shell_line.command_line(sandbox_roots.forget_argv(root))}` forgets it"
+        )
     )
 
 
@@ -2697,7 +2701,7 @@ def _branches_locked(common: Path, *, wait: float) -> Iterator[None]:
                 seen, deadline = now, time.monotonic() + wait  # another holder: still moving
             elif time.monotonic() >= deadline:
                 raise FleetError(
-                    f"another aisquare (a spawn or a reap) holds {path}"
+                    f"another rlx (a spawn or a reap) holds {path}"
                     + (
                         f", and has held it for {wait:g} s without letting go — it may be "
                         "stuck; try again once it ends"
@@ -4425,9 +4429,14 @@ directory · fork``): ``attention``, its detail this and the dialog's words
 (:func:`_with_trust_prompts`)."""
 
 
-def trust_prompt_detail(folder: Path) -> str:
-    """The detail of an agent at the folder-trust question in ``folder``: what unblocks it."""
-    return f"{TRUST_PROMPT} — approve it once, or `{claude_accounts_service.trust_command(folder)}`"
+def trust_prompt_detail(folder: Path | None) -> str:
+    """The detail of an agent at the folder-trust question about ``folder``: what unblocks it.
+    The folder it starts in, or (Claude Code 2.1.326) an ``--add-dir`` folder the question
+    names (``claude_sharing.trust_prompt_folder``); ``None``, one it names that is not on
+    this machine, whose command then says ``<dir>``."""
+    return f"{TRUST_PROMPT} — approve it once" + prog.shell_advice(
+        f", or `{claude_accounts_service.trust_command(folder)}`", app=" in the agent's pane"
+    )
 
 
 def _with_trust_prompts(
@@ -4476,7 +4485,11 @@ def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
     (:func:`_with_trust_prompts`); ``None`` with none up, or a screen tmux would not show.
 
     Claude Code's folder-trust question, by its words (``claude_sharing.shows_trust_prompt``),
-    and its first-run Security notes (#32, L2). An agent whose adapter reads its own dialogs
+    about the folder it starts in or (2.1.326) an ``--add-dir`` folder, which its detail
+    names (``claude_sharing.trust_prompt_folder``): ``accounts trust`` of the folder it
+    starts in did nothing for that one, which every spawn of the role asks about again
+    until it is trusted, the yes at the question holding for that session alone. And its
+    first-run Security notes (#32, L2). An agent whose adapter reads its own dialogs
     off its screen (``capabilities.dialog_on_screen``) is read by it: Codex's folder trust
     (``screen_prompt``'s ``trust``) reads as Claude Code's does, and any other dialog it
     opens with no hook as :data:`AT_A_DIALOG` with its words. Before, a Codex at its folder
@@ -4490,7 +4503,7 @@ def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
         return None
     if adapter is None or read is None:
         if claude_sharing.shows_trust_prompt(lines):
-            return trust_prompt_detail(agent.cwd)
+            return trust_prompt_detail(claude_sharing.trust_prompt_folder(lines, agent.cwd))
         if claude_sharing.shows_security_notes(lines):
             # Its only key is Enter, which a spawn presses (#32, L2): still there, it is one
             # nobody typed into — a window the human opened first, or a refused key.
@@ -4573,7 +4586,7 @@ FIRST_PROMPT_META = "first-prompt:"
 ``{"digest", "home", "cwd", "at"}``, for :func:`_first_prompt_off_its_transcript`; and, once a
 row reads ``unsent``, ``"seen"``: the digests of the prompts its agent's record held then."""
 BLIND_DETAIL = (
-    "; aisquare cannot tell which process holds a rollout here (no lsof, a hidden /proc),"
+    "; rlx cannot tell which process holds a rollout here (no lsof, a hidden /proc),"
     " so only the message itself clears this"
 )
 """What an ``unsent`` row's detail adds where its agent's record of the prompts it ran could not
@@ -4692,9 +4705,10 @@ def unsent_detail(project: ProjectInfo, label: str, *, blind: bool = False) -> s
     on, each naming ``project`` (``project_service.fleet_command``). ``blind``: its record of
     the prompts it ran could not be told from another session's, so only the message itself
     clears the row (:func:`_first_prompt_off_its_transcript`), and the detail says so (#24)."""
-    tell = project_service.fleet_command("tell", project, label)
-    restart = project_service.fleet_command("restart", project, label)
-    detail = f"first prompt not taken — `{tell} …` or `{restart}`"
+    detail = "first prompt not taken" + prog.shell_advice(
+        f" — `{project_service.fleet_command('tell', project, label)} …` or "
+        f"`{project_service.fleet_command('restart', project, label)}`"
+    )
     if blind:
         detail += BLIND_DETAIL
     return detail
@@ -4878,7 +4892,9 @@ def _require_role(role: str) -> None:
     if not _role_ok(role):
         raise FleetError(
             f"unknown role {role!r} — expected one of: {', '.join(FLEET_ROLES)}, a harness "
-            f"role, one bound with `aisquare team bind`, or {PLAIN_ROLE!r} for no role"
+            "role, "
+            + prog.shell_advice(f"one bound with `{prog.word()} team bind`, ", app="a bound one, ")
+            + f"or {PLAIN_ROLE!r} for no role"
         )
 
 
@@ -5212,8 +5228,10 @@ def _live_row(
             return pinned, _read_record(pinned)
     if found is None:
         raise NoSuchAgent(
-            f"no live agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)} — "
-            f"`{project_service.fleet_command('ls', project)}` shows who is running"
+            f"no live agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)}"
+            + prog.shell_advice(
+                f" — `{project_service.fleet_command('ls', project)}` shows who is running"
+            )
         )
     agent, record = found
     if agent_id is not None and agent.id != agent_id:
@@ -5232,8 +5250,10 @@ def _replaced(project: ProjectInfo, label: str, current: FleetAgent, agent_id: s
     """The refusal for a caller pinned to a row whose label has since passed to another."""
     return NoSuchAgent(
         f"{label!r} is another agent now ({current.id}) — {agent_id} ended and was "
-        "replaced since; nothing was done to either "
-        f"(`{project_service.fleet_command('ls', project)}` shows who is running)"
+        "replaced since; nothing was done to either"
+        + prog.shell_advice(
+            f" (`{project_service.fleet_command('ls', project)}` shows who is running)"
+        )
     )
 
 
@@ -5244,9 +5264,11 @@ def _in_hand_over(project: ProjectInfo, verb: str, label: str) -> FleetError:
     minutes = int(HANDOVER_GRACE.total_seconds() // 60)
     return FleetError(
         f"cannot {verb} {label!r}: a hand-over is already moving it and starts the "
-        "replacement itself — nothing was done "
-        f"(`{project_service.fleet_command('ls', project)}` shows it come back; "
-        f"one that was interrupted lets go of it within {minutes} min)"
+        "replacement itself — nothing was done ("
+        + prog.shell_advice(
+            f"`{project_service.fleet_command('ls', project)}` shows it come back; "
+        )
+        + f"one that was interrupted lets go of it within {minutes} min)"
     )
 
 
@@ -5472,8 +5494,9 @@ def spawn(
     )
     if experimental.captain_role(role) and not is_home_project(project):
         raise FleetError(
-            "the captain lives on the home board, one per home — `aisquare captain` starts "
-            f"it; it cannot be spawned into {_name(project)}"
+            "the captain lives on the home board, one per home"
+            + prog.shell_advice(f" — `{prog.word()} captain` starts it")
+            + f"; it cannot be spawned into {_name(project)}"
         )
     replayed_args = spec is not None and not agent_args
     if spec is not None:
@@ -5498,8 +5521,11 @@ def spawn(
         # `fleet spawn captain` on the home was a captain with every tool, in the
         # home itself — and `aisquare captain` then attached to it and typed into it.
         raise FleetError(
-            "the captain is started by `aisquare captain`, which gives it its brain folder "
-            "and no tool but its own server"
+            prog.shell_advice(
+                f"the captain is started by `{prog.word()} captain`",
+                app="the captain is started on its own",
+            )
+            + ", which gives it its brain folder and no tool but its own server"
         )
     srv = server(config)
     _require_tmux(srv)
@@ -5797,9 +5823,11 @@ def spawn(
         )
         if existing is not None:
             raise FleetError(
-                f"{_name(project)} already has a manager ({existing.id}) — one per "
-                f"project; `{project_service.fleet_command('stop', project, 'manager')}` "
-                "first"
+                f"{_name(project)} already has a manager ({existing.id}) — one per project"
+                + prog.shell_advice(
+                    f"; `{project_service.fleet_command('stop', project, 'manager')}` first",
+                    app="; stop it first",
+                )
             )
         # A paused manager is the project's manager still: its label is fixed, so a second
         # one took it, and `fleet resume` then found the label started again and left the
@@ -5808,8 +5836,12 @@ def spawn(
         if paused is not None and paused.id != replaces:
             raise FleetError(
                 f"{_name(project)}'s manager is paused ({paused.id}) — "
-                f"`{project_service.fleet_command('resume', project)}` brings it back, or "
-                f"`{project_service.fleet_command('stop', project, 'manager')}` ends it for good"
+                + prog.shell_advice(
+                    f"`{project_service.fleet_command('resume', project)}` brings it back, or "
+                    f"`{project_service.fleet_command('stop', project, 'manager')}` ends it for "
+                    "good",
+                    app="resume it, or stop it for good",
+                )
             )
     if experimental.captain_role(role):
         # The record's role, as the manager's guard above reads it.
@@ -5819,8 +5851,8 @@ def spawn(
         )
         if captain is not None:
             raise FleetError(
-                f"the home already has a captain ({captain.id}) — one per home; "
-                "`aisquare captain` attaches to it"
+                f"the home already has a captain ({captain.id}) — one per home"
+                + prog.shell_advice(f"; `{prog.word()} captain` attaches to it")
             )
     cap = config.max_agents_per_project
     # The agents the project runs, as the row's settlement (`_verify_cap`, `_verify_burst`),
@@ -6934,8 +6966,8 @@ def _in_place_of_recorded(
             f"{gone}, and the role resolves to {today.binary!r} today (chosen by: "
             f"{today.source}), not known to be the same kind of program: the recorded "
             f"arguments are {recorded!r}'s — put {recorded!r} back on your PATH, or start "
-            "a new agent under today's config with "
-            f"`{project_service.fleet_command('spawn', project, role)}`"
+            "a new agent under today's config"
+            + prog.shell_advice(f" with `{project_service.fleet_command('spawn', project, role)}`")
         )
     if shutil.which(today.binary) is None:
         raise FleetError(
@@ -7304,8 +7336,8 @@ def _take_over(agent: FleetAgent, previous: str, session_id: str, notes: list[st
                     notes.append(
                         f"the previous session {_team().short_id(previous)} was not marked ended "
                         f"({type(exc).__name__}: {exc}) — it shows on the board as a live "
-                        f"session, marked (stale) once it has been silent for {stale} minutes; "
-                        "from then on `aisquare team prune` retires it"
+                        f"session, marked (stale) once it has been silent for {stale} minutes"
+                        + prog.shell_advice(f"; from then on `{prog.word()} team prune` retires it")
                     )
             store.adopt_fleet_agent_session(agent.id, previous, session_id, lease)
             current = store.get_fleet_agent(agent.id)
@@ -7405,8 +7437,11 @@ def _row_projects(store: ContextStore, rows: Sequence[FleetAgent]) -> _RowProjec
         ),
         reached={each: known[each] for each in theirs if each in live},
         forgotten=[
-            f"{names[each]} is forgotten: {project_service.onboard_command(known[each].root)} "
-            "adds it back first"
+            f"{names[each]} is forgotten"
+            + prog.shell_advice(
+                f": {project_service.onboard_command(known[each].root)} adds it back first",
+                app=": add it back first",
+            )
             for each in theirs
             if each in known and each not in live
         ],
@@ -7515,7 +7550,7 @@ def _forget_an_exited_server(
 
 
 SSH_START_REFUSAL = (
-    "start asq on the Mac first: agents started from an SSH login can't read the Keychain"
+    "start rlx on the Mac first: agents started from an SSH login can't read the Keychain"
 )
 """Why an SSH login on macOS starts no fleet tmux server (:func:`_refuse_a_server_from_ssh`)."""
 
@@ -7580,7 +7615,7 @@ def _refuse_a_server_from_ssh(agent: str | None = None) -> bool:
         others = _file_login_agents()
         raise FleetError(
             f"not started: {SSH_START_REFUSAL}. No fleet tmux server runs yet: start an agent "
-            "in asq at the Mac, and agents start from SSH after that"
+            "in rlx at the Mac, and agents start from SSH after that"
             + (f"; {others} can start it from here" if others else "")
         )
     return True
@@ -7619,9 +7654,12 @@ def _refuse_a_server_started_over_ssh(srv: TmuxServer, agent: str | None) -> Non
         return
     if _started_over_ssh(srv):
         raise FleetError(
-            f"not started: {SSH_STARTED_REFUSAL}. `aisquare fleet shutdown --all` ends that "
-            f"server; then start asq on the Mac, and {claude_accounts_core.agent_label(agent)} "
-            "agents start from SSH after that"
+            f"not started: {SSH_STARTED_REFUSAL}."
+            + prog.shell_advice(
+                f" `{prog.word()} fleet shutdown --all` ends that server; then start "
+                f"{prog.word()} on the Mac, and {claude_accounts_core.agent_label(agent)} "
+                "agents start from SSH after that"
+            )
         )
 
 
@@ -7723,12 +7761,24 @@ def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
     with store_session() as store:
         projects = _row_projects(store, exited)
     reached = [row for row in exited if row.project_id in projects.reached]
+    return (
+        f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
+        f"{projects.named} {'reads' if one else 'read'} lost from now on, as "
+        f"{'its' if one else 'their'}"
+        f" {'pane' if one else 'panes'} went with it"
+        + prog.shell_advice(f" ({'; '.join(_exited_ways(reached, projects))})")
+    )
+
+
+def _exited_ways(reached: list[FleetAgent], projects: _RowProjects) -> list[str]:
+    """The ways out :func:`_exited_note` names, at a shell: the reap that records the rows,
+    each reached row's restart, and what its projects need first."""
     restarts = [
         f"`{project_service.fleet_command('restart', projects.reached[row.project_id], row.label)}`"
         for row in reached
     ]
     ways = (
-        [f"`aisquare fleet reap --all` records {'it' if len(reached) == 1 else 'them'}"]
+        [f"`{prog.word()} fleet reap --all` records {'it' if len(reached) == 1 else 'them'}"]
         if reached
         else []
     )
@@ -7738,12 +7788,7 @@ def _exited_note(srv: TmuxServer, exited: Sequence[FleetAgent]) -> str:
     ways += projects.forgotten
     if projects.unreached is not None:
         ways.append(projects.unreached)
-    return (
-        f"the tmux server at {srv.socket_path()} had exited, leaving its socket file: "
-        f"{projects.named} {'reads' if one else 'read'} lost from now on, as "
-        f"{'its' if one else 'their'}"
-        f" {'pane' if one else 'panes'} went with it ({'; '.join(ways)})"
-    )
+    return ways
 
 
 def open_window(
@@ -7834,10 +7879,13 @@ def _refuse_occupied_worktree(
             f"store) — spawn under another label, or stop that agent first"
         )
     if holder is not None and again:
-        stop = project_service.fleet_command("stop", project, holder.label)
         raise FleetError(
             f"{path} is the live worktree of {holder.label} ({holder.id}) now, so {label} is "
-            f"not started in it again until `{stop}` frees it"
+            "not started in it again until "
+            + prog.shell_advice(
+                f"`{project_service.fleet_command('stop', project, holder.label)}` frees it",
+                app=f"{holder.label} is stopped",
+            )
         )
     if holder is not None:
         raise FleetError(
@@ -7983,7 +8031,7 @@ def _add_named(store: ContextStore, project: ProjectInfo, codename: str) -> None
         ) from exc
     if added.codename != codename:
         raise FleetError(
-            f"{_name(project)} was named {added.codename} by another aisquare while this agent "
+            f"{_name(project)} was named {added.codename} by another rlx while this agent "
             f"was starting in session {session_name(codename)} — spawn again"
         )
 
@@ -8224,8 +8272,9 @@ def _admit(config: FleetSettings) -> list[str]:
         raise CapacityRefused(
             "capacity_fleet",
             f"{live_total} live agents across the fleet (max_agents_total = "
-            f"{config.max_agents_total}): {each} — stop one (`aisquare fleet capacity` lists "
-            "them), or raise the budget in [fleet]",
+            f"{config.max_agents_total}): {each} — stop one"
+            + prog.shell_advice(f" (`{prog.word()} fleet capacity` lists them)")
+            + ", or raise the budget in [fleet]",
         )
     floor = _memory_floor(config.min_free_mb)
     if config.min_free_mb > 0 and head.pressure == "critical":
@@ -8691,9 +8740,8 @@ def _retry(hold: Hold, now: datetime) -> str:
     the one it refused."""
     left = max(int((hold.until - now).total_seconds()), 0)
     at = hold.until.astimezone().isoformat(timespec="seconds")
-    return (
-        f"retry at {at} or later (in {left // 60}m {left % 60:02d}s); while `aisquare watch` "
-        "runs, it wakes this project's manager when a seat frees up"
+    return f"retry at {at} or later (in {left // 60}m {left % 60:02d}s)" + prog.shell_advice(
+        f"; while `{prog.word()} watch` runs, it wakes this project's manager when a seat frees up"
     )
 
 
@@ -8887,8 +8935,9 @@ def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
     _log_admission("capacity_memory", record)
     raise CapacityRefused(
         "capacity_memory",
-        f"not enough memory to start another agent: {why} — see `aisquare fleet capacity`, "
-        "or lower min_free_mb in [fleet] (0 turns the floor off)",
+        f"not enough memory to start another agent: {why} — "
+        + prog.shell_advice(f"see `{prog.word()} fleet capacity`, or ")
+        + "lower min_free_mb in [fleet] (0 turns the floor off)",
     )
 
 
@@ -9280,9 +9329,12 @@ def _type_prompt(
                         notes.append(
                             f"the agent was still at a dialog of its own after "
                             f"{PROMPT_TIMEOUT:.0f} s, where an Enter would answer it for you "
-                            "— the prompt was NOT typed. Answer it in its pane "
-                            f"(`{project_service.fleet_command('attach', project)}`), then "
-                            f"send the prompt: `{_tell(*to)} …`"
+                            "— the prompt was NOT typed. Answer it in its pane"
+                            + prog.shell_advice(
+                                f" (`{project_service.fleet_command('attach', project)}`), "
+                                f"then send the prompt: `{_tell(*to)} …`",
+                                app=", then send the prompt again",
+                            )
                         )
                     return "no", None
                 _sleep(_POLL_INTERVAL)
@@ -9512,9 +9564,12 @@ def _at_input_box(
             if dialog is not None:
                 notes.append(
                     f"the agent is at {dialog} — the prompt was NOT typed (its Enter would "
-                    "answer it). Answer it in the agent's window "
-                    f"(`{project_service.fleet_command('attach', to[0])}`), then send the "
-                    f"prompt: `{_tell(*to)} …`"
+                    "answer it). Answer it in the agent's window"
+                    + prog.shell_advice(
+                        f" (`{project_service.fleet_command('attach', to[0])}`), then send the "
+                        f"prompt: `{_tell(*to)} …`",
+                        app=", then send the prompt again",
+                    )
                 )
                 return False
             if wait:
@@ -9539,7 +9594,10 @@ def _tell(project: ProjectInfo, label: str) -> str:
 
 def _send_it_later(project: ProjectInfo, label: str) -> str:
     """How a prompt left untyped is sent once the agent is up: told, or typed in its window."""
-    return f"`{_tell(project, label)} …`, or `{project_service.fleet_command('attach', project)}`"
+    return prog.shell_advice(
+        f"`{_tell(project, label)} …`, or `{project_service.fleet_command('attach', project)}`",
+        app="type it in its pane",
+    )
 
 
 def _past_trust_prompt(
@@ -9572,29 +9630,35 @@ def _past_trust_prompt(
             return True
         asked = True
         if _monotonic() >= deadline:
-            notes.append(_trust_note(folder, to))
+            notes.append(_trust_note(claude_sharing.trust_prompt_folder(lines, folder), to))
             return False
         _sleep(_POLL_INTERVAL)
 
 
-def _at_trust_question(pane: PlacedPane) -> bool:
-    """Whether ``pane``'s screen shows Claude Code's folder-trust question; ``False`` when
-    tmux will not show it."""
+def _at_trust_question(pane: PlacedPane) -> list[str] | None:
+    """``pane``'s screen when it shows Claude Code's folder-trust question, else ``None``
+    (and when tmux will not show it): the screen names the folder asked about
+    (``claude_sharing.trust_prompt_folder``)."""
     try:
-        return claude_sharing.shows_trust_prompt(pane.captured())
+        lines = pane.captured()
     except TmuxError:
-        return False
+        return None
+    return lines if claude_sharing.shows_trust_prompt(lines) else None
 
 
 def _trust_note(folder: Path | None, to: tuple[ProjectInfo, str]) -> str:
-    """Why a prompt was left untyped at Claude Code's folder-trust question, and the way on."""
-    trust = claude_accounts_service.trust_command(folder)
+    """Why a prompt was left untyped at Claude Code's folder-trust question about ``folder``
+    (the one it starts in, or an ``--add-dir`` folder: ``trust_prompt_folder``), and the
+    way on."""
     return (
         "the agent is waiting at Claude Code's folder-trust question, which no "
         "account has said yes to for this folder — the prompt was NOT typed (Enter "
-        'there picks "No, exit"). Approve it once in the agent\'s window '
-        f"(`{project_service.fleet_command('attach', to[0])}`), or run `{trust}` and "
-        f"restart it; then send the prompt: `{_tell(*to)} …`"
+        'there picks "No, exit"). Approve it once in the agent\'s window'
+    ) + prog.shell_advice(
+        f" (`{project_service.fleet_command('attach', to[0])}`), or run "
+        f"`{claude_accounts_service.trust_command(folder)}` and restart it; then send the "
+        f"prompt: `{_tell(*to)} …`",
+        app=", then send the prompt again",
     )
 
 
@@ -9668,28 +9732,37 @@ def _type_at_its_start(
             except Exception as exc:  # never raises: the receipt says it
                 how = f"not filed as a board note either ({exc})"
             waited = PROMPT_TIMEOUT if at_a_dialog else START_TIMEOUT
-            attach = project_service.fleet_command("attach", project)
-            if at_a_dialog and _at_trust_question(pane):
+            if at_a_dialog and (asked := _at_trust_question(pane)) is not None:
                 # Claude Code's folder-trust question, which no account has said yes to for
-                # this folder (`share_for_launch` copied nothing): the way past it named.
-                trust = claude_accounts_service.trust_command(folder)
+                # this folder (`share_for_launch` copied nothing), or for an `--add-dir`
+                # folder it names (2.1.326): the way past it named.
+                asked_about = claude_sharing.trust_prompt_folder(asked, folder)
                 then = (
                     "It is at Claude Code's folder-trust question, where an Enter picks "
-                    f'"No, exit": approve it once in its window (`{attach}`), or run '
-                    f"`{trust}` and restart it; then"
+                    '"No, exit": approve it once in its window'
+                    + prog.shell_advice(
+                        f" (`{project_service.fleet_command('attach', project)}`), or run "
+                        f"`{claude_accounts_service.trust_command(asked_about)}` and restart it"
+                    )
+                    + "; then"
                 )
             elif at_a_dialog:
                 then = (
                     "It is at a dialog of its own, which fires no hook and where an Enter "
                     "would answer it for you (`No, exit` at its folder-trust one): answer the "
-                    f"dialog in its pane (`{attach}`), then"
+                    "dialog in its pane"
+                    + prog.shell_advice(f" (`{project_service.fleet_command('attach', project)}`)")
+                    + ", then"
                 )
             else:
                 then = "Once it is at its prompt,"
             notes.append(
                 f"its {adapter.label} session did not start within {waited:.0f} s, so the "
-                f"prompt was NOT typed — {how}. {then} `{_tell(*to)} …` types its first "
-                "prompt, which brings the note"
+                f"prompt was NOT typed — {how}. {then}"
+                + prog.shell_advice(
+                    f" `{_tell(*to)} …` types its first prompt, which brings the note",
+                    app=" type its first prompt in its pane, which brings the note",
+                )
             )
             return "no", None
         _sleep(_POLL_INTERVAL)
@@ -9761,17 +9834,25 @@ def _at_a_start_dialog(pane: PlacedPane, adapter: AgentAdapter | None) -> bool:
     ``Enter to confirm · Esc to cancel``). Not the phrase anywhere on the screen: the agent's
     own output shows it as soon as it opens a file or a conversation that does — this
     repository's tests and docs, a ``--continue`` — and every ``tell`` became a note, a
-    spawn's prompt held back (review r5 of #113, finding 8). A screen tmux will not give
+    spawn's prompt held back (review r5 of #113, finding 8). Or its own reader's ``trust``
+    prompt (``AgentScreen.screen_prompt``), whose last line may be another: Claude Code
+    2.1.326, on a pane too short for its question about an ``--add-dir`` folder, cuts the
+    question off and names the folder under the mark (R19), where the start waited out
+    :data:`START_TIMEOUT` and its note did not say how past it. A screen tmux will not give
     shows none; never raises."""
-    mark = screen_of(adapter).start_dialog_mark if adapter is not None else None
-    if not mark:
+    reader = screen_of(adapter) if adapter is not None else None
+    mark = reader.start_dialog_mark if reader is not None else None
+    if reader is None or not mark:
         return False
     try:
         screen = pane.screen()
     except TmuxError:
         return False
     last = next((row.strip() for row in reversed(screen) if row.strip()), "")
-    return last.startswith(mark)
+    if last.startswith(mark):
+        return True
+    asked = reader.screen_prompt(screen) if reader.screen_prompt is not None else None
+    return asked is not None and asked.shape == "trust"
 
 
 def _ready_on_its_screen(pane: PlacedPane, adapter: AgentAdapter) -> bool:
@@ -10614,7 +10695,11 @@ def tell(
                     noted(
                         f"its hooks say waiting, but its pane is not at {adapter.label}'s "
                         "empty prompt (a dialog of its own is open, where an Enter would "
-                        f"answer for you: `{project_service.fleet_command('attach', project)}`)",
+                        "answer for you"
+                        + prog.shell_advice(
+                            f": `{project_service.fleet_command('attach', project)}`"
+                        )
+                        + ")",
                         agent,
                     ),
                 )
@@ -10650,7 +10735,11 @@ def tell(
             # A start the board cannot see: as quiet at a dialog as at its prompt.
             why = (
                 "its pane shows a dialog of the agent's, where an Enter would answer it "
-                f"for you (answer it there: `{project_service.fleet_command('attach', project)}`)"
+                "for you"
+                + prog.shell_advice(
+                    f" (answer it there: `{project_service.fleet_command('attach', project)}`)",
+                    app=" (answer it in its pane)",
+                )
             )
             if not note:
                 return TellResult("no", why)
@@ -10667,8 +10756,9 @@ def tell(
             # names nothing on, known or not, is typed into as before.
             why = (
                 f"its pane shows {shown}, where an Enter would answer it for you: close it "
-                f"with {_KEY_SAID.get(adapter.dismiss_key, adapter.dismiss_key)} in its pane "
-                f"(`{project_service.fleet_command('attach', project)}`) and tell it again"
+                f"with {_KEY_SAID.get(adapter.dismiss_key, adapter.dismiss_key)} in its pane"
+                + prog.shell_advice(f" (`{project_service.fleet_command('attach', project)}`)")
+                + " and tell it again"
             )
             return TellResult("no", noted(why, agent))
         # One store connection for the acknowledgement wait (`delivery.prompted_since`).
@@ -12469,7 +12559,7 @@ def _paused_by_the_owner(
     resume = project_service.fleet_command("resume", project)
     return FleetError(
         f"{label} is paused, and only the owner ends a pause — ask the owner: their "
-        f"`{resume}` (or Resume agents… in asq) {ends}; nothing was changed"
+        f"`{resume}` (or Resume agents… in rlx) {ends}; nothing was changed"
     )
 
 
@@ -12564,7 +12654,9 @@ def _refuse_unless_gone(project: ProjectInfo, agent: FleetAgent, srv: TmuxServer
 def _forget(project: ProjectInfo) -> str:
     """``fleet shutdown --forget`` for ``project``, as a way out names it: the operator's word
     that ends a row whose agent no tmux client reaches."""
-    return f"`{project_service.fleet_command('shutdown', project, '--forget')}`"
+    return prog.shell_advice(
+        f"`{project_service.fleet_command('shutdown', project, '--forget')}`", app="your manager"
+    )
 
 
 def _unreachable_why(answer: SocketAnswer, path: Path, *, forget: str) -> tuple[str, str]:
@@ -12745,8 +12837,11 @@ def _shutdown_tmux(config: FleetSettings, *, forget: bool) -> str | None:
         if forget:
             return str(exc)
         raise FleetUnavailable(
-            f"{exc}; if the fleet's agents are not running, `--forget` ends their rows on "
-            "your word without tmux"
+            str(exc)
+            + prog.shell_advice(
+                "; if the fleet's agents are not running, `--forget` ends their rows on "
+                "your word without tmux"
+            )
         ) from exc
     return None
 
@@ -13290,7 +13385,8 @@ def _release_or_say(
     except Exception as exc:
         return [], (
             f"could not be released ({type(exc).__name__}: {exc}) — they stay with the ended "
-            "session until the lease lapses; `aisquare task release <id>` frees one now"
+            "session until the lease lapses"
+            + prog.shell_advice(f"; `{prog.word()} task release <id>` frees one now")
         )
     if outcome.unannounced:
         # Released — the rows say so — but the board was not told, and the
@@ -14253,7 +14349,7 @@ def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxE
     if window is not None and not window.dead:
         raise FleetError(
             f"could not stop {label!r} ({cause}) — its pane is still alive, so its row is "
-            "left live; try again, or `--force` once tmux is healthy"
+            "left live; try again" + prog.shell_advice(", or `--force` once tmux is healthy")
         ) from cause
     return window.dead_status if window is not None else None
 
@@ -14483,7 +14579,7 @@ def switch(
             )
         raise FleetError(
             f"no other account with headroom for {label!r}{where}"
-            " — add or enable one (`aisquare accounts`), name one with --to, or wait for "
+            f" — add or enable one (`{prog.word()} accounts`), name one with --to, or wait for "
             f"the reset{said}"
         )
     target = choice.account
@@ -15160,7 +15256,7 @@ def _resumable(
     facts = record.session
     if facts is None and record.legacy:
         return None, (
-            "it was spawned before this aisquare kept launch records, and its board row names "
+            "it was spawned before this rlx kept launch records, and its board row names "
             "no session to resume"
         )
     if facts is None:
@@ -15243,12 +15339,14 @@ def _hooks_installed_first(
         return
     if agent_core.connected(adapter.id, home, cwd=cwd):
         return
-    connect = f"`aisquare agents connect {adapter.id} --config-dir {home}` installs them"
     if claude_accounts_core.managed_slot(home, adapter.id) is None:
         raise FleetError(
             f"{adapter.label}'s hooks are not installed in {home}, a home of yours that "
-            f"aisquare does not write at a launch: an agent started there would run blind, "
-            f"with no session on the board — {nothing}; {connect}"
+            f"rlx does not write at a launch: an agent started there would run blind, "
+            f"with no session on the board — {nothing}"
+            + prog.shell_advice(
+                f"; `{prog.word()} agents connect {adapter.id} --config-dir {home}` installs them"
+            )
         )
     try:
         installed = agent_core.install_hooks(adapter.id, home)
@@ -15260,7 +15358,10 @@ def _hooks_installed_first(
         raise FleetError(
             f"{adapter.label}'s hooks are not installed in {home} and could not be ({reason}): "
             f"an agent started there would run blind, with no session on the board — "
-            f"{nothing}; {connect}"
+            f"{nothing}"
+            + prog.shell_advice(
+                f"; `{prog.word()} agents connect {adapter.id} --config-dir {home}` installs them"
+            )
         )
     if notes is not None:
         notes.append(
@@ -15370,7 +15471,7 @@ def _refuse_the_captain_while_off(agent: FleetAgent) -> None:
         and not experimental.captain_enabled()
         and is_the_captains_row(agent)
     ):
-        raise FleetError(experimental.CAPTAIN_OFF)
+        raise FleetError(experimental.captain_off())
 
 
 def is_the_captains_row(agent: FleetAgent) -> bool:
@@ -15405,8 +15506,9 @@ def _refuse_a_replay_spawn_refuses(project: ProjectInfo, agent: FleetAgent, role
         raise FleetError(f"{exc} — {keep}") from exc
     if experimental.captain_role(role) and not is_home_project(project):
         raise FleetError(
-            "the captain lives on the home board, one per home — `aisquare captain` starts "
-            f"it; {agent.label!r} cannot be started again in {_name(project)}, so nothing "
+            "the captain lives on the home board, one per home"
+            + prog.shell_advice(f" — `{prog.word()} captain` starts it")
+            + f"; {agent.label!r} cannot be started again in {_name(project)}, so nothing "
             "was stopped"
         )
 
@@ -15564,7 +15666,13 @@ def _launch_record(project: ProjectInfo, agent: FleetAgent, verb: str) -> launch
     _say_refused(project.id, agent, f"cannot {verb} it", why, way_out)
     raise LaunchRefused(
         f"cannot {verb} {agent.label!r}: {why} — a replacement takes nothing from the store "
-        f"that its launch record does not hold; {way_out}"
+        "that its launch record does not hold"
+        + prog.shell_advice(
+            f"; {way_out}",
+            app="; spawn a new agent"
+            if agent.ended_at is not None
+            else "; stop it, then spawn a new agent",
+        )
     )
 
 
@@ -15899,7 +16007,9 @@ def restart(
         if found is None:
             raise NoSuchAgent(
                 f"no agent {label!r} in {_name(project)}{_renamed_hint(store, project, label)}"
-                f" — `{project_service.fleet_command('ls', project, '--all')}` shows every row"
+                + prog.shell_advice(
+                    f" — `{project_service.fleet_command('ls', project, '--all')}` shows every row"
+                )
             )
         agent = found[0]
         if agent.label.startswith(RETIRED_LABEL):
@@ -16621,9 +16731,11 @@ def _handoff_row(
         agent = None  # the start of several ids is no row's id
     if agent is None or agent.id != agent_id:
         raise NoSuchAgent(
-            f"no agent {agent_id} to hand off from — "
-            f"`{project_service.fleet_command('ls', project, '--all')}` shows every row; "
-            "nothing was done"
+            f"no agent {agent_id} to hand off from"
+            + prog.shell_advice(
+                f" — `{project_service.fleet_command('ls', project, '--all')}` shows every row"
+            )
+            + "; nothing was done"
         )
     if agent.project_id != project.id:
         raise FleetError(
@@ -17187,9 +17299,16 @@ its replacement is a deliberate add, and would bring the project back to every l
 NOT_PAUSED = "not paused"
 """Why a resume by :func:`bulk` leaves a row: running, or exited (💤) without a pause — only
 the agents a ``fleet pause`` stopped come back."""
-THE_CAPTAIN = "the captain — `aisquare captain` runs it"
-"""Why a pause by :func:`bulk` leaves the captain: it is the owner's, on the home board, and
-no project's fleet."""
+NOT_CHOSEN = "not chosen"
+"""Why :func:`bulk` leaves a row the plan it was shown would have acted on: the person
+unticked it in asq's dialog (R17, its pick-list). A pause that leaves one of a project's
+agents so does not fleet-pause the project (:func:`_fully_picked`)."""
+
+
+def the_captain_reason() -> str:
+    """Why a pause by :func:`bulk` leaves the captain: it is the owner's, on the home board, and
+    no project's fleet."""
+    return "the captain" + prog.shell_advice(f" — `{prog.word()} captain` runs it")
 
 
 @dataclass(frozen=True)
@@ -17388,9 +17507,10 @@ def bulk_plan(
     - for a restart, a row whose task is done or dropped, which :func:`restart` refuses;
     - for a restart, a row of a forgotten project (:data:`PROJECT_FORGOTTEN`).
 
-    A pause acts on the rows a stop acts on, and leaves the captain (:data:`THE_CAPTAIN`) and
-    every paused agent besides. A resume acts on the paused agents alone (``paused``, the
-    listing's own state for them): every other row is left (:data:`NOT_PAUSED`). One whose
+    A pause acts on the rows a stop acts on, and leaves the captain
+    (:func:`the_captain_reason`) and every paused agent besides. A resume acts on the paused
+    agents alone (``paused``, the listing's own state for them): every other row is left
+    (:data:`NOT_PAUSED`). One whose
     task is done or dropped is acted on all the same, to end its pause (``BulkRow.closes``);
     a paused manager's is left, as a restart leaves it. A pause takes each project's manager
     first, as a stop does; a resume brings it back last, as a restart does.
@@ -17507,7 +17627,7 @@ def bulk_plan(
             elif action == "restart" and project.id in forgotten:
                 skip = PROJECT_FORGOTTEN
             elif action == "pause" and is_the_captains_row(agent):
-                skip = THE_CAPTAIN
+                skip = the_captain_reason()
             else:
                 skip = closed.get(agent.id)
             rows.append(BulkRow(project, status, skip, closes, refused))
@@ -17760,6 +17880,13 @@ def bulk(
     there (:class:`FleetError`, as :func:`pause` refuses it), before any agent is touched;
     the projects whose signal was written are on the report (:attr:`BulkReport.signals`).
     ``projects`` keeps it to those projects, as for :func:`bulk_plan`.
+
+    A ``shown`` plan whose person unticked some of its rows in asq's pick-list carries them
+    as skipped, :data:`NOT_CHOSEN`, and they are reported so and never acted on. A pause
+    sets the signal only of a project none of whose agents was unticked
+    (:func:`_fully_picked`): a partial pick pauses just those agents, its manager left free
+    to spawn (R17, Q-E1). A resume's partial pick leaves its project fleet-paused, since an
+    agent of it stays paused (:func:`_resumes_clear`).
     """
     only = frozenset(project.id for project in projects) if projects is not None else None
     if shown is not None and (shown.action, shown.managers_only, shown.only) != (
@@ -17784,7 +17911,9 @@ def bulk(
         unread, owners = now.unread, now.owners
         rows = now.rows if shown is None else _as_shown(shown, now)
         if action == "pause":
-            signals = _set_pauses(now.projects, on=True, session_ref=acting_session)
+            signals = _set_pauses(
+                _fully_picked(now.projects, shown), on=True, session_ref=acting_session
+            )
         elif action == "resume":
             # Cleared only where the resume leaves no agent paused (m2): the manager it brings
             # back then spawns again, its team back beside it.
@@ -17843,6 +17972,17 @@ def bulk(
         kept=tuple(kept),
         owners=owners,
     )
+
+
+def _fully_picked(projects: Sequence[ProjectInfo], shown: BulkPlan | None) -> list[ProjectInfo]:
+    """The projects a pause sets the ``fleet-paused`` signal of: every one it covers, or, for
+    a plan a person picked from (``shown``), those of which no agent was unticked
+    (:data:`NOT_CHOSEN`). A partial pick leaves the signal off, so the manager left running
+    can still spawn; the agents paused keep their claims for a resume (R17, Q-E1)."""
+    if shown is None:
+        return list(projects)
+    unticked = {row.project.id for row in shown.rows if row.skip == NOT_CHOSEN}
+    return [project for project in projects if project.id not in unticked]
 
 
 def _resumes_clear(
@@ -18438,8 +18578,12 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
             return current
         if codename in store.folder_names_in_use(project.id):
             raise FleetError(
-                f"codename {codename!r} is another project's folder name: `--project "
-                f"{codename}` names that one, and would name this one instead — pick another"
+                f"codename {codename!r} is another project's folder name"
+                + prog.shell_advice(
+                    f": `--project {codename}` names that one, and would name this one instead",
+                    app=", which would name that project instead of this one",
+                )
+                + " — pick another"
             )
         if codename in store.aliases_in_use(project.id):
             # Reserved for the live project that gave it up: its agents were given it, and
@@ -18449,8 +18593,11 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
             owner = store.get_project(owner_id) if owner_id is not None else None
             had = _name(owner) if owner is not None else "another project"
             raise FleetError(
-                f"codename {codename!r} is one {had} had: `--project {codename}` still names "
-                "it — pick another"
+                f"codename {codename!r} is one {had} had"
+                + prog.shell_advice(
+                    f": `--project {codename}` still names it", app=", and may still name it"
+                )
+                + " — pick another"
             )
         try:
             old, updated = store.swap_codename(project.id, codename)
@@ -18505,17 +18652,19 @@ def _rename_project_sessions(
                     if session.address.path is None
                     else ["-S", str(session.address.path)]
                 )
-                remedy = install_route.command_line(
-                    ["tmux", *by, "rename-session", "-t", session.target, name]
-                )
+                remedy = ["tmux", *by, "rename-session", "-t", session.target, name]
                 notes.append(
                     f"the codename is {codename}, but tmux could not be told ({exc}) — its "
                     f"session {session.name} on {session.address} keeps that name until it "
-                    f"is renamed: `{remedy}` does that, on the fleet's server (review r8 of "
-                    "#113, finding 7), and renaming again will not (it "
-                    "renames from the stored codename, which is already the new one). "
-                    "`fleet ls`, `tell`, `stop`, `shutdown` and `attach` are unaffected — "
-                    "they find panes and sessions by tmux's ids"
+                    "is renamed"
+                    + prog.shell_advice(
+                        f": `{install_route.command_line(remedy)}` does that, on the fleet's "
+                        "server (review r8 of #113, finding 7), and renaming again will not (it "
+                        "renames from the stored codename, which is already the new one). "
+                        "`fleet ls`, `tell`, `stop`, `shutdown` and `attach` are unaffected — "
+                        "they find panes and sessions by tmux's ids",
+                        app="; agents are found by tmux's ids all the same",
+                    )
                 )
     _rename_recorded_sessions(placements, names)
 
@@ -18577,8 +18726,11 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
                 kept = f"stays {current.codename}" if current.codename else "is not set"
                 notes.append(
                     f"{shown!r} gives no codename ({codenames.why_no_codename(shown)}), so the "
-                    f"fleet codename {kept} — "
-                    f"`{project_service.fleet_command('rename', current)} <codename>` sets one"
+                    f"fleet codename {kept}"
+                    + prog.shell_advice(
+                        f" — `{project_service.fleet_command('rename', current)} <codename>` "
+                        "sets one"
+                    )
                 )
             return current
         folders = store.folder_names_in_use(project.id)
@@ -18614,13 +18766,15 @@ def follow_name(project: ProjectInfo, *, notes: list[str] | None = None) -> Proj
             notes.append(f"{wanted} is {_name(holder)}'s codename, so this project's is {codename}")
         elif wanted in folders:
             notes.append(
-                f"{wanted} is another project's folder name (`--project {wanted}` names it), "
-                f"so this project's codename is {codename}"
+                f"{wanted} is another project's folder name"
+                + prog.shell_advice(f" (`--project {wanted}` names it)")
+                + f", so this project's codename is {codename}"
             )
         elif wanted in retired:
             notes.append(
-                f"{wanted} is a codename another project had (`--project {wanted}` still "
-                f"names it), so this project's is {codename}"
+                f"{wanted} is a codename another project had"
+                + prog.shell_advice(f" (`--project {wanted}` still names it)")
+                + f", so this project's is {codename}"
             )
         elif wanted in standing:
             notes.append(
@@ -18806,8 +18960,10 @@ def relabel(
                 raise FleetError(f"cannot rename {label!r}: {relabel_refusal(ended)}")
             raise NoSuchAgent(
                 f"no live agent {label!r} in {_name(project)}"
-                f"{_renamed_hint(store, project, label)} — "
-                f"`{project_service.fleet_command('ls', project)}` shows who is running"
+                f"{_renamed_hint(store, project, label)}"
+                + prog.shell_advice(
+                    f" — `{project_service.fleet_command('ls', project)}` shows who is running"
+                )
             )
         refusal = relabel_refusal(agent)
         if refusal is not None:
@@ -18979,11 +19135,15 @@ def _renamed_from(store: ContextStore, project: ProjectInfo, label: str) -> str 
 
 def _renamed_hint(store: ContextStore, project: ProjectInfo, label: str) -> str:
     """`` (renamed: it is login-fix now)``, for a refusal by a label :func:`relabel` took from
-    an agent; empty for any other."""
+    an agent; empty for any other. A paused agent is not an ended one: its row ended at the
+    pause, and a resume brings it back under the new label (``which is paused``, R17's G: it
+    read ``which has since ended`` and sent the person looking for an agent that was gone)."""
     agent_id = _renamed_from(store, project, label)
     agent = store.get_fleet_agent(agent_id) if agent_id is not None else None
     if agent is None:
         return ""
+    if _paused_row(agent):
+        return f" (renamed {agent.label}, which is paused)"
     if agent.ended_at is not None:
         return f" (renamed {agent.label}, which has since ended)"
     return f" (renamed: it is {agent.label} now)"
@@ -19232,6 +19392,13 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
     next board write or by ``asq``'s refresh once the box is clear
     (:func:`retry_deferred_nudges`). Nothing is lost meanwhile: the human's own submit runs
     ``UserPromptSubmit``, which hands the manager the same delta.
+
+    Nor into a dialog of the manager's own that its screen reader names, as ``tell`` asks it
+    (:func:`_dialog_on_its_screen`): a picker the human opened and left open (Claude Code's
+    ``/config`` or ``/resume``, read by its edge since R25), where the nudge's Enter would
+    answer it. It waits the same way, and goes out once the picker is closed. It is held
+    back, not filed as a tell is: it carries nothing, and the news it wakes the manager for
+    is already on the board.
     """
     return _nudge(project_id, owe=True, board=board)
 
@@ -19260,7 +19427,9 @@ def deliver_owed_nudge(project_id: str) -> bool:
 
 def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
     """:func:`nudge_manager`, leaving the nudge owed where tmux refused it when ``owe``;
-    otherwise :func:`deliver_owed_nudge`'s, due only for unread news. Typed into the pane
+    otherwise :func:`deliver_owed_nudge`'s. Either is due only for news the manager wakes for,
+    unread (``team.wake_pending``: its own writes, echoes and what its standby holds are not,
+    R12). Typed into the pane
     the manager's launch record places, by its record's agent's rules (:func:`resolve_place`),
     never its row's: a delivery runs from a sandboxed agent's own hooks, outside its
     sandbox, and the row was the sandbox's to write before its broker (review r5 of
@@ -19290,7 +19459,10 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
             session = store.get_session(row.session_id)
             if session is None or session.ended_at is not None:
                 return False
-            if not owe and not _team().wake_pending(store, session):
+            # Due only for news it wakes for, unread (``team.wake_pending``, R12): its own
+            # result, an echo of news it has read, or a line its standby holds wakes nobody,
+            # whichever write asked. An owed one was always asked this; now every one is.
+            if not _team().wake_pending(store, session):
                 return False
             key = f"nudge:{session.id}"
             now = _now()
@@ -19311,6 +19483,14 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
             state, _ = _derive(manager, session, view, observed=True, now=now)
             if not _at_its_prompt(pane, manager, session, state, now):
                 return False
+            deferred = f"{NUDGE_DEFERRED}{session.id}"
+            if _dialog_on_its_screen(pane, recorded_adapter(manager.agent)) is not None:
+                # A dialog of its own on its screen, as `tell` asks: a picker the human left
+                # open (Claude Code's /config, /resume, R25), where the Enter after the line
+                # would answer it. Held back as a draft holds it back, and retried the same way.
+                if not store.get_meta(deferred):
+                    store.set_meta(deferred, now.isoformat())
+                return False
             # Typed as `tell` types a line (`PlacedPane.deliver_typed`): its Enter a key of its
             # own, so a Codex manager does not keep it unsent in its composer.
             done = pane.deliver_typed(
@@ -19326,7 +19506,6 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
                 origin=prompt_origin.WAKE,
                 gap=_enter_gap(recorded_adapter(manager.agent)),
             )
-            deferred = f"{NUDGE_DEFERRED}{session.id}"
             if done.refused is not None:
                 if not store.get_meta(deferred):
                     store.set_meta(deferred, now.isoformat())
@@ -19340,8 +19519,9 @@ def _nudge(project_id: str, *, owe: bool, board: str | None = None) -> bool:
 
 
 def retry_deferred_nudges() -> int:
-    """Send each manager nudge a draft held back (:data:`NUDGE_DEFERRED`), now that its input
-    box may be clear: ``asq``'s refresh asks every frame. How many were sent.
+    """Send each manager nudge a draft or a dialog held back (:data:`NUDGE_DEFERRED`), now that
+    its input box may be clear and the dialog closed: ``asq``'s refresh asks every frame. How
+    many were sent.
 
     One indexed read when nothing is held back. A nudge whose manager has prompted since it
     was held back is dropped unsent: that prompt's ``UserPromptSubmit`` handed it the delta
@@ -19387,7 +19567,7 @@ def send_deferred_nudges(targets: Sequence[FleetAgent]) -> int:
     return sum(
         nudge_manager(
             row.project_id,
-            reason="deferred: a draft was in its input box",
+            reason="deferred: a draft or a dialog held it back",
             board=_board_of_row(row),
         )
         for row in targets
@@ -19487,14 +19667,20 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     for session in _project_sessions(project.id, placements, config):
         if session.present():
             return session.attach_command()
-    spawn = project_service.fleet_command("spawn", project, "manager")
     if codename is None:
         raise FleetError(
-            f"no fleet session for {_name(project)} — nothing to attach to; `{spawn}` starts one"
+            f"no fleet session for {_name(project)} — nothing to attach to"
+            + prog.shell_advice(
+                f"; `{project_service.fleet_command('spawn', project, 'manager')}` starts one"
+            )
         )
     raise FleetError(
         f"no fleet session a launch record of {_name(project)} names is running — nothing to "
-        f"attach to; `{spawn}` starts one. Agents spawned before this version run in a "
-        f"session no record names: `tmux -L {config.tmux_socket} attach -t "
-        f"={session_name(codename)}` attaches to it by hand"
+        "attach to"
+        + prog.shell_advice(
+            f"; `{project_service.fleet_command('spawn', project, 'manager')}` starts one. "
+            "Agents spawned before this version run in a session no record names: "
+            f"`tmux -L {config.tmux_socket} attach -t ={session_name(codename)}` attaches to "
+            "it by hand"
+        )
     )

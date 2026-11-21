@@ -48,7 +48,7 @@ dependencies = [
   # the shared flags by hand), so every command of a fresh install raised, --version
   # included. tests/test_dependency_bounds.py and tests/test_typer_is_capped_below_0_29.py
   # fail if this cap goes.
-  "typer>=0.26.8,<0.29",
+  "typer>=0.26.8,<0.30",
   "rich>=14.3",  # rich.cells.split_graphemes (cli/ui/terminal) exists from 14.3.0
   "pydantic>=2.13.4",
   "tomli-w>=1.2.0",
